@@ -39,6 +39,9 @@ func New(opts Options) *Client {
 	if opts.WorkDir == "" {
 		opts.WorkDir = os.TempDir()
 	}
+	if opts.ExecTimeout <= 0 {
+		opts.ExecTimeout = 10 * time.Minute
+	}
 	logf := opts.OnLog
 	if logf == nil {
 		logf = func(format string, args ...any) {
@@ -50,7 +53,7 @@ func New(opts Options) *Client {
 		opts: opts,
 		logf: logf,
 		tools: []Tool{
-			ExecTool(opts.WorkDir),
+			ExecTool(opts.WorkDir, opts.ExecTimeout),
 			FsTool(),
 		},
 	}
@@ -90,12 +93,31 @@ func (c *Client) Connect() error {
 		}),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
-		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+		nats.CustomReconnectDelay(func(attempts int) time.Duration {
+			// 指数退避：2s → 4s → 8s → 16s → 30s (上限)
+			delay := time.Duration(1<<min(attempts, 5)) * time.Second
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			return delay
+		}),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			c.logf("NATS disconnected: %v", err)
+			if isAuthError(err) {
+				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new ENV_KEY and restart.")
+				go nc.Close()
+			}
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			c.logf("NATS reconnected, republishing caps")
 			c.publishCaps(nc)
+		}),
+		nats.ErrorHandler(func(nc *nats.Conn, _ *nats.Subscription, err error) {
+			c.logf("NATS error: %v", err)
+			if isAuthError(err) {
+				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new ENV_KEY and restart.")
+				go nc.Close()
+			}
 		}),
 	}
 
@@ -200,6 +222,8 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		return
 	}
 
+	c.logf("→ request: %s deadline=%s (msg=%s)", req.ToolName, req.Deadline, req.MsgID)
+
 	if req.Signature == "" {
 		c.logf("tool request rejected: missing K_tool signature for %s", req.ToolName)
 		c.respond(msg, toolResponse{Status: "rejected", Error: "missing request signature"})
@@ -239,7 +263,8 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		return
 	}
 
-	c.logf("tool request: %s (msg=%s)", req.ToolName, req.MsgID)
+	params := ParseToolParams(req.ToolData)
+	c.logf("tool request: %s %s (msg=%s)", req.ToolName, formatCmd(params), req.MsgID)
 
 	ctx := context.WithValue(context.Background(), reqCtxKey{}, &RequestCtx{
 		GrantedLevel: req.GrantedLevel,
@@ -302,6 +327,7 @@ func (c *Client) findTool(name string) *Tool {
 func (c *Client) respond(msg *nats.Msg, resp toolResponse) {
 	data, _ := json.Marshal(resp)
 	msg.Respond(data)
+	c.logf("← response: msg=%s status=%s error=%q", resp.MsgID, resp.Status, resp.Error)
 }
 
 func approvalResolvedBy(req toolRequest) string {
@@ -309,4 +335,23 @@ func approvalResolvedBy(req toolRequest) string {
 		return req.Approval.ResolvedBy
 	}
 	return ""
+}
+
+func isAuthError(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "authentication") || strings.Contains(s, "authorization")
+}
+
+func formatCmd(params *ToolParams) string {
+	if params == nil || params.Action == "" {
+		return "(empty)"
+	}
+	s := params.Action
+	if len(params.Argv) > 0 {
+		s += " " + strings.Join(params.Argv, " ")
+	}
+	if len(s) > 80 {
+		s = s[:80] + "..."
+	}
+	return s
 }

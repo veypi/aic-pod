@@ -2,17 +2,21 @@
 // 客户端通过此 SDK 可快速将设备接入 AIC 平台，注册执行能力并处理工具请求。
 package aicenv
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Options 客户端配置。
 type Options struct {
-	Credential string // "<env_id>.<cred_ver>.<secret>.<uid>" (必填)
-	NATSURL    string // "nats://host:port" 或 "ws://host/path" (必填)
-	WorkDir    string // exec 工作目录，默认 /tmp
-	DeviceName string // 展示名称，默认 hostname
-	DeviceType string // sandbox / device / server
-	Version    string // 客户端版本号
-	OnLog      func(format string, args ...any)
+	Credential  string // "<env_id>.<cred_ver>.<secret>.<uid>" (必填)
+	NATSURL     string // "nats://host:port" 或 "ws://host/path" (必填)
+	WorkDir     string // exec 工作目录，默认 /tmp
+	DeviceName  string // 展示名称，默认 hostname
+	DeviceType  string // sandbox / device / server
+	Version     string // 客户端版本号
+	ExecTimeout time.Duration // exec 后台超时，默认 10m
+	OnLog       func(format string, args ...any)
 }
 
 // ToolDef 工具定义，对应 CAPS 中的 tool 条目。

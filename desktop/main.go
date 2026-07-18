@@ -20,13 +20,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 
 	aicenv "github.com/veypi/aic-pod/sdk"
 )
 
-var version = "2.1.0"
+var version = "0.1.0"
 
 func main() {
 	_ = godotenv.Load()
@@ -35,17 +36,25 @@ func main() {
 	envCred := getEnv("ENV_KEY", "")
 	workDir := getEnv("WORK_DIR", "")
 	deviceName := getEnv("DEVICE_NAME", "")
+	execTimeoutStr := getEnv("EXEC_TIMEOUT", "10m")
 
 	flag.StringVar(&natsURL, "url", natsURL, "AIC server URL")
 	flag.StringVar(&envCred, "key", envCred, "Environment key (<env_id>.<cred_ver>.<secret>.<uid>)")
 	flag.StringVar(&workDir, "dir", workDir, "Working directory for exec (default /tmp)")
 	flag.StringVar(&deviceName, "name", deviceName, "Device display name (default hostname)")
+	flag.StringVar(&execTimeoutStr, "exec-timeout", execTimeoutStr, "Exec background timeout (default 10m)")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("aic v%s\n", version)
+		fmt.Printf("aic-pod v%s\n", version)
 		os.Exit(0)
+	}
+
+	execTimeout, err := time.ParseDuration(execTimeoutStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid exec-timeout %q: %v\n", execTimeoutStr, err)
+		os.Exit(1)
 	}
 
 	if envCred == "" {
@@ -55,19 +64,21 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Or use .env file:")
-		fmt.Fprintln(os.Stderr, "  AIC_URL     Server URL (default: wss://ivec.ai/aic/api/nc)")
-		fmt.Fprintln(os.Stderr, "  ENV_KEY     Environment key from 'env create'")
-		fmt.Fprintln(os.Stderr, "  WORK_DIR    Working directory for exec (default: /tmp)")
-		fmt.Fprintln(os.Stderr, "  DEVICE_NAME Device display name (default: hostname)")
+		fmt.Fprintln(os.Stderr, "  AIC_URL      Server URL (default: wss://ivec.ai/aic/api/nc)")
+		fmt.Fprintln(os.Stderr, "  ENV_KEY      Environment key from 'env create'")
+		fmt.Fprintln(os.Stderr, "  WORK_DIR     Working directory for exec (default: /tmp)")
+		fmt.Fprintln(os.Stderr, "  DEVICE_NAME  Device display name (default: hostname)")
+		fmt.Fprintln(os.Stderr, "  EXEC_TIMEOUT Exec background timeout (default: 10m)")
 		os.Exit(1)
 	}
 
 	client := aicenv.New(aicenv.Options{
-		Credential: envCred,
-		NATSURL:    natsURL,
-		WorkDir:    workDir,
-		DeviceName: deviceName,
-		Version:    version,
+		Credential:  envCred,
+		NATSURL:     natsURL,
+		WorkDir:     workDir,
+		DeviceName:  deviceName,
+		Version:     version,
+		ExecTimeout: execTimeout,
 	})
 
 	if err := client.Connect(); err != nil {
