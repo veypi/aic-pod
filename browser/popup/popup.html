@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="popup">
+    <!-- 连接状态 -->
+    <div class="status-row">
+      <span id="indicator" class="dot disconnected"></span>
+      <span id="status-text">未连接</span>
+    </div>
+
+    <hr>
+
+    <!-- 快捷开关 -->
+    <div class="toggle-row">
+      <span>自动连接</span>
+      <label class="switch">
+        <input type="checkbox" id="auto-connect">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <span>后台模式</span>
+      <label class="switch">
+        <input type="checkbox" id="background">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <span>隐私模式</span>
+      <label class="switch">
+        <input type="checkbox" id="incognito">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <hr>
+
+    <!-- 按钮 -->
+    <button id="connect-btn" class="btn primary">连接</button>
+    <button id="disconnect-btn" class="btn" style="display:none">断开</button>
+
+    <button id="options-btn" class="btn link">⚙ 详细设置</button>
+  </div>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
