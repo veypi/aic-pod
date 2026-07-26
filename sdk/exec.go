@@ -41,7 +41,7 @@ func ExecTool(workDir string, execTimeout time.Duration) Tool {
 	return Tool{
 		Def: ToolDef{
 			Name:        "exec",
-			Description: "Execute a program. action is the program name (bash, sh, ls, python, git, ...), argv are its arguments. Output is logged to file, response truncated to 1000 lines. Use fs read to get full log.",
+			Description: "Execute a program. action is the program name (bash, sh, ls, python, git, ...), argv are its arguments. Output is logged to file, response truncated to 1000 lines. Use fs read to get full log. Use action=bg_list to list background processes still running.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
