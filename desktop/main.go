@@ -24,7 +24,7 @@ import (
 
 	"github.com/joho/godotenv"
 
-	aicenv "github.com/veypi/aic-pod/sdk"
+	aichost "github.com/veypi/aic-pod/sdk"
 )
 
 var version = "0.1.1"
@@ -72,7 +72,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := aicenv.New(aicenv.Options{
+	client := aichost.New(aichost.Options{
 		Credential:  envCred,
 		NATSURL:     natsURL,
 		WorkDir:     workDir,

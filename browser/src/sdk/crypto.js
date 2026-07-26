@@ -29,9 +29,9 @@ async function hkdfDerive(secret, salt, info) {
  * - kTool:    for tool request signature verification
  */
 export async function deriveKeys(secret, envID) {
-  const kConnect = await hkdfDerive(secret, envID, "aic/env/connect/v1");
-  const kServer  = await hkdfDerive(secret, envID, "aic/env/server-proof/v1");
-  const kTool    = await hkdfDerive(secret, envID, "aic/env/tool-request/v1");
+  const kConnect = await hkdfDerive(secret, envID, "aic/host/connect/v1");
+  const kServer  = await hkdfDerive(secret, envID, "aic/host/server-proof/v1");
+  const kTool    = await hkdfDerive(secret, envID, "aic/host/tool-request/v1");
   return { kConnect, kServer, kTool };
 }
 

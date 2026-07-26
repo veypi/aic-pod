@@ -1,4 +1,4 @@
-package aicenv
+package aichost
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 
 // imageDataMaxBytes 是 image_data 附件的原始字节上限。
 // env 用户 NATS 单消息默认上限 1MB，base64 编码膨胀约 4/3，需为消息信封预留空间。
-const imageDataMaxBytes = 600 * 1024
+const imageDataMaxBytes = 1 << 20 // 1MB（§2.5）
 
 // isViewableImage 判断图片格式是否可被模型直接查看，
 // 与服务端 sessionctx.decodeBase64Image 支持的格式一致（其他格式默认按 .png 存储会损坏内容）。

@@ -9,7 +9,7 @@
   if (window.__aic_network_init) return;
   window.__aic_network_init = true;
 
-  const MAX_LOGS = 200;
+  const MAX_LOGS = 500; // §5.5 环形缓冲：每页会话最多保留最近 500 条请求
   window.__aic_network_logs = [];
 
   let reqCounter = 0;

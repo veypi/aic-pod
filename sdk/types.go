@@ -1,6 +1,6 @@
 // Package aicenv 提供 AIC Env 协议的 Go 实现。
 // 客户端通过此 SDK 可快速将设备接入 AIC 平台，注册执行能力并处理工具请求。
-package aicenv
+package aichost
 
 import (
 	"context"
@@ -9,23 +9,32 @@ import (
 
 // Options 客户端配置。
 type Options struct {
-	Credential  string // "<env_id>.<cred_ver>.<secret>.<uid>" (必填)
-	NATSURL     string // "nats://host:port" 或 "ws://host/path" (必填)
-	WorkDir     string // exec 工作目录，默认 /tmp
-	DeviceName  string // 展示名称，默认 hostname
-	DeviceType  string // sandbox / device / server
-	Version     string // 客户端版本号
+	Credential  string        // "<host_id>.<cred_ver>.<secret>.<uid>" (必填)
+	NATSURL     string        // "nats://host:port" 或 "ws://host/path" (必填)
+	WorkDir     string        // exec 工作目录，默认 /tmp
+	DeviceName  string        // 展示名称，默认 hostname
+	DeviceType  string        // sandbox / device / server
+	Version     string        // 客户端版本号
 	ExecTimeout time.Duration // exec 后台超时，默认 10m
 	OnLog       func(format string, args ...any)
 }
 
-// ToolDef 工具定义，对应 CAPS 中的 tool 条目。
+// ToolDef 工具定义，对应 CAPS 中的 tool 条目（§10.2）。
+// Actions 元素为对象 {"name": "...", "required_level": N} 或字符串简写
+// （继承指令集级 RequiredLevel），声明该指令集支持的子指令全集。
 type ToolDef struct {
 	Name          string         `json:"name"`
 	Description   string         `json:"description"`
 	Parameters    map[string]any `json:"parameters,omitempty"`
+	Actions       []any          `json:"actions,omitempty"`
 	RequiredLevel int            `json:"required_level"`
 	PolicyVersion string         `json:"policy_version"`
+}
+
+// ActionLevel 是 caps actions 数组中对象形式元素：action 级权限声明。
+type ActionLevel struct {
+	Name          string `json:"name"`
+	RequiredLevel int    `json:"required_level"`
 }
 
 // ToolHandler 工具处理函数。
@@ -47,7 +56,7 @@ type ToolParams struct {
 
 // ToolResult 工具执行结果。
 type ToolResult struct {
-	Status       string              `json:"status,omitempty"` // ""="completed", "waiting", "rejected"
+	State        string              `json:"state,omitempty"` // ""="completed", "waiting", "rejected"
 	Content      string              `json:"content,omitempty"`
 	Error        string              `json:"error,omitempty"`
 	Attrs        map[string]string   `json:"attrs,omitempty"`
@@ -84,16 +93,16 @@ func RequestFromContext(ctx context.Context) *RequestCtx {
 // ---- 内部类型 ----
 
 type capabilities struct {
-	EnvID         string         `json:"env_id"`
-	AgentVersion  string         `json:"agent_version"`
-	CredentialVer uint64         `json:"credential_ver"`
-	DeviceType    string         `json:"device_type,omitempty"`
-	DeviceName    string         `json:"device_name,omitempty"`
-	DeviceInfo    *envDeviceInfo `json:"device_info,omitempty"`
-	Tools         []ToolDef      `json:"tools"`
+	HostID        string          `json:"host_id"`
+	AgentVersion  string          `json:"agent_version"`
+	CredentialVer uint64          `json:"credential_ver"`
+	DeviceType    string          `json:"device_type,omitempty"`
+	DeviceName    string          `json:"device_name,omitempty"`
+	DeviceInfo    *hostDeviceInfo `json:"device_info,omitempty"`
+	Tools         []ToolDef       `json:"tools"`
 }
 
-type envDeviceInfo struct {
+type hostDeviceInfo struct {
 	Hostname  string `json:"hostname"`
 	OS        string `json:"os"`
 	Arch      string `json:"arch"`
@@ -102,15 +111,15 @@ type envDeviceInfo struct {
 }
 
 type toolRequest struct {
-	MsgID         string `json:"msg_id"`
-	SessionID     string `json:"session_id"`
-	ToolName      string `json:"tool_name"`
-	ToolData      any    `json:"tool_data"`
-	GrantedLevel  int    `json:"granted_level"`
-	Signature     string `json:"sig,omitempty"`
-	Nonce         string `json:"nonce,omitempty"`
-	Deadline      string `json:"deadline,omitempty"`
-	Approval      *struct {
+	MsgID        string `json:"msg_id"`
+	SessionID    string `json:"session_id"`
+	ToolName     string `json:"tool_name"`
+	ToolData     any    `json:"tool_data"`
+	GrantedLevel int    `json:"granted_level"`
+	Signature    string `json:"sig,omitempty"`
+	Nonce        string `json:"nonce,omitempty"`
+	Deadline     string `json:"deadline,omitempty"`
+	Approval     *struct {
 		Fingerprint string `json:"fingerprint"`
 		ResolvedBy  string `json:"resolved_by"`
 	} `json:"approval,omitempty"`
@@ -118,7 +127,7 @@ type toolRequest struct {
 
 type toolResponse struct {
 	MsgID        string              `json:"msg_id"`
-	Status       string              `json:"status"`
+	State        string              `json:"state"`
 	Content      string              `json:"content,omitempty"`
 	Error        string              `json:"error,omitempty"`
 	Attrs        map[string]string   `json:"attrs,omitempty"`
@@ -126,17 +135,17 @@ type toolResponse struct {
 }
 
 type connectSigPayload struct {
-	Domain  string `json:"domain"`
-	EnvID   string `json:"env_id"`
-	UID     string `json:"uid"`
-	EnvInfo string `json:"env_info"`
-	UnixMS  int64  `json:"unix_ms"`
-	Nonce   string `json:"nonce"`
+	Domain   string `json:"domain"`
+	HostID   string `json:"host_id"`
+	UID      string `json:"uid"`
+	HostInfo string `json:"host_info"`
+	UnixMS   int64  `json:"unix_ms"`
+	Nonce    string `json:"nonce"`
 }
 
 type toolReqSigPayload struct {
 	Version             int     `json:"version"`
-	EnvID               string  `json:"env_id"`
+	HostID              string  `json:"host_id"`
 	MsgID               string  `json:"msg_id"`
 	SessionID           string  `json:"session_id"`
 	ToolName            string  `json:"tool_name"`

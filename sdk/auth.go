@@ -1,4 +1,4 @@
-package aicenv
+package aichost
 
 import (
 	"crypto/hmac"
@@ -11,11 +11,11 @@ import (
 )
 
 // generateConnectToken 生成连接 token。
-func generateConnectToken(envID, uid, version, deviceType, deviceName, kConnect string) string {
+func generateConnectToken(hostID, uid, version, deviceType, deviceName, kConnect string) string {
 	envInfo, _ := json.Marshal(map[string]string{
-		"env_version": version,
-		"env_type":    deviceType,
-		"env_name":    deviceName,
+		"agent_version": version,
+		"device_type":   deviceType,
+		"device_name":   deviceName,
 	})
 	envInfoB64 := base64.RawURLEncoding.EncodeToString(envInfo)
 
@@ -26,31 +26,31 @@ func generateConnectToken(envID, uid, version, deviceType, deviceName, kConnect 
 	rand.Read(nonce)
 	nonceB64 := base64.RawURLEncoding.EncodeToString(nonce)
 
-	sigInput := canonicalConnectSigInput(envID, uid, string(envInfo), unixMs, nonceB64)
+	sigInput := canonicalConnectSigInput(hostID, uid, string(envInfo), unixMs, nonceB64)
 	sig := hmacSHA256Raw(kConnect, sigInput)
 	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
 
-	return fmt.Sprintf("e1.%s.%s.%s.%s.%s", envID, envInfoB64, tsStr, nonceB64, sigB64)
+	return fmt.Sprintf("e1.%s.%s.%s.%s.%s", hostID, envInfoB64, tsStr, nonceB64, sigB64)
 }
 
-func canonicalConnectSigInput(envID, uid, envInfo string, unixMs int64, nonce string) string {
+func canonicalConnectSigInput(hostID, uid, envInfo string, unixMs int64, nonce string) string {
 	b, _ := json.Marshal(connectSigPayload{
-		Domain:  "aic-env-connect-v1",
-		EnvID:   envID,
-		UID:     uid,
-		EnvInfo: envInfo,
-		UnixMS:  unixMs,
-		Nonce:   nonce,
+		Domain:   "aic-host-connect-v1",
+		HostID:   hostID,
+		UID:      uid,
+		HostInfo: envInfo,
+		UnixMS:   unixMs,
+		Nonce:    nonce,
 	})
 	return string(b)
 }
 
-func canonicalToolReqSigInput(envID, msgID, sessionID, toolName, nonce, deadline string, toolData any, grantedLevel int, approvalFingerprint *string) string {
+func canonicalToolReqSigInput(hostID, msgID, sessionID, toolName, nonce, deadline string, toolData any, grantedLevel int, approvalFingerprint *string) string {
 	toolDataJSON, _ := json.Marshal(toolData)
 	toolDataHash := fmt.Sprintf("%x", sha256.Sum256(toolDataJSON))
 	b, _ := json.Marshal(toolReqSigPayload{
 		Version:             1,
-		EnvID:               envID,
+		HostID:              hostID,
 		MsgID:               msgID,
 		SessionID:           sessionID,
 		ToolName:            toolName,
@@ -63,8 +63,8 @@ func canonicalToolReqSigInput(envID, msgID, sessionID, toolName, nonce, deadline
 	return string(b)
 }
 
-func verifyToolRequestSig(req *toolRequest, envID, kTool string) bool {
-	expected := canonicalToolReqSigInput(envID, req.MsgID, req.SessionID, req.ToolName, req.Nonce, req.Deadline, req.ToolData, req.GrantedLevel, approvalFingerprint(req))
+func verifyToolRequestSig(req *toolRequest, hostID, kTool string) bool {
+	expected := canonicalToolReqSigInput(hostID, req.MsgID, req.SessionID, req.ToolName, req.Nonce, req.Deadline, req.ToolData, req.GrantedLevel, approvalFingerprint(req))
 	mac := hmac.New(sha256.New, []byte(kTool))
 	mac.Write([]byte(expected))
 	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))

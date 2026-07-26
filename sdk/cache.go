@@ -1,4 +1,4 @@
-package aicenv
+package aichost
 
 import "sync"
 

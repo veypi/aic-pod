@@ -1,87 +1,148 @@
-package aicenv
+package aichost
 
 import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"mime"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
 // ParseToolParams 从工具请求的 toolData 解析标准 action + argv 参数。
-func ParseToolParams(toolData any) *ToolParams {
-	if m, ok := toolData.(map[string]any); ok {
-		action, _ := m["action"].(string)
-		argv := toStringSlice(m["argv"])
-		return &ToolParams{Action: strings.TrimSpace(action), Argv: argv}
+// argv 元素类型容错（§1.2）：number/bool 强转字符串；null/对象/数组报错。
+func ParseToolParams(toolData any) (*ToolParams, error) {
+	m, ok := toolData.(map[string]any)
+	if !ok {
+		return &ToolParams{}, nil
 	}
-	return &ToolParams{}
+	action, _ := m["action"].(string)
+	argv, err := toStringSlice(m["argv"])
+	if err != nil {
+		return nil, err
+	}
+	return &ToolParams{Action: strings.TrimSpace(action), Argv: argv}, nil
 }
 
-// FsTool 返回内置 fs 工具（文件操作）。
-// action 指定操作类型，argv 为位置路径参数加 --flag 标志参数，与 aic ufs 工具语义一致。
+func toStringSlice(v any) ([]string, error) {
+	arr, ok := v.([]any)
+	if !ok {
+		if s, ok := v.([]string); ok {
+			return s, nil
+		}
+		return nil, nil
+	}
+	out := make([]string, 0, len(arr))
+	for i, item := range arr {
+		switch val := item.(type) {
+		case string:
+			out = append(out, val)
+		case float64:
+			out = append(out, strconv.FormatFloat(val, 'f', -1, 64))
+		case bool:
+			out = append(out, strconv.FormatBool(val))
+		default:
+			return nil, fmt.Errorf("argv element %d must be a string", i)
+		}
+	}
+	return out, nil
+}
+
+// fsActions 与 fsFlagSets 是 fs 指令集的 action 全集与 action 级 flag 表（§4.2/§2.1），
+// 与 aic tools/fs 完全一致。
+var fsActions = []string{"ls", "read", "write", "edit", "rm", "mkdir", "cp", "mv", "search", "download"}
+
+var fsFlagSets = map[string]flagSet{
+	"ls":       {},
+	"read":     {"offset": flagValue, "limit": flagValue},
+	"write":    {"content": flagValue, "append": flagBool},
+	"edit":     {"old": flagValue, "new": flagValue, "replace-all": flagBool},
+	"rm":       {},
+	"mkdir":    {},
+	"cp":       {},
+	"mv":       {},
+	"search":   {"glob": flagValue, "pattern": flagValue, "limit": flagValue, "ignore-case": flagBool},
+	"download": {"from": flagValue, "max-size": flagValue},
+}
+
+// FsTool 返回内置 fs 工具（§4：两端行为一致，aic tools/fs 同源语义）。
 func FsTool() Tool {
 	return Tool{
 		Def: ToolDef{
 			Name: "fs",
-			Description: "Purpose: Read and modify files in the execution environment filesystem. " +
+			Description: "Purpose: Read and modify files in the host filesystem. " +
 				"Actions and their argv examples:\n" +
 				`  {"action": "ls",     "argv": ["/tmp"]}` + "\n" +
 				`  {"action": "read",   "argv": ["/app/log.txt", "--offset", "100", "--limit", "200"]}` + "\n" +
 				`  {"action": "write",  "argv": ["/app/notes.txt", "--content", "hello"]}` + "\n" +
-				`  {"action": "edit",   "argv": ["/app/index.html", "--old", "<title>Old</title>", "--new", "<title>New</title>"]}` + "\n" +
+				`  {"action": "write",  "argv": ["/app/log.txt", "--content", "more", "--append"]}` + "\n" +
 				`  {"action": "edit",   "argv": ["/app/foo.txt", "--old", "x", "--new", "y", "--replace-all"]}` + "\n" +
 				`  {"action": "rm",     "argv": ["/tmp/junk.txt"]}` + "\n" +
 				`  {"action": "mkdir",  "argv": ["/app/subdir"]}` + "\n" +
 				`  {"action": "cp",     "argv": ["/app/a.txt", "/tmp/b.txt"]}` + "\n" +
 				`  {"action": "mv",     "argv": ["/app/old.txt", "/app/new.txt"]}` + "\n" +
-				`  {"action": "search", "argv": ["/app", "--glob", "*.md", "--pattern", "TODO", "--limit", "20"]}` + "\n" +
-				"Important rules: write overwrites the whole file; edit requires exact --old value; " +
-				"read returns at most 1000 lines, use --offset/--limit to page; " +
+				`  {"action": "search", "argv": ["/app", "--glob", "*.md", "--pattern", "*TODO*", "--limit", "20"]}` + "\n" +
+				`  {"action": "download", "argv": ["/tmp/model.bin", "--from", "https://example.com/model.bin"]}` + "\n" +
+				"Important rules: write overwrites the whole file unless --append; edit requires exact unique --old value; " +
+				"read returns at most 1000 lines (1-based --offset/--limit paging); " +
 				"read on image files (png/jpg/gif/webp) returns viewable image_data, oversized images are auto-compressed to jpeg; " +
-				"search without --pattern lists files with size and mtime; " +
-				"cp and mv fail if the destination already exists.",
+				"search --pattern is a full-line glob (use *text* for substring match); " +
+				"cp, mv and download fail if the destination already exists.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"action": map[string]any{
 						"type": "string",
-						"enum": []string{"ls", "read", "write", "edit", "rm", "mkdir", "cp", "mv", "search"},
+						"enum": fsActions,
 					},
 					"argv": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				},
 				"required": []string{"action", "argv"},
 			},
+			// §10.2：rm 显式声明 action 级等级，其余字符串简写继承基线 1
+			Actions: []any{
+				ActionLevel{Name: "rm", RequiredLevel: 2},
+				"ls", "read", "write", "edit", "mkdir", "cp", "mv", "search", "download",
+			},
 			RequiredLevel: 1,
 			PolicyVersion: "1",
 		},
 		Handler: func(ctx context.Context, data any) (*ToolResult, error) {
-			params := ParseToolParams(data)
+			params, err := ParseToolParams(data)
+			if err != nil {
+				return &ToolResult{Error: "fs: " + err.Error()}, nil
+			}
 			return handleFs(ctx, params)
 		},
 	}
 }
 
 func handleFs(_ context.Context, params *ToolParams) (*ToolResult, error) {
-	pa := parseArgv(params.Argv)
-
 	action := strings.ToLower(params.Action)
 	if action == "" {
-		action = inferFsAction(pa)
+		// §4.4：不做特征 flag 推断——无害报错，让 Agent 显式修正后重试
+		return &ToolResult{Error: fmt.Sprintf("fs: action is required (supported: %s)", strings.Join(fsActions, ", "))}, nil
 	}
-	if action == "" {
-		return &ToolResult{Error: "fs: action is required (supported: ls, read, write, edit, rm, mkdir, cp, mv, search)"}, nil
+	flags, ok := fsFlagSets[action]
+	if !ok {
+		return &ToolResult{Error: fmt.Sprintf("fs: unknown action %q (supported: %s)", params.Action, strings.Join(fsActions, ", "))}, nil
+	}
+
+	pa, err := parseActionArgv("fs", action, params.Argv, flags)
+	if err != nil {
+		return &ToolResult{Error: err.Error()}, nil
 	}
 	if len(pa.positional) == 0 {
-		return &ToolResult{Error: "fs: argv requires at least one path argument"}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs %s: path is required", action)}, nil
 	}
 	if (action == "cp" || action == "mv") && len(pa.positional) < 2 {
-		return &ToolResult{Error: fmt.Sprintf("fs %s: source and destination paths required", action)}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs %s: source and destination paths are required", action)}, nil
 	}
 
 	switch action {
@@ -103,29 +164,39 @@ func handleFs(_ context.Context, params *ToolParams) (*ToolResult, error) {
 		return handleFsMove(pa)
 	case "search":
 		return handleFsSearch(pa)
-	default:
-		return &ToolResult{
-			Error: fmt.Sprintf("fs: unknown action %q (supported: ls, read, write, edit, rm, mkdir, cp, mv, search)", params.Action),
-		}, nil
+	case "download":
+		return handleFsDownload(pa)
 	}
+	return &ToolResult{Error: fmt.Sprintf("fs: unknown action %q (supported: %s)", action, strings.Join(fsActions, ", "))}, nil
 }
 
-// ---- fs handlers ----
+// ---- read ----
 
 func handleFsRead(pa *parsedArgv) (*ToolResult, error) {
-	offset := pa.getInt("offset")
-	limit := pa.getInt("limit")
-	if offset < 0 {
-		return &ToolResult{Error: fmt.Sprintf("fs read: offset must be >= 0, got %d", offset)}, nil
+	// §4.3：--offset/--limit 均 1 基，与 Content 行号同一编号空间
+	offset := 1
+	if v, ok := pa.flags["offset"]; ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return &ToolResult{Error: fmt.Sprintf("fs read: offset must be >= 1, got %s", v)}, nil
+		}
+		offset = n
 	}
-	if limit <= 0 || limit > 1000 {
-		limit = 1000
+	limit := 1000
+	if v, ok := pa.flags["limit"]; ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return &ToolResult{Error: fmt.Sprintf("fs read: limit must be >= 1, got %s", v)}, nil
+		}
+		if n < 1000 {
+			limit = n
+		}
 	}
 
 	path := pa.positional[0]
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs read: %v", err)}, nil
 	}
 
 	mimeType := detectMime(data, path)
@@ -148,8 +219,8 @@ func handleFsRead(pa *parsedArgv) (*ToolResult, error) {
 				c, err := compressImage(data, mimeType)
 				if err != nil {
 					return &ToolResult{
-						Content: fmt.Sprintf("Image file too large to view: %s (%s, %dx%d, %d bytes, auto-compress failed: %v)", path, mimeType, w, h, len(data), err),
-						Attrs:   attrs,
+						Error: fmt.Sprintf("fs read: image too large even after compression (%d bytes)", len(data)),
+						Attrs: attrs,
 					}, nil
 				}
 				imgData, imgMime = c.data, "image/jpeg"
@@ -168,57 +239,78 @@ func handleFsRead(pa *parsedArgv) (*ToolResult, error) {
 		}, nil
 	}
 
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	totalLines := len(lines)
-	if totalLines > 0 && lines[totalLines-1] == "" {
-		lines = lines[:totalLines-1]
-		totalLines--
+	lines := strings.Split(string(data), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
 	}
-
-	attrs["rows"] = strconv.Itoa(totalLines)
-
-	if offset == 0 && limit == 1000 && totalLines <= 1000 {
-		var b strings.Builder
-		for i, line := range lines {
-			fmt.Fprintf(&b, "%d\t%s\n", i+1, line)
-		}
-		content := strings.TrimRight(b.String(), "\n")
-		attrs["range"] = fmt.Sprintf("1-%d", totalLines)
-		attrs["truncated"] = "false"
-		return &ToolResult{Content: content, Attrs: attrs}, nil
+	total := len(lines)
+	if offset > total {
+		return &ToolResult{Error: fmt.Sprintf("fs read: offset %d exceeds %d lines", offset, total)}, nil
 	}
-
-	start := offset
-	if start >= totalLines {
-		return &ToolResult{Error: fmt.Sprintf("fs read: offset %d exceeds %d lines", offset, totalLines)}, nil
+	end := offset - 1 + limit
+	if end > total {
+		end = total
 	}
-	end := start + limit
-	truncated := false
-	if end > totalLines {
-		end = totalLines
-	} else {
-		truncated = end < totalLines
-	}
+	truncated := end < total
 
-	selected := lines[start:end]
 	var b strings.Builder
-	for i, line := range selected {
-		fmt.Fprintf(&b, "%d\t%s\n", start+i+1, line)
+	for i := offset - 1; i < end; i++ {
+		fmt.Fprintf(&b, "%d\t%s\n", i+1, lines[i])
 	}
-	content := strings.TrimRight(b.String(), "\n")
-	attrs["range"] = fmt.Sprintf("%d-%d", start+1, end)
+	body := b.String()
+
+	// §4.3：512KB 内容上限先于 --limit 触发时只保留完整行，rows/range 同步收紧
+	if cut, wasCut := truncateContentBytes(body, maxContentBytes); wasCut {
+		body = cut
+		kept := strings.Count(body, "\n")
+		end = offset - 1 + kept
+		truncated = true
+	}
+
+	attrs["total_lines"] = strconv.Itoa(total)
+	attrs["rows"] = strconv.Itoa(end - (offset - 1))
+	attrs["range"] = fmt.Sprintf("%d-%d", offset, end)
 	attrs["truncated"] = strconv.FormatBool(truncated)
-	return &ToolResult{Content: content, Attrs: attrs}, nil
+	return &ToolResult{Content: body, Attrs: attrs}, nil
 }
+
+// ---- write ----
 
 func handleFsWrite(pa *parsedArgv) (*ToolResult, error) {
 	path := pa.positional[0]
-	content := pa.flags["content"]
-	if content == "" && len(pa.positional) > 1 {
-		content = pa.positional[1]
+	content, ok := pa.flags["content"]
+	if !ok {
+		// §4.3：--content 必填，不做位置参数兜底
+		return &ToolResult{Error: "fs write: --content is required"}, nil
+	}
+	if pa.bools["append"] {
+		// 显式追加模式（文件不存在则创建）；追加不幂等——超时后先 read 确认尾部再重试
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return &ToolResult{Error: fmt.Sprintf("fs write: %v", err)}, nil
+		}
+		_, werr := f.WriteString(content)
+		cerr := f.Close()
+		if werr != nil {
+			return &ToolResult{Error: fmt.Sprintf("fs write: %v", werr)}, nil
+		}
+		if cerr != nil {
+			return &ToolResult{Error: fmt.Sprintf("fs write: %v", cerr)}, nil
+		}
+		lines := countLines(content)
+		return &ToolResult{
+			Content: fmt.Sprintf("appended to %s (+%d lines, +%d bytes)", path, lines, len(content)),
+			Attrs: map[string]string{
+				"action": "write",
+				"path":   path,
+				"mode":   "append",
+				"lines":  strconv.Itoa(lines),
+				"bytes":  strconv.Itoa(len(content)),
+			},
+		}, nil
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs write: %v", err)}, nil
 	}
 	lines := countLines(content)
 	return &ToolResult{
@@ -226,38 +318,60 @@ func handleFsWrite(pa *parsedArgv) (*ToolResult, error) {
 		Attrs: map[string]string{
 			"action": "write",
 			"path":   path,
+			"mode":   "overwrite",
 			"lines":  strconv.Itoa(lines),
 			"bytes":  strconv.Itoa(len(content)),
 		},
 	}, nil
 }
 
+// countLines 统计内容行数：'\n' 的数量加上末尾无换行符的一行。空内容为 0 行。
+func countLines(content string) int {
+	if content == "" {
+		return 0
+	}
+	n := strings.Count(content, "\n")
+	if !strings.HasSuffix(content, "\n") {
+		n++
+	}
+	return n
+}
+
+// ---- edit ----
+
 func handleFsEdit(pa *parsedArgv) (*ToolResult, error) {
 	path := pa.positional[0]
-	oldStr, newStr := pa.flags["old"], pa.flags["new"]
-	replaceAll := pa.bools["replace-all"]
-	if oldStr == "" {
+	oldStr, ok := pa.flags["old"]
+	if !ok || oldStr == "" {
 		return &ToolResult{Error: "fs edit: --old is required"}, nil
 	}
-	if oldStr == newStr {
+	newStr := pa.flags["new"]
+	if newStr == oldStr {
 		return &ToolResult{Error: "fs edit: --new must be different from --old"}, nil
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs edit: %v", err)}, nil
+	}
+	if !isTextMime(detectMime(data, path)) && !utf8.Valid(data) {
+		return &ToolResult{Error: fmt.Sprintf("fs edit: %s is not a text file", path)}, nil
 	}
 	content := string(data)
-	if !strings.Contains(content, oldStr) {
+	matches := strings.Count(content, oldStr)
+	if matches == 0 {
 		return &ToolResult{Error: "fs edit: --old string not found in file"}, nil
 	}
-	if replaceAll {
+	if matches > 1 && !pa.bools["replace-all"] {
+		return &ToolResult{Error: fmt.Sprintf("fs edit: --old matches %d locations; provide more surrounding context to make it unique, or use --replace-all", matches)}, nil
+	}
+	if pa.bools["replace-all"] {
 		content = strings.ReplaceAll(content, oldStr, newStr)
 	} else {
 		content = strings.Replace(content, oldStr, newStr, 1)
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs edit: %v", err)}, nil
 	}
 	return &ToolResult{
 		Content: fmt.Sprintf("updated file: %s", path),
@@ -265,13 +379,16 @@ func handleFsEdit(pa *parsedArgv) (*ToolResult, error) {
 	}, nil
 }
 
+// ---- ls ----
+
 func handleFsLs(pa *parsedArgv) (*ToolResult, error) {
 	path := pa.positional[0]
 	info, err := os.Stat(path)
 	if err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs ls: %v", err)}, nil
 	}
 	if !info.IsDir() {
+		// ls 单个文件：Content 为空字符串（§2.2 豁免）
 		return &ToolResult{
 			Content: "",
 			Attrs: map[string]string{
@@ -285,22 +402,28 @@ func handleFsLs(pa *parsedArgv) (*ToolResult, error) {
 		}, nil
 	}
 
-	entries, err := os.ReadDir(path)
+	entries, err := os.ReadDir(path) // os.ReadDir 按文件名排序（UTF-8 字节序，§4.3）
 	if err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs ls: %v", err)}, nil
 	}
 
-	var b strings.Builder
-	for i, e := range entries {
-		label := e.Name()
-		if e.IsDir() {
-			label += "/"
+	content := ""
+	if len(entries) == 0 {
+		content = fmt.Sprintf("empty directory: %s", path)
+	} else {
+		var b strings.Builder
+		for i, e := range entries {
+			label := e.Name()
+			if e.IsDir() {
+				label += "/"
+			}
+			fmt.Fprintf(&b, "%d\t%s\n", i+1, label)
 		}
-		fmt.Fprintf(&b, "%d\t%s\n", i+1, label)
+		content = strings.TrimRight(b.String(), "\n")
 	}
 
 	return &ToolResult{
-		Content: strings.TrimRight(b.String(), "\n"),
+		Content: content,
 		Attrs: map[string]string{
 			"action":    "ls",
 			"path":      path,
@@ -312,8 +435,17 @@ func handleFsLs(pa *parsedArgv) (*ToolResult, error) {
 	}, nil
 }
 
+// ---- rm ----
+
 func handleFsRemove(pa *parsedArgv) (*ToolResult, error) {
 	path := pa.positional[0]
+	// §4.3 根目录硬保护（拒绝，不可审批绕过）：文件系统根（/、盘符根如 C:\）禁止删除
+	if isFilesystemRoot(path) {
+		return &ToolResult{
+			State: "rejected",
+			Error: fmt.Sprintf("fs rm: cannot remove root directory %s", path),
+		}, nil
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return &ToolResult{Error: fmt.Sprintf("fs rm: %s: %v", path, err)}, nil
@@ -323,7 +455,7 @@ func handleFsRemove(pa *parsedArgv) (*ToolResult, error) {
 		count = countEntries(path)
 	}
 	if err := os.RemoveAll(path); err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs rm: %v", err)}, nil
 	}
 	msg := fmt.Sprintf("removed %s", path)
 	if count > 0 {
@@ -333,6 +465,22 @@ func handleFsRemove(pa *parsedArgv) (*ToolResult, error) {
 		Content: msg,
 		Attrs:   map[string]string{"action": "rm", "path": path},
 	}, nil
+}
+
+// isFilesystemRoot 判定路径是否为文件系统根（/、盘符根如 C:\、UNC 根）。
+func isFilesystemRoot(path string) bool {
+	clean := filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		// C:\ 或 C:（Clean 后盘符根）
+		if len(clean) == 2 && clean[1] == ':' {
+			return true
+		}
+		if len(clean) == 3 && clean[1] == ':' && (clean[2] == '\\' || clean[2] == '/') {
+			return true
+		}
+		return clean == `\\`
+	}
+	return clean == "/"
 }
 
 // countEntries 递归统计目录下的文件和目录总数。
@@ -350,13 +498,15 @@ func countEntries(dir string) int {
 	return n
 }
 
+// ---- mkdir / cp / mv ----
+
 func handleFsMkdir(pa *parsedArgv) (*ToolResult, error) {
 	path := pa.positional[0]
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
 		return &ToolResult{Error: fmt.Sprintf("fs mkdir: %s already exists", path)}, nil
 	}
 	if err := os.MkdirAll(path, 0755); err != nil {
-		return &ToolResult{Error: err.Error()}, nil
+		return &ToolResult{Error: fmt.Sprintf("fs mkdir: %v", err)}, nil
 	}
 	return &ToolResult{
 		Content: fmt.Sprintf("created %s", path),
@@ -440,314 +590,90 @@ func handleFsMove(pa *parsedArgv) (*ToolResult, error) {
 	}, nil
 }
 
-func handleFsSearch(pa *parsedArgv) (*ToolResult, error) {
-	glob := pa.flags["glob"]
-	pattern := pa.flags["pattern"]
-	limit := pa.getInt("limit")
-	if limit <= 0 || limit > 500 {
-		limit = 100
+// ---- download ----
+
+// downloadClient 共享下载客户端；单请求超时 10 分钟（§4.3）。
+var downloadClient = &http.Client{Timeout: 10 * time.Minute}
+
+// handleFsDownload 从 http(s) 下载文件到 host 本地（§4.3：各环境自行发起 fetch）。
+// cloud:// 与 {host_id}:// 源为预留 scheme，本期报 scheme not yet supported。
+func handleFsDownload(pa *parsedArgv) (*ToolResult, error) {
+	dst := pa.positional[0]
+	source := pa.flags["from"]
+	if source == "" {
+		return &ToolResult{Error: "fs download: --from is required"}, nil
 	}
-	ignoreCase := pa.bools["ignore-case"]
-	root := pa.positional[0]
 
-	if _, err := os.Stat(root); err != nil {
-		return &ToolResult{Error: fmt.Sprintf("search: %s: %v", root, err)}, nil
+	// scheme 判定（§4.3，逐条顺序匹配）
+	idx := strings.Index(source, "://")
+	if idx < 0 {
+		return &ToolResult{Error: fmt.Sprintf("fs download: invalid source %q: missing scheme (supported: http(s)://, cloud://, {host_id}://)", source)}, nil
+	}
+	scheme := source[:idx]
+	switch scheme {
+	case "http", "https":
+		// 本期实现：host 由 host agent 下载写入本地路径
+	case "cloud":
+		return &ToolResult{Error: "fs download: scheme not yet supported: cloud"}, nil
+	default:
+		// 其余左段为跨 host 源（预留）；host 端无法查表校验，统一按预留处理
+		return &ToolResult{Error: fmt.Sprintf("fs download: scheme not yet supported: %s", scheme)}, nil
 	}
 
-	var b strings.Builder
-	count := 0
-	walkFS(root, glob, pattern, ignoreCase, limit, &count, &b)
+	// 目标已存在报错（与 cp/mv 一致，不覆盖）
+	if _, err := os.Stat(dst); err == nil {
+		return &ToolResult{Error: fmt.Sprintf("fs download: destination %s already exists", dst)}, nil
+	}
 
-	isGrep := pattern != ""
-	if count == 0 {
-		msg := fmt.Sprintf("no files matched glob %q in %s", glob, root)
-		if isGrep {
-			msg = fmt.Sprintf("no lines matched pattern %q in %s", pattern, root)
+	maxSizeMB := 1024
+	if v, ok := pa.flags["max-size"]; ok {
+		n, err := strconv.Atoi(v)
+		if err == nil && n > 0 {
+			maxSizeMB = n
 		}
-		return &ToolResult{
-			Content: msg,
-			Attrs: map[string]string{
-				"action":    "search",
-				"path":      root,
-				"mime":      "text/plain",
-				"rows":      "0",
-				"truncated": "false",
-			},
-		}, nil
+		if maxSizeMB > 10240 {
+			maxSizeMB = 10240
+		}
 	}
 
+	req, err := http.NewRequest(http.MethodGet, source, nil)
+	if err != nil {
+		return &ToolResult{Error: fmt.Sprintf("fs download: %v", err)}, nil
+	}
+	resp, err := downloadClient.Do(req)
+	if err != nil {
+		return &ToolResult{Error: fmt.Sprintf("fs download: fetch %s: %v", source, err)}, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return &ToolResult{Error: fmt.Sprintf("fs download: fetch %s returned %s", source, resp.Status)}, nil
+	}
+
+	f, err := os.Create(dst)
+	if err != nil {
+		return &ToolResult{Error: fmt.Sprintf("fs download: cannot create %s: %v", dst, err)}, nil
+	}
+	// 字节上限：超限中止并删除半成品文件
+	maxBytes := int64(maxSizeMB) << 20
+	n, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	if closeErr := f.Close(); copyErr == nil && closeErr != nil {
+		copyErr = closeErr
+	}
+	if n > maxBytes {
+		_ = os.Remove(dst)
+		return &ToolResult{Error: fmt.Sprintf("fs download: size limit exceeded (%dMB > %dMB)", n>>20, maxSizeMB)}, nil
+	}
+	if copyErr != nil {
+		_ = os.Remove(dst)
+		return &ToolResult{Error: fmt.Sprintf("fs download: write %s: %v", dst, copyErr)}, nil
+	}
 	return &ToolResult{
-		Content: strings.TrimRight(b.String(), "\n"),
+		Content: fmt.Sprintf("downloaded %s to %s (%d bytes)", source, dst, n),
 		Attrs: map[string]string{
-			"action":    "search",
-			"path":      root,
-			"mime":      "text/plain",
-			"rows":      strconv.Itoa(count),
-			"truncated": strconv.FormatBool(count >= limit),
+			"action": "download",
+			"path":   dst,
+			"source": source,
+			"bytes":  strconv.FormatInt(n, 10),
 		},
 	}, nil
 }
-
-// countLines 统计内容行数：'\n' 的数量加上末尾无换行符的一行。空内容为 0 行。
-func countLines(content string) int {
-	if content == "" {
-		return 0
-	}
-	n := strings.Count(content, "\n")
-	if !strings.HasSuffix(content, "\n") {
-		n++
-	}
-	return n
-}
-
-// ---- argv helpers ----
-
-func toStringSlice(v any) []string {
-	switch arr := v.(type) {
-	case []any:
-		out := make([]string, len(arr))
-		for i, item := range arr {
-			out[i] = fmt.Sprint(item)
-		}
-		return out
-	case []string:
-		return arr
-	}
-	return nil
-}
-
-// parsedArgv 是 Unix 风格 argv 的解析结果：位置参数、--flag value、--bool-flag。
-type parsedArgv struct {
-	positional []string
-	flags      map[string]string
-	bools      map[string]bool
-}
-
-// parseArgv 将 argv 解析为位置参数与标志参数，与 aic libs/tools.ParseArgv 语义一致。
-func parseArgv(argv []string) *parsedArgv {
-	pa := &parsedArgv{
-		flags: make(map[string]string),
-		bools: make(map[string]bool),
-	}
-	for i := 0; i < len(argv); i++ {
-		arg := argv[i]
-		if key, ok := strings.CutPrefix(arg, "--"); ok && looksLikeFlagName(key) {
-			if i+1 < len(argv) && !looksLikeFlag(argv[i+1]) {
-				pa.flags[key] = argv[i+1]
-				i++
-			} else {
-				pa.bools[key] = true
-			}
-		} else {
-			pa.positional = append(pa.positional, arg)
-		}
-	}
-	return pa
-}
-
-// looksLikeFlag 判断 arg 是否为 "--name" 风格的标志。
-func looksLikeFlag(arg string) bool {
-	key, ok := strings.CutPrefix(arg, "--")
-	return ok && looksLikeFlagName(key)
-}
-
-// looksLikeFlagName 判断 key（去掉 "--" 前缀后的部分）是否是合法标志名：
-// 非空且仅由字母、数字、'-'、'_' 组成。任意文本（如 YAML front matter "---\n..."）
-// 不会通过检查，因此会被当作上一个标志的值而不是新标志。
-func looksLikeFlagName(key string) bool {
-	if key == "" {
-		return false
-	}
-	for _, r := range key {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '-' || r == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func (pa *parsedArgv) getInt(name string) int {
-	v, _ := strconv.Atoi(pa.flags[name])
-	return v
-}
-
-// inferFsAction 在 action 缺失时根据特征标志推断操作，与 ufs 工具一致。
-func inferFsAction(pa *parsedArgv) string {
-	if _, ok := pa.flags["old"]; ok {
-		return "edit"
-	}
-	if pa.bools["replace-all"] {
-		return "edit"
-	}
-	if _, ok := pa.flags["content"]; ok {
-		return "write"
-	}
-	if _, ok := pa.flags["glob"]; ok {
-		return "search"
-	}
-	if _, ok := pa.flags["pattern"]; ok {
-		return "search"
-	}
-	if pa.bools["ignore-case"] {
-		return "search"
-	}
-	if _, ok := pa.flags["offset"]; ok {
-		return "read"
-	}
-	if _, ok := pa.flags["limit"]; ok {
-		return "read"
-	}
-	return ""
-}
-
-// ---- glob + search helpers ----
-
-func walkFS(root, glob, pattern string, ignoreCase bool, limit int, count *int, b *strings.Builder) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if *count >= limit {
-			return
-		}
-		subPath := filepath.Join(root, e.Name())
-		if glob != "" && !matchSimpleGlob(glob, e.Name()) {
-			if e.IsDir() {
-				walkFS(subPath, glob, pattern, ignoreCase, limit, count, b)
-			}
-			continue
-		}
-		if pattern != "" {
-			if !e.IsDir() {
-				data, err := os.ReadFile(subPath)
-				if err != nil {
-					continue
-				}
-				for ln, line := range strings.Split(string(data), "\n") {
-					if *count >= limit {
-						return
-					}
-					if matchLine(line, pattern, ignoreCase) {
-						col := matchColumn(line, pattern, ignoreCase)
-						*count++
-						fmt.Fprintf(b, "%d\t%s:%d:%d\t%s\n", *count, subPath, ln+1, col, line)
-					}
-				}
-			}
-		} else {
-			*count++
-			label := subPath
-			if e.IsDir() {
-				label += "/"
-			}
-			var size, mtime int64
-			if info, err := e.Info(); err == nil {
-				size, mtime = info.Size(), info.ModTime().Unix()
-			}
-			fmt.Fprintf(b, "%d\t%s\t%d\t%d\n", *count, label, size, mtime)
-		}
-		if e.IsDir() {
-			walkFS(subPath, glob, pattern, ignoreCase, limit, count, b)
-		}
-	}
-}
-
-func matchSimpleGlob(pattern, name string) bool {
-	px, nx := 0, 0
-	for px < len(pattern) {
-		if pattern[px] == '*' {
-			if px+1 >= len(pattern) {
-				return true
-			}
-			for ; nx < len(name); nx++ {
-				if matchSimpleGlob(pattern[px+1:], name[nx:]) {
-					return true
-				}
-			}
-			return false
-		}
-		if nx >= len(name) {
-			return false
-		}
-		if pattern[px] != '?' && pattern[px] != name[nx] {
-			return false
-		}
-		px++
-		nx++
-	}
-	return nx == len(name)
-}
-
-func matchLine(line, pattern string, ignoreCase bool) bool {
-	if ignoreCase {
-		return strings.Contains(strings.ToLower(line), strings.ToLower(pattern))
-	}
-	return strings.Contains(line, pattern)
-}
-
-func matchColumn(line, pattern string, ignoreCase bool) int {
-	s, p := line, pattern
-	if ignoreCase {
-		s = strings.ToLower(s)
-		p = strings.ToLower(p)
-	}
-	idx := strings.Index(s, p)
-	if idx < 0 {
-		return 1
-	}
-	return idx + 1
-}
-
-// ---- mime detection ----
-
-// detectMime 检测文件的裸 media type（不含 charset 参数）。
-// application/octet-stream 按扩展名细化，与 aic libstools 一致。
-func detectMime(data []byte, path string) string {
-	mimeType, _, _ := strings.Cut(http.DetectContentType(data), ";")
-	if mimeType != "application/octet-stream" {
-		return mimeType
-	}
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	case ".svg":
-		return "image/svg+xml"
-	case ".pdf":
-		return "application/pdf"
-	case ".mp4":
-		return "video/mp4"
-	case ".mp3":
-		return "audio/mpeg"
-	case ".wav":
-		return "audio/wav"
-	case ".zip":
-		return "application/zip"
-	case ".tar", ".gz", ".tgz":
-		return "application/gzip"
-	}
-	return mimeType
-}
-
-// isViewableImage、imageDataMaxBytes 等图片处理逻辑见 image.go
-
-func isTextMime(mimeType string) bool {
-	return strings.HasPrefix(mimeType, "text/") ||
-		mimeType == "application/json" ||
-		mimeType == "application/xml" ||
-		mimeType == "application/javascript"
-}
-
-// Ensure mime package import used
-var _ = mime.TypeByExtension

@@ -7,7 +7,7 @@
 
 import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
-import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
+import { generateConnectTokenRaw, verifyToolRequestSig, verifyApprovalFingerprint } from "./auth.js";
 
 // ---- re-export for handler ----
 export { errors as natsErrors } from "../lib/nats/nats-core.js";
@@ -15,19 +15,19 @@ export { errors as natsErrors } from "../lib/nats/nats-core.js";
 const HEARTBEAT_INTERVAL = 20_000; // 20s
 
 /**
- * Parse credential string: env_id.cred_ver.secret.uid
+ * Parse credential string: host_id.cred_ver.secret.uid
  */
 function parseCredential(cred) {
   const parts = cred.split(".");
   if (parts.length !== 4) {
-    throw new Error("invalid credential format: expected <env_id>.<cred_ver>.<secret>.<uid>");
+    throw new Error("invalid credential format: expected <host_id>.<cred_ver>.<secret>.<uid>");
   }
-  const envID = parts[0];
+  const hostID = parts[0];
   const credVer = parseInt(parts[1], 10);
   if (isNaN(credVer) || credVer === 0) {
     throw new Error(`invalid cred_ver in credential: ${parts[1]}`);
   }
-  return { envID, credVer, secret: parts[2], uid: parts[3] };
+  return { hostID, credVer, secret: parts[2], uid: parts[3] };
 }
 
 export class AICClient {
@@ -35,10 +35,11 @@ export class AICClient {
     this.opts = options;
     this.nc = null;           // NATS connection
     this.kTool = null;        // K_tool key for request verification
-    this.envID = null;
+    this.hostID = null;
     this.uid = null;
     this.credVer = 0;
     this.tools = new Map();   // name → Tool
+    this.nonceCache = new Map(); // 防重放：nonce → deadline ms（§10.1 第 3 条）
     this.heartbeatTimer = null;
     this.reconnecting = false;
     this.closed = false;
@@ -59,8 +60,8 @@ export class AICClient {
    * Connect to NATS, publish CAPS, subscribe to tool requests, start heartbeat.
    */
   async connect() {
-    const { envID, credVer, secret, uid } = parseCredential(this.opts.key);
-    this.envID = envID;
+    const { hostID, credVer, secret, uid } = parseCredential(this.opts.key);
+    this.hostID = hostID;
     this.uid = uid;
     this.credVer = credVer;
 
@@ -69,11 +70,11 @@ export class AICClient {
     const deviceName = this.opts.deviceName || "Chrome";
 
     // Derive keys
-    const keys = await deriveKeys(secret, envID);
+    const keys = await deriveKeys(secret, hostID);
     const kConnect = keys.kConnect;
     this.kTool = keys.kTool;
 
-    this.logf("starting aic-browser v%s [%s/%s] (env=%s)", version, deviceType, deviceName, envID);
+    this.logf("starting aic-browser v%s [%s/%s] (host=%s)", version, deviceType, deviceName, hostID);
 
     // Build NATS connection options
     let natsURL = (this.opts.url || "wss://ivec.ai/aic/api/nc").trim();
@@ -89,7 +90,7 @@ export class AICClient {
 
     // Pre-generate auth token (Web Crypto is async, cannot be called
     // synchronously from nats tokenAuthenticator)
-    const token = await generateConnectTokenRaw(envID, uid, JSON.stringify({
+    const token = await generateConnectTokenRaw(hostID, uid, JSON.stringify({
       env_version: version,
       env_type: deviceType,
       env_name: deviceName,
@@ -97,7 +98,7 @@ export class AICClient {
 
     const natsOpts = {
       servers: [natsURL],
-      name: `aic-browser-${envID}`,
+      name: `aic-browser-${hostID}`,
       token: token,
       reconnect: true,
       maxReconnectAttempts: -1,
@@ -123,7 +124,7 @@ export class AICClient {
     await this._publishCaps(version, deviceType, deviceName);
 
     // Subscribe to tool requests
-    const toolWildcard = `u.${uid}.e.${envID}.${credVer}.tool.*.req`;
+    const toolWildcard = `u.${uid}.h.${hostID}.${credVer}.tool.*.req`;
     this._sub = this.nc.subscribe(toolWildcard, {
       callback: (err, msg) => {
         if (err) {
@@ -186,17 +187,20 @@ export class AICClient {
   async _publishCaps(version, deviceType, deviceName) {
     const toolDefs = [];
     for (const [_, t] of this.tools) {
-      toolDefs.push({
+      const def = {
         name: t.def.name,
         description: t.def.description,
         parameters: t.def.parameters,
         required_level: t.def.requiredLevel,
         policy_version: t.def.policyVersion || "1",
-      });
+      };
+      if (t.def.actions) def.actions = t.def.actions; // §10.2 action 级等级声明
+      toolDefs.push(def);
     }
 
     const caps = {
-      env_id: this.envID,
+      host_id: this.hostID,
+      hostname: deviceName, // §10.2 一级字段
       agent_version: version,
       credential_ver: this.credVer,
       device_type: deviceType,
@@ -211,7 +215,7 @@ export class AICClient {
       tools: toolDefs,
     };
 
-    const subj = `u.${this.uid}.e.${this.envID}.${this.credVer}.caps`;
+    const subj = `u.${this.uid}.h.${this.hostID}.${this.credVer}.caps`;
     this.nc.publish(subj, JSON.stringify(caps));
     this.logf("caps published to %s (%d tools)", subj, toolDefs.length);
   }
@@ -220,12 +224,12 @@ export class AICClient {
     this.heartbeatTimer = setInterval(() => {
       if (this.closed || !this.nc || this.nc.isClosed()) return;
       const presence = {
-        env_id: this.envID,
+        host_id: this.hostID,
         credential_ver: this.credVer,
         running: 1,
         sent_at: new Date().toISOString(),
       };
-      const subj = `u.${this.uid}.e.${this.envID}.${this.credVer}.presence`;
+      const subj = `u.${this.uid}.h.${this.hostID}.${this.credVer}.presence`;
       this.nc.publish(subj, JSON.stringify(presence));
     }, HEARTBEAT_INTERVAL);
   }
@@ -235,7 +239,7 @@ export class AICClient {
     try {
       req = JSON.parse(new TextDecoder().decode(msg.data));
     } catch (err) {
-      this._respond(msg, { msg_id: "", status: "error", error: "invalid request: " + err.message });
+      this._respond(msg, { msg_id: "", state: "error", error: "invalid request: " + err.message });
       return;
     }
 
@@ -244,13 +248,13 @@ export class AICClient {
     // Verify signature
     if (!req.sig) {
       this.logf("tool request rejected: missing K_tool signature for %s", req.tool_name);
-      this._respond(msg, { msg_id: req.msg_id, status: "rejected", error: "missing request signature" });
+      this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "missing request signature" });
       return;
     }
 
-    if (!(await verifyToolRequestSig(req, this.envID, this.kTool))) {
+    if (!(await verifyToolRequestSig(req, this.hostID, this.kTool))) {
       this.logf("tool request rejected: invalid K_tool signature for %s", req.tool_name);
-      this._respond(msg, { msg_id: req.msg_id, status: "rejected", error: "invalid request signature" });
+      this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "invalid request signature" });
       return;
     }
 
@@ -258,7 +262,31 @@ export class AICClient {
     if (req.deadline) {
       const dl = new Date(req.deadline).getTime();
       if (Date.now() > dl) {
-        this._respond(msg, { msg_id: req.msg_id, status: "rejected", error: "request deadline exceeded" });
+        this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "request expired" });
+        return;
+      }
+    }
+
+    // 防重放：nonce 窗口内缓存去重（网络重传/恶意重放直接拒绝）
+    if (req.nonce) {
+      const now = Date.now();
+      for (const [n, dl] of this.nonceCache) {
+        if (now > dl) this.nonceCache.delete(n);
+      }
+      if (this.nonceCache.has(req.nonce)) {
+        this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "duplicate nonce" });
+        return;
+      }
+      this.nonceCache.set(req.nonce, req.deadline ? new Date(req.deadline).getTime() : now + 600_000);
+    }
+
+    // approval.fingerprint 重算比对（§10.1 第 4 条，纵深防御）
+    if (req.approval && req.approval.fingerprint) {
+      const ok = await verifyApprovalFingerprint(
+        req.approval.fingerprint, req.session_id, req.tool_name, this.hostID, req.tool_data
+      );
+      if (!ok) {
+        this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "approval fingerprint mismatch" });
         return;
       }
     }
@@ -267,7 +295,7 @@ export class AICClient {
     const tool = this.tools.get(req.tool_name);
     if (!tool) {
       this.logf("tool request: unknown tool %s", req.tool_name);
-      this._respond(msg, { msg_id: req.msg_id, status: "error", error: `unknown tool: ${req.tool_name}` });
+      this._respond(msg, { msg_id: req.msg_id, state: "error", error: `unknown tool: ${req.tool_name}` });
       return;
     }
 
@@ -276,7 +304,7 @@ export class AICClient {
       this.logf("tool request denied: %s (granted=%d < required=%d)",
         req.tool_name, req.granted_level, tool.def.requiredLevel);
       this._respond(msg, {
-        msg_id: req.msg_id, status: "rejected",
+        msg_id: req.msg_id, state: "rejected",
         error: `insufficient permission: ${req.tool_name} requires level ${tool.def.requiredLevel}, got ${req.granted_level}`,
       });
       return;
@@ -302,16 +330,16 @@ export class AICClient {
         attrs: result.attrs || {},
       };
 
-      switch (result.status) {
-        case "rejected": resp.status = "rejected"; break;
-        case "waiting": resp.status = "waiting"; break;
+      switch (result.state) {
+        case "rejected": resp.state = "rejected"; break;
+        case "waiting": resp.state = "waiting"; break;
         default:
-          resp.status = result.error ? "error" : "completed";
+          resp.state = result.error ? "error" : "completed";
       }
 
       this._respond(msg, resp);
     } catch (err) {
-      this._respond(msg, { msg_id: req.msg_id, status: "error", error: err.message });
+      this._respond(msg, { msg_id: req.msg_id, state: "error", error: err.message });
     }
   }
 
@@ -323,6 +351,6 @@ export class AICClient {
       logAttrs.image_data = `<base64 ${logAttrs.image_data.length} chars>`;
     }
     const logContent = resp.content ? (resp.content.length > 100 ? resp.content.slice(0, 100) + "..." : resp.content) : "";
-    this.logf("← response: msg=%s status=%s content=%q attrs=%j error=%q", resp.msg_id, resp.status, logContent, logAttrs, resp.error);
+    this.logf("← response: msg=%s state=%s content=%q attrs=%j error=%q", resp.msg_id, resp.state, logContent, logAttrs, resp.error);
   }
 }

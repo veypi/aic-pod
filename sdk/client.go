@@ -1,4 +1,4 @@
-package aicenv
+package aichost
 
 import (
 	"context"
@@ -20,11 +20,12 @@ type Client struct {
 	opts    Options
 	nc      *nats.Conn
 	kTool   string
-	envID   string
-	envUID  string
+	hostID  string
+	hostUID string
 	credVer uint64
 	tools   []Tool
 	cache   idempotentCache
+	replay  replayCache
 	logf    func(string, ...any)
 }
 
@@ -68,28 +69,28 @@ func (c *Client) RegisterTool(t Tool) {
 func (c *Client) Connect() error {
 	parts := strings.SplitN(c.opts.Credential, ".", 4)
 	if len(parts) != 4 {
-		return fmt.Errorf("invalid credential format: expected <env_id>.<cred_ver>.<secret>.<uid>")
+		return fmt.Errorf("invalid credential format: expected <host_id>.<cred_ver>.<secret>.<uid>")
 	}
-	c.envID = parts[0]
+	c.hostID = parts[0]
 	if _, err := fmt.Sscanf(parts[1], "%d", &c.credVer); err != nil || c.credVer == 0 {
 		return fmt.Errorf("invalid cred_ver in credential: %s", parts[1])
 	}
 	secret := parts[2]
-	c.envUID = parts[3]
+	c.hostUID = parts[3]
 
-	kConnect, _, kTool, err := deriveKeys(secret, c.envID)
+	kConnect, _, kTool, err := deriveKeys(secret, c.hostID)
 	if err != nil {
 		return fmt.Errorf("derive keys: %w", err)
 	}
 	c.kTool = kTool
 
-	c.logf("starting aic-env v%s [%s/%s] (env=%s)", c.opts.Version, c.opts.DeviceType, c.opts.DeviceName, c.envID)
+	c.logf("starting aic-host v%s [%s/%s] (env=%s)", c.opts.Version, c.opts.DeviceType, c.opts.DeviceName, c.hostID)
 
 	natsURL := c.opts.NATSURL
 	opts := []nats.Option{
-		nats.Name("aic-env-" + c.envID),
+		nats.Name("aic-host-" + c.hostID),
 		nats.TokenHandler(func() string {
-			return generateConnectToken(c.envID, c.envUID, c.opts.Version, c.opts.DeviceType, c.opts.DeviceName, kConnect)
+			return generateConnectToken(c.hostID, c.hostUID, c.opts.Version, c.opts.DeviceType, c.opts.DeviceName, kConnect)
 		}),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
@@ -139,7 +140,7 @@ func (c *Client) Connect() error {
 
 	c.publishCaps(nc)
 
-	toolWildcard := fmt.Sprintf("u.%s.e.%s.%d.tool.*.req", c.envUID, c.envID, c.credVer)
+	toolWildcard := fmt.Sprintf("u.%s.h.%s.%d.tool.*.req", c.hostUID, c.hostID, c.credVer)
 	if _, err := nc.Subscribe(toolWildcard, c.handleToolRequest); err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
@@ -177,12 +178,12 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 		toolDefs[i] = t.Def
 	}
 	caps := capabilities{
-		EnvID:         c.envID,
+		HostID:        c.hostID,
 		AgentVersion:  c.opts.Version,
 		CredentialVer: c.credVer,
 		DeviceType:    c.opts.DeviceType,
 		DeviceName:    c.opts.DeviceName,
-		DeviceInfo: &envDeviceInfo{
+		DeviceInfo: &hostDeviceInfo{
 			Hostname:  hostname,
 			OS:        runtime.GOOS,
 			Arch:      runtime.GOARCH,
@@ -192,7 +193,7 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 		Tools: toolDefs,
 	}
 	data, _ := json.Marshal(caps)
-	subj := fmt.Sprintf("u.%s.e.%s.%d.caps", c.envUID, c.envID, c.credVer)
+	subj := fmt.Sprintf("u.%s.h.%s.%d.caps", c.hostUID, c.hostID, c.credVer)
 	nc.Publish(subj, data)
 	c.logf("caps published to %s (%d tools)", subj, len(caps.Tools))
 }
@@ -205,40 +206,67 @@ func (c *Client) heartbeatLoop() {
 			return
 		}
 		presence := map[string]any{
-			"env_id":         c.envID,
+			"host_id":        c.hostID,
 			"credential_ver": c.credVer,
 			"running":        1,
 			"sent_at":        time.Now().UTC().Format(time.RFC3339),
 		}
 		data, _ := json.Marshal(presence)
-		c.nc.Publish(fmt.Sprintf("u.%s.e.%s.%d.presence", c.envUID, c.envID, c.credVer), data)
+		c.nc.Publish(fmt.Sprintf("u.%s.h.%s.%d.presence", c.hostUID, c.hostID, c.credVer), data)
 	}
 }
 
 func (c *Client) handleToolRequest(msg *nats.Msg) {
 	var req toolRequest
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		c.respond(msg, toolResponse{Status: "error", Error: "invalid request: " + err.Error()})
+		c.respond(msg, toolResponse{State: "error", Error: "invalid request: " + err.Error()})
 		return
 	}
 
 	c.logf("→ request: %s deadline=%s (msg=%s)", req.ToolName, req.Deadline, req.MsgID)
 
+	// ---- 防重放（§10.1 host 端验证规范，必须实现） ----
+
+	// 1. 验签
 	if req.Signature == "" {
 		c.logf("tool request rejected: missing K_tool signature for %s", req.ToolName)
-		c.respond(msg, toolResponse{Status: "rejected", Error: "missing request signature"})
+		c.respond(msg, toolResponse{State: "rejected", Error: "missing request signature"})
 		return
 	}
-	if !verifyToolRequestSig(&req, c.envID, c.kTool) {
+	if !verifyToolRequestSig(&req, c.hostID, c.kTool) {
 		c.logf("tool request rejected: invalid K_tool signature for %s", req.ToolName)
-		c.respond(msg, toolResponse{Status: "rejected", Error: "invalid request signature"})
+		c.respond(msg, toolResponse{State: "rejected", Error: "invalid request signature"})
 		return
 	}
 
+	// 2. deadline 过期拒绝
+	var deadline time.Time
 	if req.Deadline != "" {
 		dl, err := time.Parse(time.RFC3339, req.Deadline)
-		if err == nil && time.Now().After(dl) {
-			c.respond(msg, toolResponse{Status: "rejected", Error: "request deadline exceeded"})
+		if err == nil {
+			deadline = dl
+			if time.Now().After(dl) {
+				c.respond(msg, toolResponse{State: "rejected", Error: "request expired"})
+				return
+			}
+		}
+	}
+
+	// 3. nonce 窗口内缓存去重：同一 nonce 的重复请求（网络重传/恶意重放）直接拒绝
+	if req.Nonce != "" && !c.replay.checkAndMark(req.Nonce, deadline) {
+		c.logf("tool request rejected: duplicate nonce (msg=%s)", req.MsgID)
+		c.respond(msg, toolResponse{State: "rejected", Error: "duplicate nonce"})
+		return
+	}
+
+	// 4. approval.fingerprint 存在时按 §2.3 公式（JCS + sha256 前 16 位 hex）
+	// 对 {target, action, argv} 重算并比对——纵深防御，
+	// 不只信任签名信封内的审批声明。
+	if req.Approval != nil && req.Approval.Fingerprint != "" {
+		params, _ := ParseToolParams(req.ToolData)
+		if !verifyApprovalFingerprint(req.Approval.Fingerprint, req.SessionID, req.ToolName, c.hostID, params) {
+			c.logf("tool request rejected: approval fingerprint mismatch (msg=%s)", req.MsgID)
+			c.respond(msg, toolResponse{State: "rejected", Error: "approval fingerprint mismatch"})
 			return
 		}
 	}
@@ -246,13 +274,16 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 	t := c.findTool(req.ToolName)
 	if t == nil {
 		c.logf("tool request: unknown tool %s", req.ToolName)
-		c.respond(msg, toolResponse{Status: "error", Error: fmt.Sprintf("unknown tool: %s", req.ToolName)})
+		c.respond(msg, toolResponse{State: "error", Error: fmt.Sprintf("unknown tool: %s", req.ToolName)})
 		return
 	}
 
-	if req.GrantedLevel < t.Def.RequiredLevel && req.Approval == nil {
-		c.logf("tool request denied: %s (granted=%d < required=%d)", req.ToolName, req.GrantedLevel, t.Def.RequiredLevel)
-		c.respond(msg, toolResponse{Status: "rejected", Error: fmt.Sprintf("insufficient permission: %s requires level %d, got %d", req.ToolName, t.Def.RequiredLevel, req.GrantedLevel)})
+	// action 级权限检查（§10.2：caps 声明的 action 级等级优先，未声明继承指令集基线）
+	params, _ := ParseToolParams(req.ToolData)
+	requiredLevel := actionRequiredLevel(t.Def, params.Action)
+	if req.GrantedLevel < requiredLevel && req.Approval == nil {
+		c.logf("tool request denied: %s %s (granted=%d < required=%d)", req.ToolName, params.Action, req.GrantedLevel, requiredLevel)
+		c.respond(msg, toolResponse{State: "rejected", Error: fmt.Sprintf("insufficient permission: %s %s requires level %d, got %d", req.ToolName, params.Action, requiredLevel, req.GrantedLevel)})
 		return
 	}
 
@@ -263,7 +294,6 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		return
 	}
 
-	params := ParseToolParams(req.ToolData)
 	c.logf("tool request: %s %s (msg=%s)", req.ToolName, formatCmd(params), req.MsgID)
 
 	ctx := context.WithValue(context.Background(), reqCtxKey{}, &RequestCtx{
@@ -273,17 +303,15 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		SessionID:    req.SessionID,
 		MsgID:        req.MsgID,
 	})
-	if req.Deadline != "" {
-		if dl, err := time.Parse(time.RFC3339, req.Deadline); err == nil {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithDeadline(ctx, dl)
-			defer cancel()
-		}
+	if !deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
 
 	result, err := t.Handler(ctx, req.ToolData)
 	if err != nil {
-		c.respond(msg, toolResponse{Status: "error", Error: err.Error()})
+		c.respond(msg, toolResponse{State: "error", Error: err.Error()})
 		return
 	}
 
@@ -295,24 +323,42 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		NeedApproval: result.NeedApproval,
 	}
 
-	switch result.Status {
+	switch result.State {
 	case "rejected":
-		resp.Status = "rejected"
+		resp.State = "rejected"
 	case "waiting":
-		resp.Status = "waiting"
+		resp.State = "waiting"
 	default:
 		if result.Error != "" {
-			resp.Status = "error"
+			resp.State = "error"
 		} else {
-			resp.Status = "completed"
+			resp.State = "completed"
 		}
 	}
 
 	// 仅对成功结果做幂等缓存，waiting/rejected/error 不缓存
-	if resp.Status == "completed" {
+	if resp.State == "completed" {
 		c.cache.set(req.MsgID, &resp)
 	}
 	c.respond(msg, resp)
+}
+
+// actionRequiredLevel 解析 action 级权限：caps actions 对象形式声明优先，
+// 字符串简写与未声明 action 继承指令集级 RequiredLevel（§10.2）。
+func actionRequiredLevel(def ToolDef, action string) int {
+	for _, a := range def.Actions {
+		if m, ok := a.(map[string]any); ok {
+			if name, _ := m["name"].(string); name == action {
+				if lv, ok := m["required_level"].(float64); ok {
+					return int(lv)
+				}
+				if lv, ok := m["required_level"].(int); ok {
+					return lv
+				}
+			}
+		}
+	}
+	return def.RequiredLevel
 }
 
 func (c *Client) findTool(name string) *Tool {
@@ -327,7 +373,7 @@ func (c *Client) findTool(name string) *Tool {
 func (c *Client) respond(msg *nats.Msg, resp toolResponse) {
 	data, _ := json.Marshal(resp)
 	msg.Respond(data)
-	c.logf("← response: msg=%s status=%s error=%q", resp.MsgID, resp.Status, resp.Error)
+	c.logf("← response: msg=%s state=%s error=%q", resp.MsgID, resp.State, resp.Error)
 }
 
 func approvalResolvedBy(req toolRequest) string {
