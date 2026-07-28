@@ -45,35 +45,27 @@ func canonicalConnectSigInput(hostID, uid, envInfo string, unixMs int64, nonce s
 	return string(b)
 }
 
-func canonicalToolReqSigInput(hostID, msgID, sessionID, toolName, nonce, deadline string, toolData any, grantedLevel int, approvalFingerprint *string) string {
+func canonicalToolReqSigInput(hostID, msgID, sessionID, toolName, nonce, deadline string, toolData any, grantedLevel int) string {
 	toolDataJSON, _ := json.Marshal(toolData)
 	toolDataHash := fmt.Sprintf("%x", sha256.Sum256(toolDataJSON))
 	b, _ := json.Marshal(toolReqSigPayload{
-		Version:             1,
-		HostID:              hostID,
-		MsgID:               msgID,
-		SessionID:           sessionID,
-		ToolName:            toolName,
-		ToolDataSHA256:      toolDataHash,
-		GrantedLevel:        grantedLevel,
-		Nonce:               nonce,
-		Deadline:            deadline,
-		ApprovalFingerprint: approvalFingerprint,
+		Version:        1,
+		HostID:         hostID,
+		MsgID:          msgID,
+		SessionID:      sessionID,
+		ToolName:       toolName,
+		ToolDataSHA256: toolDataHash,
+		GrantedLevel:   grantedLevel,
+		Nonce:          nonce,
+		Deadline:       deadline,
 	})
 	return string(b)
 }
 
 func verifyToolRequestSig(req *toolRequest, hostID, kTool string) bool {
-	expected := canonicalToolReqSigInput(hostID, req.MsgID, req.SessionID, req.ToolName, req.Nonce, req.Deadline, req.ToolData, req.GrantedLevel, approvalFingerprint(req))
+	expected := canonicalToolReqSigInput(hostID, req.MsgID, req.SessionID, req.ToolName, req.Nonce, req.Deadline, req.ToolData, req.GrantedLevel)
 	mac := hmac.New(sha256.New, []byte(kTool))
 	mac.Write([]byte(expected))
 	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(req.Signature), []byte(expectedSig))
-}
-
-func approvalFingerprint(req *toolRequest) *string {
-	if req.Approval != nil {
-		return &req.Approval.Fingerprint
-	}
-	return nil
 }

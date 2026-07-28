@@ -33,9 +33,9 @@ function jsonStringifySorted(obj) {
  */
 export function generateConnectToken(hostID, uid, version, deviceType, deviceName, kConnect) {
   const hostInfo = JSON.stringify({
-    env_version: version,
-    env_type: deviceType,
-    env_name: deviceName,
+    agent_version: version,
+    device_type: deviceType,
+    device_name: deviceName,
   });
   return generateConnectTokenRaw(hostID, uid, hostInfo, kConnect);
 }
@@ -68,7 +68,7 @@ function canonicalConnectSigInput(hostID, uid, hostInfo, unixMs, nonceB64) {
 }
 
 export async function canonicalToolReqSigInput(hostID, msgID, sessionID, toolName,
-  nonce, deadline, toolData, grantedLevel, approvalFingerprint) {
+  nonce, deadline, toolData, grantedLevel) {
   const toolDataJSON = jsonStringifySorted(toolData);
   const toolDataHash = await sha256Hex(toolDataJSON);
 
@@ -83,76 +83,15 @@ export async function canonicalToolReqSigInput(hostID, msgID, sessionID, toolNam
     nonce: nonce,
     deadline: deadline,
   };
-  if (approvalFingerprint !== null && approvalFingerprint !== undefined) {
-    payload.approval_fingerprint = approvalFingerprint;
-  }
   // payload matches Go struct field declaration order
   return JSON.stringify(payload);
 }
 
 export async function verifyToolRequestSig(req, hostID, kTool) {
-  const afp = req.approval ? req.approval.fingerprint : undefined;
   const expected = await canonicalToolReqSigInput(
     hostID, req.msg_id, req.session_id, req.tool_name,
-    req.nonce, req.deadline, req.tool_data, req.granted_level, afp
+    req.nonce, req.deadline, req.tool_data, req.granted_level
   );
   const expectedSig = await hmacSHA256B64(kTool, expected);
   return expectedSig === req.sig;
-}
-
-// ---- 审批指纹重算（§10.1 第 4 条） ----
-
-/**
- * JCS（RFC 8785）字符串序列化：最简转义，与 aic types.writeJCSString 一致。
- */
-function writeJCSString(s) {
-  let out = '"';
-  for (const ch of s) {
-    const code = ch.codePointAt(0);
-    switch (ch) {
-      case '"': out += '\\"'; break;
-      case "\\": out += "\\\\"; break;
-      case "\b": out += "\\b"; break;
-      case "\f": out += "\\f"; break;
-      case "\n": out += "\\n"; break;
-      case "\r": out += "\\r"; break;
-      case "\t": out += "\\t"; break;
-      default:
-        if (code < 0x20) {
-          out += "\\u" + code.toString(16).padStart(4, "0");
-        } else {
-          out += ch;
-        }
-    }
-  }
-  return out + '"';
-}
-
-/**
- * 计算 {target, action, argv} 的 JCS 规范化 JSON 的 sha256 前 16 位 hex，
- * 与 aic types.ApprovalInputHash 逐字节一致。
- */
-export async function approvalInputHash(target, action, argv) {
-  let canonical = "{" + writeJCSString("action") + ":" + writeJCSString(action || "");
-  canonical += "," + writeJCSString("argv") + ":" + "[" + (argv || []).map(writeJCSString).join(",") + "]";
-  if (target) {
-    canonical += "," + writeJCSString("target") + ":" + writeJCSString(target);
-  }
-  canonical += "}";
-  const hex = await sha256Hex(canonical);
-  return hex.slice(0, 16);
-}
-
-/**
- * 按 §2.3 公式重算审批指纹并比对（纵深防御，不只信任签名信封内的审批声明）。
- * fingerprint = fp:{sessionID}:{tool}:{policyVersion}:{hash16}
- */
-export async function verifyApprovalFingerprint(fingerprint, sessionID, toolName, hostID, toolData) {
-  const parts = String(fingerprint || "").split(":");
-  if (parts.length !== 5 || parts[0] !== "fp") return false;
-  if (parts[1] !== sessionID || parts[2] !== toolName) return false;
-  const action = toolData?.action || "";
-  const argv = Array.isArray(toolData?.argv) ? toolData.argv.map(String) : [];
-  const hash = await approvalInputHash(hostID, action, argv);
-  return parts[4] === hash;
 }

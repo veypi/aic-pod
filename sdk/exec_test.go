@@ -149,52 +149,6 @@ func TestReplayCache(t *testing.T) {
 	}
 }
 
-func TestVerifyApprovalFingerprint(t *testing.T) {
-	// 与 aic types.BuildApprovalFingerprint 同公式：
-	// fp:{sessionID}:{tool}:{policyVersion}:{sha256(jcs({target,action,argv}))[:16]}
-	params := &ToolParams{Action: "write", Argv: []string{"/a.txt", "--content", "hi"}}
-	hash := approvalInputHash("host_abc", params.Action, params.Argv)
-	fp := "fp:sess1:fs:1:" + hash
-	if !verifyApprovalFingerprint(fp, "sess1", "fs", "host_abc", params) {
-		t.Fatal("valid fingerprint should pass")
-	}
-	// 改参数 → 不符
-	if verifyApprovalFingerprint(fp, "sess1", "fs", "host_abc", &ToolParams{Action: "write", Argv: []string{"/b.txt"}}) {
-		t.Fatal("different argv should fail")
-	}
-	// 不同 target → 不符
-	if verifyApprovalFingerprint(fp, "sess1", "fs", "host_xyz", params) {
-		t.Fatal("different target should fail")
-	}
-	// session/tool 段不符
-	if verifyApprovalFingerprint(fp, "sess2", "fs", "host_abc", params) {
-		t.Fatal("different session should fail")
-	}
-	// 格式错误
-	if verifyApprovalFingerprint("bad-fp", "sess1", "fs", "host_abc", params) {
-		t.Fatal("malformed fingerprint should fail")
-	}
-}
-
-func TestApprovalInputHashMatchesJCS(t *testing.T) {
-	// 规范化形式确定性：{"action":"read","argv":["/a","--limit","20"],"target":"cloud"}
-	h := approvalInputHash("cloud", "read", []string{"/a", "--limit", "20"})
-	if len(h) != 16 {
-		t.Fatalf("hash len = %d", len(h))
-	}
-	for _, c := range h {
-		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
-			t.Fatalf("not hex: %q", h)
-		}
-	}
-	// target 为空时省略 target 键
-	h1 := approvalInputHash("", "read", []string{"/a"})
-	h2 := approvalInputHash("cloud", "read", []string{"/a"})
-	if h1 == h2 {
-		t.Fatal("empty vs non-empty target must differ")
-	}
-}
-
 func TestActionRequiredLevel(t *testing.T) {
 	def := ToolDef{
 		RequiredLevel: 3,
@@ -220,21 +174,3 @@ func TestExecLogPathLayout(t *testing.T) {
 	}
 }
 
-// TestApprovalInputHashPinnedVectors 跨实现固定向量：
-// 与 JS browser/src/sdk/auth.js approvalInputHash 及 aic types.ApprovalInputHash 必须一致。
-func TestApprovalInputHashPinnedVectors(t *testing.T) {
-	cases := []struct {
-		target, action string
-		argv           []string
-		want           string
-	}{
-		{"cloud", "read", []string{"/a", "--limit", "20"}, "5ff51decf470e46a"},
-		{"host_abc", "write", []string{"/a.txt", "--content", "hi"}, "aec0feb022efb7b1"},
-		{"host_abc", "rm", []string{"/tmp/x"}, "7798623f326a4ad3"},
-	}
-	for _, c := range cases {
-		if got := approvalInputHash(c.target, c.action, c.argv); got != c.want {
-			t.Errorf("approvalInputHash(%q, %q, %v) = %q, want %q", c.target, c.action, c.argv, got, c.want)
-		}
-	}
-}

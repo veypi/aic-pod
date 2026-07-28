@@ -1,6 +1,7 @@
 package aichost
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -111,7 +112,7 @@ func FsTool() Tool {
 				"ls", "read", "write", "edit", "mkdir", "cp", "mv", "search", "download",
 			},
 			RequiredLevel: 1,
-			PolicyVersion: "1",
+			PolicyVersion: "2",
 		},
 		Handler: func(ctx context.Context, data any) (*ToolResult, error) {
 			params, err := ParseToolParams(data)
@@ -123,7 +124,7 @@ func FsTool() Tool {
 	}
 }
 
-func handleFs(_ context.Context, params *ToolParams) (*ToolResult, error) {
+func handleFs(ctx context.Context, params *ToolParams) (*ToolResult, error) {
 	action := strings.ToLower(params.Action)
 	if action == "" {
 		// §4.4：不做特征 flag 推断——无害报错，让 Agent 显式修正后重试
@@ -138,11 +139,19 @@ func handleFs(_ context.Context, params *ToolParams) (*ToolResult, error) {
 	if err != nil {
 		return &ToolResult{Error: err.Error()}, nil
 	}
-	if len(pa.positional) == 0 {
+	n := len(pa.positional)
+	if n == 0 {
 		return &ToolResult{Error: fmt.Sprintf("fs %s: path is required", action)}, nil
 	}
-	if (action == "cp" || action == "mv") && len(pa.positional) < 2 {
-		return &ToolResult{Error: fmt.Sprintf("fs %s: source and destination paths are required", action)}, nil
+	if action == "cp" || action == "mv" {
+		if n < 2 {
+			return &ToolResult{Error: fmt.Sprintf("fs %s: source and destination paths are required", action)}, nil
+		}
+		if n > 2 {
+			return &ToolResult{Error: fmt.Sprintf("fs %s: unexpected argument %q (expected 2 paths)", action, pa.positional[2])}, nil
+		}
+	} else if n > 1 {
+		return &ToolResult{Error: fmt.Sprintf("fs %s: unexpected argument %q (expected 1 path)", action, pa.positional[1])}, nil
 	}
 
 	switch action {
@@ -163,12 +172,17 @@ func handleFs(_ context.Context, params *ToolParams) (*ToolResult, error) {
 	case "mv":
 		return handleFsMove(pa)
 	case "search":
-		return handleFsSearch(pa)
+		return handleFsSearch(ctx, pa)
 	case "download":
 		return handleFsDownload(pa)
 	}
 	return &ToolResult{Error: fmt.Sprintf("fs: unknown action %q (supported: %s)", action, strings.Join(fsActions, ", "))}, nil
 }
+
+// readStreamThreshold 是 read 整读的大小上限：超过则嗅探前 512 字节判定文本并
+// 流式按行扫描（内存以窗口内容 512KB + 当前行为界，总数仍然精确统计）。
+// 与 aic tools/fs 一致。
+const readStreamThreshold = 8 << 20 // 8MB
 
 // ---- read ----
 
@@ -194,6 +208,10 @@ func handleFsRead(pa *parsedArgv) (*ToolResult, error) {
 	}
 
 	path := pa.positional[0]
+	// 大文件走流式路径（内存以窗口内容 512KB + 当前行为界，总数仍然精确统计）
+	if info, statErr := os.Stat(path); statErr == nil && !info.IsDir() && info.Size() > readStreamThreshold {
+		return handleFsReadLarge(path, info, offset, limit)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return &ToolResult{Error: fmt.Sprintf("fs read: %v", err)}, nil
@@ -204,39 +222,14 @@ func handleFsRead(pa *parsedArgv) (*ToolResult, error) {
 		// 类型无法识别但内容是合法 UTF-8，按纯文本处理
 		mimeType = "text/plain"
 	}
+
+	if !isTextMime(mimeType) {
+		return fsReadBinaryResult(path, data, mimeType)
+	}
 	attrs := map[string]string{
 		"action": "read",
 		"path":   path,
 		"mime":   mimeType,
-	}
-
-	if !isTextMime(mimeType) {
-		attrs["size"] = strconv.Itoa(len(data))
-		if isViewableImage(mimeType) {
-			w, h := imageDimensions(data)
-			imgData, imgMime := data, mimeType
-			if len(data) > imageDataMaxBytes {
-				c, err := compressImage(data, mimeType)
-				if err != nil {
-					return &ToolResult{
-						Error: fmt.Sprintf("fs read: image too large even after compression (%d bytes)", len(data)),
-						Attrs: attrs,
-					}, nil
-				}
-				imgData, imgMime = c.data, "image/jpeg"
-				// 与服务端 extractToolImages 的 image_compressed 格式一致（避免 ">" 破坏 tool_result XML 解析）
-				attrs["image_compressed"] = fmt.Sprintf("%d bytes → image/jpeg %dx%d quality %d (%d bytes)", len(data), c.width, c.height, c.quality, len(c.data))
-			}
-			attrs["image_data"] = "data:" + imgMime + ";base64," + base64.StdEncoding.EncodeToString(imgData)
-			return &ToolResult{
-				Content: fmt.Sprintf("Image file: %s (%s, %dx%d, %d bytes)", path, mimeType, w, h, len(data)),
-				Attrs:   attrs,
-			}, nil
-		}
-		return &ToolResult{
-			Content: fmt.Sprintf("Binary file: %s (%s, %d bytes)", path, mimeType, len(data)),
-			Attrs:   attrs,
-		}, nil
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -272,6 +265,115 @@ func handleFsRead(pa *parsedArgv) (*ToolResult, error) {
 	attrs["range"] = fmt.Sprintf("%d-%d", offset, end)
 	attrs["truncated"] = strconv.FormatBool(truncated)
 	return &ToolResult{Content: body, Attrs: attrs}, nil
+}
+
+// fsReadBinaryResult 生成二进制文件的 read 结果：图片附带压缩后的 image_data，
+// 其余仅报告类型与大小。与 aic libstools.FormatBinaryReadResult 语义一致。
+func fsReadBinaryResult(path string, data []byte, mimeType string) (*ToolResult, error) {
+	attrs := map[string]string{
+		"action": "read",
+		"path":   path,
+		"mime":   mimeType,
+		"size":   strconv.Itoa(len(data)),
+	}
+	if isViewableImage(mimeType) {
+		w, h := imageDimensions(data)
+		imgData, imgMime := data, mimeType
+		if len(data) > imageDataMaxBytes {
+			c, err := compressImage(data, mimeType)
+			if err != nil {
+				return &ToolResult{
+					Error: fmt.Sprintf("fs read: image too large even after compression (%d bytes)", len(data)),
+					Attrs: attrs,
+				}, nil
+			}
+			imgData, imgMime = c.data, "image/jpeg"
+			// 与服务端 extractToolImages 的 image_compressed 格式一致（避免 ">" 破坏 tool_result XML 解析）
+			attrs["image_compressed"] = fmt.Sprintf("%d bytes → image/jpeg %dx%d quality %d (%d bytes)", len(data), c.width, c.height, c.quality, len(c.data))
+		}
+		attrs["image_data"] = "data:" + imgMime + ";base64," + base64.StdEncoding.EncodeToString(imgData)
+		return &ToolResult{
+			Content: fmt.Sprintf("Image file: %s (%s, %dx%d, %d bytes)", path, mimeType, w, h, len(data)),
+			Attrs:   attrs,
+		}, nil
+	}
+	return &ToolResult{
+		Content: fmt.Sprintf("Binary file: %s (%s, %d bytes)", path, mimeType, len(data)),
+		Attrs:   attrs,
+	}, nil
+}
+
+// handleFsReadLarge 流式读取大文件（>readStreamThreshold）：单次按行扫描，精确
+// 统计总行数，仅缓冲窗口内且在 512KB 字节预算内的行。
+// 二进制结果：图片仍整读（需压缩产出 image_data），其余不整读、size 取自 Stat。
+// 与 aic tools/fs.fsReadLarge 逐行为一致（图片处理为环境能力差异）。
+func handleFsReadLarge(path string, info os.FileInfo, offset, limit int) (*ToolResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return &ToolResult{Error: fmt.Sprintf("fs read: %v", err)}, nil
+	}
+	r := bufio.NewReaderSize(f, 64<<10)
+	// 嗅探前 512 字节判定文本（截断的多字节字符尾部不计入 UTF-8 校验）
+	head, _ := r.Peek(512)
+	for n := 0; n < 3 && len(head) > 0 && !utf8.Valid(head); n++ {
+		head = head[:len(head)-1]
+	}
+	if !isTextContent(head) {
+		f.Close()
+		mimeType := detectMime(head, path)
+		if isViewableImage(mimeType) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return &ToolResult{Error: fmt.Sprintf("fs read: %v", err)}, nil
+			}
+			return fsReadBinaryResult(path, data, mimeType)
+		}
+		return &ToolResult{
+			Content: fmt.Sprintf("Binary file: %s (%s, %d bytes)", path, mimeType, info.Size()),
+			Attrs: map[string]string{
+				"action": "read",
+				"path":   path,
+				"mime":   mimeType,
+				"size":   strconv.FormatInt(info.Size(), 10),
+			},
+		}, nil
+	}
+	defer f.Close()
+
+	var b strings.Builder
+	total, kept := 0, 0
+	for {
+		line, err := r.ReadString('\n')
+		if len(line) > 0 {
+			total++
+			line = strings.TrimSuffix(line, "\n")
+			if total >= offset && kept < limit {
+				row := fmt.Sprintf("%d\t%s\n", total, line)
+				if kept == 0 || b.Len()+len(row) <= maxContentBytes {
+					b.WriteString(row)
+					kept++
+				}
+			}
+		}
+		if err != nil {
+			break // EOF 或读中断：已扫描部分即总数
+		}
+	}
+	if offset > total {
+		return &ToolResult{Error: fmt.Sprintf("fs read: offset %d exceeds %d lines", offset, total)}, nil
+	}
+	end := offset - 1 + kept
+	truncated := end < total
+	attrs := map[string]string{
+		"action":      "read",
+		"path":        path,
+		"mime":        "text/plain",
+		"total_lines": strconv.Itoa(total),
+		"rows":        strconv.Itoa(kept),
+		"range":       fmt.Sprintf("%d-%d", offset, end),
+		"truncated":   strconv.FormatBool(truncated),
+	}
+	return &ToolResult{Content: b.String(), Attrs: attrs}, nil
 }
 
 // ---- write ----
@@ -345,7 +447,11 @@ func handleFsEdit(pa *parsedArgv) (*ToolResult, error) {
 	if !ok || oldStr == "" {
 		return &ToolResult{Error: "fs edit: --old is required"}, nil
 	}
-	newStr := pa.flags["new"]
+	newStr, ok := pa.flags["new"]
+	if !ok {
+		// §4.3：--new 必填（显式传空串表示删除），防止漏传被静默按删除处理
+		return &ToolResult{Error: "fs edit: --new is required"}, nil
+	}
 	if newStr == oldStr {
 		return &ToolResult{Error: "fs edit: --new must be different from --old"}, nil
 	}
@@ -467,6 +573,12 @@ func handleFsRemove(pa *parsedArgv) (*ToolResult, error) {
 	}, nil
 }
 
+// pathInside 判定 dst 是否为 src 自身或其子路径（双方先 Clean）。
+func pathInside(src, dst string) bool {
+	s, d := filepath.Clean(src), filepath.Clean(dst)
+	return d == s || strings.HasPrefix(d, s+string(filepath.Separator))
+}
+
 // isFilesystemRoot 判定路径是否为文件系统根（/、盘符根如 C:\、UNC 根）。
 func isFilesystemRoot(path string) bool {
 	clean := filepath.Clean(path)
@@ -519,6 +631,9 @@ func handleFsCopy(pa *parsedArgv) (*ToolResult, error) {
 	info, err := os.Stat(src)
 	if err != nil {
 		return &ToolResult{Error: fmt.Sprintf("fs cp: cannot stat source %s: %v", src, err)}, nil
+	}
+	if info.IsDir() && pathInside(src, dst) {
+		return &ToolResult{Error: fmt.Sprintf("fs cp: cannot copy directory %s into itself: %s", src, dst)}, nil
 	}
 	if _, err := os.Stat(dst); err == nil {
 		return &ToolResult{Error: fmt.Sprintf("fs cp: destination %s already exists", dst)}, nil
@@ -578,6 +693,21 @@ func handleFsMove(pa *parsedArgv) (*ToolResult, error) {
 	if src == dst {
 		return &ToolResult{Error: fmt.Sprintf("fs mv: %s and %s are identical", src, dst)}, nil
 	}
+	// §4.3 根目录硬保护（拒绝，不可审批绕过）：mv 与 rm 同等——
+	// 文件系统根禁止移走（否则 rm 根保护可被 mv 绕过）
+	if isFilesystemRoot(src) {
+		return &ToolResult{
+			State: "rejected",
+			Error: fmt.Sprintf("fs mv: cannot move root directory %s", src),
+		}, nil
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return &ToolResult{Error: fmt.Sprintf("fs mv: cannot stat source %s: %v", src, err)}, nil
+	}
+	if info.IsDir() && pathInside(src, dst) {
+		return &ToolResult{Error: fmt.Sprintf("fs mv: cannot move directory %s into itself: %s", src, dst)}, nil
+	}
 	if _, err := os.Stat(dst); err == nil {
 		return &ToolResult{Error: fmt.Sprintf("fs mv: destination %s already exists", dst)}, nil
 	}
@@ -609,7 +739,7 @@ func handleFsDownload(pa *parsedArgv) (*ToolResult, error) {
 	if idx < 0 {
 		return &ToolResult{Error: fmt.Sprintf("fs download: invalid source %q: missing scheme (supported: http(s)://, cloud://, {host_id}://)", source)}, nil
 	}
-	scheme := source[:idx]
+	scheme := strings.ToLower(source[:idx])
 	switch scheme {
 	case "http", "https":
 		// 本期实现：host 由 host agent 下载写入本地路径

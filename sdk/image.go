@@ -14,8 +14,10 @@ import (
 )
 
 // imageDataMaxBytes 是 image_data 附件的原始字节上限。
-// env 用户 NATS 单消息默认上限 1MB，base64 编码膨胀约 4/3，需为消息信封预留空间。
-const imageDataMaxBytes = 1 << 20 // 1MB（§2.5）
+// 与服务端 libstools.MaxToolImageBytes（600KB）一致：host 端提前压缩到投递标准，
+// 服务端落盘转换时不再二次压缩，image_compressed 得以保留原始尺寸信息，
+// 且两端对同一原图的压缩结果一致。base64 膨胀后仍远低于 NATS 单消息上限。
+const imageDataMaxBytes = 600 * 1024 // 600KB
 
 // isViewableImage 判断图片格式是否可被模型直接查看，
 // 与服务端 sessionctx.decodeBase64Image 支持的格式一致（其他格式默认按 .png 存储会损坏内容）。

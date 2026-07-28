@@ -2,7 +2,8 @@
 # 发版流程
 # ==============================================================================
 #
-# 1. 修改版本号  desktop/main.go 中 var version = "x.y.z"
+# 1. 修改浏览器扩展版本号  browser/manifest.json 中 "version": "x.y.z"
+#    （desktop 版本号由第 4 步的 git tag 决定，无需改代码）
 #
 # 2. 查看上次发版至今的变更:
 #      git log $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD)..HEAD --oneline
@@ -22,6 +23,22 @@
 #      make docker-build && make docker-push
 #
 # ==============================================================================
+# 版本号来源（各产品）
+# ==============================================================================
+#
+#   desktop 二进制   : git 版本（git describe --tags，即 git tag vx.y.z），
+#                      构建时经 ldflags -X main.version=$(VERSION) 注入；
+#                      desktop/main.go 中的 var version 仅为 go run 开发兜底。
+#                      docker 镜像内嵌的就是 desktop 二进制，镜像 tag 与二进
+#                      制版本同源于 git 版本（非 desktop/main.go 的默认值）。
+#   browser 扩展     : browser/manifest.json 的 version 字段，运行时由
+#                      background.js 经 chrome.runtime.getManifest() 读取，
+#                      加 "v" 前缀上报服务端（版本门禁要求 va.b.c 格式）。
+#
+# 两产品共享同一个 git 仓库与 tag，发版时保持 manifest.json 与 git tag 的
+# 数字部分一致（manifest 0.2.0 ↔ tag v0.2.0）。
+#
+# ==============================================================================
 
 APP_NAME   := aic-pod
 BIN_DIR    := dist
@@ -30,6 +47,8 @@ DOCKER_IMAGE ?= veypi/$(APP_NAME)
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
 GOHOSTARCH := $(shell go env GOHOSTARCH)
+# VERSION：git 版本（tag 优先，无 tag 时为短 commit hash，如 v0.2.0-3-g9be711f），
+# 注入 desktop 二进制（ldflags -X main.version）并用作 docker 镜像 tag。
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS    := -s -w -X main.version=$(VERSION)
 

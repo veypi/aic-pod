@@ -22,7 +22,7 @@ export function createRegistry() {
           description: t.def.description,
           parameters: t.def.parameters,
           required_level: t.def.requiredLevel,
-          policy_version: t.def.policyVersion || "1",
+          policy_version: t.def.policyVersion || "2",
         });
       }
       return defs;

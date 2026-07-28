@@ -65,7 +65,7 @@ func ExecTool(workDir string, execTimeout time.Duration) Tool {
 			// 未列出的可执行文件按指令集基线 All(3) 检查
 			Actions:       []any{"bg_list", "bg_wait", "bg_kill"},
 			RequiredLevel: 3,
-			PolicyVersion: "1",
+			PolicyVersion: "2",
 		},
 		Handler: func(ctx context.Context, data any) (*ToolResult, error) {
 			params, err := ParseToolParams(data)

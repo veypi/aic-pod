@@ -27,7 +27,7 @@ import (
 	aichost "github.com/veypi/aic-pod/sdk"
 )
 
-var version = "0.1.1"
+var version = "v0.2.0"
 
 func main() {
 	_ = godotenv.Load()
@@ -47,7 +47,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("aic-pod v%s\n", version)
+		fmt.Printf("aic-pod %s\n", version)
 		os.Exit(0)
 	}
 

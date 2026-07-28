@@ -32,7 +32,7 @@ type Client struct {
 // New 创建客户端，不连接。可在此之后 RegisterTool 注册自定义工具。
 func New(opts Options) *Client {
 	if opts.DeviceType == "" {
-		opts.DeviceType = "device"
+		opts.DeviceType = "cli"
 	}
 	if opts.DeviceName == "" {
 		opts.DeviceName, _ = os.Hostname()
@@ -141,7 +141,10 @@ func (c *Client) Connect() error {
 	c.publishCaps(nc)
 
 	toolWildcard := fmt.Sprintf("u.%s.h.%s.%d.tool.*.req", c.hostUID, c.hostID, c.credVer)
-	if _, err := nc.Subscribe(toolWildcard, c.handleToolRequest); err != nil {
+	// 每个请求独立 goroutine 处理：nats 异步订阅由单个分发 goroutine 串行投递，
+	// 任一 handler 阻塞（如读取 /proc 伪文件永不返回）会造成 head-of-line 阻塞，
+	// 后续所有工具请求排队至 server 端超时。
+	if _, err := nc.Subscribe(toolWildcard, func(msg *nats.Msg) { go c.handleToolRequest(msg) }); err != nil {
 		return fmt.Errorf("subscribe: %w", err)
 	}
 	c.logf("listening on %s", toolWildcard)
@@ -259,18 +262,6 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		return
 	}
 
-	// 4. approval.fingerprint 存在时按 §2.3 公式（JCS + sha256 前 16 位 hex）
-	// 对 {target, action, argv} 重算并比对——纵深防御，
-	// 不只信任签名信封内的审批声明。
-	if req.Approval != nil && req.Approval.Fingerprint != "" {
-		params, _ := ParseToolParams(req.ToolData)
-		if !verifyApprovalFingerprint(req.Approval.Fingerprint, req.SessionID, req.ToolName, c.hostID, params) {
-			c.logf("tool request rejected: approval fingerprint mismatch (msg=%s)", req.MsgID)
-			c.respond(msg, toolResponse{State: "rejected", Error: "approval fingerprint mismatch"})
-			return
-		}
-	}
-
 	t := c.findTool(req.ToolName)
 	if t == nil {
 		c.logf("tool request: unknown tool %s", req.ToolName)
@@ -278,12 +269,19 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 		return
 	}
 
-	// action 级权限检查（§10.2：caps 声明的 action 级等级优先，未声明继承指令集基线）
+	// action 级权限检查（§10.2：caps 声明的 action 级等级优先，未声明继承指令集基线）。
+	// 审批模型见 aic docs/tool_permission.md：审批通过 = procs 以 granted_level=9 重发，
+	// host 只做 granted >= required 数字比较；不足返回 waiting 转人工审批（非 rejected）。
 	params, _ := ParseToolParams(req.ToolData)
 	requiredLevel := actionRequiredLevel(t.Def, params.Action)
-	if req.GrantedLevel < requiredLevel && req.Approval == nil {
-		c.logf("tool request denied: %s %s (granted=%d < required=%d)", req.ToolName, params.Action, req.GrantedLevel, requiredLevel)
-		c.respond(msg, toolResponse{State: "rejected", Error: fmt.Sprintf("insufficient permission: %s %s requires level %d, got %d", req.ToolName, params.Action, requiredLevel, req.GrantedLevel)})
+	if req.GrantedLevel < requiredLevel {
+		reason := fmt.Sprintf("%s %s requires level %d (granted %d)", req.ToolName, params.Action, requiredLevel, req.GrantedLevel)
+		c.logf("tool request waiting approval: %s (msg=%s)", reason, req.MsgID)
+		c.respond(msg, toolResponse{
+			MsgID:        req.MsgID,
+			State:        "waiting",
+			NeedApproval: &NeedApprovalDetail{Reason: reason},
+		})
 		return
 	}
 
@@ -298,8 +296,6 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 
 	ctx := context.WithValue(context.Background(), reqCtxKey{}, &RequestCtx{
 		GrantedLevel: req.GrantedLevel,
-		Approved:     req.Approval != nil,
-		ResolvedBy:   approvalResolvedBy(req),
 		SessionID:    req.SessionID,
 		MsgID:        req.MsgID,
 	})
@@ -374,13 +370,6 @@ func (c *Client) respond(msg *nats.Msg, resp toolResponse) {
 	data, _ := json.Marshal(resp)
 	msg.Respond(data)
 	c.logf("← response: msg=%s state=%s error=%q", resp.MsgID, resp.State, resp.Error)
-}
-
-func approvalResolvedBy(req toolRequest) string {
-	if req.Approval != nil {
-		return req.Approval.ResolvedBy
-	}
-	return ""
 }
 
 func isAuthError(err error) bool {

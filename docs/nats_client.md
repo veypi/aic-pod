@@ -40,9 +40,9 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 ```json
 {
   "env_id": "abc123",
-  "agent_version": "1.0.0",
+  "agent_version": "v0.2.0",
   "credential_ver": 1,
-  "device_type": "device",
+  "device_type": "cli",
   "device_name": "my-pc",
   "device_info": {
     "hostname": "my-pc",
@@ -120,12 +120,7 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
   "nonce": "abc123def456",
   "deadline": "2026-07-18T10:31:00Z",
   "sig": "base64url_hmac_signature",
-  "env_id": "abc123",
-  "approval": {
-    "fingerprint": "approve-abc",
-    "resolved_by": "user_id",
-    "resolved_at": "2026-07-18T10:30:30Z"
-  }
+  "env_id": "abc123"
 }
 ```
 
@@ -135,12 +130,11 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 | `session_id` | string | LLM 会话 ID |
 | `tool_name` | string | 工具名，对应 CAPS 中声明的 name |
 | `tool_data` | object | 工具参数。**内置工具**用 `{action, argv}` 格式；**自定义工具**自行定义 |
-| `granted_level` | int | **当前授予的权限等级**，客户端据此判断是否允许执行 |
+| `granted_level` | int | **有效授予等级**：工具配置 mode（0-3）或审批通过标记 **9**（仅本次下发有效）。客户端只做 `granted >= required` 数字比较 |
 | `nonce` | string | 随机数 Base64URL |
 | `deadline` | string | RFC3339 截止时间，过期请求客户端应拒绝 |
 | `sig` | string | HMAC-SHA256(K_tool, canonical)，客户端**必须验签** |
 | `env_id` | string | 目标环境 ID |
-| `approval` | object | 审批凭证。存在表示用户已事前批准。`fingerprint` 为审批指纹，`resolved_by` 为审批人 |
 
 ### Tool Response — 客户端回复
 
@@ -180,12 +174,9 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 {
   "msg_id": "req_xxx",
   "status": "waiting",
-  "content": "About to delete 500 records in table users",
   "need_approval": {
-    "reason": "This will permanently delete 500 records",
-    "wait_type": "approval",
-    "preview": "DELETE FROM users WHERE ...",
-    "fingerprint": "delete-users-123"
+    "reason": "exec bash requires level 3 (granted 1)",
+    "preview": "bash -c 'rm -rf /tmp/build'"
   }
 }
 ```
@@ -193,64 +184,58 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 | need_approval 字段 | 类型 | 说明 |
 |------|------|------|
 | `reason` | string | 审批原因，展示给用户 |
-| `wait_type` | string | 等待类型，固定 `"approval"` |
-| `preview` | string | 预览信息，帮助用户决策 |
-| `fingerprint` | string | 审批指纹，服务端重试时原样带回 |
+| `preview` | string | 预览信息，帮助用户决策（可选） |
 
 ### 权限等级
 
 每个工具声明时设置 `required_level`，服务端根据会话配置下发 `granted_level`。
+等级语义详见 aic `docs/tool_permission.md`：
 
-| Level | 值 | 含义 | 典型场景 |
-|-------|-----|------|---------|
-| Confirm | 1 | 每次需用户确认 | 文件修改、数据删除 |
-| Auto | 2 | 安全操作自动执行 | 文件读取、信息查询 |
-| Allow | 3 | 全部自动允许 | 任意命令执行 |
+| Level | 值 | 含义 |
+|-------|-----|------|
+| None | 0 | 禁用，不可审批绕过 |
+| Read | 1 | 读（无副作用） |
+| Write | 2 | 一般写（局部、可逆） |
+| Danger | 3 | 危险读写（破坏性/外发性/执行性），用户可授予的上限 |
+| Critical | 4 | 超高危（隐藏），只作为 required 出现 ⇒ 必转人工审批 |
+| Approved | 9 | 审批通过标记，仅服务端审批通过后的单次下发 |
 
-**客户端校验逻辑：**
+**客户端校验逻辑（唯一判定式）：**
 
 ```
 if granted_level >= required_level
     → 正常执行
 
-if granted_level < required_level && approval 存在
-    → 用户已事前批准，正常执行
-
-if granted_level < required_level && approval 不存在
-    → 拒绝，返回 status: "rejected"
+if granted_level < required_level
+    → 返回 status: "waiting" + need_approval（转人工审批）
 ```
 
 ### 审批流程
 
-**事前审批（Pre-execution）：**
+审批不是凭证，是状态：决策全部集中在服务端 procs，客户端不校验任何
+指纹/票据，只比较等级数字（详见 aic `docs/tool_permission.md`）。
 
 ```
-1. LLM 选择工具，服务端判断 granted_level < required_level
-2. 服务端向用户发起确认请求
-3. 用户确认 → 服务端重发请求，附带 approval 字段
-4. 客户端收到 approval → 正常执行
+1. LLM 选择工具，服务端 procs 判定（deny > allow > mode）后下发 granted_level
+2. 客户端评估 required_level：granted < required → 返回 status: "waiting" + need_approval
+3. 服务端将该消息置 waiting，向用户展示审批信息
+4. 用户批准 → 服务端以 granted_level = 9 重发**同一 msg_id** 的请求
+   （nonce、deadline 必须重新生成——nonce 窗口去重会拒绝复用的旧 nonce）
+5. 客户端数字比较 9 >= required → 放行执行
+6. 用户拒绝 → 不再重试
 ```
 
-**动态审批（Runtime waiting）：**
-
-```
-1. 客户端开始执行（事前已通过或无需审批）
-2. 执行中遇到高风险操作，需要用户确认
-3. 客户端返回 status: "waiting" + need_approval
-4. 服务端向用户展示审批信息
-5. 用户确认 → 服务端重发请求，附带 approval（含 fingerprint）
-6. 客户端收到 approval → 继续执行
-7. 用户拒绝 → 不再重试
-```
+签名输入已覆盖 `msg_id + tool_data_hash + granted_level + nonce + deadline`，
+等级与调用内容绑定，篡改或截取重放均会被验签/nonce 机制拒绝。
 
 **动态审批 handler 示例（伪代码）：**
 
 ```
-function handle(data, grantedLevel, approved):
-    if not approved:
-        return {status: "waiting", need_approval: {reason: "...", fingerprint: "abc"}}
+function handle(data, grantedLevel):
+    required = evaluateRequired(data)   // 按 action/argv 评估
+    if grantedLevel < required:
+        return {status: "waiting", need_approval: {reason: "..."}}
 
-    // approved = true → 执行实际操作
     result = execute(data)
     return {status: "completed", content: result}
 ```
@@ -325,17 +310,17 @@ e1.<env_id>.<env_info_b64>.<ts_ms>.<nonce_b64>.<sig_b64>
 
 ```json
 {
-  "env_version": "1.0.0",
-  "env_type": "device",
-  "env_name": "my-raspberry-pi"
+  "agent_version": "v0.2.0",
+  "device_type": "cli",
+  "device_name": "my-raspberry-pi"
 }
 ```
 
 | 字段 | 可选值 | 说明 |
 |------|--------|------|
-| `env_version` | 任意字符串 | 客户端版本号 |
-| `env_type` | `sandbox` / `device` / `server` | 设备类型 |
-| `env_name` | 任意字符串 | 设备名称（展示用） |
+| `agent_version` | `va.b.c`（a/b/c 为数字） | 客户端版本号。**版本门禁**：主版本号 a 与服务端不一致时拒绝连接（协议兼容边界，响应错误提示升级客户端） |
+| `device_type` | `cli` / `browser` / ... | 客户端类型，连接成功后写入 host.type（用户不可编辑） |
+| `device_name` | 任意字符串 | 设备名称（展示用） |
 
 ### 3.4 签名计算
 
@@ -373,9 +358,9 @@ u.<uid>.e.<env_id>.<cred_ver>.caps
 ```json
 {
   "env_id": "<env_id>",
-  "agent_version": "1.0.0",
+  "agent_version": "v0.2.0",
   "credential_ver": 1,
-  "device_type": "device",
+  "device_type": "cli",
   "device_name": "my-raspberry-pi",
   "device_info": {
     "hostname": "raspberrypi",
@@ -490,12 +475,7 @@ u.<uid>.e.<env_id>.<cred_ver>.tool.*.req
   "nonce": "abc123def456",
   "deadline": "2026-07-17T10:31:00Z",
   "sig": "hmac_base64url_signature",
-  "env_id": "abc123",
-  "approval": {
-    "fingerprint": "approve-abc",
-    "resolved_by": "user_id",
-    "resolved_at": "2026-07-17T10:30:30Z"
-  }
+  "env_id": "abc123"
 }
 ```
 
@@ -505,8 +485,7 @@ u.<uid>.e.<env_id>.<cred_ver>.tool.*.req
 | `session_id` | LLM 会话 ID |
 | `tool_name` | 工具名 |
 | `tool_data` | 工具参数，action+argv 格式（自定义工具自行定义） |
-| `granted_level` | LLM 授予的权限等级 |
-| `approval` | 审批凭证。存在表示用户已事前批准 |
+| `granted_level` | 有效授予等级：工具配置 mode（0-3）或审批通过标记 9 |
 | `sig` | HMAC-SHA256(K_tool, 签名输入)，请求签名 |
 | `deadline` | RFC3339 截止时间，过期请求必须拒绝 |
 
@@ -515,6 +494,7 @@ u.<uid>.e.<env_id>.<cred_ver>.tool.*.req
 签名输入为紧凑 JSON（字段顺序固定）：
 
 ```json
+{"version":1,"host_id":"...","msg_id":"...","session_id":"...","tool_name":"exec","tool_data_sha256":"...","granted_level":3,"nonce":"...","deadline":"..."}
 ```
 
 计算过程：
@@ -523,8 +503,9 @@ u.<uid>.e.<env_id>.<cred_ver>.tool.*.req
 toolDataJSON = compact_json(request.tool_data)    // 紧凑 JSON，字段按字母序
 toolDataHash = SHA256(toolDataJSON).hex()
 
-                         session_id, tool_name, tool_data_sha256: toolDataHash,
-                         granted_level, nonce, deadline, approval_fingerprint: null})
+sigInput = JSON.stringify({version: 1, host_id, msg_id,
+                           session_id, tool_name, tool_data_sha256: toolDataHash,
+                           granted_level, nonce, deadline})  // 字段顺序固定
 
 expected = HMAC-SHA256(K_tool, sigInput)  // 原始字节
 actual   = Base64URLDecode(request.sig)
@@ -917,8 +898,8 @@ K_tool    = deriveKey(secret, envID, "aic/env/tool-request/v1")
 ## 附录 B：连接 Token 生成（伪代码）
 
 ```
-function generateToken(envID, uid, envVersion, envType, envName, kConnect):
-    envInfo   = JSON.stringify({env_version: envVersion, env_type: envType, env_name: envName})
+function generateToken(envID, uid, agentVersion, deviceType, deviceName, kConnect):
+    envInfo   = JSON.stringify({agent_version: agentVersion, device_type: deviceType, device_name: deviceName})
     // envInfo 原文 ≤ 1024 字节
     envInfoB64 = Base64URL(envInfo)
     ts        = currentUnixMillis()
@@ -949,16 +930,15 @@ function verifyRequest(request, kTool):
 
     sigInput = JSON.stringify({
         version:              1,
-        env_id:               request.env_id,
+        host_id:              request.host_id,
         msg_id:               request.msg_id,
         session_id:           request.session_id,
         tool_name:            request.tool_name,
         tool_data_sha256:     toolDataHash,
         granted_level:        request.granted_level,
         nonce:                request.nonce,
-        deadline:             request.deadline,
-        approval_fingerprint: null
-    })  // 紧凑格式，无空格无换行
+        deadline:             request.deadline
+    })  // 紧凑格式，无空格无换行，字段顺序固定
 
     expectedSig = HMAC-SHA256(kTool, sigInput)
     return constantTimeEquals(expectedSig, Base64URLDecode(request.sig))

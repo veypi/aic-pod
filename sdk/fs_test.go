@@ -2,8 +2,10 @@ package aichost
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -194,7 +196,7 @@ func TestFsSearch(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# notes\n"), 0644)
 
 	// glob 模式
-	r, _ := handleFsSearch(mustArgv(t, "search", []string{dir, "--glob", "*.go"}))
+	r, _ := handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--glob", "*.go"}))
 	if r.Error != "" {
 		t.Fatal(r.Error)
 	}
@@ -203,7 +205,7 @@ func TestFsSearch(t *testing.T) {
 	}
 
 	// grep 模式：全行 glob，无列号
-	r, _ = handleFsSearch(mustArgv(t, "search", []string{dir, "--pattern", "*TODO*"}))
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--pattern", "*TODO*"}))
 	if r.Error != "" {
 		t.Fatal(r.Error)
 	}
@@ -212,7 +214,7 @@ func TestFsSearch(t *testing.T) {
 	}
 
 	// 无通配符 pattern 的空结果带引导提示
-	r, _ = handleFsSearch(mustArgv(t, "search", []string{dir, "--pattern", "TODO"}))
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--pattern", "TODO"}))
 	if !strings.Contains(r.Content, `(pattern is full-line glob; use "*text*" for substring match)`) {
 		t.Fatalf("content = %q", r.Content)
 	}
@@ -221,13 +223,170 @@ func TestFsSearch(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "f1.txt"), []byte("x"), 0644)
 	os.WriteFile(filepath.Join(dir, "f2.txt"), []byte("x"), 0644)
 	os.WriteFile(filepath.Join(dir, "f3.txt"), []byte("x"), 0644)
-	r, _ = handleFsSearch(mustArgv(t, "search", []string{dir, "--glob", "f?.txt", "--limit", "3"}))
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--glob", "f?.txt", "--limit", "3"}))
 	if r.Attrs["truncated"] != "false" || r.Attrs["rows"] != "3" {
 		t.Fatalf("attrs = %v", r.Attrs)
 	}
-	r, _ = handleFsSearch(mustArgv(t, "search", []string{dir, "--glob", "f?.txt", "--limit", "2"}))
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--glob", "f?.txt", "--limit", "2"}))
 	if r.Attrs["truncated"] != "true" || r.Attrs["rows"] != "2" {
 		t.Fatalf("attrs = %v", r.Attrs)
+	}
+
+	// 搜索根为单个文件：grep 模式（不再报 readdir not a directory）
+	mainGo := filepath.Join(dir, "src", "main.go")
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{mainGo, "--pattern", "*TODO*"}))
+	if r.Error != "" {
+		t.Fatal(r.Error)
+	}
+	if !strings.Contains(r.Content, mainGo+":2\t// TODO fix") {
+		t.Fatalf("content = %q", r.Content)
+	}
+
+	// 搜索根为单个文件：glob 模式文件名命中
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{mainGo, "--glob", "*.go"}))
+	if !strings.Contains(r.Content, mainGo+"\t") || r.Attrs["rows"] != "1" {
+		t.Fatalf("content = %q attrs = %v", r.Content, r.Attrs)
+	}
+
+	// 文件名不命中 glob → 空结果文案
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{mainGo, "--glob", "*.js"}))
+	if !strings.Contains(r.Content, `no files matched glob "*.js" in `) {
+		t.Fatalf("content = %q", r.Content)
+	}
+
+	// grep 模式 + 文件名不命中 glob → 空结果文案
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{mainGo, "--glob", "*.js", "--pattern", "*TODO*"}))
+	if !strings.Contains(r.Content, `no lines matched pattern "*TODO*" in `) {
+		t.Fatalf("content = %q", r.Content)
+	}
+
+	// glob 两端一致 TrimSpace（cloud 端同样处理）
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--glob", " *.go "}))
+	if r.Error != "" || r.Attrs["rows"] != "1" {
+		t.Fatalf("content = %q attrs = %v", r.Content, r.Attrs)
+	}
+
+	// CRLF 行尾 \r 不影响 glob 全行匹配，输出亦不含 \r
+	winPath := filepath.Join(dir, "win.txt")
+	os.WriteFile(winPath, []byte("foo\r\nbar\r\n"), 0644)
+	r, _ = handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--pattern", "foo"}))
+	if !strings.Contains(r.Content, ":1\tfoo") || strings.Contains(r.Content, "\r") {
+		t.Fatalf("content = %q", r.Content)
+	}
+}
+
+func TestFsSearchByteBudget(t *testing.T) {
+	dir := setupFsDir(t)
+	// 10 行 × 100KB：超出 512KB 预算，只保留完整行并标 truncated
+	longLine := strings.Repeat("x", 100<<10) + " needle"
+	var sb strings.Builder
+	for i := 0; i < 10; i++ {
+		sb.WriteString(longLine + "\n")
+	}
+	os.WriteFile(filepath.Join(dir, "long.txt"), []byte(sb.String()), 0644)
+	r, _ := handleFsSearch(context.Background(), mustArgv(t, "search", []string{dir, "--pattern", "*needle"}))
+	if r.Error != "" {
+		t.Fatal(r.Error)
+	}
+	if r.Attrs["truncated"] != "true" {
+		t.Fatalf("attrs = %v", r.Attrs)
+	}
+	rows, _ := strconv.Atoi(r.Attrs["rows"])
+	if rows < 1 || rows >= 10 || len(r.Content) > 600<<10 {
+		t.Fatalf("rows = %d, content bytes = %d", rows, len(r.Content))
+	}
+}
+
+func TestFsReadLargeFile(t *testing.T) {
+	dir := setupFsDir(t)
+	// 构造 >8MB 文本：120000 行，走流式路径
+	var sb strings.Builder
+	for i := 1; i <= 120000; i++ {
+		fmt.Fprintf(&sb, "line %d content padding padding padding padding padding padding padding\n", i)
+	}
+	big := filepath.Join(dir, "big.txt")
+	os.WriteFile(big, []byte(sb.String()), 0644)
+
+	r, _ := handleFsRead(mustArgv(t, "read", []string{big, "--offset", "119998", "--limit", "10"}))
+	if r.Error != "" {
+		t.Fatal(r.Error)
+	}
+	if !strings.Contains(r.Content, "119998\tline 119998") || !strings.Contains(r.Content, "120000\tline 120000") {
+		t.Fatalf("content tail = %q", r.Content[len(r.Content)-200:])
+	}
+	if r.Attrs["total_lines"] != "120000" || r.Attrs["rows"] != "3" || r.Attrs["truncated"] != "false" {
+		t.Fatalf("attrs = %v", r.Attrs)
+	}
+	// offset 越界报错
+	r, _ = handleFsRead(mustArgv(t, "read", []string{big, "--offset", "120001"}))
+	if !strings.Contains(r.Error, "exceeds 120000 lines") {
+		t.Fatalf("err = %v", r.Error)
+	}
+}
+
+func TestFsMvRootProtection(t *testing.T) {
+	// mv 文件系统根与 rm 同等硬保护（拒绝，不可审批绕过）
+	r, _ := handleFsMove(mustArgv(t, "mv", []string{"/", "/tmp/whatever-nonexist"}))
+	if r.State != "rejected" || !strings.Contains(r.Error, "cannot move root directory") {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+func TestFsCpMvIntoItself(t *testing.T) {
+	dir := setupFsDir(t)
+	src := filepath.Join(dir, "dir")
+	os.MkdirAll(src, 0755)
+	os.WriteFile(filepath.Join(src, "a.txt"), []byte("x"), 0644)
+
+	// cp 目录到自身子目录：拒绝（防止失控递归）
+	r, _ := handleFsCopy(mustArgv(t, "cp", []string{src, filepath.Join(src, "sub")}))
+	if !strings.Contains(r.Error, "into itself") {
+		t.Fatalf("cp: %v", r.Error)
+	}
+	if _, err := os.Stat(filepath.Join(src, "sub")); err == nil {
+		t.Fatal("dst should not have been created")
+	}
+	// mv 目录到自身子目录：拒绝
+	r, _ = handleFsMove(mustArgv(t, "mv", []string{src, filepath.Join(src, "sub")}))
+	if !strings.Contains(r.Error, "into itself") {
+		t.Fatalf("mv: %v", r.Error)
+	}
+	// 正常 cp 不受影响
+	r, _ = handleFsCopy(mustArgv(t, "cp", []string{src, filepath.Join(dir, "dir2")}))
+	if r.Error != "" || !strings.Contains(r.Content, "copied") {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+func TestFsEditNewRequired(t *testing.T) {
+	dir := setupFsDir(t)
+	p := filepath.Join(dir, "e.txt")
+	os.WriteFile(p, []byte("hello world"), 0644)
+	// 漏传 --new：报错而非静默按空串删除
+	r, _ := handleFsEdit(mustArgv(t, "edit", []string{p, "--old", "hello"}))
+	if r.Error != "fs edit: --new is required" {
+		t.Fatalf("err = %v", r.Error)
+	}
+	// 显式空串：合法删除
+	r, _ = handleFsEdit(mustArgv(t, "edit", []string{p, "--old", "hello ", "--new", ""}))
+	if r.Error != "" {
+		t.Fatal(r.Error)
+	}
+	data, _ := os.ReadFile(p)
+	if string(data) != "world" {
+		t.Fatalf("data = %q", data)
+	}
+}
+
+func TestFsExtraPositional(t *testing.T) {
+	dir := setupFsDir(t)
+	r, _ := handleFs(context.Background(), &ToolParams{Action: "ls", Argv: []string{dir, dir}})
+	if !strings.Contains(r.Error, "unexpected argument") {
+		t.Fatalf("err = %v", r.Error)
+	}
+	r, _ = handleFs(context.Background(), &ToolParams{Action: "cp", Argv: []string{"a", "b", "c"}})
+	if !strings.Contains(r.Error, "unexpected argument") {
+		t.Fatalf("err = %v", r.Error)
 	}
 }
 

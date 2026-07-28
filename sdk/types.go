@@ -13,7 +13,7 @@ type Options struct {
 	NATSURL     string        // "nats://host:port" 或 "ws://host/path" (必填)
 	WorkDir     string        // exec 工作目录，默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname
-	DeviceType  string        // sandbox / device / server
+	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
 	Version     string        // 客户端版本号
 	ExecTimeout time.Duration // exec 后台超时，默认 10m
 	OnLog       func(format string, args ...any)
@@ -63,19 +63,17 @@ type ToolResult struct {
 	NeedApproval *NeedApprovalDetail `json:"need_approval,omitempty"`
 }
 
-// NeedApprovalDetail 是执行中动态审批的详情。
+// NeedApprovalDetail 是执行中动态审批的详情（state=waiting 时携带）。
 type NeedApprovalDetail struct {
-	Reason      string `json:"reason"`
-	WaitType    string `json:"wait_type,omitempty"`
-	Preview     string `json:"preview,omitempty"`
-	Fingerprint string `json:"fingerprint"`
+	Reason  string `json:"reason"`
+	Preview string `json:"preview,omitempty"`
 }
 
 // RequestCtx 是工具请求上下文，通过 context 传递给 handler。
+// GrantedLevel 为有效授予等级：工具配置 mode（0-3）或审批通过标记 9，
+// handler 只做 granted >= required 数字比较，不感知审批概念。
 type RequestCtx struct {
 	GrantedLevel int
-	Approved     bool
-	ResolvedBy   string
 	SessionID    string
 	MsgID        string
 }
@@ -119,10 +117,6 @@ type toolRequest struct {
 	Signature    string `json:"sig,omitempty"`
 	Nonce        string `json:"nonce,omitempty"`
 	Deadline     string `json:"deadline,omitempty"`
-	Approval     *struct {
-		Fingerprint string `json:"fingerprint"`
-		ResolvedBy  string `json:"resolved_by"`
-	} `json:"approval,omitempty"`
 }
 
 type toolResponse struct {
@@ -144,14 +138,13 @@ type connectSigPayload struct {
 }
 
 type toolReqSigPayload struct {
-	Version             int     `json:"version"`
-	HostID              string  `json:"host_id"`
-	MsgID               string  `json:"msg_id"`
-	SessionID           string  `json:"session_id"`
-	ToolName            string  `json:"tool_name"`
-	ToolDataSHA256      string  `json:"tool_data_sha256"`
-	GrantedLevel        int     `json:"granted_level"`
-	Nonce               string  `json:"nonce"`
-	Deadline            string  `json:"deadline"`
-	ApprovalFingerprint *string `json:"approval_fingerprint,omitempty"`
+	Version        int    `json:"version"`
+	HostID         string `json:"host_id"`
+	MsgID          string `json:"msg_id"`
+	SessionID      string `json:"session_id"`
+	ToolName       string `json:"tool_name"`
+	ToolDataSHA256 string `json:"tool_data_sha256"`
+	GrantedLevel   int    `json:"granted_level"`
+	Nonce          string `json:"nonce"`
+	Deadline       string `json:"deadline"`
 }

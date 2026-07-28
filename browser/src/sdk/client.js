@@ -7,7 +7,7 @@
 
 import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
-import { generateConnectTokenRaw, verifyToolRequestSig, verifyApprovalFingerprint } from "./auth.js";
+import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
 
 // ---- re-export for handler ----
 export { errors as natsErrors } from "../lib/nats/nats-core.js";
@@ -65,7 +65,7 @@ export class AICClient {
     this.uid = uid;
     this.credVer = credVer;
 
-    const version = this.opts.version || "0.1.0";
+    const version = this.opts.version || "v0.2.0";
     const deviceType = this.opts.deviceType || "browser";
     const deviceName = this.opts.deviceName || "Chrome";
 
@@ -91,9 +91,9 @@ export class AICClient {
     // Pre-generate auth token (Web Crypto is async, cannot be called
     // synchronously from nats tokenAuthenticator)
     const token = await generateConnectTokenRaw(hostID, uid, JSON.stringify({
-      env_version: version,
-      env_type: deviceType,
-      env_name: deviceName,
+      agent_version: version,
+      device_type: deviceType,
+      device_name: deviceName,
     }), kConnect);
 
     const natsOpts = {
@@ -168,7 +168,7 @@ export class AICClient {
           case "reconnect":
             this.logf("NATS reconnected, republishing caps");
             this._publishCaps(
-              this.opts.version || "0.1.0",
+              this.opts.version || "v0.2.0",
               this.opts.deviceType || "browser",
               this.opts.deviceName || "Chrome"
             );
@@ -192,7 +192,7 @@ export class AICClient {
         description: t.def.description,
         parameters: t.def.parameters,
         required_level: t.def.requiredLevel,
-        policy_version: t.def.policyVersion || "1",
+        policy_version: t.def.policyVersion || "2",
       };
       if (t.def.actions) def.actions = t.def.actions; // §10.2 action 级等级声明
       toolDefs.push(def);
@@ -280,17 +280,6 @@ export class AICClient {
       this.nonceCache.set(req.nonce, req.deadline ? new Date(req.deadline).getTime() : now + 600_000);
     }
 
-    // approval.fingerprint 重算比对（§10.1 第 4 条，纵深防御）
-    if (req.approval && req.approval.fingerprint) {
-      const ok = await verifyApprovalFingerprint(
-        req.approval.fingerprint, req.session_id, req.tool_name, this.hostID, req.tool_data
-      );
-      if (!ok) {
-        this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "approval fingerprint mismatch" });
-        return;
-      }
-    }
-
     // Find tool
     const tool = this.tools.get(req.tool_name);
     if (!tool) {
@@ -299,13 +288,14 @@ export class AICClient {
       return;
     }
 
-    // Check permission level
-    if (req.granted_level < tool.def.requiredLevel && !req.approval) {
-      this.logf("tool request denied: %s (granted=%d < required=%d)",
-        req.tool_name, req.granted_level, tool.def.requiredLevel);
+    // 权限检查（aic docs/tool_permission.md：审批通过 = 服务端以 granted_level=9 重发，
+    // host 只做 granted >= required 数字比较；不足返回 waiting 转人工审批）
+    if (req.granted_level < tool.def.requiredLevel) {
+      const reason = `${req.tool_name} requires level ${tool.def.requiredLevel} (granted ${req.granted_level})`;
+      this.logf("tool request waiting approval: %s (msg=%s)", reason, req.msg_id);
       this._respond(msg, {
-        msg_id: req.msg_id, state: "rejected",
-        error: `insufficient permission: ${req.tool_name} requires level ${tool.def.requiredLevel}, got ${req.granted_level}`,
+        msg_id: req.msg_id, state: "waiting",
+        need_approval: { reason },
       });
       return;
     }
@@ -313,8 +303,6 @@ export class AICClient {
     // Build request context
     const ctx = {
       grantedLevel: req.granted_level,
-      approved: !!req.approval,
-      resolvedBy: req.approval ? req.approval.resolved_by : "",
       sessionID: req.session_id,
       msgID: req.msg_id,
     };

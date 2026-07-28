@@ -33,7 +33,7 @@ const BROWSER_DEF = {
   },
   actions: ["open", "click", "close", "download", "eval", "get", "network", "read", "screenshot", "snapshot", "tab", "wait", "sleep"],
   requiredLevel: 2,
-  policyVersion: "1",
+  policyVersion: "2",
 };
 
 // ---- Lifecycle ----
@@ -74,7 +74,8 @@ async function connect(settings) {
     url: settings.url || "wss://ivec.ai/aic/api/nc",
     deviceName: settings.deviceName || "Chrome",
     deviceType: "browser",
-    version: "0.1.0",
+    // 版本以 manifest.json 为单一来源，上报格式 va.b.c（服务端主版本门禁）
+    version: "v" + chrome.runtime.getManifest().version,
     onLog: (fmt, ...args) => console.log(`[aic-browser] ${fmt}`, ...args),
   });
 
