@@ -19,12 +19,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
 
-	aichost "github.com/veypi/aic-pod/sdk"
+	"github.com/veypi/aic-pod/sdk/host"
 )
 
 var version = "v0.2.0"
@@ -72,7 +74,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := aichost.New(aichost.Options{
+	client := host.New(host.Options{
 		Credential:  envCred,
 		NATSURL:     natsURL,
 		WorkDir:     workDir,
@@ -86,7 +88,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	client.Wait()
+	// 阻塞等待 SIGINT/SIGTERM
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	fmt.Println("shutting down...")
+	client.Close()
 }
 
 func getEnv(key, def string) string {

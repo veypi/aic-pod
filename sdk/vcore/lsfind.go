@@ -190,4 +190,3 @@ func cmdFind(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	r.set("truncated", truncated)
 	return r, nil
 }
-

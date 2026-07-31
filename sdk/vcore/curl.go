@@ -28,7 +28,7 @@ func cmdCurl(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	rawurl := pa.pos[0]
 
 	// scheme 判定（RFC 3986 大小写不敏感归一）：
-// http(s):// 为标准形；{host}:/{path} 单斜杠预留形按 scheme 拒绝。
+	// http(s):// 为标准形；{host}:/{path} 单斜杠预留形按 scheme 拒绝。
 	var scheme string
 	if idx := strings.Index(rawurl, "://"); idx >= 0 {
 		scheme = strings.ToLower(rawurl[:idx])

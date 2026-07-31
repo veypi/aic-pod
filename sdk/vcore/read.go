@@ -172,4 +172,3 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 	r.Content = fmt.Sprintf("Binary file: %s (%s, %d bytes)", abs, mime, info.Size())
 	return r, nil
 }
-
