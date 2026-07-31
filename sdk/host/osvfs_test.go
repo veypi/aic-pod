@@ -92,6 +92,19 @@ func runOSParity(t *testing.T, c osVectorCase) {
 			_ = os.Chtimes(osv.mapPath(logical), time.Unix(sec, 0), time.Unix(sec, 0))
 		}
 	}
+	// mtimes 可独立作用于 files 未列出的隐式目录（与 vcore 向量运行器一致）
+	for p, sec := range c.Mtimes {
+		if _, listed := c.Files[p]; listed || !strings.HasSuffix(p, "/") {
+			continue
+		}
+		logical := strings.TrimSuffix(p, "/")
+		mt := time.Unix(sec, 0)
+		mem.SetDir(logical, mt)
+		if err := osv.MkdirAll(logical); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(osv.mapPath(logical), mt, mt)
+	}
 
 	fetcher := vcore.Fetcher(nil)
 	if c.Fetch != nil {
