@@ -178,3 +178,11 @@ func ParseConnectToken(token string) (*ConnectToken, error) {
 	}
 	return v, nil
 }
+
+// HostConnectInfo 是连接 token 中 host_info 的标准结构（§6.3）：
+// agent_version 用于主版本门禁，device_type/device_name 连接成功后写入 host 一级字段。
+type HostConnectInfo struct {
+	AgentVersion string `json:"agent_version"`
+	DeviceType   string `json:"device_type,omitempty"`
+	DeviceName   string `json:"device_name,omitempty"`
+}
