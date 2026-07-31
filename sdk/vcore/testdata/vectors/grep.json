@@ -1,0 +1,112 @@
+{
+  "cases": [
+    {
+      "name": "grep single file",
+      "cmd": "grep",
+      "argv": ["foo", "/docs/a.txt"],
+      "files": {"/docs/a.txt": "foo one\nbar\nfoo two\n"},
+      "expect": {
+        "content": "/docs/a.txt:1\tfoo one\n/docs/a.txt:3\tfoo two",
+        "attrs": {"action": "grep", "path": "/docs/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "grep -r recursive path order",
+      "cmd": "grep",
+      "argv": ["-r", "foo", "/docs"],
+      "files": {"/docs/b.txt": "foo b\n", "/docs/a.txt": "foo a\n", "/docs/sub/c.txt": "foo c\n"},
+      "expect": {
+        "content": "/docs/a.txt:1\tfoo a\n/docs/b.txt:1\tfoo b\n/docs/sub/c.txt:1\tfoo c",
+        "attrs": {"action": "grep", "path": "/docs", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "grep -i case insensitive",
+      "cmd": "grep",
+      "argv": ["-i", "todo", "/a.txt"],
+      "files": {"/a.txt": "TODO: fix\nnothing\nTodo: ship\n"},
+      "expect": {
+        "content": "/a.txt:1\tTODO: fix\n/a.txt:3\tTodo: ship",
+        "attrs": {"action": "grep", "path": "/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "grep regex alternation and anchor",
+      "cmd": "grep",
+      "argv": ["^(foo|baz)\\d+", "/a.txt"],
+      "files": {"/a.txt": "foo123 ok\nbar baz9\nbaz42\nxfoo1\n"},
+      "expect": {
+        "content": "/a.txt:1\tfoo123 ok\n/a.txt:3\tbaz42",
+        "attrs": {"action": "grep", "path": "/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "grep -m truncation",
+      "cmd": "grep",
+      "argv": ["-m", "1", "foo", "/a.txt"],
+      "files": {"/a.txt": "foo 1\nfoo 2\nfoo 3\n"},
+      "expect": {
+        "content": "/a.txt:1\tfoo 1",
+        "attrs": {"action": "grep", "path": "/a.txt", "rows": "1", "truncated": "true"}
+      }
+    },
+    {
+      "name": "grep CRLF strip",
+      "cmd": "grep",
+      "argv": ["foo$", "/a.txt"],
+      "files": {"/a.txt": "foo\r\nbar\r\n"},
+      "expect": {
+        "content": "/a.txt:1\tfoo",
+        "attrs": {"action": "grep", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "grep skips binary files",
+      "cmd": "grep",
+      "argv": ["-r", "foo", "/docs"],
+      "files": {"/docs/bin.dat": "base64:AMBmb28=", "/docs/a.txt": "foo\n"},
+      "expect": {
+        "content": "/docs/a.txt:1\tfoo",
+        "attrs": {"action": "grep", "path": "/docs", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "grep lookaround rejected with escape hatch",
+      "cmd": "grep",
+      "argv": ["foo(?=bar)", "/a.txt"],
+      "files": {"/a.txt": "foobar\n"},
+      "expectError": "grep: pattern uses unsupported feature, use bash -c \"grep -P ...\" on a physical host"
+    },
+    {
+      "name": "grep backreference rejected",
+      "cmd": "grep",
+      "argv": ["(a)\\1", "/a.txt"],
+      "files": {"/a.txt": "aa\n"},
+      "expectError": "grep: pattern uses unsupported feature, use bash -c \"grep -P ...\" on a physical host"
+    },
+    {
+      "name": "grep invalid regex",
+      "cmd": "grep",
+      "argv": ["[", "/a.txt"],
+      "files": {"/a.txt": "x\n"},
+      "expectError": "grep: invalid pattern: error parsing regexp: missing closing ]: `[`"
+    },
+    {
+      "name": "grep directory without -r",
+      "cmd": "grep",
+      "argv": ["foo", "/docs"],
+      "files": {"/docs/a.txt": "foo\n"},
+      "expectError": "grep: /docs is a directory (use -r)"
+    },
+    {
+      "name": "grep no match",
+      "cmd": "grep",
+      "argv": ["zzz", "/a.txt"],
+      "files": {"/a.txt": "foo\n"},
+      "expect": {
+        "content": "no lines matched pattern \"zzz\" in /a.txt",
+        "attrs": {"action": "grep", "path": "/a.txt", "rows": "0", "truncated": "false"}
+      }
+    }
+  ]
+}

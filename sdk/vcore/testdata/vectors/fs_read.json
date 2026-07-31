@@ -1,0 +1,96 @@
+{
+  "cases": [
+    {
+      "name": "read whole file",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt"},
+      "files": {"/a.txt": "first\nsecond\nthird\n"},
+      "expect": {
+        "content": "1\tfirst\n2\tsecond\n3\tthird\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "3", "rows": "3", "range": "1-3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "read offset and limit",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt", "offset": 2, "limit": 2},
+      "files": {"/a.txt": "l1\nl2\nl3\nl4\n"},
+      "expect": {
+        "content": "2\tl2\n3\tl3\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "4", "rows": "2", "range": "2-3", "truncated": "true"}
+      }
+    },
+    {
+      "name": "read last page not truncated",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt", "offset": 3},
+      "files": {"/a.txt": "l1\nl2\nl3\n"},
+      "expect": {
+        "content": "3\tl3\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "3", "rows": "1", "range": "3-3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "read offset exceeds",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt", "offset": 5},
+      "files": {"/a.txt": "l1\nl2\nl3\n"},
+      "expectError": "fs read: offset 5 exceeds 3 lines"
+    },
+    {
+      "name": "read offset below 1",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt", "offset": 0},
+      "files": {"/a.txt": "l1\n"},
+      "expectError": "fs read: offset must be >= 1, got 0"
+    },
+    {
+      "name": "read limit below 1",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt", "limit": 0},
+      "files": {"/a.txt": "l1\n"},
+      "expectError": "fs read: limit must be >= 1, got 0"
+    },
+    {
+      "name": "read with workdir",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "notes.txt", "workdir": "/wd"},
+      "files": {"/wd/notes.txt": "hello\n"},
+      "expect": {
+        "content": "1\thello\n",
+        "attrs": {"action": "read", "path": "/wd/notes.txt", "mime": "text/plain", "total_lines": "1", "rows": "1", "range": "1-1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "read with root var",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "$SESSION/out.log"},
+      "vars": {"$SESSION": "/sessions/s1"},
+      "files": {"/sessions/s1/out.log": "log line\n"},
+      "expect": {
+        "content": "1\tlog line\n",
+        "attrs": {"action": "read", "path": "/sessions/s1/out.log", "mime": "text/plain", "total_lines": "1", "rows": "1", "range": "1-1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "read binary file",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/bin.dat"},
+      "files": {"/bin.dat": "base64:AMA="},
+      "expect": {
+        "content": "Binary file: /bin.dat (application/octet-stream, 2 bytes)",
+        "attrs": {"action": "read", "path": "/bin.dat", "mime": "application/octet-stream", "size": "2"}
+      }
+    },
+    {
+      "name": "read no trailing newline",
+      "cmd": "fs",
+      "params": {"action": "read", "path": "/a.txt"},
+      "files": {"/a.txt": "only line"},
+      "expect": {
+        "content": "1\tonly line\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "1", "rows": "1", "range": "1-1", "truncated": "false"}
+      }
+    }
+  ]
+}

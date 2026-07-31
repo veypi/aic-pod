@@ -1,0 +1,123 @@
+{
+  "cases": [
+    {
+      "name": "write new file",
+      "cmd": "fs",
+      "params": {"action": "write", "path": "/notes.txt", "content": "第一行\n第二行\n"},
+      "files": {},
+      "expect": {
+        "content": "wrote file: /notes.txt (2 lines, 20 bytes)",
+        "attrs": {"action": "write", "path": "/notes.txt", "mode": "overwrite", "lines": "2", "bytes": "20"}
+      },
+      "expectFiles": {"/notes.txt": "第一行\n第二行\n"}
+    },
+    {
+      "name": "write creates parent dirs",
+      "cmd": "fs",
+      "params": {"action": "write", "path": "/a/b/c.txt", "content": "x"},
+      "files": {},
+      "expect": {
+        "content": "wrote file: /a/b/c.txt (1 lines, 1 bytes)",
+        "attrs": {"action": "write", "path": "/a/b/c.txt", "mode": "overwrite", "lines": "1", "bytes": "1"}
+      },
+      "expectFiles": {"/a/": "", "/a/b/": "", "/a/b/c.txt": "x"}
+    },
+    {
+      "name": "write append",
+      "cmd": "fs",
+      "params": {"action": "write", "path": "/log.txt", "content": "more\n", "append": true},
+      "files": {"/log.txt": "init\n"},
+      "expect": {
+        "content": "appended to /log.txt (+1 lines, +5 bytes)",
+        "attrs": {"action": "write", "path": "/log.txt", "mode": "append", "lines": "1", "bytes": "5"}
+      },
+      "expectFiles": {"/log.txt": "init\nmore\n"}
+    },
+    {
+      "name": "write empty content",
+      "cmd": "fs",
+      "params": {"action": "write", "path": "/empty.txt", "content": ""},
+      "files": {},
+      "expect": {
+        "content": "wrote file: /empty.txt (0 lines, 0 bytes)",
+        "attrs": {"action": "write", "path": "/empty.txt", "mode": "overwrite", "lines": "0", "bytes": "0"}
+      },
+      "expectFiles": {"/empty.txt": ""}
+    },
+    {
+      "name": "write content required",
+      "cmd": "fs",
+      "params": {"action": "write", "path": "/x.txt"},
+      "files": {},
+      "expectError": "fs write: content is required"
+    },
+    {
+      "name": "write with workdir",
+      "cmd": "fs",
+      "params": {"action": "write", "path": "notes.txt", "content": "hello", "workdir": "/wd"},
+      "files": {"/wd/": ""},
+      "expect": {
+        "content": "wrote file: /wd/notes.txt (1 lines, 5 bytes)",
+        "attrs": {"action": "write", "path": "/wd/notes.txt", "mode": "overwrite", "lines": "1", "bytes": "5"}
+      },
+      "expectFiles": {"/wd/": "", "/wd/notes.txt": "hello"}
+    },
+    {
+      "name": "edit single replacement",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "旧内容A", "newText": "新内容A"}]},
+      "files": {"/foo.txt": "前缀旧内容A后缀\n"},
+      "expect": {
+        "content": "updated file: /foo.txt (1 edits)",
+        "attrs": {"action": "edit", "path": "/foo.txt", "edits": "1"}
+      },
+      "expectFiles": {"/foo.txt": "前缀新内容A后缀\n"}
+    },
+    {
+      "name": "edit multiple edits",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "aaa", "newText": "bbb"}, {"oldText": "ccc", "newText": ""}]},
+      "files": {"/foo.txt": "aaa middle ccc end\n"},
+      "expect": {
+        "content": "updated file: /foo.txt (2 edits)",
+        "attrs": {"action": "edit", "path": "/foo.txt", "edits": "2"}
+      },
+      "expectFiles": {"/foo.txt": "bbb middle  end\n"}
+    },
+    {
+      "name": "edit oldText not found",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "nope", "newText": "x"}]},
+      "files": {"/foo.txt": "hello\n"},
+      "expectError": "fs edit: oldText not found in file"
+    },
+    {
+      "name": "edit oldText not unique",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "dup", "newText": "x"}]},
+      "files": {"/foo.txt": "dup and dup\n"},
+      "expectError": "fs edit: oldText matches 2 locations; provide more surrounding context to make it unique"
+    },
+    {
+      "name": "edit newText equals oldText",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "same", "newText": "same"}]},
+      "files": {"/foo.txt": "same\n"},
+      "expectError": "fs edit: newText must be different from oldText"
+    },
+    {
+      "name": "edit overlapping edits",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "abcdef", "newText": "x"}, {"oldText": "cde", "newText": "y"}]},
+      "files": {"/foo.txt": "abcdef\n"},
+      "expectError": "fs edit: edits overlap or nest; merge them into a single edit"
+    },
+    {
+      "name": "edit edits required",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt"},
+      "files": {"/foo.txt": "x\n"},
+      "expectError": "fs edit: edits is required"
+    }
+  ]
+}

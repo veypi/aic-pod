@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "name": "find recursive mtime desc",
+      "cmd": "find",
+      "argv": ["/docs"],
+      "files": {"/docs/old.txt": "o", "/docs/new.txt": "n", "/docs/sub/mid.txt": "m"},
+      "mtimes": {"/docs/old.txt": 1000, "/docs/new.txt": 3000, "/docs/sub/mid.txt": 2000, "/docs/sub/": 1500},
+      "expect": {
+        "content": "/docs/new.txt\t1\t3000\n/docs/sub/mid.txt\t1\t2000\n/docs/sub/\t0\t1500\n/docs/old.txt\t1\t1000",
+        "attrs": {"action": "find", "path": "/docs", "rows": "4", "truncated": "false"}
+      }
+    },
+    {
+      "name": "find -name glob",
+      "cmd": "find",
+      "argv": ["/docs", "-name", "*.txt"],
+      "files": {"/docs/a.txt": "a", "/docs/b.md": "b"},
+      "mtimes": {"/docs/a.txt": 1000, "/docs/b.md": 2000},
+      "expect": {
+        "content": "/docs/a.txt\t1\t1000",
+        "attrs": {"action": "find", "path": "/docs", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "find skips node_modules vendor dot dirs but not dotfiles",
+      "cmd": "find",
+      "argv": ["/p"],
+      "files": {
+        "/p/a.txt": "a",
+        "/p/.env": "secret",
+        "/p/node_modules/pkg/index.js": "x",
+        "/p/vendor/lib/v.go": "y",
+        "/p/.git/config": "z"
+      },
+      "mtimes": {"/p/a.txt": 1000, "/p/.env": 2000},
+      "expect": {
+        "content": "/p/.env\t6\t2000\n/p/a.txt\t1\t1000",
+        "attrs": {"action": "find", "path": "/p", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "find no match",
+      "cmd": "find",
+      "argv": ["/docs", "-name", "*.md"],
+      "files": {"/docs/a.txt": "a"},
+      "expect": {
+        "content": "no files matched glob \"*.md\" in /docs",
+        "attrs": {"action": "find", "path": "/docs", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "find single file as root",
+      "cmd": "find",
+      "argv": ["/docs/a.txt"],
+      "files": {"/docs/a.txt": "hello"},
+      "mtimes": {"/docs/a.txt": 1000},
+      "expect": {
+        "content": "/docs/a.txt\t5\t1000",
+        "attrs": {"action": "find", "path": "/docs/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "find requires path",
+      "cmd": "find",
+      "argv": [],
+      "files": {},
+      "expectError": "find: missing argument (expected at least 1, got 0)"
+    }
+  ]
+}

@@ -16,6 +16,10 @@ type ExecError struct {
 }
 
 func (e *ExecError) Error() string {
+	if e.Tool == "" {
+		// 虚拟指令错误：{cmd}: {原因}（§5.4，指令名本身即 action）
+		return fmt.Sprintf("%s: %s", e.Action, e.Reason)
+	}
 	if e.Action == "" {
 		return fmt.Sprintf("%s: %s", e.Tool, e.Reason)
 	}

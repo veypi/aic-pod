@@ -1,0 +1,80 @@
+{
+  "cases": [
+    {
+      "name": "curl basic download",
+      "cmd": "curl",
+      "argv": ["-o", "/dl/f.bin", "https://example.com/f.bin"],
+      "files": {},
+      "fetch": {"https://example.com/f.bin": "hello world"},
+      "expect": {
+        "content": "downloaded https://example.com/f.bin to /dl/f.bin (11 bytes)",
+        "attrs": {"action": "curl", "path": "/dl/f.bin", "bytes": "11"}
+      },
+      "expectFiles": {"/dl/": "", "/dl/f.bin": "hello world"}
+    },
+    {
+      "name": "curl scheme case insensitive",
+      "cmd": "curl",
+      "argv": ["-o", "/f.txt", "HTTP://example.com/x"],
+      "files": {},
+      "fetch": {"HTTP://example.com/x": "ok"},
+      "expect": {
+        "content": "downloaded HTTP://example.com/x to /f.txt (2 bytes)",
+        "attrs": {"action": "curl", "path": "/f.txt", "bytes": "2"}
+      },
+      "expectFiles": {"/f.txt": "ok"}
+    },
+    {
+      "name": "curl destination exists",
+      "cmd": "curl",
+      "argv": ["-o", "/f.txt", "https://example.com/x"],
+      "files": {"/f.txt": "old"},
+      "fetch": {"https://example.com/x": "new"},
+      "expectError": "curl: destination /f.txt already exists"
+    },
+    {
+      "name": "curl cloud scheme reserved",
+      "cmd": "curl",
+      "argv": ["-o", "/f.txt", "cloud:/sessions/s1/a.txt"],
+      "files": {},
+      "expectError": "curl: scheme not yet supported: cloud"
+    },
+    {
+      "name": "curl host scheme reserved",
+      "cmd": "curl",
+      "argv": ["-o", "/f.txt", "host_abc:/var/log/a.log"],
+      "files": {},
+      "expectError": "curl: scheme not yet supported: host_abc"
+    },
+    {
+      "name": "curl missing scheme",
+      "cmd": "curl",
+      "argv": ["-o", "/f.txt", "example.com/x"],
+      "files": {},
+      "expectError": "curl: invalid url \"example.com/x\": missing scheme"
+    },
+    {
+      "name": "curl max-size exceeded deletes partial",
+      "cmd": "curl",
+      "argv": ["-o", "/big.bin", "--max-size", "1", "https://example.com/big"],
+      "files": {},
+      "fetch": {"https://example.com/big": "repeat:3MB"},
+      "expectError": "curl: size limit exceeded (3MB > 1MB)",
+      "expectFiles": {}
+    },
+    {
+      "name": "curl unavailable without fetcher",
+      "cmd": "curl",
+      "argv": ["-o", "/f.txt", "https://example.com/x"],
+      "files": {},
+      "expectError": "curl: curl is not available on this host"
+    },
+    {
+      "name": "curl -o required",
+      "cmd": "curl",
+      "argv": ["https://example.com/x"],
+      "files": {},
+      "expectError": "curl: -o is required"
+    }
+  ]
+}

@@ -1,0 +1,164 @@
+{
+  "cases": [
+    {
+      "name": "rm file",
+      "cmd": "rm",
+      "argv": ["/tmp.txt"],
+      "files": {"/tmp.txt": "x"},
+      "expect": {
+        "content": "removed /tmp.txt",
+        "attrs": {"action": "rm", "path": "/tmp.txt"}
+      },
+      "expectFiles": {}
+    },
+    {
+      "name": "rm empty dir",
+      "cmd": "rm",
+      "argv": ["/d"],
+      "files": {"/d/": ""},
+      "expect": {
+        "content": "removed /d",
+        "attrs": {"action": "rm", "path": "/d"}
+      },
+      "expectFiles": {}
+    },
+    {
+      "name": "rm non-empty dir without -r",
+      "cmd": "rm",
+      "argv": ["/d"],
+      "files": {"/d/a.txt": "a"},
+      "expectError": "rm: /d is a non-empty directory (use -r)"
+    },
+    {
+      "name": "rm -r counts items",
+      "cmd": "rm",
+      "argv": ["-r", "/d"],
+      "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b"},
+      "expect": {
+        "content": "removed /d (3 items)",
+        "attrs": {"action": "rm", "path": "/d", "items": "3"}
+      },
+      "expectFiles": {}
+    },
+    {
+      "name": "rm root protection",
+      "cmd": "rm",
+      "argv": ["-r", "/users/u1"],
+      "protectRoots": ["/users/u1"],
+      "files": {"/users/u1/a.txt": "a"},
+      "expectError": "rm: cannot remove root directory /users/u1"
+    },
+    {
+      "name": "mkdir basic",
+      "cmd": "mkdir",
+      "argv": ["/newdir"],
+      "files": {},
+      "expect": {
+        "content": "created /newdir",
+        "attrs": {"action": "mkdir", "path": "/newdir"}
+      },
+      "expectFiles": {"/newdir/": ""}
+    },
+    {
+      "name": "mkdir exists without -p",
+      "cmd": "mkdir",
+      "argv": ["/d"],
+      "files": {"/d/": ""},
+      "expectError": "mkdir: /d already exists"
+    },
+    {
+      "name": "mkdir -p idempotent",
+      "cmd": "mkdir",
+      "argv": ["-p", "/d"],
+      "files": {"/d/": ""},
+      "expect": {
+        "content": "created /d",
+        "attrs": {"action": "mkdir", "path": "/d"}
+      },
+      "expectFiles": {"/d/": ""}
+    },
+    {
+      "name": "mkdir parent missing without -p",
+      "cmd": "mkdir",
+      "argv": ["/a/b"],
+      "files": {},
+      "expectError": "mkdir: parent directory does not exist: /a"
+    },
+    {
+      "name": "cp file",
+      "cmd": "cp",
+      "argv": ["/a.txt", "/b.txt"],
+      "files": {"/a.txt": "content"},
+      "expect": {
+        "content": "copied /a.txt to /b.txt",
+        "attrs": {"action": "cp", "path": "/b.txt", "source_path": "/a.txt"}
+      },
+      "expectFiles": {"/a.txt": "content", "/b.txt": "content"}
+    },
+    {
+      "name": "cp destination exists",
+      "cmd": "cp",
+      "argv": ["/a.txt", "/b.txt"],
+      "files": {"/a.txt": "x", "/b.txt": "y"},
+      "expectError": "cp: destination /b.txt already exists"
+    },
+    {
+      "name": "cp dir without -r",
+      "cmd": "cp",
+      "argv": ["/d", "/e"],
+      "files": {"/d/a.txt": "a"},
+      "expectError": "cp: /d is a directory (use -r)"
+    },
+    {
+      "name": "cp -r dir",
+      "cmd": "cp",
+      "argv": ["-r", "/d", "/e"],
+      "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b"},
+      "expect": {
+        "content": "copied /d to /e",
+        "attrs": {"action": "cp", "path": "/e", "source_path": "/d"}
+      },
+      "expectFiles": {"/d/": "", "/d/a.txt": "a", "/d/sub/": "", "/d/sub/b.txt": "b", "/e/": "", "/e/a.txt": "a", "/e/sub/": "", "/e/sub/b.txt": "b"}
+    },
+    {
+      "name": "cp into itself",
+      "cmd": "cp",
+      "argv": ["-r", "/d", "/d/sub"],
+      "files": {"/d/a.txt": "a"},
+      "expectError": "cp: cannot copy directory /d into itself: /d/sub"
+    },
+    {
+      "name": "mv file",
+      "cmd": "mv",
+      "argv": ["/old.txt", "/new.txt"],
+      "files": {"/old.txt": "content"},
+      "expect": {
+        "content": "moved /old.txt to /new.txt",
+        "attrs": {"action": "mv", "path": "/new.txt", "source_path": "/old.txt"}
+      },
+      "expectFiles": {"/new.txt": "content"}
+    },
+    {
+      "name": "mv identical",
+      "cmd": "mv",
+      "argv": ["/a.txt", "/a.txt"],
+      "files": {"/a.txt": "x"},
+      "expectError": "mv: /a.txt and /a.txt are identical"
+    },
+    {
+      "name": "mv destination exists",
+      "cmd": "mv",
+      "argv": ["/a.txt", "/b.txt"],
+      "files": {"/a.txt": "x", "/b.txt": "y"},
+      "expectError": "mv: destination /b.txt already exists"
+    },
+    {
+      "name": "mv root protection",
+      "cmd": "mv",
+      "argv": ["/users/u1", "/elsewhere"],
+      "protectRoots": ["/users/u1"],
+      "files": {"/users/u1/a.txt": "a"},
+      "expectError": "mv: cannot move root directory /users/u1"
+    }
+  ]
+}

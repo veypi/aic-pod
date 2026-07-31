@@ -1,0 +1,99 @@
+{
+  "cases": [
+    {
+      "name": "ls directory",
+      "cmd": "ls",
+      "argv": ["/docs"],
+      "files": {"/docs/a.txt": "a", "/docs/b.txt": "b", "/docs/sub/": ""},
+      "expect": {
+        "content": "a.txt\nb.txt\nsub/",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -la with size and mtime",
+      "cmd": "ls",
+      "argv": ["-la", "/docs"],
+      "files": {"/docs/b.txt": "bb", "/docs/a.txt": "a"},
+      "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000001},
+      "expect": {
+        "content": "a.txt\t1\t1700000000\nb.txt\t2\t1700000001",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls single file",
+      "cmd": "ls",
+      "argv": ["/docs/a.txt"],
+      "files": {"/docs/a.txt": "a"},
+      "expect": {
+        "content": "",
+        "attrs": {"action": "ls", "path": "/docs/a.txt", "path_kind": "file", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls empty directory",
+      "cmd": "ls",
+      "argv": ["/docs"],
+      "files": {"/docs/": ""},
+      "expect": {
+        "content": "empty directory: /docs",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls default workdir",
+      "cmd": "ls",
+      "argv": [],
+      "workdir": "/wd",
+      "files": {"/wd/x.txt": "x"},
+      "expect": {
+        "content": "x.txt",
+        "attrs": {"action": "ls", "path": "/wd", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls relative path via workdir",
+      "cmd": "ls",
+      "argv": ["sub"],
+      "workdir": "/wd",
+      "files": {"/wd/sub/y.txt": "y"},
+      "expect": {
+        "content": "y.txt",
+        "attrs": {"action": "ls", "path": "/wd/sub", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls with root var",
+      "cmd": "ls",
+      "argv": ["$USER/docs"],
+      "vars": {"$USER": "/users/u1"},
+      "files": {"/users/u1/docs/z.txt": "z"},
+      "expect": {
+        "content": "z.txt",
+        "attrs": {"action": "ls", "path": "/users/u1/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls unknown flag",
+      "cmd": "ls",
+      "argv": ["-x"],
+      "files": {},
+      "expectError": "ls: unknown flag \"-x\""
+    },
+    {
+      "name": "ls extra positional",
+      "cmd": "ls",
+      "argv": ["/a", "/b"],
+      "files": {},
+      "expectError": "ls: unexpected argument \"/b\""
+    },
+    {
+      "name": "ls flag equals form rejected",
+      "cmd": "ls",
+      "argv": ["--la=true"],
+      "files": {},
+      "expectError": "ls: unknown flag \"--la=true\" (use \"--flag value\" two-element form)"
+    }
+  ]
+}
