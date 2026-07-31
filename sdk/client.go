@@ -15,6 +15,10 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// unsignedToolGrantedLevel 是 Unsigned 工具的固定执行等级：owner 浏览器直连
+// 语义，等价于用户本人操作（授权已由 natsauth subject 所有权保证）。
+const unsignedToolGrantedLevel = 3
+
 // Client 是 AIC Env 客户端。
 type Client struct {
 	opts    Options
@@ -56,6 +60,7 @@ func New(opts Options) *Client {
 		tools: []Tool{
 			ExecTool(opts.WorkDir, opts.ExecTimeout),
 			FsTool(),
+			HfsTool(),
 		},
 	}
 }
@@ -228,18 +233,31 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 
 	c.logf("→ request: %s deadline=%s (msg=%s)", req.ToolName, req.Deadline, req.MsgID)
 
-	// ---- 防重放（§10.1 host 端验证规范，必须实现） ----
-
-	// 1. 验签
-	if req.Signature == "" {
-		c.logf("tool request rejected: missing K_tool signature for %s", req.ToolName)
-		c.respond(msg, toolResponse{State: "rejected", Error: "missing request signature"})
+	t := c.findTool(req.ToolName)
+	if t == nil {
+		c.logf("tool request: unknown tool %s", req.ToolName)
+		c.respond(msg, toolResponse{State: "error", Error: fmt.Sprintf("unknown tool: %s", req.ToolName)})
 		return
 	}
-	if !verifyToolRequestSig(&req, c.hostID, c.kTool) {
-		c.logf("tool request rejected: invalid K_tool signature for %s", req.ToolName)
-		c.respond(msg, toolResponse{State: "rejected", Error: "invalid request signature"})
-		return
+
+	// ---- 防重放（§10.1 host 端验证规范，必须实现） ----
+
+	// 1. 验签（Unsigned 工具除外：授权依赖 natsauth subject 所有权——仅 owner
+	//    前端连接与 aic server 可发布到本 subject；此类工具固定以 owner 直连
+	//    等级执行，信封自报的 GrantedLevel 不可信、直接覆盖）
+	if t.Unsigned {
+		req.GrantedLevel = unsignedToolGrantedLevel
+	} else {
+		if req.Signature == "" {
+			c.logf("tool request rejected: missing K_tool signature for %s", req.ToolName)
+			c.respond(msg, toolResponse{State: "rejected", Error: "missing request signature"})
+			return
+		}
+		if !verifyToolRequestSig(&req, c.hostID, c.kTool) {
+			c.logf("tool request rejected: invalid K_tool signature for %s", req.ToolName)
+			c.respond(msg, toolResponse{State: "rejected", Error: "invalid request signature"})
+			return
+		}
 	}
 
 	// 2. deadline 过期拒绝
@@ -259,13 +277,6 @@ func (c *Client) handleToolRequest(msg *nats.Msg) {
 	if req.Nonce != "" && !c.replay.checkAndMark(req.Nonce, deadline) {
 		c.logf("tool request rejected: duplicate nonce (msg=%s)", req.MsgID)
 		c.respond(msg, toolResponse{State: "rejected", Error: "duplicate nonce"})
-		return
-	}
-
-	t := c.findTool(req.ToolName)
-	if t == nil {
-		c.logf("tool request: unknown tool %s", req.ToolName)
-		c.respond(msg, toolResponse{State: "error", Error: fmt.Sprintf("unknown tool: %s", req.ToolName)})
 		return
 	}
 

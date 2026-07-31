@@ -46,6 +46,10 @@ type ToolHandler func(ctx context.Context, toolData any) (*ToolResult, error)
 type Tool struct {
 	Def     ToolDef
 	Handler ToolHandler
+	// Unsigned 为 true 时跳过 K_tool 验签（如 hfs 浏览器直连工具）。
+	// 授权依赖 natsauth 的 subject 所有权（仅 owner/server 可发布到请求
+	// subject）；此类工具以固定等级执行，信封自报的 GrantedLevel 被忽略。
+	Unsigned bool
 }
 
 // ToolParams 是标准 action + argv 参数结构。
