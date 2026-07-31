@@ -3,7 +3,7 @@
  *
  * 1. Load settings from chrome.storage.local
  * 2. Initialize AICClient with credential + NATS URL
- * 3. Register web_browser tool
+ * 3. Register browser tool
  * 4. Connect to NATS + publish CAPS
  * 5. Handle connect/disconnect based on settings
  */

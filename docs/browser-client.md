@@ -40,11 +40,11 @@
 
 ## 工具定义
 
-浏览器插件注册一个 `web_browser` 工具，与 `agent-browser` CLI 签名对齐。
+浏览器插件注册一个 `browser` 工具，与 `agent-browser` CLI 签名对齐。
 
 ```json
 {
-  "name": "web_browser",
+  "name": "browser",
   "description": "Control a web browser via Chrome Extension APIs. Actions: open, click, close, dblclick, download, eval, get, network, read, screenshot, snapshot, tab, wait, scroll, hover, fill, press, select, back, forward, reload, sleep, cookies, storage, pipeline.",
   "parameters": {
     "type": "object",
@@ -405,11 +405,11 @@ browser/
 │   │   ├── crypto.js             # HKDF + HMAC-SHA256 (Web Crypto API)
 │   │   ├── auth.js               # Token 生成 (e1.*)
 │   │   ├── client.js             # NATS 连接 / CAPS 发布 / 心跳 / 重连
-│   │   ├── handler.js            # Tool request 验签 + 分发
+│   │   ├── argv.js               # action+argv 双层解析
 │   │   └── storage.js            # chrome.storage.local 读写封装
 │   │
 │   └── tools/                    # 工具实现
-│       ├── web_browser.js        # open/click/dblclick/download/eval/get/network/read/screenshot/snapshot/tab/wait/scroll/hover/fill/press/select/back/forward/reload/sleep/cookies/storage/pipeline
+│       ├── browser.js            # open/click/close/download/eval/get/network/read/screenshot/snapshot/tab/wait/sleep 等核心 action
 │       └── registry.js           # 工具注册表 (name → handler 映射)
 │
 └── dist/                        # 构建产出 (make build)
@@ -427,7 +427,7 @@ background.js
   │
   ├── sdk/handler.js      → 验签 + 工具分发
   │   └── tools/registry.js
-  │       └── tools/web_browser.js
+  │       └── tools/browser.js
   │
   └── sdk/storage.js      → 读取用户设置
 ```

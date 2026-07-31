@@ -99,6 +99,10 @@ export class AICClient {
     const natsOpts = {
       servers: [natsURL],
       name: `aic-browser-${hostID}`,
+      // inboxPrefix 必须落在 u.{uid} 权限域内：默认 _INBOX.* 的 mux 订阅会触发
+      // natsauth Permissions Violation，导致所有 request/reply（含 hfs 直连）失效。
+      // 与 aic 仓库 nc.worker.js 的修复保持一致。
+      inboxPrefix: `u.${uid}._INBOX`,
       token: token,
       reconnect: true,
       maxReconnectAttempts: -1,

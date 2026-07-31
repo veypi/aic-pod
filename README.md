@@ -144,7 +144,7 @@ make build-browser   # → dist/aic-browser.zip
 
 ### 工具能力
 
-插件注册一个 `web_browser` 工具，签名与 `agent-browser` CLI 对齐：
+插件注册一个 `browser` 工具，签名与 `agent-browser` CLI 对齐：
 
 ```json
 { "action": "<action>", "argv": ["..."] }
@@ -177,7 +177,7 @@ make build-browser   # → dist/aic-browser.zip
 | 维度 | desktop (CLI/Docker) | browser (Extension) |
 |---|---|---|
 | 运行时 | 独立二进制 | Chrome Service Worker |
-| 核心能力 | `exec` (命令执行), `fs` (文件操作) | `web_browser` (浏览器自动化) |
+| 核心能力 | `exec` (命令执行), `fs` (文件操作) | `browser` (浏览器自动化) |
 | 登录态 | 无状态 | 直接用浏览器登录态 |
 | 安装 | 下载二进制 | 加载扩展 |
 | 适用场景 | 服务器运维 | Web 自动化测试、网页数据采集 |

@@ -17,15 +17,20 @@ aic-pod/
 ├── Makefile
 │
 ├── sdk/                  # Go SDK 包，desktop / embedded 等 Go 客户端引用
-│   ├── client.go         # NATS 连接 + 重连 + 断线处理
-│   ├── auth.go           # Token 生成 + HMAC 签名
-│   ├── crypto.go         # HKDF 密钥派生
-│   ├── exec.go           # exec 工具实现
-│   ├── exec_unix.go      # Unix setpgid
+│   ├── client.go         # NATS 连接/重连/断线处理 + CAPS 发布 + 心跳 + 工具请求分发（验签/防重放/权限/幂等）
+│   ├── auth.go           # Token 生成 + HMAC 签名 + 工具请求验签
+│   ├── crypto.go         # HKDF 密钥派生 (K_connect / K_server / K_tool)
+│   ├── types.go          # 公共类型定义 (Options/Tool/ToolDef/请求响应载荷)
+│   ├── argv.go           # action+argv 双层解析 (flagSet/parseActionArgv)
+│   ├── exec.go           # exec 工具实现 (后台进程 bg_list/wait/kill)
+│   ├── exec_unix.go      # Unix setpgid + 进程组杀死
 │   ├── exec_windows.go   # Windows 空实现
-│   ├── fs.go             # fs 工具实现 (9 种 action)
+│   ├── fs.go             # fs 工具实现 (10 种 action, 含 download/图片处理)
+│   ├── hfs.go            # hfs 结构化文件工具 (浏览器直连, 免签)
+│   ├── search.go         # 搜索遍历/glob 匹配/mime 检测
+│   ├── image.go          # 图片尺寸/压缩 (600KB 对齐服务端)
 │   ├── cache.go          # 幂等缓存
-│   └── types.go          # 公共类型定义
+│   └── replay.go         # nonce 防重放缓存
 │
 ├── desktop/              # PC 桌面客户端入口 (Windows / macOS / Linux)
 │   └── main.go
@@ -33,7 +38,7 @@ aic-pod/
 ├── embedded/             # 嵌入式设备客户端入口 (树莓派 / IoT) (未来)
 │   └── main.go
 │
-├── browser/              # 浏览器插件 (Chrome / Firefox) (未来)
+├── browser/              # 浏览器插件 (Chrome MV3, 已实现; Firefox 未做)
 │   ├── manifest.json
 │   └── src/
 │
@@ -148,14 +153,14 @@ aic-pod/
 
 **输出：** stdout+stderr 合并写入系统临时目录下 `aic/{session_id}/{request_id}.log`（Linux `/tmp`，macOS `$TMPDIR`，Windows `%TEMP%`），响应 `content` 最多返回前 1000 行。`attrs.path` 指向完整日志，Agent 可通过 fs read 查看全文。
 
-**实现要点：** `exec.Command(action, argv...)` 直接调用，`action` 可以是 shell 也可以是任意可执行文件。超时 50s，设置独立进程组（`setpgid`）。
+**实现要点：** `exec.Command(action, argv...)` 直接调用，`action` 可以是 shell 也可以是任意可执行文件。后台超时默认 10m（`EXEC_TIMEOUT` 可调），请求 deadline 到期自动转后台；设置独立进程组（`setpgid`）。
 
 #### fs — 文件操作
 
 | 字段 | 值 |
 |------|-----|
 | `name` | `fs` |
-| `required_level` | 1 (Confirm) |
+| `required_level` | 1 (Confirm)，`rm` 单独 2 |
 
 | action | argv | 说明 |
 |--------|------|------|
@@ -168,6 +173,7 @@ aic-pod/
 | `cp` | `<src> <dest>` | 复制文件 |
 | `mv` | `<src> <dest>` | 移动/重命名文件 |
 | `search` | `<root> [--glob <pattern>] [--pattern <substr>] [--limit N] [--ignore-case]` | 搜索文件 |
+| `download` | `<path> --from <url> [--max-size MB]` | 从 http(s) 下载文件到本地 |
 
 ### 自定义工具
 
@@ -226,16 +232,18 @@ aic-pod/
 **模块划分：**
 
 ```
-client.go     # New(opts...) → (*Client, error) → Connect/Close
-auth.go       # Token 生成 (ConnectSigInput + HMAC-SHA256)
-crypto.go     # HKDF 密钥派生 (K_connect, K_tool)
-caps.go       # PublishCaps → 声明设备信息和工具列表
-heartbeat.go  # 每 20s 发布 presence
-registry.go   # RegisterTool / OnToolRequest 工具注册 + 分发
-exec.go       # 命令执行 (setpgid, 50s 超时, exit code)
-fs.go         # 文件操作 (9 种 action)
+client.go     # NATS 连接/重连/断线 + Connect/Close；内部含 PublishCaps、20s 心跳、工具请求分发
+auth.go       # Token 生成 (canonical + HMAC-SHA256) + 工具请求验签
+crypto.go     # HKDF 密钥派生 (K_connect, K_server, K_tool)
+types.go      # Options/Tool/ToolDef/请求响应载荷类型定义
+argv.go       # action+argv 双层解析 (flagSet/parseActionArgv)
+exec.go       # 命令执行 (setpgid, 默认 10m 超时, exit code) + bg_list/wait/kill
+fs.go         # 文件操作 (10 种 action, 含 download/图片压缩)
+hfs.go        # hfs 结构化文件工具 (浏览器直连, 免签, depth 嵌套)
+search.go     # 搜索遍历/glob 匹配/mime 检测/文本判定
+image.go      # 图片尺寸/压缩 (600KB 对齐服务端投递标准)
 cache.go      # 幂等缓存
-types.go      # 请求/响应/签名载荷类型定义
+replay.go     # nonce 防重放缓存
 ```
 
 **客户端只需做的：**
@@ -303,5 +311,5 @@ c.Connect()
 |------|------|
 | **Phase 1** | `sdk/` + `desktop` — 从 aic 仓库迁移 demo，编译为独立二进制 |
 | **Phase 2** | `embedded` — 适配 tinygo，减小体积，添加命令白名单 |
-| **Phase 3** | `sdk/ts` + `browser` — Chrome 插件，Web Crypto API 实现 |
+| **Phase 3** | ~~`sdk/ts` + `browser`~~ — Chrome 插件已实现（Web Crypto API，MV3） |
 | **Phase 4** | `sdk/dart` + `mobile` — Flutter App |

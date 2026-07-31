@@ -20,26 +20,26 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 
 | Subject | 方向 | 说明 |
 |---------|------|------|
-| `u.{uid}.e.{env_id}.{cred_ver}.caps` | Client → Server | 能力声明，连接成功后立即发布 |
-| `u.{uid}.e.{env_id}.{cred_ver}.presence` | Client → Server | 心跳，每 20s |
-| `u.{uid}.e.{env_id}.{cred_ver}.tool.{name}.req` | Server → Client | 工具请求（req-reply） |
+| `u.{uid}.h.{host_id}.{cred_ver}.caps` | Client → Server | 能力声明，连接成功后立即发布 |
+| `u.{uid}.h.{host_id}.{cred_ver}.presence` | Client → Server | 心跳，每 20s |
+| `u.{uid}.h.{host_id}.{cred_ver}.tool.{name}.req` | Server → Client | 工具请求（req-reply） |
 
 ### 连接鉴权
 
 1. 客户端使用 Token 认证连接 NATS
-2. Token 格式: `e1.{env_id}.{env_info_b64}.{ts_ms}.{nonce_b64}.{sig_b64}`
+2. Token 格式: `e1.{host_id}.{host_info_b64}.{ts_ms}.{nonce_b64}.{sig_b64}`
 3. NATS Server 通过 Auth Callout 验证 HMAC 签名
 4. 通过后签发限域 JWT，客户端只能访问自己环境的 subject
 
 ### CAPS — 能力声明
 
-**Subject:** `u.{uid}.e.{env_id}.{cred_ver}.caps`
+**Subject:** `u.{uid}.h.{host_id}.{cred_ver}.caps`
 
 **Payload:**
 
 ```json
 {
-  "env_id": "abc123",
+  "host_id": "abc123",
   "agent_version": "v0.2.0",
   "credential_ver": 1,
   "device_type": "cli",
@@ -80,13 +80,13 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 
 ### Presence — 心跳
 
-**Subject:** `u.{uid}.e.{env_id}.{cred_ver}.presence`
+**Subject:** `u.{uid}.h.{host_id}.{cred_ver}.presence`
 
 **Payload:**
 
 ```json
 {
-  "env_id": "abc123",
+  "host_id": "abc123",
   "credential_ver": 1,
   "running": 1,
   "sent_at": "2026-07-18T10:30:00Z"
@@ -101,7 +101,7 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 
 ### Tool Request — 服务端发送工具请求
 
-**Subject:** `u.{uid}.e.{env_id}.{cred_ver}.tool.{tool_name}.req`
+**Subject:** `u.{uid}.h.{host_id}.{cred_ver}.tool.{tool_name}.req`
 
 **方向:** Server → Client (NATS Request-Reply)
 
@@ -120,7 +120,6 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
   "nonce": "abc123def456",
   "deadline": "2026-07-18T10:31:00Z",
   "sig": "base64url_hmac_signature",
-  "env_id": "abc123"
 }
 ```
 
@@ -134,7 +133,6 @@ AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 N
 | `nonce` | string | 随机数 Base64URL |
 | `deadline` | string | RFC3339 截止时间，过期请求客户端应拒绝 |
 | `sig` | string | HMAC-SHA256(K_tool, canonical)，客户端**必须验签** |
-| `env_id` | string | 目标环境 ID |
 
 ### Tool Response — 客户端回复
 
@@ -244,15 +242,15 @@ function handle(data, grantedLevel):
 
 ## 一、获取凭据
 
-在 AIC 平台上创建环境后，会得到凭据，格式为：
+在 AIC 平台上创建主机（host）后，会得到凭据，格式为：
 
 ```
-<env_id>.<cred_ver>.<secret>.<uid>
+<host_id>.<cred_ver>.<secret>.<uid>
 ```
 
 | 字段 | 含义 | 说明 |
 |------|------|------|
-| `env_id` | 环境唯一标识 | 创建环境时生成 |
+| `host_id` | 主机唯一标识 | 创建主机（host）时生成 |
 | `cred_ver` | 凭据版本号 | 初始为 `1`，密钥吊销后递增 |
 | `secret` | 主密钥 | **仅此一次返回**，永不在线传输 |
 | `uid` | 用户 ID | AIC 平台账户 |
@@ -263,12 +261,12 @@ function handle(data, grantedLevel):
 
 ## 二、密钥派生
 
-从 `secret` 和 `env_id` 通过 **HKDF-SHA256** 派生三个用途隔离的密钥：
+从 `secret` 和 `host_id` 通过 **HKDF-SHA256** 派生三个用途隔离的密钥：
 
 ```
-K_connect  = HKDF-SHA256(secret, salt=env_id, info="aic/env/connect/v1")    → 32 字节，Base64URL
-K_server   = HKDF-SHA256(secret, salt=env_id, info="aic/env/server-proof/v1") → 32 字节，Base64URL
-K_tool     = HKDF-SHA256(secret, salt=env_id, info="aic/env/tool-request/v1") → 32 字节，Base64URL
+K_connect  = HKDF-SHA256(secret, salt=host_id, info="aic/host/connect/v1")    → 32 字节，Base64URL
+K_server   = HKDF-SHA256(secret, salt=host_id, info="aic/host/server-proof/v1") → 32 字节，Base64URL
+K_tool     = HKDF-SHA256(secret, salt=host_id, info="aic/host/tool-request/v1") → 32 字节，Base64URL
 ```
 
 | 密钥 | 用途 |
@@ -287,26 +285,26 @@ K_tool     = HKDF-SHA256(secret, salt=env_id, info="aic/env/tool-request/v1") �
 |------|-----|------|
 | URL | `wss://ivec.ai/aic/api/nc` | NATS over WebSocket |
 | 认证方式 | Token | 动态生成连接 token |
-| Name | `aic-env-<env_id>` | **建议设置**，便于服务端日志追踪 |
+| Name | `aic-host-<host_id>` | **建议设置**，便于服务端日志追踪 |
 
 每次连接（含自动重连）需新生成一个 token，不能复用。
 
 ### 3.2 连接 Token 格式
 
 ```
-e1.<env_id>.<env_info_b64>.<ts_ms>.<nonce_b64>.<sig_b64>
+e1.<host_id>.<host_info_b64>.<ts_ms>.<nonce_b64>.<sig_b64>
 ```
 
 | 字段 | 说明 | 约束 |
 |------|------|------|
 | `e1` | 协议版本前缀 | 固定值 |
-| `env_id` | 环境 ID | 不含 `.` `*` `>` 和空白字符 |
-| `env_info_b64` | 设备信息 JSON 的 Base64URL 编码 | JSON 原文 ≤ 1024 字节 |
+| `host_id` | 主机 ID | 不含 `.` `*` `>` 和空白字符 |
+| `host_info_b64` | 设备信息 JSON 的 Base64URL 编码 | JSON 原文 ≤ 1024 字节 |
 | `ts_ms` | Unix 毫秒时间戳 | 与服务器时钟偏差需在 ±60s 内 |
 | `nonce_b64` | 随机数 Base64URL | 16 字节，每次连接必须不同 |
 | `sig_b64` | HMAC-SHA256 签名 Base64URL | 32 字节 |
 
-### 3.3 env_info JSON 结构
+### 3.3 host_info JSON 结构
 
 ```json
 {
@@ -327,7 +325,7 @@ e1.<env_id>.<env_info_b64>.<ts_ms>.<nonce_b64>.<sig_b64>
 签名输入为**紧凑 JSON**（字段顺序固定，无空格无换行）：
 
 ```json
-{"domain":"aic-env-connect-v1","env_id":"<env_id>","uid":"<uid>","env_info":"<env_info JSON 原文，非 Base64>","unix_ms":<整数>,"nonce":"<nonce_b64>"}
+{"domain":"aic-host-connect-v1","host_id":"<host_id>","uid":"<uid>","host_info":"<host_info JSON 原文，非 Base64>","unix_ms":<整数>,"nonce":"<nonce_b64>"}
 ```
 
 ```
@@ -335,7 +333,7 @@ sig = HMAC-SHA256(K_connect, 签名输入)
 sig_b64 = Base64URL(sig)
 ```
 
-> 签名输入必须是紧凑格式（无空格、无换行），字段键名固定不可更改。env_info 使用 JSON 原文而非 Base64 编码值。
+> 签名输入必须是紧凑格式（无空格、无换行），字段键名固定不可更改。host_info 使用 JSON 原文而非 Base64 编码值。
 
 ### 3.5 连接被拒
 
@@ -348,7 +346,7 @@ sig_b64 = Base64URL(sig)
 NATS 连接成功后，**立即发布**能力声明到：
 
 ```
-u.<uid>.e.<env_id>.<cred_ver>.caps
+u.<uid>.h.<host_id>.<cred_ver>.caps
 ```
 
 每次重连成功后也必须重新发布。
@@ -357,7 +355,7 @@ u.<uid>.e.<env_id>.<cred_ver>.caps
 
 ```json
 {
-  "env_id": "<env_id>",
+  "host_id": "<host_id>",
   "agent_version": "v0.2.0",
   "credential_ver": 1,
   "device_type": "cli",
@@ -412,7 +410,7 @@ u.<uid>.e.<env_id>.<cred_ver>.caps
 | `required_level` | int | 权限等级：1=Confirm, 2=Auto, 3=Allow。低于此等级的调用会被拒绝 |
 | `policy_version` | string | 策略版本标识（可自定义） |
 
-> 至少需声明 `exec` 和 `fs` 两个内置工具，否则 LLM 无法执行命令和操作文件。自定义工具使用 `env_run` 调用。
+> 至少需声明 `exec` 和 `fs` 两个内置工具，否则 LLM 无法执行命令和操作文件。自定义工具以工具名直接调用。
 
 ---
 
@@ -421,14 +419,14 @@ u.<uid>.e.<env_id>.<cred_ver>.caps
 每 **20 秒**发布一次心跳到：
 
 ```
-u.<uid>.e.<env_id>.<cred_ver>.presence
+u.<uid>.h.<host_id>.<cred_ver>.presence
 ```
 
 ### 载荷格式
 
 ```json
 {
-  "env_id": "<env_id>",
+  "host_id": "<host_id>",
   "credential_ver": 1,
   "running": 1,
   "sent_at": "2026-07-17T10:30:00Z"
@@ -440,7 +438,7 @@ u.<uid>.e.<env_id>.<cred_ver>.presence
 | `running` | 固定为 `1`（表示在线） |
 | `sent_at` | RFC3339 UTC 时间戳 |
 
-> 心跳中断后，服务端会在两次心跳周期内标记环境为 offline。建议客户端在后台 goroutine/线程中持续发送，网络抖动时适当容忍。
+> 心跳中断后，服务端会在两次心跳周期内标记主机为 offline。建议客户端在后台 goroutine/线程中持续发送，网络抖动时适当容忍。
 
 ---
 
@@ -449,16 +447,16 @@ u.<uid>.e.<env_id>.<cred_ver>.presence
 订阅通配符主题接收工具调用：
 
 ```
-u.<uid>.e.<env_id>.<cred_ver>.tool.*.req
+u.<uid>.h.<host_id>.<cred_ver>.tool.*.req
 ```
 
-当 LLM 调用 `env_exec`、`env_fs` 或 `env_run` 时，服务端会向对应主题发送请求：
+当 LLM 调用 `exec`、`fs` 或自定义工具时，服务端会向对应主题发送请求：
 
 | 工具 | 主题 |
 |------|------|
-| `exec` | `u.<uid>.e.<env_id>.<cred_ver>.tool.exec.req` |
-| `fs` | `u.<uid>.e.<env_id>.<cred_ver>.tool.fs.req` |
-| 自定义工具 | `u.<uid>.e.<env_id>.<cred_ver>.tool.<tool_name>.req` |
+| `exec` | `u.<uid>.h.<host_id>.<cred_ver>.tool.exec.req` |
+| `fs` | `u.<uid>.h.<host_id>.<cred_ver>.tool.fs.req` |
+| 自定义工具 | `u.<uid>.h.<host_id>.<cred_ver>.tool.<tool_name>.req` |
 
 ### 6.1 请求载荷
 
@@ -475,7 +473,6 @@ u.<uid>.e.<env_id>.<cred_ver>.tool.*.req
   "nonce": "abc123def456",
   "deadline": "2026-07-17T10:31:00Z",
   "sig": "hmac_base64url_signature",
-  "env_id": "abc123"
 }
 ```
 
@@ -586,7 +583,7 @@ actual   = Base64URLDecode(request.sig)
 **输出说明：**
 
 - 命令 stdout 和 stderr 合并写入 `/tmp/aic/{session_id}/{msg_id}.log`
-- 完整日志通过日志文件存放，Agent 可用 `env_fs → read` 查看
+- 完整日志通过日志文件存放，Agent 可用 `fs → read` 查看
 - 响应中 `content` 最多返回前 **1000 行**，`attrs.truncated` 标识是否被截断
 - 日志路径为系统临时目录下 `aic/{session_id}/{msg_id}.log`（Linux: `/tmp/...`，macOS: `$TMPDIR/...`，Windows: `%TEMP%\...`
 - `attrs.path` 指向完整日志文件路径
@@ -831,25 +828,25 @@ actual   = Base64URLDecode(request.sig)
 
 ```
 1. 获取凭据
-   env create → env_id + secret
-   凭据格式: <env_id>.<cred_ver>.<secret>.<uid>
+   host create → host_id + secret
+   凭据格式: <host_id>.<cred_ver>.<secret>.<uid>
 
 2. 密钥派生
-   secret + env_id → HKDF-SHA256 → K_connect, K_tool
+   secret + host_id → HKDF-SHA256 → K_connect, K_tool
 
 3. 连接 NATS
    WebSocket: wss://ivec.ai/aic/api/nc
    认证: Token 认证（每次连接动态生成 e1.xxx token）
-   连接名: aic-env-<env_id>
+   连接名: aic-host-<host_id>
 
 4. 发布 CAPS
-   → u.<uid>.e.<env_id>.<cred_ver>.caps (声明能力和设备信息)
+   → u.<uid>.h.<host_id>.<cred_ver>.caps (声明能力和设备信息)
 
 5. 订阅工具请求
-   ← u.<uid>.e.<env_id>.<cred_ver>.tool.*.req (通配符)
+   ← u.<uid>.h.<host_id>.<cred_ver>.tool.*.req (通配符)
 
 6. 启动心跳
-   → u.<uid>.e.<env_id>.<cred_ver>.presence (每 20s)
+   → u.<uid>.h.<host_id>.<cred_ver>.presence (每 20s)
 
 7. 处理工具请求
    ← 收到 → 验签 → 执行 → 响应
@@ -871,9 +868,9 @@ actual   = Base64URLDecode(request.sig)
 - 所有工具请求签名为 HMAC-SHA256(K_tool, canonical JSON)，防伪造指令
 - 过期 deadline 的请求必须拒绝
 - 签名无效的请求必须拒绝
-- `env_id` / `uid` / `cred_ver` 中不含 `.`、`*`、`>` 和空白字符
-- `env_info` JSON 原文 ≤ 1024 字节
-- 设备端 NATS 权限自动限域：只能访问 `u.<uid>.e.<env_id>.<cred_ver>.` 范围内的主题
+- `host_id` / `uid` / `cred_ver` 中不含 `.`、`*`、`>` 和空白字符
+- `host_info` JSON 原文 ≤ 1024 字节
+- 设备端 NATS 权限自动限域：只能访问 `u.<uid>.h.<host_id>.<cred_ver>.` 范围内的主题
 - 同一凭据同时只能有一个活跃连接，重复连接会被拒绝
 
 ---
@@ -891,8 +888,8 @@ function deriveKey(secret, envID, info):
     )
     // 返回值：Base64URL 编码的 32 字节密钥
 
-K_connect = deriveKey(secret, envID, "aic/env/connect/v1")
-K_tool    = deriveKey(secret, envID, "aic/env/tool-request/v1")
+K_connect = deriveKey(secret, envID, "aic/host/connect/v1")
+K_tool    = deriveKey(secret, envID, "aic/host/tool-request/v1")
 ```
 
 ## 附录 B：连接 Token 生成（伪代码）
@@ -907,10 +904,10 @@ function generateToken(envID, uid, agentVersion, deviceType, deviceName, kConnec
     nonceB64  = Base64URL(nonce)
 
     sigInput  = JSON.stringify({
-        domain:   "aic-env-connect-v1",
-        env_id:   envID,
+        domain:   "aic-host-connect-v1",
+        host_id:  hostID,
         uid:      uid,
-        env_info: envInfo,      // 注意：JSON 原文，非 Base64
+        host_info: hostInfo,    // 注意：JSON 原文，非 Base64
         unix_ms:  ts,
         nonce:    nonceB64
     })  // 紧凑格式，无空格无换行
