@@ -209,6 +209,9 @@ func TestDispatchRejectsWeakEnvelope(t *testing.T) {
 	if resp := c.dispatch(context.Background(), testSubject, newReq(nonce, "not-a-timestamp")); resp.State != proto.StateRejected {
 		t.Errorf("invalid deadline: state = %s, want rejected", resp.State)
 	}
+	if resp := c.dispatch(context.Background(), testSubject, newReq(nonce, "")); resp.State != proto.StateRejected {
+		t.Errorf("missing deadline: state = %s, want rejected", resp.State)
+	}
 }
 
 // parseWSURL 的 base/proxyPath 切分须按实际 scheme 长度跳过 "://"。

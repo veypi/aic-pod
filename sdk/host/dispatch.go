@@ -38,17 +38,18 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 		return reject(req.MsgID, "invalid request signature")
 	}
 
-	// 2. deadline 非法/过期拒绝（非空但不可解析 → 拒绝，防"永不过期"请求）
-	var deadline time.Time
-	if req.Deadline != "" {
-		dl, err := time.Parse(time.RFC3339, req.Deadline)
-		if err != nil {
-			return reject(req.MsgID, "invalid deadline")
-		}
-		deadline = dl
-		if time.Now().After(dl) {
-			return reject(req.MsgID, "request expired")
-		}
+	// 2. deadline 必填且未过期（空 = "永不过期"请求，拒绝；格式非法拒绝）
+	//    请求方为可信服务端（request.go 恒签发 RFC3339 deadline），空/非法均为异常。
+	if req.Deadline == "" {
+		return reject(req.MsgID, "missing deadline")
+	}
+	dl, err := time.Parse(time.RFC3339, req.Deadline)
+	if err != nil {
+		return reject(req.MsgID, "invalid deadline")
+	}
+	deadline := dl
+	if time.Now().After(dl) {
+		return reject(req.MsgID, "request expired")
 	}
 
 	// 3. nonce 必填且窗口内缓存去重（空 nonce 直接拒绝，防跳过去重）
