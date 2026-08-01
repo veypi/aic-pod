@@ -78,28 +78,32 @@
       "cmd": "fs",
       "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "nope", "newText": "x"}]},
       "files": {"/foo.txt": "hello\n"},
-      "expectError": "fs edit: oldText not found in file"
+      "expectError": "fs edit: edit[1]: oldText not found in file"
     },
     {
       "name": "edit oldText not unique",
       "cmd": "fs",
       "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "dup", "newText": "x"}]},
       "files": {"/foo.txt": "dup and dup\n"},
-      "expectError": "fs edit: oldText matches 2 locations; provide more surrounding context to make it unique"
+      "expectError": "fs edit: edit[1]: oldText matches 2 locations; provide more surrounding context to make it unique"
     },
     {
       "name": "edit newText equals oldText",
       "cmd": "fs",
       "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "same", "newText": "same"}]},
       "files": {"/foo.txt": "same\n"},
-      "expectError": "fs edit: newText must be different from oldText"
+      "expectError": "fs edit: edit[1]: newText must be different from oldText"
     },
     {
-      "name": "edit overlapping edits",
+      "name": "edit overlap applies first edit",
       "cmd": "fs",
       "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "abcdef", "newText": "x"}, {"oldText": "cde", "newText": "y"}]},
       "files": {"/foo.txt": "abcdef\n"},
-      "expectError": "fs edit: edits overlap or nest; merge them into a single edit"
+      "expect": {
+        "content": "updated file: /foo.txt (1/2 edits applied; failed: edit[2]: oldText not found in file)",
+        "attrs": {"action": "edit", "path": "/foo.txt", "edits": "1", "edits_failed": "1"}
+      },
+      "expectFiles": {"/foo.txt": "x\n"}
     },
     {
       "name": "edit edits required",
@@ -107,6 +111,24 @@
       "params": {"action": "edit", "path": "/foo.txt"},
       "files": {"/foo.txt": "x\n"},
       "expectError": "fs edit: edits is required"
+    },
+    {
+      "name": "edit partial success keeps applied",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "aaa", "newText": "bbb"}, {"oldText": "nope", "newText": "x"}, {"oldText": "ccc", "newText": ""}]},
+      "files": {"/foo.txt": "aaa ccc\n"},
+      "expect": {
+        "content": "updated file: /foo.txt (2/3 edits applied; failed: edit[2]: oldText not found in file)",
+        "attrs": {"action": "edit", "path": "/foo.txt", "edits": "2", "edits_failed": "1"}
+      },
+      "expectFiles": {"/foo.txt": "bbb \n"}
+    },
+    {
+      "name": "edit all fail reports no write",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "nope", "newText": "x"}, {"oldText": "nope2", "newText": "y"}]},
+      "files": {"/foo.txt": "hello\n"},
+      "expectError": "fs edit: no edits applied: edit[1]: oldText not found in file; edit[2]: oldText not found in file"
     }
   ]
 }

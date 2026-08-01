@@ -49,22 +49,17 @@ func countLines(content string) int {
 	return n
 }
 
-// fsEdit 实现 edit（§4.4）：edits 数组一次多处替换；每个 oldText 在文件中
-// 必须唯一匹配；各 edit 基于原始文件匹配、互不重叠（不提供 replaceAll）。
+// fsEdit 实现 edit（§4.4）：edits 数组逐个顺序应用——每个 edit 基于前一个
+// 应用后的当前内容匹配，oldText 必须唯一；单个 edit 失败（找不到/多匹配/
+// 参数非法）不阻塞其余 edit——**部分成功语义**：成功的保留，失败的按
+// `edit[i]: 原因` 在结果中报告（不提供 replaceAll）。全部失败时整组报错、
+// 不写文件。
 func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if p.Path == "" {
 		return nil, fsErr("edit", "path is required")
 	}
 	if len(p.Edits) == 0 {
 		return nil, fsErr("edit", "edits is required")
-	}
-	for _, e := range p.Edits {
-		if e.OldText == "" {
-			return nil, fsErr("edit", "oldText is required")
-		}
-		if e.NewText == e.OldText {
-			return nil, fsErr("edit", "newText must be different from oldText")
-		}
 	}
 	abs, err := env.Resolve(p.Path)
 	if err != nil {
@@ -79,46 +74,51 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	content := string(data)
 
-	// 基于原始文件定位每个 edit 的唯一匹配区间
-	type span struct{ start, end, idx int }
-	spans := make([]span, 0, len(p.Edits))
+	// 逐个顺序应用（§4.4）：后一个 edit 匹配的是前一个应用后的内容。
+	// 失败条目记录序号与原因，不阻塞其余 edit（部分成功语义）。
+	applied := 0
+	failed := make([]string, 0)
 	for i, e := range p.Edits {
+		idx := fmt.Sprintf("edit[%d]", i+1)
+		if e.OldText == "" {
+			failed = append(failed, idx+": oldText is required")
+			continue
+		}
+		if e.NewText == e.OldText {
+			failed = append(failed, idx+": newText must be different from oldText")
+			continue
+		}
 		first := strings.Index(content, e.OldText)
 		if first < 0 {
-			return nil, fsErr("edit", "oldText not found in file")
+			failed = append(failed, idx+": oldText not found in file")
+			continue
 		}
-		if strings.Index(content[first+len(e.OldText):], e.OldText) >= 0 {
-			n := strings.Count(content, e.OldText)
-			return nil, fsErr("edit",
-				"oldText matches %d locations; provide more surrounding context to make it unique", n)
+		if n := strings.Count(content, e.OldText); n > 1 {
+			failed = append(failed, fmt.Sprintf(
+				"%s: oldText matches %d locations; provide more surrounding context to make it unique", idx, n))
+			continue
 		}
-		spans = append(spans, span{first, first + len(e.OldText), i})
+		content = content[:first] + e.NewText + content[first+len(e.OldText):]
+		applied++
 	}
-	// 重叠/嵌套校验：报错引导合并为单个 edit
-	for a := 0; a < len(spans); a++ {
-		for b := a + 1; b < len(spans); b++ {
-			if spans[a].start < spans[b].end && spans[b].start < spans[a].end {
-				return nil, fsErr("edit",
-					"edits overlap or nest; merge them into a single edit")
-			}
+	if applied == 0 {
+		// 单 edit 失败直接报原因；多 edit 全失败汇总报（都不写文件）
+		if len(failed) == 1 {
+			return nil, fsErr("edit", "%s", failed[0])
 		}
-	}
-	// 自右向左替换，区间基于原始文件
-	for i := 0; i < len(spans); i++ {
-		for j := i + 1; j < len(spans); j++ {
-			if spans[j].start > spans[i].start {
-				spans[i], spans[j] = spans[j], spans[i]
-			}
-		}
-	}
-	for _, s := range spans {
-		content = content[:s.start] + p.Edits[s.idx].NewText + content[s.end:]
+		return nil, fsErr("edit", "no edits applied: %s", strings.Join(failed, "; "))
 	}
 	if err := env.VFS.WriteFile(abs, []byte(content)); err != nil {
 		return nil, fsErr("edit", "%s", err)
 	}
 	r := newResult("edit", abs)
-	r.Content = fmt.Sprintf("updated file: %s (%d edits)", abs, len(p.Edits))
-	r.set("edits", len(p.Edits))
+	if len(failed) == 0 {
+		r.Content = fmt.Sprintf("updated file: %s (%d edits)", abs, len(p.Edits))
+	} else {
+		r.Content = fmt.Sprintf("updated file: %s (%d/%d edits applied; failed: %s)",
+			abs, applied, len(p.Edits), strings.Join(failed, "; "))
+		r.set("edits_failed", len(failed))
+	}
+	r.set("edits", applied)
 	return r, nil
 }
