@@ -42,7 +42,14 @@ func ResolvePath(p, workdir string, vars map[string]string) (string, error) {
 		}
 		// 未匹配的 $ 开头按字面相对路径处理（不做任何变量展开）。
 	}
-	if path.IsAbs(p) || isDrivePath(p) {
+	drive := isDrivePath(p)
+	if drive {
+		// Windows 盘符路径归一为斜杠（vcore 三端公共规范形，执行层 OSVFS
+		// 在 OS 边界转换）。path.Clean 不识别反斜杠，不归一下文的根保护等
+		// 等值比较会在 C:\ 与 C:/ 两形之间永远失配。
+		p = strings.ReplaceAll(p, `\`, "/")
+	}
+	if path.IsAbs(p) || drive {
 		return path.Clean(p), nil
 	}
 	if workdir == "" {
@@ -50,6 +57,9 @@ func ResolvePath(p, workdir string, vars map[string]string) (string, error) {
 	}
 	if !path.IsAbs(workdir) && !isDrivePath(workdir) {
 		return "", fmt.Errorf("proto: workdir must be absolute, got %q", workdir)
+	}
+	if isDrivePath(workdir) {
+		workdir = strings.ReplaceAll(workdir, `\`, "/")
 	}
 	return path.Clean(path.Join(workdir, p)), nil
 }

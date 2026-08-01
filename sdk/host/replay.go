@@ -13,9 +13,10 @@ type replayCache struct {
 }
 
 // checkAndMark 检查 nonce 是否已使用；未使用则标记并返回 true。
+// 空 nonce 一律拒绝（纵深防御：调用方 dispatch 已前置拦截）。
 func (c *replayCache) checkAndMark(nonce string, deadline time.Time) bool {
 	if nonce == "" {
-		return true
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

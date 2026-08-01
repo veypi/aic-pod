@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 )
 
 // OSVFS 是 OS 本地文件系统的 vcore.VFS 适配（物理 host 执行环境）。
@@ -36,29 +35,20 @@ func (OSVFS) WriteFile(name string, data []byte) error {
 	return os.WriteFile(toOS(name), data, 0o644)
 }
 
-// Append 真追加（O_APPEND，§4.3 实现取舍：物理 host 为真追加）。
-func (OSVFS) Append(name string, data []byte) error {
-	f, err := os.OpenFile(toOS(name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.Write(data)
-	return err
-}
-
 // filesystemRoots 返回 rm/mv 根目录硬保护列表（§5.4：物理 host 文件系统根）。
+// 盘符根规范形为 "C:"：path.Clean 会剥掉盘符后的尾斜杠（"C:/" → "C:"），
+// proto.ResolvePath 对盘符路径归一反斜杠后输出即此形，等值比较可命中。
+// Stat 用 "C:/" 探测盘符存在性（裸 "C:" 指盘符当前目录，语义不同）。
 func filesystemRoots() []string {
 	if runtime.GOOS == "windows" {
 		var roots []string
 		for _, d := range "CDEFGHIJKLMNOPQRSTUVWXYZ" {
-			p := string(d) + `:\`
-			if _, err := os.Stat(p); err == nil {
-				roots = append(roots, strings.TrimSuffix(p, `\`))
+			if _, err := os.Stat(string(d) + ":/"); err == nil {
+				roots = append(roots, string(d)+":")
 			}
 		}
 		if len(roots) == 0 {
-			roots = []string{`C:\`}
+			roots = []string{"C:"}
 		}
 		return roots
 	}

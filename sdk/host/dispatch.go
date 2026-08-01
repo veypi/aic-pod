@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -37,19 +38,23 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 		return reject(req.MsgID, "invalid request signature")
 	}
 
-	// 2. deadline 过期拒绝
+	// 2. deadline 非法/过期拒绝（非空但不可解析 → 拒绝，防"永不过期"请求）
 	var deadline time.Time
 	if req.Deadline != "" {
 		dl, err := time.Parse(time.RFC3339, req.Deadline)
-		if err == nil {
-			deadline = dl
-			if time.Now().After(dl) {
-				return reject(req.MsgID, "request expired")
-			}
+		if err != nil {
+			return reject(req.MsgID, "invalid deadline")
+		}
+		deadline = dl
+		if time.Now().After(dl) {
+			return reject(req.MsgID, "request expired")
 		}
 	}
 
-	// 3. nonce 窗口内缓存去重
+	// 3. nonce 必填且窗口内缓存去重（空 nonce 直接拒绝，防跳过去重）
+	if req.Nonce == "" {
+		return reject(req.MsgID, "missing nonce")
+	}
 	if !c.replay.checkAndMark(req.Nonce, deadline) {
 		return reject(req.MsgID, "duplicate nonce")
 	}
@@ -141,7 +146,7 @@ func (c *Client) newEnv(workdir string) *vcore.Env {
 }
 
 // isVirtual 判定 action 是否为虚拟指令（同名虚拟优先，§5.4：
-// 真实核心 8 程序不直接暴露，完整 GNU/BSD 语义走 shell 逃生舱）。
+// 真实核心指令程序不直接暴露，完整 GNU/BSD 语义走 shell 逃生舱）。
 func isVirtual(action string) bool {
 	for _, n := range vcore.CoreCommandNames() {
 		if n == action {
@@ -241,13 +246,19 @@ type wsURL struct {
 }
 
 func parseWSURL(raw string) (*wsURL, error) {
-	// ws(s)://host/path → base = ws(s)://host，path 作为 ProxyPath
-	for i := len("ws://"); i < len(raw); i++ {
-		if raw[i] == '/' {
-			if i == len(raw)-1 {
+	// ws(s)://host/path → base = ws(s)://host，path 作为 ProxyPath。
+	// 扫描起点须按实际 scheme（ws:// 与 wss:// 长度不同）跳过 "://"，
+	// 否则 wss:// 的第二个斜杠会被误判为路径起点。
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return &wsURL{base: raw}, nil
+	}
+	for j := i + 3; j < len(raw); j++ {
+		if raw[j] == '/' {
+			if j == len(raw)-1 {
 				return &wsURL{base: raw}, nil
 			}
-			return &wsURL{base: raw[:i], proxyPath: raw[i:]}, nil
+			return &wsURL{base: raw[:j], proxyPath: raw[j:]}, nil
 		}
 	}
 	return &wsURL{base: raw}, nil

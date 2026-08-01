@@ -37,8 +37,15 @@ func TestResolvePathVectors(t *testing.T) {
 		// workdir 约束
 		{"rel", "", nil, "", true},
 		{"rel", "not/abs", nil, "", true},
-		// Windows 盘符视为绝对
-		{`C:\foo\bar`, "/wd", nil, `C:\foo\bar`, false},
+		// Windows 盘符视为绝对，反斜杠归一为斜杠（vcore 规范形）；
+		// path.Clean 剥盘符尾斜杠："C:/" → "C:"（盘符根规范形）
+		{`C:\foo\bar`, "/wd", nil, `C:/foo/bar`, false},
+		{`C:\foo\..\x`, "/wd", nil, `C:/x`, false},
+		{`C:\`, "/wd", nil, `C:`, false},
+		{"C:/", "/wd", nil, "C:", false},
+		{"C:/slash/form", "/wd", nil, "C:/slash/form", false},
+		// workdir 盘符反斜杠形同样归一
+		{"rel.txt", `C:\wd`, nil, "C:/wd/rel.txt", false},
 		{"", "/wd", nil, "", true},
 	}
 	for _, c := range cases {

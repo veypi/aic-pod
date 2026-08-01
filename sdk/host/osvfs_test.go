@@ -28,9 +28,10 @@ type osVectorCase struct {
 	Params  json.RawMessage   `json:"params"`
 	Workdir string            `json:"workdir"`
 	Vars    map[string]string `json:"vars"`
-	Files   map[string]string `json:"files"`
-	Mtimes  map[string]int64  `json:"mtimes"`
-	Fetch   map[string]string `json:"fetch"`
+	Files        map[string]string `json:"files"`
+	Mtimes       map[string]int64  `json:"mtimes"`
+	Fetch        map[string]string `json:"fetch"`
+	ProtectRoots []string          `json:"protectRoots"`
 }
 
 func TestVcoreVectorsOnOSVFS(t *testing.T) {
@@ -59,6 +60,14 @@ func TestVcoreVectorsOnOSVFS(t *testing.T) {
 }
 
 var osDirSizeRe = regexp.MustCompile(`(/\t)\d+(\t)`)
+
+// treeJSONRe 归一 tree JSON 的 size/mod_time（环境数据差异，§2.6；文件大小由 ls -la 覆盖）。
+var treeJSONRe = regexp.MustCompile(`"(size|mod_time)":\d+`)
+
+func normContent(s string) string {
+	s = osDirSizeRe.ReplaceAllString(s, "${1}D${2}")
+	return treeJSONRe.ReplaceAllString(s, `"${1}":0`)
+}
 
 func runOSParity(t *testing.T, c osVectorCase) {
 	t.Helper()
@@ -119,8 +128,8 @@ func runOSParity(t *testing.T, c osVectorCase) {
 	}
 	// OSVFS 测试 root 隔离：逻辑绝对路径直接映射到 OS 绝对路径会污染真实文件系统——
 	// 用 chroot 式子树适配（测试专用）：将逻辑路径重写到 t.TempDir() 下。
-	osEnv := &vcore.Env{VFS: osv, Workdir: c.Workdir, Vars: c.Vars, Fetcher: fetcher}
-	memEnv := &vcore.Env{VFS: mem, Workdir: c.Workdir, Vars: c.Vars, Fetcher: fetcher}
+	osEnv := &vcore.Env{VFS: osv, Workdir: c.Workdir, Vars: c.Vars, Fetcher: fetcher, ProtectRoots: c.ProtectRoots}
+	memEnv := &vcore.Env{VFS: mem, Workdir: c.Workdir, Vars: c.Vars, Fetcher: fetcher, ProtectRoots: c.ProtectRoots}
 
 	var memRes, osRes *vcore.Result
 	var memErr, osErr error
@@ -139,8 +148,7 @@ func runOSParity(t *testing.T, c osVectorCase) {
 		t.Fatalf("error text mismatch:\nmem=%q\nos=%q", memErr, osErr)
 	}
 	if memRes != nil && osRes != nil {
-		if osDirSizeRe.ReplaceAllString(memRes.Content, "${1}D${2}") !=
-			osDirSizeRe.ReplaceAllString(osRes.Content, "${1}D${2}") {
+		if normContent(memRes.Content) != normContent(osRes.Content) {
 			t.Errorf("content mismatch:\nmem=%q\nos=%q", memRes.Content, osRes.Content)
 		}
 		if !reflect.DeepEqual(memRes.Attrs, osRes.Attrs) {
@@ -175,9 +183,6 @@ func (s *subVFS) MkdirAll(name string) error  { return osvDelegate.MkdirAll(s.ma
 func (s *subVFS) RemoveAll(name string) error { return osvDelegate.RemoveAll(s.mapPath(name)) }
 func (s *subVFS) Rename(oldname, newname string) error {
 	return osvDelegate.Rename(s.mapPath(oldname), s.mapPath(newname))
-}
-func (s *subVFS) Append(name string, data []byte) error {
-	return osvDelegate.Append(s.mapPath(name), data)
 }
 
 func pathDirOf(p string) string {

@@ -2,8 +2,8 @@
 // NATS 连接与认证、caps v2 上报、心跳、req 分发（fs/exec）、bg 注册表、
 // granted_level 纵深检查（与 vcore 分级表同源）。
 //
-// 物理 host 能力：程序（PATH）+ 虚拟指令（核心 8 虚拟包装 + commands + bg_*，
-// 同名虚拟优先——真实核心 8 程序不直接暴露，完整 GNU/BSD 语义走 shell 逃生舱）。
+// 物理 host 能力：程序（PATH）+ 虚拟指令（核心 7 虚拟包装 + commands + bg_*，
+// 同名虚拟优先——真实核心指令程序不直接暴露，完整 GNU/BSD 语义走 shell 逃生舱）。
 package host
 
 import (
@@ -54,6 +54,8 @@ func New(opts Options) *Client {
 	if opts.WorkDir == "" {
 		opts.WorkDir = os.TempDir()
 	}
+	// WorkDir 的反斜杠规范形归一由 proto.ResolvePath 在路径运算层统一处理
+	//（Windows 下 os.TempDir() 为反斜杠形，workdir 分支同样归一）。
 	if opts.ExecTimeout <= 0 {
 		opts.ExecTimeout = 10 * time.Minute
 	}
@@ -157,7 +159,7 @@ func (c *Client) Close() error {
 
 // buildCaps 构造物理 host 的 caps v2：
 // fs.actions=null（全部 3 个）；exec.programs=null（不限制，PATH 自检）；
-// virtual = 核心 8 虚拟包装 + commands + bg_*（必备，分级与 vcore 表同源）。
+// virtual = 核心 7 虚拟包装 + commands + bg_*（必备，分级与 vcore 表同源）。
 func (c *Client) buildCaps() *proto.Caps {
 	virtual := make([]proto.VirtualDecl, 0, 12)
 	for _, name := range vcore.CoreCommandNames() {
@@ -219,6 +221,8 @@ func (c *Client) heartbeatLoop() {
 }
 
 func isAuthError(err error) bool {
-	s := err.Error()
+	// nats.go 报 "Authentication Violation"/"Authorization Violation"（首字母大写），
+	// 统一小写后匹配，避免致命认证分支永不命中。
+	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "authentication") || strings.Contains(s, "authorization")
 }

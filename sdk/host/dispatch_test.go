@@ -136,6 +136,23 @@ func TestDispatchVirtualCommands(t *testing.T) {
 	if len(virtual) < 12 { // 核心 8 + commands + bg_*3
 		t.Errorf("virtual = %d", len(virtual))
 	}
+	hasRg, hasTree := false, false
+	for _, v := range virtual {
+		if decl, ok := v.(map[string]any); ok {
+			switch decl["name"] {
+			case "rg":
+				hasRg = true
+			case "tree":
+				hasTree = true
+			}
+		}
+	}
+	if !hasRg {
+		t.Error("virtual list missing rg")
+	}
+	if !hasTree {
+		t.Error("virtual list missing tree")
+	}
 
 	// 未知程序 → error unknown action
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
@@ -167,5 +184,56 @@ func TestDispatchBgFlow(t *testing.T) {
 		map[string]any{"action": "bg_wait", "argv": []string{"host_test01:s1:nope"}}, 1))
 	if resp.State != proto.StateError {
 		t.Fatalf("bg_wait missing: state = %s", resp.State)
+	}
+}
+
+// 空 nonce / 非法 deadline 必须拒绝（§6.2 纵深防御：防跳过去重、防"永不过期"请求）。
+func TestDispatchRejectsWeakEnvelope(t *testing.T) {
+	c, kTool := testClient(t)
+	newReq := func(nonce, deadline string) []byte {
+		raw, _ := json.Marshal(map[string]any{"action": "commands"})
+		req := &proto.ToolRequest{
+			MsgID: "msg_weak", SessionID: "s1", Tool: "exec", Data: raw,
+			GrantedLevel: 3, Nonce: nonce, Deadline: deadline,
+		}
+		proto.SignToolRequest(req, c.hostID, kTool)
+		out, _ := json.Marshal(req)
+		return out
+	}
+	valid := time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+
+	if resp := c.dispatch(context.Background(), testSubject, newReq("", valid)); resp.State != proto.StateRejected {
+		t.Errorf("empty nonce: state = %s, want rejected", resp.State)
+	}
+	nonce, _ := proto.NewNonce()
+	if resp := c.dispatch(context.Background(), testSubject, newReq(nonce, "not-a-timestamp")); resp.State != proto.StateRejected {
+		t.Errorf("invalid deadline: state = %s, want rejected", resp.State)
+	}
+}
+
+// parseWSURL 的 base/proxyPath 切分须按实际 scheme 长度跳过 "://"。
+// 回归：wss:// 曾被按 ws:// 的起点扫描，第二个斜杠被误判为路径起点。
+func TestParseWSURL(t *testing.T) {
+	cases := []struct {
+		raw       string
+		base      string
+		proxyPath string
+	}{
+		{"wss://ivec.ai/aic/api/nc", "wss://ivec.ai", "/aic/api/nc"},
+		{"ws://host/path", "ws://host", "/path"},
+		{"wss://host", "wss://host", ""},
+		{"ws://host:8080/a/b", "ws://host:8080", "/a/b"},
+		{"ws://host/", "ws://host/", ""},
+	}
+	for _, c := range cases {
+		u, err := parseWSURL(c.raw)
+		if err != nil {
+			t.Errorf("%s: unexpected err %v", c.raw, err)
+			continue
+		}
+		if u.base != c.base || u.proxyPath != c.proxyPath {
+			t.Errorf("%s: got base=%q proxy=%q, want base=%q proxy=%q",
+				c.raw, u.base, u.proxyPath, c.base, c.proxyPath)
+		}
 	}
 }
