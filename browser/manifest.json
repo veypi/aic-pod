@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AIC Browser",
-  "version": "0.3.0",
-  "description": "AIC Pod Browser Extension — connect your browser to AIC platform",
+  "version": "0.4.0",
+  "description": "AIC Pod Browser Extension — connect your browser to AIC platform (instruction set v2)",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

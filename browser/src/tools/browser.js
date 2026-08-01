@@ -45,13 +45,16 @@ const NETWORK_LIMIT_DEFAULT = 100; // §5.5：network 列表默认截断 100
 const refGenByTab = new Map();
 
 // ---- main entry ----
+// 指令集 v2：作为 exec 虚拟指令接入，data = {action: "browser", argv: [subcommand, ...args]}。
+// 子命令 = argv[0]，子命令参数 = argv.slice(1)（与 Go vcore/browser.Handle 语义一致）。
 
 export async function browserHandler(ctx, toolData) {
-  const action = String(toolData?.action || "").trim().toLowerCase();
   const argv = Array.isArray(toolData?.argv) ? toolData.argv.map(String) : [];
+  const action = String(argv[0] || "").trim().toLowerCase();
+  const rest = argv.slice(1);
 
   if (!action) {
-    return err0(`browser: action is required (supported: ${ALL_ACTIONS.join(", ")})`);
+    return err0(`browser: subcommand is required (supported: ${ALL_ACTIONS.join(", ")})`);
   }
   if (EXT_ACTIONS.includes(action)) {
     // §5.2：扩展集物理端可选，未实现报 unknown action
@@ -64,7 +67,7 @@ export async function browserHandler(ctx, toolData) {
 
   let pa;
   try {
-    pa = parseActionArgv("browser", action, argv, flagSet);
+    pa = parseActionArgv("browser", action, rest, flagSet);
   } catch (e) {
     return err0(e.message);
   }

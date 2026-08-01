@@ -133,12 +133,14 @@ release: all build-browser
 		$(BIN_DIR)/*
 	@echo "→ GitHub release $(VERSION) created"
 
-# Chrome Extension 打包
+# Chrome Extension 打包（先删旧 zip 防追加残留；测试文件不打包）
 build-browser:
 	@mkdir -p $(BIN_DIR)
+	rm -f $(BROWSER_OUT)
 	cd $(BROWSER_DIR) && zip -r ../$(BROWSER_OUT) . \
 		-x "*.DS_Store" \
-		-x "dist/*"
+		-x "dist/*" \
+		-x "*.test.js"
 	@echo "→ $(BROWSER_OUT)"
 
 help:

@@ -15,26 +15,14 @@ import { browserHandler } from "./tools/browser.js";
 let client = null;
 let connecting = false;
 
-// ---- Tool Definition (mirrors agent-browser CLI) ----
+// ---- 能力声明（指令集 v2，caps 由 client 汇总发布） ----
+// exec 虚拟指令：browser（核心 13 + 扩展集未实现）。分级与 Go vcore/browser.VirtualDecl 一致：
+//   required_level = 2（Write：局部、可逆、低爆炸半径）
+//   stateful = true（同 (session, host) 串行，服务端 slocks 保证）
+//   backgroundable = true（download/wait 长操作可后台化）
+// fs.actions = []（浏览器扩展无文件系统）；exec.programs = []（显式纯虚拟）。
 
-const BROWSER_DEF = {
-  name: "browser",
-  description: "Control the user's real browser (Chrome extension host). " +
-    "Core actions: open, click, close, download, eval, get, network, read, screenshot, snapshot, tab, wait, sleep. " +
-    "Refs (@eN) from snapshot become stale when the page changes — always re-snapshot before the next ref interaction. " +
-    "Extended actions (save/upload/pipeline/var) are not implemented on this host.",
-  parameters: {
-    type: "object",
-    properties: {
-      action: { type: "string", description: "Browser action to perform" },
-      argv: { type: "array", items: { type: "string" }, description: "Per-action arguments" },
-    },
-    required: ["action", "argv"],
-  },
-  actions: ["open", "click", "close", "download", "eval", "get", "network", "read", "screenshot", "snapshot", "tab", "wait", "sleep"],
-  requiredLevel: 2,
-  policyVersion: "2",
-};
+const BROWSER_LEVEL = 2;
 
 // ---- Lifecycle ----
 
@@ -79,7 +67,10 @@ async function connect(settings) {
     onLog: (fmt, ...args) => console.log(`[aic-browser] ${fmt}`, ...args),
   });
 
-  client.registerTool(BROWSER_DEF, browserHandler);
+  client.registerVirtual("browser", BROWSER_LEVEL, browserHandler, {
+    stateful: true,
+    backgroundable: true,
+  });
 
   try {
     await client.connect();
@@ -141,7 +132,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "status":
         sendResponse({
           connected: client !== null && !client.closed,
-          envID: client ? client.envID : null,
+          hostID: client ? client.hostID : null,
         });
         break;
 

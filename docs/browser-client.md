@@ -12,13 +12,72 @@
 ┌────────────────────▼──────────────────────────────────┐
 │  Service Worker (后台常驻)                             │
 │  - NATS over WebSocket 连接                           │
-│  - CAPS 发布 (仅 action + argv 参数定义)                │
-│  - tool.*.req 订阅 → { action, argv } 分发             │
+│  - caps v2 发布 (fs/exec 能力声明，§6.3)              │
+│  - 会话级 inbox 订阅 u.{uid}.s.*.h.host_{id}.>         │
+│    → 验签/防重放/纵深检查 → exec browser 指令分发       │
 │  - 操作标签页 / 注入脚本 / 截图                         │
 └───────────────────────────────────────────────────────┘
 ```
 
-> **Tool 层只认 `{action, argv}`**，全局参数在插件设置页配置，不出现在工具调用中。
+> **协议（指令集 v2）：** 本扩展是 exec 虚拟指令 host——只暴露 `browser` 虚拟指令
+> （`exec browser <subcommand> [args...]`），无程序执行（`exec.programs=[]` 显式纯虚拟）、
+> 无文件系统（`fs.actions=[]`）。全局参数在插件设置页配置，不出现在工具调用中。
+
+## 协议（指令集 v2）
+
+> 与 [aic docs/instruction_sets_v2.md](../aic/docs/instruction_sets_v2.md) §6 对齐，
+> 协议层实现见 `src/sdk/proto.js`（subject/信封/caps 纯函数，Go 侧 `sdk/proto` 零漂移，
+> 固定向量见 `src/sdk/proto.test.js` + `auth.test.js`）。
+
+### 连接级 subject（host 生命周期）
+
+| subject | 载荷 | 说明 |
+|---|---|---|
+| `u.{uid}.h.{host_id}.{cred_ver}.caps` | caps v2 JSON | 每次连接/重连发布，服务端以最近一次为准 |
+| `u.{uid}.h.{host_id}.{cred_ver}.presence` | `{host_id, credential_ver, running, sent_at}` | 20s 心跳 |
+
+### caps v2 声明
+
+```json
+{
+  "host_id": "<host_id>",
+  "credential_ver": 1,
+  "agent_version": "v0.4.0",
+  "device_type": "browser",
+  "device_info": { "os": "Chrome", "arch": "browser", "num_cpu": 8 },
+  "fs": { "actions": [] },
+  "exec": {
+    "programs": [],
+    "virtual": [
+      { "name": "browser", "required_level": 2, "stateful": true, "backgroundable": true }
+    ]
+  }
+}
+```
+
+- `fs.actions=[]`：不支持 fs（浏览器扩展无文件系统）；
+- `exec.programs=[]`：显式纯虚拟（无程序执行能力）；
+- `exec.virtual`：按扩展能力声明——`browser`（required_level=2 Write，stateful 串行，
+  download/wait 可后台化），与 Go `vcore/browser.VirtualDecl()` 同源。
+
+### 工具流量（会话级 subject）
+
+host 端连接时单订阅 `u.{uid}.s.*.h.host_{host_id}.>`（HostInboxSubject），
+覆盖该 host 所有会话的 fs/exec 请求，无 per-session 订阅 churn。请求信封
+（server→host，HMAC-SHA256 签名，K_tool 派生）：
+
+```json
+{
+  "msg_id": "...", "session_id": "...", "tool": "exec",
+  "data": "{"action":"browser","argv":["open","https://..."]}",
+  "granted_level": 2, "nonce": "...", "deadline": "RFC3339", "sig": "..."
+}
+```
+
+响应信封：`{msg_id, state: completed|waiting|rejected|error, content, error, attrs, need_approval}`。
+
+host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 → granted_level 纵深检查
+（browser 指令 required=2，不足回 `waiting` 转人工审批）→ 分发。
 
 ## 插件设置页参数
 
@@ -36,28 +95,12 @@
 
 > **注意：** Chrome Extension 运行在用户浏览器内，因此不需要 `browserPath`（浏览器路径）、`userDataDir`（profile 目录）、`headless`（无头模式）等参数。`incognito=true` 通过 `chrome.windows.create({incognito: true})` 实现隔离。
 >
-> 以上参数不出现在 CAPS 声明和 tool_data 中。
+> 以上参数不出现在 caps 声明和 exec 负载中。
 
 ## 工具定义
 
-浏览器插件注册一个 `browser` 工具，与 `agent-browser` CLI 签名对齐。
-
-```json
-{
-  "name": "browser",
-  "description": "Control a web browser via Chrome Extension APIs. Actions: open, click, close, dblclick, download, eval, get, network, read, screenshot, snapshot, tab, wait, scroll, hover, fill, press, select, back, forward, reload, sleep, cookies, storage, pipeline.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": { "type": "string" },
-      "argv": { "type": "array", "items": { "type": "string" } }
-    },
-    "required": ["action", "argv"]
-  },
-  "required_level": 1,
-  "policy_version": "1"
-}
-```
+浏览器插件暴露 exec 虚拟指令 `browser`（调用形态 `exec browser <subcommand> [args...]`），
+子命令与 `agent-browser` CLI 签名对齐。caps 声明见上文（required_level=2，stateful，backgroundable）。
 
 > **约定：** 所有操作默认针对**当前活跃标签页**。需切换目标时，先调用 `tab <N>` 切换，后续操作即作用于新 tab。
 
@@ -385,7 +428,7 @@ browser/
 │   └── options.js                # 读写 chrome.storage.local
 │
 ├── src/
-│   ├── background.js             # Service Worker 入口
+│   ├── background.js             # Service Worker 入口（注册 browser 虚拟指令 + 生命周期）
 │   │
 │   ├── lib/                      # 第三方库
 │   │   └── nats/                 # @nats-io/nats-core (复制自 aic/ui)
@@ -401,16 +444,19 @@ browser/
 │   │       ├── jetstream.js
 │   │       └── jetstream-internal.js
 │   │
-│   ├── sdk/                      # AIC 客户端 SDK
+│   ├── sdk/                      # AIC 客户端 SDK（指令集 v2）
+│   │   ├── proto.js              # 协议层：subject/信封/caps v2 纯函数（Go sdk/proto 零漂移）
+│   │   ├── proto.test.js         # subject/caps 固定向量（node --test）
 │   │   ├── crypto.js             # HKDF + HMAC-SHA256 (Web Crypto API)
-│   │   ├── auth.js               # Token 生成 (e1.*)
-│   │   ├── client.js             # NATS 连接 / CAPS 发布 / 心跳 / 重连
+│   │   ├── auth.js               # 连接 token (e1.*) + 工具请求验签（v2 canonical 输入）
+│   │   ├── auth.test.js          # 密钥派生/签名固定向量（与 Go vectors_test.go 同源）
+│   │   ├── client.js             # NATS 连接 / caps v2 发布 / 会话级 inbox 订阅 / 分发
 │   │   ├── argv.js               # action+argv 双层解析
+│   │   ├── argv.test.js          # 双层解析测试
 │   │   └── storage.js            # chrome.storage.local 读写封装
 │   │
-│   └── tools/                    # 工具实现
-│       ├── browser.js            # open/click/close/download/eval/get/network/read/screenshot/snapshot/tab/wait/sleep 等核心 action
-│       └── registry.js           # 工具注册表 (name → handler 映射)
+│   └── tools/                    # 虚拟指令实现
+│       └── browser.js            # exec browser 子命令实现（open/click/snapshot/...）
 │
 └── dist/                        # 构建产出 (make build)
     └── aic-browser.zip
@@ -420,15 +466,13 @@ browser/
 
 ```
 background.js
-  ├── sdk/client.js       → NATS 连接生命周期
+  ├── sdk/client.js       → NATS 连接生命周期 + 会话级 inbox 分发
+  │   ├── sdk/proto.js    → subject/信封/caps v2（纯函数）
   │   ├── sdk/crypto.js   → HKDF 密钥派生
-  │   ├── sdk/auth.js     → e1 Token 生成
+  │   ├── sdk/auth.js     → e1 Token 生成 + 请求验签
   │   └── lib/nats/*.js   → NATS WebSocket
   │
-  ├── sdk/handler.js      → 验签 + 工具分发
-  │   └── tools/registry.js
-  │       └── tools/browser.js
-  │
+  └── tools/browser.js    → exec browser 子命令实现
   └── sdk/storage.js      → 读取用户设置
 ```
 
