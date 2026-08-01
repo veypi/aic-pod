@@ -23,17 +23,6 @@
       "expectFiles": {"/a/": "", "/a/b/": "", "/a/b/c.txt": "x"}
     },
     {
-      "name": "write append",
-      "cmd": "fs",
-      "params": {"action": "write", "path": "/log.txt", "content": "more\n", "append": true},
-      "files": {"/log.txt": "init\n"},
-      "expect": {
-        "content": "appended to /log.txt (+1 lines, +5 bytes)",
-        "attrs": {"action": "write", "path": "/log.txt", "mode": "append", "lines": "1", "bytes": "5"}
-      },
-      "expectFiles": {"/log.txt": "init\nmore\n"}
-    },
-    {
       "name": "write empty content",
       "cmd": "fs",
       "params": {"action": "write", "path": "/empty.txt", "content": ""},

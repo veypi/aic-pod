@@ -10,15 +10,15 @@ import (
 
 var testTime = time.Unix(1700000000, 0)
 
-// find 默认上限 100 条：查 limit+1 判定截断，恰好 100 条不误标（§5.4）。
-func TestFindLimit(t *testing.T) {
+// rg --files 平台上限 100 条：超限标记 truncated，恰好 100 条不误标（§5.4）。
+func TestRgFilesLimit(t *testing.T) {
 	vfs := NewMemVFS()
 	for i := 0; i < 101; i++ {
 		vfs.SetFile(fmt.Sprintf("/d/f%03d.txt", i), []byte("x"), testTime)
 	}
 	env := &Env{VFS: vfs, Workdir: "/d"}
 
-	res, err := Run(context.Background(), env, "find", []string{"/d"})
+	res, err := Run(context.Background(), env, "rg", []string{"--files", "/d"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestFindLimit(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		vfs2.SetFile(fmt.Sprintf("/d/f%03d.txt", i), []byte("x"), testTime)
 	}
-	res2, err := Run(context.Background(), &Env{VFS: vfs2, Workdir: "/d"}, "find", []string{"/d"})
+	res2, err := Run(context.Background(), &Env{VFS: vfs2, Workdir: "/d"}, "rg", []string{"--files", "/d"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +70,28 @@ func TestReadLargeFile(t *testing.T) {
 	}
 }
 
-// grep 大候选文件流式匹配（>8MB）。
-func TestGrepLargeFile(t *testing.T) {
+// tree 节点上限：超过 treeMaxNodes 标记 truncated 且 rows 截断（§5.4 有界子树）。
+func TestTreeNodeCap(t *testing.T) {
+	vfs := NewMemVFS()
+	for i := 0; i < treeMaxNodes+1; i++ {
+		vfs.SetFile(fmt.Sprintf("/d/f%05d.txt", i), []byte("x"), testTime)
+	}
+	env := &Env{VFS: vfs, Workdir: "/d"}
+
+	res, err := Run(context.Background(), env, "tree", []string{"--depth", "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attrs["truncated"] != "true" {
+		t.Errorf("truncated = %s, want true", res.Attrs["truncated"])
+	}
+	if res.Attrs["rows"] != fmt.Sprintf("%d", treeMaxNodes) {
+		t.Errorf("rows = %s, want %d", res.Attrs["rows"], treeMaxNodes)
+	}
+}
+
+// rg 大候选文件流式匹配（>8MB），输出 rg 管道格式（冒号分隔）。
+func TestRgLargeFile(t *testing.T) {
 	vfs := NewMemVFS()
 	var sb strings.Builder
 	for i := 0; i < 200000; i++ {
@@ -81,11 +101,11 @@ func TestGrepLargeFile(t *testing.T) {
 	vfs.SetFile("/big.log", []byte(sb.String()), testTime)
 	env := &Env{VFS: vfs, Workdir: "/"}
 
-	res, err := Run(context.Background(), env, "grep", []string{"needle", "/big.log"})
+	res, err := Run(context.Background(), env, "rg", []string{"needle", "/big.log"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Attrs["rows"] != "1" || !strings.Contains(res.Content, "/big.log:200001\tneedle here") {
+	if res.Attrs["rows"] != "1" || !strings.Contains(res.Content, "/big.log:200001:needle here") {
 		t.Errorf("res = %v %.80q", res.Attrs, res.Content)
 	}
 }

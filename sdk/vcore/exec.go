@@ -15,8 +15,8 @@ type CmdFunc func(ctx context.Context, env *Env, argv []string) (*Result, error)
 // coreCommands 是核心 8 虚拟指令（§5.4，三端统一基准）。
 var coreCommands = map[string]CmdFunc{
 	"ls":    cmdLs,
-	"find":  cmdFind,
-	"grep":  cmdGrep,
+	"rg":    cmdRg,
+	"tree":  cmdTree,
 	"curl":  cmdCurl,
 	"rm":    cmdRm,
 	"mkdir": cmdMkdir,
@@ -35,7 +35,7 @@ func CoreCommandNames() []string {
 }
 
 // Register 注册额外虚拟指令（git/browser/bg_*/commands 由引入方或后续阶段接入）。
-// 同名覆盖核心 8 不被允许（一致性基准不可替换）。
+// 同名覆盖核心指令不被允许（一致性基准不可替换）。
 func Register(name string, fn CmdFunc) error {
 	if _, ok := coreCommands[name]; ok {
 		return fmt.Errorf("vcore: cannot override core command %q", name)

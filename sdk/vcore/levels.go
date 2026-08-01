@@ -24,8 +24,8 @@ func FSRequired(action string) int {
 // rm 的动态提升（-r 非空目录 = Danger）见 ExecRequiredIn。
 var execCoreLevels = map[string]int{
 	"ls":   proto.LevelRead,
-	"find": proto.LevelRead,
-	"grep": proto.LevelRead,
+	"rg":   proto.LevelRead,
+	"tree": proto.LevelRead,
 
 	"curl":  proto.LevelWrite,
 	"mkdir": proto.LevelWrite,

@@ -1,0 +1,250 @@
+{
+  "cases": [
+    {
+      "name": "rg single file",
+      "cmd": "rg",
+      "argv": ["foo", "/docs/a.txt"],
+      "files": {"/docs/a.txt": "foo one\nbar\nfoo two\n"},
+      "expect": {
+        "content": "/docs/a.txt:1:foo one\n/docs/a.txt:3:foo two",
+        "attrs": {"action": "rg", "path": "/docs/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg recursive directory byte order",
+      "cmd": "rg",
+      "argv": ["foo", "/docs"],
+      "files": {"/docs/b.txt": "foo b\n", "/docs/a.txt": "foo a\n", "/docs/sub/c.txt": "foo c\n"},
+      "expect": {
+        "content": "/docs/a.txt:1:foo a\n/docs/b.txt:1:foo b\n/docs/sub/c.txt:1:foo c",
+        "attrs": {"action": "rg", "path": "/docs", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg -i case insensitive",
+      "cmd": "rg",
+      "argv": ["-i", "todo", "/a.txt"],
+      "files": {"/a.txt": "TODO: fix\nnothing\nTodo: ship\n"},
+      "expect": {
+        "content": "/a.txt:1:TODO: fix\n/a.txt:3:Todo: ship",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg regex alternation and anchor",
+      "cmd": "rg",
+      "argv": ["^(foo|baz)\\d+", "/a.txt"],
+      "files": {"/a.txt": "foo123 ok\nbar baz9\nbaz42\nxfoo1\n"},
+      "expect": {
+        "content": "/a.txt:1:foo123 ok\n/a.txt:3:baz42",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg -m per file limit not global truncation",
+      "cmd": "rg",
+      "argv": ["-m", "1", "foo", "/a.txt"],
+      "files": {"/a.txt": "foo 1\nfoo 2\nfoo 3\n"},
+      "expect": {
+        "content": "/a.txt:1:foo 1",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg -m applies per file",
+      "cmd": "rg",
+      "argv": ["-m", "1", "foo", "/d"],
+      "files": {"/d/a.txt": "foo\nfoo\n", "/d/b.txt": "foo\nfoo\n"},
+      "expect": {
+        "content": "/d/a.txt:1:foo\n/d/b.txt:1:foo",
+        "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg -l files with matches",
+      "cmd": "rg",
+      "argv": ["-l", "foo", "/docs"],
+      "files": {"/docs/a.txt": "foo\nbar\n", "/docs/b.txt": "nothing\n", "/docs/sub/c.txt": "foo\n"},
+      "expect": {
+        "content": "/docs/a.txt\n/docs/sub/c.txt",
+        "attrs": {"action": "rg", "path": "/docs", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg CRLF strip",
+      "cmd": "rg",
+      "argv": ["foo$", "/a.txt"],
+      "files": {"/a.txt": "foo\r\nbar\r\n"},
+      "expect": {
+        "content": "/a.txt:1:foo",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg skips binary files",
+      "cmd": "rg",
+      "argv": ["foo", "/docs"],
+      "files": {"/docs/bin.dat": "base64:AMBmb28=", "/docs/a.txt": "foo\n"},
+      "expect": {
+        "content": "/docs/a.txt:1:foo",
+        "attrs": {"action": "rg", "path": "/docs", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg skips node_modules vendor dot dirs but not dotfiles",
+      "cmd": "rg",
+      "argv": ["foo", "/p"],
+      "files": {
+        "/p/a.txt": "foo\n",
+        "/p/.env": "foo secret\n",
+        "/p/node_modules/pkg/index.js": "foo\n",
+        "/p/vendor/lib/v.go": "foo\n",
+        "/p/.git/config": "foo\n"
+      },
+      "expect": {
+        "content": "/p/.env:1:foo secret\n/p/a.txt:1:foo",
+        "attrs": {"action": "rg", "path": "/p", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg -g glob filter search",
+      "cmd": "rg",
+      "argv": ["-g", "*.go", "todo", "/src"],
+      "files": {"/src/a.go": "todo a\n", "/src/b.md": "todo b\n", "/src/sub/c.go": "todo c\n"},
+      "expect": {
+        "content": "/src/a.go:1:todo a\n/src/sub/c.go:1:todo c",
+        "attrs": {"action": "rg", "path": "/src", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg lookaround rejected with escape hatch",
+      "cmd": "rg",
+      "argv": ["foo(?=bar)", "/a.txt"],
+      "files": {"/a.txt": "foobar\n"},
+      "expectError": "rg: pattern uses unsupported feature (lookaround/backreference), use bash -c \"grep -P ...\" on a physical host"
+    },
+    {
+      "name": "rg backreference rejected",
+      "cmd": "rg",
+      "argv": ["(a)\\1", "/a.txt"],
+      "files": {"/a.txt": "aa\n"},
+      "expectError": "rg: pattern uses unsupported feature (lookaround/backreference), use bash -c \"grep -P ...\" on a physical host"
+    },
+    {
+      "name": "rg invalid regex",
+      "cmd": "rg",
+      "argv": ["[", "/a.txt"],
+      "files": {"/a.txt": "x\n"},
+      "expectError": "rg: invalid pattern: error parsing regexp: missing closing ]: `[`"
+    },
+    {
+      "name": "rg missing pattern and path",
+      "cmd": "rg",
+      "argv": [],
+      "files": {},
+      "expectError": "rg: missing argument: rg [OPTIONS] <pattern> <path>"
+    },
+    {
+      "name": "rg missing path",
+      "cmd": "rg",
+      "argv": ["foo"],
+      "files": {},
+      "expectError": "rg: missing argument: rg [OPTIONS] <pattern> <path>"
+    },
+    {
+      "name": "rg unknown flag",
+      "cmd": "rg",
+      "argv": ["-x", "foo", "/a.txt"],
+      "files": {"/a.txt": "foo\n"},
+      "expectError": "rg: unknown flag \"-x\""
+    },
+    {
+      "name": "rg no matches",
+      "cmd": "rg",
+      "argv": ["zzz", "/a.txt"],
+      "files": {"/a.txt": "foo\n"},
+      "expect": {
+        "content": "no matches for pattern \"zzz\" in /a.txt",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg empty pattern no trailing phantom line",
+      "cmd": "rg",
+      "argv": ["^$", "/a.txt"],
+      "files": {"/a.txt": "foo\nbar\n"},
+      "expect": {
+        "content": "no matches for pattern \"^$\" in /a.txt",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg empty pattern matches real blank line",
+      "cmd": "rg",
+      "argv": ["^$", "/a.txt"],
+      "files": {"/a.txt": "foo\n\nbar\n"},
+      "expect": {
+        "content": "/a.txt:2:",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg --files byte order files only",
+      "cmd": "rg",
+      "argv": ["--files", "/d"],
+      "files": {"/d/c.txt": "c", "/d/a.txt": "a", "/d/sub/b.txt": "b"},
+      "expect": {
+        "content": "/d/a.txt\n/d/c.txt\n/d/sub/b.txt",
+        "attrs": {"action": "rg", "path": "/d", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg --files glob filter",
+      "cmd": "rg",
+      "argv": ["--files", "-g", "*.go", "/d"],
+      "files": {"/d/a.go": "a", "/d/b.txt": "b", "/d/sub/c.go": "c"},
+      "expect": {
+        "content": "/d/a.go\n/d/sub/c.go",
+        "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg --files defaults to workdir",
+      "cmd": "rg",
+      "argv": ["--files"],
+      "workdir": "/d",
+      "files": {"/d/x.txt": "x", "/d/y.txt": "y"},
+      "expect": {
+        "content": "/d/x.txt\n/d/y.txt",
+        "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg --files single file",
+      "cmd": "rg",
+      "argv": ["--files", "/a.txt"],
+      "files": {"/a.txt": "hello"},
+      "expect": {
+        "content": "/a.txt",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg --files glob no match",
+      "cmd": "rg",
+      "argv": ["--files", "-g", "*.rs", "/d"],
+      "files": {"/d/a.txt": "a"},
+      "expect": {
+        "content": "no files matched globs *.rs in /d",
+        "attrs": {"action": "rg", "path": "/d", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg --files rejects search flags",
+      "cmd": "rg",
+      "argv": ["--files", "-i", "/d"],
+      "files": {"/d/a.txt": "a"},
+      "expectError": "rg: --files cannot be used with search flags (-i, -l, -m)"
+    }
+  ]
+}

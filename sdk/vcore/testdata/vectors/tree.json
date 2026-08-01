@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "name": "tree depth1 flat",
+      "cmd": "tree",
+      "argv": ["--depth", "1"],
+      "workdir": "/d",
+      "files": {"/d/a.txt": "a", "/d/b.txt": "bb", "/d/sub/": ""},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"},{\"name\":\"b.txt\",\"dir\":false,\"size\":2,\"mod_time\":0,\"mime\":\"\"},{\"name\":\"sub\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\"}],\"truncated\":false}",
+        "attrs": {"action": "tree", "path": "/d", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "tree nested depth2",
+      "cmd": "tree",
+      "argv": ["--depth", "2"],
+      "workdir": "/d",
+      "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b", "/d/sub/deep/c.txt": "c"},
+      "mtimes": {"/d/sub/": 0, "/d/sub/deep/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"},{\"name\":\"sub\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\",\"items\":[{\"name\":\"b.txt\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"},{\"name\":\"deep\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\"}]}],\"truncated\":false}",
+        "attrs": {"action": "tree", "path": "/d", "rows": "4", "truncated": "false"}
+      }
+    },
+    {
+      "name": "tree default depth expands 3 levels",
+      "cmd": "tree",
+      "argv": [],
+      "workdir": "/d",
+      "files": {"/d/a/b/c.txt": "c"},
+      "mtimes": {"/d/a/": 0, "/d/a/b/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\",\"items\":[{\"name\":\"b\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\",\"items\":[{\"name\":\"c.txt\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"}]}]}],\"truncated\":false}",
+        "attrs": {"action": "tree", "path": "/d", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "tree skips dot dirs and skip dirs as leaves",
+      "cmd": "tree",
+      "argv": ["--depth", "2"],
+      "workdir": "/d",
+      "files": {"/d/ok.txt": "o", "/d/.env": "e", "/d/.git/y.txt": "y", "/d/node_modules/x.txt": "x"},
+      "mtimes": {"/d/.git/": 0, "/d/node_modules/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\".env\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"},{\"name\":\".git\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\"},{\"name\":\"node_modules\",\"dir\":true,\"size\":0,\"mod_time\":0,\"mime\":\"\"},{\"name\":\"ok.txt\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"}],\"truncated\":false}",
+        "attrs": {"action": "tree", "path": "/d", "rows": "4", "truncated": "false"}
+      }
+    },
+    {
+      "name": "tree single file",
+      "cmd": "tree",
+      "argv": ["/d/a.txt"],
+      "workdir": "/d",
+      "files": {"/d/a.txt": "a"},
+      "expect": {
+        "content": "{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0,\"mime\":\"\"}",
+        "attrs": {"action": "tree", "path": "/d/a.txt", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "tree unknown flag",
+      "cmd": "tree",
+      "argv": ["-x"],
+      "workdir": "/d",
+      "files": {},
+      "expectError": "tree: unknown flag \"-x\""
+    },
+    {
+      "name": "tree invalid depth",
+      "cmd": "tree",
+      "argv": ["--depth", "0"],
+      "workdir": "/d",
+      "files": {},
+      "expectError": "tree: --depth must be >= 1, got 0"
+    }
+  ]
+}

@@ -21,10 +21,3 @@ type VFS interface {
 	RemoveAll(name string) error
 	Rename(oldname, newname string) error
 }
-
-// Appender 是可选的真追加接口（O_APPEND）。
-// 未实现时 fs write 的 append 模式退化为读改写（§4.3 实现取舍：
-// cloud/page 读改写、物理 host 真追加；同 host 调用串行化已挡住并发交叉）。
-type Appender interface {
-	Append(name string, data []byte) error
-}

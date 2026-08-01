@@ -49,6 +49,22 @@
       "expectError": "rm: cannot remove root directory /users/u1"
     },
     {
+      "name": "rm drive root protection (backslash input normalized)",
+      "cmd": "rm",
+      "argv": ["-r", "C:\\"],
+      "protectRoots": ["C:"],
+      "files": {},
+      "expectError": "rm: cannot remove root directory C:"
+    },
+    {
+      "name": "rm drive root protection (slash input)",
+      "cmd": "rm",
+      "argv": ["C:/"],
+      "protectRoots": ["C:"],
+      "files": {},
+      "expectError": "rm: cannot remove root directory C:"
+    },
+    {
       "name": "mkdir basic",
       "cmd": "mkdir",
       "argv": ["/newdir"],

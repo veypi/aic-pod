@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// fsWrite 实现 write（§4.3）：content 必填；默认整文件覆写，append 为显式追加；
-// 父目录不存在自动创建。
+// fsWrite 实现 write（§4.3）：content 必填，整文件覆写；父目录不存在自动创建。
 func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if p.Path == "" {
 		return nil, fsErr("write", "path is required")
@@ -29,26 +28,6 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	r := newResult("write", abs)
 	r.set("lines", lines)
 	r.set("bytes", len(content))
-
-	if p.Append {
-		if ap, ok := env.VFS.(Appender); ok {
-			err = ap.Append(abs, []byte(content))
-		} else {
-			// 读改写（§4.3 实现取舍：cloud/page 无追加原语，同 host 串行化挡并发交叉）
-			var old []byte
-			old, err = env.VFS.ReadFile(abs)
-			if err != nil {
-				old = nil // 文件不存在则创建
-			}
-			err = env.VFS.WriteFile(abs, append(old, content...))
-		}
-		if err != nil {
-			return nil, fsErr("write", "%s", err)
-		}
-		r.Content = fmt.Sprintf("appended to %s (+%d lines, +%d bytes)", abs, lines, len(content))
-		r.Attrs["mode"] = "append"
-		return r, nil
-	}
 
 	if err := env.VFS.WriteFile(abs, []byte(content)); err != nil {
 		return nil, fsErr("write", "%s", err)

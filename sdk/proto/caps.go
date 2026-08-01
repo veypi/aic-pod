@@ -66,7 +66,7 @@ type ExecCaps struct {
 func (c ExecCaps) ProgramsUnrestricted() bool { return c.Programs == nil }
 
 // VirtualDecl 是虚拟指令声明（§6.3）。
-// 物理 host 必备 = 核心 8（虚拟包装）+ commands + bg_*。
+// 物理 host 必备 = 核心 7（虚拟包装）+ commands + bg_*。
 type VirtualDecl struct {
 	Name           string `json:"name"`
 	RequiredLevel  int    `json:"required_level"`

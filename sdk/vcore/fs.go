@@ -17,7 +17,6 @@ type fsParams struct {
 	Offset  *int     `json:"offset,omitempty"`
 	Limit   *int     `json:"limit,omitempty"`
 	Content *string  `json:"content,omitempty"`
-	Append  bool     `json:"append,omitempty"`
 	Edits   []editOp `json:"edits,omitempty"`
 }
 
