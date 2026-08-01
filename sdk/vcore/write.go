@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +51,31 @@ func countLines(content string) int {
 	return n
 }
 
+// unicodeEscapeRe 匹配字面 \uXXXX 序列（LLM 双重 JSON 编码的典型残留：
+// 模型意图发出 JSON 转义 \u003c 表示 '<'，但反斜杠又被转义一次，工具实际
+// 收到 6 个字面字符 \u003c，与文件中的 '<' 无法匹配）。
+var unicodeEscapeRe = regexp.MustCompile(`\\u[0-9a-fA-F]{4}`)
+
+// doubleEncodingHint 检测上述双重编码：oldText 含字面 \uXXXX 转义且其 Unicode
+// 解码形式恰好在文件中存在时，返回可操作提示（否则空串）。
+// 仅处理 BMP 单码元；代理对无法正确还原时解码结果自然不匹配、不产生误报。
+func doubleEncodingHint(content, oldText string) string {
+	if !strings.Contains(oldText, `\u`) {
+		return ""
+	}
+	decoded := unicodeEscapeRe.ReplaceAllStringFunc(oldText, func(m string) string {
+		n, err := strconv.ParseUint(m[2:], 16, 32)
+		if err != nil {
+			return m
+		}
+		return string(rune(n))
+	})
+	if decoded == oldText || !strings.Contains(content, decoded) {
+		return ""
+	}
+	return ` (hint: oldText contains literal "\u003c"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters)`
+}
+
 // fsEdit 实现 edit（§4.4）：edits 数组逐个顺序应用——每个 edit 基于前一个
 // 应用后的当前内容匹配，oldText 必须唯一；单个 edit 失败（找不到/多匹配/
 // 参数非法）不阻塞其余 edit——**部分成功语义**：成功的保留，失败的按
@@ -90,7 +117,7 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		}
 		first := strings.Index(content, e.OldText)
 		if first < 0 {
-			failed = append(failed, idx+": oldText not found in file")
+			failed = append(failed, idx+": oldText not found in file"+doubleEncodingHint(content, e.OldText))
 			continue
 		}
 		if n := strings.Count(content, e.OldText); n > 1 {

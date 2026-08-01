@@ -129,6 +129,42 @@
       "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "nope", "newText": "x"}, {"oldText": "nope2", "newText": "y"}]},
       "files": {"/foo.txt": "hello\n"},
       "expectError": "fs edit: no edits applied: edit[1]: oldText not found in file; edit[2]: oldText not found in file"
+    },
+    {
+      "name": "edit regex backslashes match literally",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/re.txt", "edits": [{"oldText": "/<file_uploaded\\s+path=\"([^\"]*)\"/g", "newText": "/x/g"}]},
+      "files": {"/re.txt": "const re = /<file_uploaded\\s+path=\"([^\"]*)\"/g;\n"},
+      "expect": {
+        "content": "updated file: /re.txt (1 edits)",
+        "attrs": {"action": "edit", "path": "/re.txt", "edits": "1"}
+      },
+      "expectFiles": {"/re.txt": "const re = /x/g;\n"}
+    },
+    {
+      "name": "edit oldText double-encoded unicode escapes gets hint",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/re.txt", "edits": [{"oldText": "const re = /\\u003cfile\\s+path", "newText": "x"}]},
+      "files": {"/re.txt": "const re = /<file\\s+path\n"},
+      "expectError": "fs edit: edit[1]: oldText not found in file (hint: oldText contains literal \"\\u003c\"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters)"
+    },
+    {
+      "name": "edit partial failure reports double-encoding hint",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "aaa", "newText": "bbb"}, {"oldText": "tail \\u003c/end\\u003e", "newText": "x"}]},
+      "files": {"/foo.txt": "aaa tail </end>\n"},
+      "expect": {
+        "content": "updated file: /foo.txt (1/2 edits applied; failed: edit[2]: oldText not found in file (hint: oldText contains literal \"\\u003c\"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters))",
+        "attrs": {"action": "edit", "path": "/foo.txt", "edits": "1", "edits_failed": "1"}
+      },
+      "expectFiles": {"/foo.txt": "bbb tail </end>\n"}
+    },
+    {
+      "name": "edit literal unicode escape without decoded match gets no hint",
+      "cmd": "fs",
+      "params": {"action": "edit", "path": "/foo.txt", "edits": [{"oldText": "missing \\u003c tag", "newText": "x"}]},
+      "files": {"/foo.txt": "hello\n"},
+      "expectError": "fs edit: edit[1]: oldText not found in file"
     }
   ]
 }

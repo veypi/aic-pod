@@ -10,11 +10,13 @@ import (
 
 // ---- curl（§5.4）----
 
-// curl -o <path> <url> [--max-size <MB>]：仅 http/https，GET 流式写入；
+// curl [-L] -o <path> <url> [--max-size <MB>]：仅 http/https，GET 流式写入；
+// -L 跟随重定向（可选；Fetcher 默认已跟随，每跳均过 SSRF 校验）；
 // 目标已存在报错不覆盖；超限中止并删除半成品文件。
 // SSRF 防护由 Fetcher 实现方注入（cloud 严格 / 物理 host 不限制）。
 func cmdCurl(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	pa, err := parseArgv("curl", argvSpec{
+		bools:  map[string]bool{"-L": true}, // 跟随重定向（Fetcher 默认已跟随）
 		values: map[string]bool{"-o": true, "--max-size": true},
 		minPos: 1, maxPos: 1,
 	}, argv)
