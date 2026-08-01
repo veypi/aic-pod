@@ -17,9 +17,14 @@ const (
 	ToolExec = "exec"
 )
 
-// HostIDPrefix 是 host_id 的强制前缀。它是安全边界的一部分：
-// 前端 JWT 的 sub deny 规则（FrontendDenyPattern）依赖此前缀精确匹配物理 host
-// 而不误伤 h.page.> 与其他会话 topic。改动必须同步 natsauth。
+// HostIDPrefix 是**会话级 subject 中物理 host 段**的强制前缀（§6.1）。它是安全
+// 边界的一部分：前端 JWT 的 sub deny 规则（FrontendDenyPattern）依赖此前缀精确
+// 匹配物理 host 的工具流量而不误伤 h.page.> 与其他会话 topic。
+//
+// host_id 本身**不带**前缀：1host 参数、连接级 caps/presence subject、host list
+// 输出均用裸 id；仅会话级工具流量（ToolReqSubject/HostInboxSubject）的 host 段
+// 在构造时添加（hostSeg），解析时还原（ParseToolReqSubject）。
+// 改动必须同步 natsauth 的 host JWT sub allow（issueUserJWT，经 HostInboxSubject）。
 const HostIDPrefix = "host_"
 
 // validSeg 校验 subject 段：非空且不含 . * > 与空白。
@@ -51,8 +56,18 @@ func connSubject(uid, hostID string, credVer uint64, suffix string) (string, err
 
 // ---- 会话级 subject（工具流量，§6.1） ----
 
+// hostSeg 构造会话级 subject 的 host 段：物理 host 加 HostIDPrefix 前缀，
+// page/cloud 保留字与已带前缀的输入原样（幂等）。
+func hostSeg(host string) string {
+	if host == HostCloud || host == HostPage || strings.HasPrefix(host, HostIDPrefix) {
+		return host
+	}
+	return HostIDPrefix + host
+}
+
 // ToolReqSubject 工具请求：u.{uid}.s.{sid}.h.{host}.{fs|exec}.req
-// host 段填 host_id 或 page（1host 寻址同构）；cloud 服务端本地执行，不过 NATS。
+// host 段：物理 host = host_{host_id}（HostIDPrefix，构造时自动添加）；
+// page 保留字原样（1host 寻址同构）。cloud 服务端本地执行，不过 NATS。
 func ToolReqSubject(uid, sid, host, tool string) (string, error) {
 	if !validSeg(uid) || !validSeg(sid) || !validSeg(host) {
 		return "", fmt.Errorf("proto: invalid uid/sid/host segment")
@@ -60,7 +75,7 @@ func ToolReqSubject(uid, sid, host, tool string) (string, error) {
 	if tool != ToolFS && tool != ToolExec {
 		return "", fmt.Errorf("proto: invalid tool %q (must be fs|exec)", tool)
 	}
-	return fmt.Sprintf("u.%s.s.%s.h.%s.%s.req", uid, sid, host, tool), nil
+	return fmt.Sprintf("u.%s.s.%s.h.%s.%s.req", uid, sid, hostSeg(host), tool), nil
 }
 
 // FSReqSubject 是 ToolReqSubject 的 fs 简写。
@@ -73,17 +88,20 @@ func ExecReqSubject(uid, sid, host string) (string, error) {
 	return ToolReqSubject(uid, sid, host, ToolExec)
 }
 
-// HostInboxSubject 是 host 端连接时的单订阅：u.{uid}.s.*.h.{host_id}.>
+// HostInboxSubject 是 host 端连接时的单订阅：u.{uid}.s.*.h.host_{host_id}.>
 // 覆盖该 host 所有会话的 fs/exec 请求，无 per-session 订阅 churn。
+// host 段自动加 HostIDPrefix（与 ToolReqSubject 同源）。
 func HostInboxSubject(uid, hostID string) (string, error) {
 	if !validSeg(uid) || !validSeg(hostID) {
 		return "", fmt.Errorf("proto: invalid uid/hostID segment")
 	}
-	return fmt.Sprintf("u.%s.s.*.h.%s.>", uid, hostID), nil
+	return fmt.Sprintf("u.%s.s.*.h.%s.>", uid, hostSeg(hostID)), nil
 }
 
 // ParseToolReqSubject 解析会话级工具请求 subject（host 端从 subject 取 sid
 // 做会话隔离——bg 注册表 {host}:{sid}:{op_id} 命名空间与 topic 一致）。
+// host 段为 host_{host_id}，解析后还原为裸 host_id（与 1host 参数一致）；
+// page 保留字原样返回。
 func ParseToolReqSubject(subject string) (uid, sid, host, tool string, err error) {
 	parts := strings.Split(subject, ".")
 	// u.{uid}.s.{sid}.h.{host}.{tool}.req 恰好 8 段
@@ -93,7 +111,7 @@ func ParseToolReqSubject(subject string) (uid, sid, host, tool string, err error
 	if parts[6] != ToolFS && parts[6] != ToolExec {
 		return "", "", "", "", fmt.Errorf("proto: invalid tool segment in subject: %s", subject)
 	}
-	return parts[1], parts[3], parts[5], parts[6], nil
+	return parts[1], parts[3], strings.TrimPrefix(parts[5], HostIDPrefix), parts[6], nil
 }
 
 // PageQueueGroup 是 page 端 fs.req/exec.req 的统一 queue group（§6.1）：page-{sid}。

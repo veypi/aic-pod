@@ -15,6 +15,11 @@ func TestSubjects(t *testing.T) {
 	if err != nil || fs != "u.u1.s.s9.h.host_abc.fs.req" {
 		t.Errorf("FSReqSubject = %q, %v", fs, err)
 	}
+	// 裸 host_id（1host 参数形态）自动加 HostIDPrefix；已带前缀输入幂等
+	fs2, err := FSReqSubject("u1", "s9", "abc")
+	if err != nil || fs2 != "u.u1.s.s9.h.host_abc.fs.req" {
+		t.Errorf("FSReqSubject(raw id) = %q, %v", fs2, err)
+	}
 	ex, err := ExecReqSubject("u1", "s9", HostPage)
 	if err != nil || ex != "u.u1.s.s9.h.page.exec.req" {
 		t.Errorf("ExecReqSubject(page) = %q, %v", ex, err)
@@ -22,6 +27,10 @@ func TestSubjects(t *testing.T) {
 	inbox, err := HostInboxSubject("u1", "host_abc")
 	if err != nil || inbox != "u.u1.s.*.h.host_abc.>" {
 		t.Errorf("HostInboxSubject = %q, %v", inbox, err)
+	}
+	inbox2, err := HostInboxSubject("u1", "abc")
+	if err != nil || inbox2 != "u.u1.s.*.h.host_abc.>" {
+		t.Errorf("HostInboxSubject(raw id) = %q, %v", inbox2, err)
 	}
 	allow, err := UserAllowPattern("u1")
 	if err != nil || allow != "u.u1.>" {
@@ -54,9 +63,15 @@ func TestSubjects(t *testing.T) {
 }
 
 func TestParseToolReqSubject(t *testing.T) {
+	// host 段 host_{host_id} 解析后还原为裸 host_id（与 1host 参数一致）
 	uid, sid, host, tool, err := ParseToolReqSubject("u.u1.s.s9.h.host_abc.exec.req")
-	if err != nil || uid != "u1" || sid != "s9" || host != "host_abc" || tool != ToolExec {
+	if err != nil || uid != "u1" || sid != "s9" || host != "abc" || tool != ToolExec {
 		t.Errorf("parse = %q %q %q %q, %v", uid, sid, host, tool, err)
+	}
+	// page 保留字原样返回
+	_, _, phost, _, err := ParseToolReqSubject("u.u1.s.s9.h.page.fs.req")
+	if err != nil || phost != HostPage {
+		t.Errorf("parse page = %q, %v", phost, err)
 	}
 	for _, s := range []string{
 		"u.u1.h.host_abc.1.caps",       // 连接级

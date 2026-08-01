@@ -1,5 +1,11 @@
 # AIC Env 客户端连入指南
 
+> **DEPRECATED（指令集 v2）**：本文描述的是 v1.2 协议（连接级 `tool.{name}.req` subject +
+> `tool_name/tool_data` 信封），已随指令集 v2 重构整体废除（旧扁平 aichost 包已删除）。
+> 现行协议的**唯一权威**是 `sdk/proto`（subject/信封/签名，含固定向量测试）与
+> `sdk/host`（host agent 运行时参考实现）；协议变更记录见 aic 仓库
+> `docs/instruction_sets_v2.md` §6 与 `docs/nats_auth.md`。
+
 ## 概述
 
 AIC Env 服务允许第三方设备（服务器、沙箱、IoT 设备）通过 NATS over WebSocket 连入 AIC 平台。连入后，设备上的命令执行、文件操作等能力会自动注册为 LLM 可调用的工具。
