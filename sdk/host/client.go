@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/veypi/aic-pod/sdk/exec_procs"
 	"github.com/veypi/aic-pod/sdk/proto"
 	"github.com/veypi/aic-pod/sdk/vcore"
+	vbrowser "github.com/veypi/aic-pod/sdk/vcore/browser"
 )
 
 // Options 客户端配置。
@@ -39,8 +42,10 @@ type Client struct {
 	uid     string
 	credVer uint64
 	replay  *replayCache
-	bgs     *bgRegistry
-	logf    func(string, ...any)
+	procs      *exec_procs.Manager // exec 子进程统一托管（§5.8/§5.9）
+	browserMu  sync.Mutex
+	browsers   map[string]*vbrowser.Browser // per-session browser 实例（pod 模式不隔离，§5.6）
+	logf       func(string, ...any)
 }
 
 // New 创建客户端（不连接）。
@@ -68,8 +73,9 @@ func New(opts Options) *Client {
 	return &Client{
 		opts:   opts,
 		replay: &replayCache{store: map[string]time.Time{}},
-		bgs:    newBgRegistry(),
-		logf:   logf,
+		procs:    exec_procs.NewManager(opts.ExecTimeout),
+		browsers: map[string]*vbrowser.Browser{},
+		logf:     logf,
 	}
 }
 
@@ -159,21 +165,24 @@ func (c *Client) Close() error {
 
 // buildCaps 构造物理 host 的 caps v2：
 // fs.actions=null（全部 3 个）；exec.programs=null（不限制，PATH 自检）；
-// virtual = 核心 7 虚拟包装 + commands + bg_*（必备，分级与 vcore 表同源）。
+// virtual = 核心 8 虚拟包装 + commands + bg_*（必备，desc/help/level 与 vcore 元数据同源）。
+// git/browser 不在物理 host 声明：git 走程序透传，browser 由浏览器扩展注册。
 func (c *Client) buildCaps() *proto.Caps {
 	virtual := make([]proto.VirtualDecl, 0, 12)
 	for _, name := range vcore.CoreCommandNames() {
-		virtual = append(virtual, proto.VirtualDecl{
-			Name:          name,
-			RequiredLevel: vcore.ExecRequired(name, nil),
-		})
+		if d, ok := vcore.Decl(name); ok {
+			virtual = append(virtual, d)
+		}
 	}
-	virtual = append(virtual,
-		proto.VirtualDecl{Name: "commands", RequiredLevel: proto.LevelRead},
-		proto.VirtualDecl{Name: "bg_list", RequiredLevel: proto.LevelRead},
-		proto.VirtualDecl{Name: "bg_wait", RequiredLevel: proto.LevelRead},
-		proto.VirtualDecl{Name: "bg_kill", RequiredLevel: proto.LevelDanger},
-	)
+	for _, name := range []string{"commands", "bg_list", "bg_wait", "bg_kill"} {
+		if d, ok := vcore.Decl(name); ok {
+			virtual = append(virtual, d)
+		}
+	}
+	// browser：pod 模式（不隔离——用户本机浏览器，§5.6），经 agent-browser CLI 调用
+	if d, ok := vcore.Decl("browser"); ok {
+		virtual = append(virtual, d)
+	}
 	hostname, _ := os.Hostname()
 	return &proto.Caps{
 		HostID:        c.hostID,

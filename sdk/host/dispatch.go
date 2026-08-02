@@ -155,7 +155,7 @@ func isVirtual(action string) bool {
 		}
 	}
 	switch action {
-	case "commands", "bg_list", "bg_wait", "bg_kill":
+	case "commands", "bg_list", "bg_wait", "bg_kill", "browser":
 		return true
 	}
 	return false
@@ -181,13 +181,16 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "commands":
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
 			Content: c.commandsJSON(), Attrs: map[string]string{"action": "commands"}}
+	case "browser":
+		// §5.6 pod 模式：agent-browser CLI，不隔离（用户本机浏览器）
+		return c.runBrowser(ctx, sid, req, p.Argv)
 	case "bg_list":
-		return resultToResponse(req.MsgID, c.bgs.list(sid), nil)
+		return resultToResponse(req.MsgID, c.bgList(sid), nil)
 	case "bg_wait":
-		res, err := c.bgs.wait(ctx, sid, p.Argv)
+		res, err := c.bgWait(ctx, sid, p.Argv)
 		return resultToResponse(req.MsgID, res, err)
 	case "bg_kill":
-		res, err := c.bgs.kill(sid, p.Argv)
+		res, err := c.bgKill(sid, p.Argv)
 		return resultToResponse(req.MsgID, res, err)
 	}
 

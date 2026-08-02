@@ -1,6 +1,6 @@
 //go:build !windows
 
-package host
+package exec_procs
 
 import (
 	"os/exec"
@@ -12,21 +12,21 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// killBackground 终止后台进程：先对整个进程组发 SIGTERM，5s 未退出补 SIGKILL（§5.8）。
-func killBackground(p *bgProcess) {
+// killEntry 终止后台进程：先对整个进程组发 SIGTERM，5s 未退出补 SIGKILL（§5.8）。
+func killEntry(e *Entry) {
 	// 进程组杀死（Setpgid 使 pgid == pid）
-	_ = syscall.Kill(-p.pid, syscall.SIGTERM)
+	_ = syscall.Kill(-e.pid, syscall.SIGTERM)
 	go func() {
 		timer := time.NewTimer(5 * time.Second)
 		<-timer.C
 		select {
-		case <-p.done:
+		case <-e.done:
 		default:
-			_ = syscall.Kill(-p.pid, syscall.SIGKILL)
+			_ = syscall.Kill(-e.pid, syscall.SIGKILL)
 		}
 	}()
 	// cancel 兜底（CommandContext 会 Kill 进程）
-	if p.cancel != nil {
-		p.cancel()
+	if e.cancel != nil {
+		e.cancel()
 	}
 }
