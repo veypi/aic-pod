@@ -10,6 +10,7 @@ import {
   cmdRg,
   cmdTree,
   cmdRm,
+  cmdCurl,
   humanSize,
   globMatch,
   cmpBytes,
@@ -52,6 +53,9 @@ class MemFS {
     }
     return [...dirs];
   }
+  _sizeOf(rec) {
+    return rec.content instanceof Uint8Array ? rec.content.byteLength : byteLen(rec.content);
+  }
   async resolve(p, ctx = {}) {
     return this._abs(p);
   }
@@ -60,7 +64,7 @@ class MemFS {
     // 根恒存在（对齐 PageFS.stat：空工作区 ls 得 empty directory）
     if (abs === "/sessions/s1" || abs === "/home/u1") return { path: abs, dir: true, size: 0, mtime: undefined };
     const rec = this.files.get(abs);
-    if (rec !== undefined) return { path: abs, dir: false, size: byteLen(rec.content), mtime: rec.mtime };
+    if (rec !== undefined) return { path: abs, dir: false, size: this._sizeOf(rec), mtime: rec.mtime };
     const prefix = abs.endsWith("/") ? abs : abs + "/";
     if (this._childrenOf(prefix).length > 0 || this.dirs.has(abs)) return { path: prefix, dir: true, size: 0, mtime: undefined };
     return null;
@@ -77,7 +81,7 @@ class MemFS {
         name: seg,
         path: full + (deeper ? "/" : ""),
         dir: deeper,
-        size: rec ? byteLen(rec.content) : undefined,
+        size: rec ? this._sizeOf(rec) : undefined,
         mtime: rec ? rec.mtime : undefined,
       });
     }
@@ -109,7 +113,7 @@ class MemFS {
     const abs = this._abs(p);
     const rec = this.files.get(abs);
     if (rec === undefined) throw new Error("no such file");
-    return { content: rec.content, mime: "text/plain", size: byteLen(rec.content), path: abs };
+    return { content: rec.content, mime: rec.mime || "text/plain", size: this._sizeOf(rec), path: abs };
   }
   async remove(p, ctx = {}) {
     const abs = this._abs(p);
@@ -132,6 +136,22 @@ class MemFS {
     this.files.set(abs, { content: text, mtime: Date.now() });
     return { ok: true, path: abs, size: byteLen(text) };
   }
+  async writeBlob(p, blob, ctx = {}) {
+    const abs = this._abs(p);
+    // 二进制保真：存 Uint8Array + mime（rg 按 mime 跳过非文本）
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    this.files.set(abs, { content: bytes, mime: blob.type || "application/octet-stream", mtime: Date.now() });
+    return { ok: true, path: abs, size: bytes.byteLength };
+  }
+}
+
+// ---- curl 测试辅助：stub 全局 fetch 返回构造的 Response ----
+function stubFetch(resp) {
+  const prev = globalThis.fetch;
+  globalThis.fetch = async () => resp;
+  return () => {
+    globalThis.fetch = prev;
+  };
 }
 function byteLen(s) {
   return new TextEncoder().encode(s).length;
@@ -474,6 +494,88 @@ test("rm: -r recursive with items count", async () => {
 test("rm: missing path", async () => {
   const fs = new MemFS({});
   await assert.rejects(cmdRm(fs, CTX, ["/nope"]), (e) => e.message === "rm: /nope: no such file or directory");
+});
+
+// ---- curl（流式下载：边读边计数、超限中止不落盘、Blob 二进制保留）----
+
+test("curl: streams text and writes blob", async () => {
+  const fs = new MemFS({});
+  const restore = stubFetch(new Response("hello world", { status: 200 }));
+  try {
+    const r = await cmdCurl(fs, CTX, ["-o", "/d/f.txt", "https://example.com/f.txt"]);
+    assert.equal(r.content, "downloaded https://example.com/f.txt to /d/f.txt (11 bytes)");
+    assert.deepEqual(r.attrs, { action: "curl", path: "/d/f.txt", bytes: "11" });
+    const rec = fs.files.get("/d/f.txt");
+    assert.equal(new TextDecoder().decode(rec.content), "hello world");
+  } finally {
+    restore();
+  }
+});
+
+test("curl: binary bytes preserved (no mojibake)", async () => {
+  const fs = new MemFS({});
+  const bytes = new Uint8Array([0x00, 0xff, 0x10, 0x7f, 0x80, 0x9f]);
+  const restore = stubFetch(new Response(bytes, { status: 200 }));
+  try {
+    const r = await cmdCurl(fs, CTX, ["-o", "/d/bin.dat", "https://example.com/bin.dat"]);
+    assert.equal(r.attrs.bytes, String(bytes.byteLength));
+    const rec = fs.files.get("/d/bin.dat");
+    assert.ok(rec.content instanceof Uint8Array);
+    assert.deepEqual([...rec.content], [...bytes]);
+  } finally {
+    restore();
+  }
+});
+
+test("curl: size limit aborts stream without writing", async () => {
+  const fs = new MemFS({});
+  // 2MB 响应 vs --max-size 1：流式读取中计数超限即中止，不落盘
+  const restore = stubFetch(new Response(new Uint8Array(2 * 1024 * 1024), { status: 200 }));
+  try {
+    await assert.rejects(cmdCurl(fs, CTX, ["-o", "/d/big.bin", "--max-size", "1", "https://example.com/big.bin"]), (e) =>
+      e.message.startsWith("curl: size limit exceeded (2MB > 1MB)"),
+    );
+    assert.equal(fs.files.has("/d/big.bin"), false); // 无半成品
+  } finally {
+    restore();
+  }
+});
+
+test("curl: destination exists rejected", async () => {
+  const fs = new MemFS({ "/d/f.txt": "old" });
+  const restore = stubFetch(new Response("new", { status: 200 }));
+  try {
+    await assert.rejects(cmdCurl(fs, CTX, ["-o", "/d/f.txt", "https://example.com/f.txt"]), (e) =>
+      e.message === "curl: destination /d/f.txt already exists",
+    );
+    assert.equal(fs.files.get("/d/f.txt").content, "old"); // 未覆盖
+  } finally {
+    restore();
+  }
+});
+
+test("curl: -o required and scheme rejected", async () => {
+  const fs = new MemFS({});
+  await assert.rejects(cmdCurl(fs, CTX, ["https://example.com/x"]), (e) => e.message === "curl: -o is required");
+  await assert.rejects(cmdCurl(fs, CTX, ["-o", "/d/x", "ftp://example.com/x"]), (e) =>
+    e.message === "curl: scheme not yet supported: ftp",
+  );
+  await assert.rejects(cmdCurl(fs, CTX, ["-o", "/d/x", "example.com/x"]), (e) =>
+    e.message === 'curl: invalid url "example.com/x": missing scheme',
+  );
+});
+
+test("curl: http error status", async () => {
+  const fs = new MemFS({});
+  const restore = stubFetch(new Response("nf", { status: 404 }));
+  try {
+    await assert.rejects(cmdCurl(fs, CTX, ["-o", "/d/x", "https://example.com/x"]), (e) =>
+      e.message === "curl: fetch https://example.com/x: HTTP 404",
+    );
+    assert.equal(fs.files.has("/d/x"), false);
+  } finally {
+    restore();
+  }
 });
 
 // ---- runVCmd 入口 ----

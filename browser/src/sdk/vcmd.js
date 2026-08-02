@@ -12,7 +12,7 @@
 //   list(p, ctx)     → {items: [{name, dir, size, mtime}]}（一层，目录推导）
 //   walk(p, ctx)     → {items: [{path, dir, size, mtime}]}（递归平铺，不过滤）
 //   readRaw(p, ctx)  → {content, mime, size, path}（rg 内容搜索：非 text 跳过）
-//   writeText(p, s, ctx) → {ok, path, size}（curl 落盘）
+//   writeBlob(p, blob, ctx) → {ok, path, size}（curl 落盘，Blob 保留原始字节）
 
 // ---- 受限反馈 / 错误 ----
 
@@ -480,10 +480,12 @@ export async function cmdRm(fs, ctx, argv) {
   };
 }
 
-// ---- curl（对齐 vcore curl.go：fetch 实现，CORS 失败按执行错误）----
+// ---- curl（对齐 vcore curl.go：流式下载、超限中止、二进制保留）----
 
 // curl [-L] -o <path> <url> [--max-size <MB>]：仅 http/https；目标已存在报错不覆盖；
-// 超限中止不落盘。fetch 受页面 CORS 限制——失败按执行错误返回。
+// ReadableStream 边读边计数，超限即中止（未写盘无半成品，对齐 Go io.Copy+LimitReader
+// 语义）；落盘用 Blob 保留原始字节（二进制安全）。fetch 受页面 CORS 限制——失败按执行
+// 错误返回；无 ReadableStream 的极简运行时回退整读但仍做字节计数。
 export async function cmdCurl(fs, ctx, argv) {
   const pa = parseVCmdArgv("curl", { bools: { "-L": true }, values: { "-o": true, "--max-size": true }, minPos: 1, maxPos: 1 }, argv);
   const dst = pa.values["-o"];
@@ -511,14 +513,40 @@ export async function cmdCurl(fs, ctx, argv) {
     throw execErr("curl", `fetch ${rawurl}: ${e?.message || e}`);
   }
   if (!resp.ok) throw execErr("curl", `fetch ${rawurl}: HTTP ${resp.status}`);
-  const text = await resp.text();
-  const bytes = byteLenOf(text);
   const maxBytes = maxSizeMB << 20;
-  if (bytes > maxBytes) throw execErr("curl", `size limit exceeded (${(bytes >> 20)}MB > ${maxSizeMB}MB)`);
-  const w = await fs.writeText(dst, text, ctx);
+  const chunks = [];
+  let total = 0;
+  try {
+    // 流式读取：边读边计数，超限中止——未写盘，天然无半成品
+    const reader = resp.body && typeof resp.body.getReader === "function" ? resp.body.getReader() : null;
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          throw execErr("curl", `size limit exceeded (${Math.floor(total >> 20)}MB > ${maxSizeMB}MB)`);
+        }
+        chunks.push(value);
+      }
+    } else {
+      // 无 ReadableStream（极简运行时）：整读回退，仍做字节计数
+      const text = await resp.text();
+      total = byteLenOf(text);
+      if (total > maxBytes) throw execErr("curl", `size limit exceeded (${Math.floor(total >> 20)}MB > ${maxSizeMB}MB)`);
+      chunks.push(new TextEncoder().encode(text));
+    }
+  } catch (e) {
+    // 超限（已是 curl 错误）直接上抛；传输错误统一包装
+    if (e instanceof Error && e.message.startsWith("curl: ")) throw e;
+    throw execErr("curl", `fetch ${rawurl}: ${e?.message || e}`);
+  }
+  const blob = new Blob(chunks, { type: resp.headers && typeof resp.headers.get === "function" ? resp.headers.get("content-type") || "" : "" });
+  const w = await fs.writeBlob(dst, blob, ctx);
   return {
-    content: `downloaded ${rawurl} to ${abs} (${w.size ?? bytes} bytes)`,
-    attrs: { action: "curl", path: abs, bytes: String(w.size ?? bytes) },
+    content: `downloaded ${rawurl} to ${abs} (${w.size ?? total} bytes)`,
+    attrs: { action: "curl", path: abs, bytes: String(w.size ?? total) },
   };
 }
 
