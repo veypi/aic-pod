@@ -75,25 +75,118 @@ export function parseToolReqSubject(subject) {
 }
 
 /**
- * parseRequest 解析工具请求信封（§6.2）。data 字段保持原始 JSON 字符串
- * （验签的 data_sha256 是对原始字节的哈希，禁止重序列化）。
- * 返回 null 表示非法 JSON。
+ * parseRequest 解析工具请求信封（§6.2）。data 字段从信封原始文本中按字节
+ * 提取为原始 JSON 字符串：验签的 data_sha256 覆盖服务端序列化的原始字节，
+ * JSON.parse 后重序列化会破坏字节形态（空白/键序/转义差异），严格禁止。
+ * 返回 null 表示非法 JSON 或缺少 data 成员。
  */
 export function parseRequest(data) {
+  let req;
   try {
-    const req = JSON.parse(data);
-    if (!req || typeof req !== "object") return null;
-    return req;
+    req = JSON.parse(data);
   } catch (_) {
     return null;
   }
+  if (!req || typeof req !== "object") return null;
+  const rawData = extractRawMember(data, "data");
+  if (rawData === null) return null;
+  req.data = rawData;
+  return req;
+}
+
+// ---- 信封 data 成员的字节级提取（不经过 JSON.parse 物化） ----
+
+/**
+ * extractRawMember 从顶层 JSON 对象文本中提取指定成员的原始值子串。
+ * 只扫描顶层成员；key 按 JSON 解码后比较（兼容转义写法）。
+ * 返回 null 表示未找到或文本结构非法。
+ */
+function extractRawMember(text, key) {
+  const n = text.length;
+  let i = 0;
+  const skipWs = () => {
+    while (i < n && (text[i] === " " || text[i] === "\t" || text[i] === "\r" || text[i] === "\n")) i++;
+  };
+  skipWs();
+  if (text[i] !== "{") return null;
+  i++;
+  for (;;) {
+    skipWs();
+    if (i >= n || text[i] === "}") return null;
+    if (text[i] !== '"') return null;
+    const keyStart = i;
+    i = scanString(text, i);
+    if (i < 0) return null;
+    let k;
+    try {
+      k = JSON.parse(text.slice(keyStart, i));
+    } catch (_) {
+      return null;
+    }
+    skipWs();
+    if (text[i] !== ":") return null;
+    i++;
+    skipWs();
+    const valStart = i;
+    i = scanValue(text, i);
+    if (i < 0) return null;
+    if (k === key) return text.slice(valStart, i);
+    skipWs();
+    if (text[i] !== ",") return null; // "}" 或非法：未找到目标成员
+    i++;
+  }
+}
+
+/** scanString 从 text[start]==='"' 起扫描 JSON 字符串，返回闭引号后下标；非法返回 -1。 */
+function scanString(text, start) {
+  let i = start + 1;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === '"') return i + 1;
+    i++;
+  }
+  return -1;
+}
+
+/** scanValue 从 start 扫描完整 JSON 值（对象/数组/字符串/字面量），返回结束后下标；非法返回 -1。 */
+function scanValue(text, start) {
+  const c = text[start];
+  if (c === '"') return scanString(text, start);
+  if (c === "{" || c === "[") {
+    let depth = 0;
+    let i = start;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '"') {
+        i = scanString(text, i);
+        if (i < 0) return -1;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        depth++;
+      } else if (ch === "}" || ch === "]") {
+        depth--;
+        if (depth === 0) return i + 1;
+      }
+      i++;
+    }
+    return -1;
+  }
+  // 数字 / true / false / null：扫描到分隔符
+  let i = start;
+  while (i < text.length && !",}] \t\r\n".includes(text[i])) i++;
+  return i > start ? i : -1;
 }
 
 /**
  * buildCaps 构造 caps v2（§6.3）：
  *   - fsActions：null = 全部 3 个 action；[] = 不支持 fs
  *   - programs：null = 不限制（物理 host 按 PATH 自检）；[] = 纯虚拟（browser 类 host 必须显式）
- *   - virtual：exec 虚拟指令声明 [{name, required_level, stateful?, backgroundable?}]
+ *   - virtual：exec 虚拟指令注册声明 [{name, desc?, help?, level}]（§6.3，与 Go sdk/proto.VirtualDecl 同构）
  */
 export function buildCaps({ hostID, credVer, version, deviceType, deviceName, fsActions = [], programs = [], virtual = [] }) {
   const caps = {

@@ -6,7 +6,8 @@
  *   - 工具流量会话级：单订阅 u.{uid}.s.*.h.host_{host_id}.>（HostInboxSubject），
  *     subject 解析取 sid/tool，响应经 NATS req-reply 返回
  *   - 请求信封 proto.ToolRequest（HMAC-SHA256，K_tool 派生）；响应 proto.ToolResponse
- *   - caps v2：fs.actions=[]（浏览器扩展无文件系统）+ exec.programs=[]（显式纯虚拟）
+ *   - caps v2：fs.actions=[read/write/edit]（§4.5：与 page 端同一套 PageFS 代码，
+ *     扩展 IndexedDB 后端，按 host_id 寻址）+ exec.programs=[]（显式纯虚拟）
  *     + exec.virtual 按扩展能力声明（browser 指令）
  * Uses @nats-io/nats-core (via bundled ESM) for NATS over WebSocket.
  */
@@ -15,11 +16,18 @@ import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
 import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
 import { hostInboxSubject, parseToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
+import { PageFS } from "./fs.js";
 
 // ---- re-export for handler ----
 export { errors as natsErrors } from "../lib/nats/nats-core.js";
 
 const HEARTBEAT_INTERVAL = 20_000; // 20s
+
+// FS_REQUIRED 与 Go sdk/vcore/levels.go FSRequired 同源（§2.4，禁止各自另写）：
+// read=Read(1)，write/edit=Write(2)，未声明 action 兜底 Danger(3)。
+const FS_REQUIRED = { read: Level.READ, write: Level.WRITE, edit: Level.WRITE };
+// FS_ACTIONS caps 声明（与 Go proto.AllFSActions 对齐：全集显式声明，非 null）。
+const FS_ACTIONS = ["read", "write", "edit"];
 
 /**
  * Parse credential string: host_id.cred_ver.secret.uid
@@ -45,9 +53,10 @@ export class AICClient {
     this.hostID = null;
     this.uid = null;
     this.credVer = 0;
-    this.virtuals = new Map(); // exec 虚拟指令 name → {requiredLevel, handler, stateful, backgroundable}
+    this.virtuals = new Map(); // exec 虚拟指令 name → {requiredLevel, desc, help, handler, stateful, backgroundable}
     this.chains = new Map();   // stateful 虚拟指令串行链（对齐 Go vcore/browser mutex 语义）
     this.nonceCache = new Map(); // 防重放：nonce → deadline ms
+    this.fs = null;            // PageFS 实例（connect 后持有；fs 通道 + browser 截图落盘复用）
     this.heartbeatTimer = null;
     this.reconnecting = false;
     this.closed = false;
@@ -59,15 +68,20 @@ export class AICClient {
 
   /**
    * Register an exec virtual command (caps v2 §6.3). Must be called before connect().
+   * 注册信息 = {name, desc, help, level}：desc 输出给 AI（commands），help 由服务端
+   * procs 拦截 `-h` 返回，level 仅供服务端审批判断——均与 Go sdk/vcore/meta.go 同源。
+   * stateful/backgroundable 为指令内部实现细节（串行链/后台化），不进协议。
    * @param {string} name 虚拟指令名（如 "browser"）
-   * @param {number} requiredLevel 权限等级（§2.4，与 vcore 分级表同源）
+   * @param {number} requiredLevel 基础权限等级（§2.4，风险子命令动态提升由 handler 侧判定）
    * @param {(ctx, data) => Promise<{state, content, error, attrs}>} handler
    *        data = exec 负载 {action, argv, workdir?}
-   * @param {{stateful?: boolean, backgroundable?: boolean}} [opts]
+   * @param {{desc?: string, help?: string, stateful?: boolean, backgroundable?: boolean}} [opts]
    */
   registerVirtual(name, requiredLevel, handler, opts = {}) {
     this.virtuals.set(name, {
       requiredLevel,
+      desc: opts.desc || "",
+      help: opts.help || "",
       handler,
       stateful: !!opts.stateful,
       backgroundable: !!opts.backgroundable,
@@ -91,6 +105,10 @@ export class AICClient {
     const keys = await deriveKeys(secret, hostID);
     const kConnect = keys.kConnect;
     this.kTool = keys.kTool;
+
+    // fs 后端：与 page 端同一套 PageFS 代码（IndexedDB 双根 $USER/$SESSION），
+    // 扩展 origin 独立 → 与页面 IndexedDB 物理隔离，按 host_id 寻址（§4.5）。
+    this.fs = new PageFS({ uid });
 
     this.logf("starting aic-browser v%s [%s/%s] (host=%s)", version, deviceType, deviceName, hostID);
 
@@ -205,12 +223,10 @@ export class AICClient {
   async _publishCaps() {
     const virtual = [];
     for (const [name, v] of this.virtuals) {
-      virtual.push({
-        name,
-        required_level: v.requiredLevel,
-        stateful: v.stateful || undefined,
-        backgroundable: v.backgroundable || undefined,
-      });
+      const d = { name, level: v.requiredLevel };
+      if (v.desc) d.desc = v.desc;
+      if (v.help) d.help = v.help;
+      virtual.push(d);
     }
     const caps = buildCaps({
       hostID: this.hostID,
@@ -218,8 +234,8 @@ export class AICClient {
       version: this.opts.version || "v0.2.0",
       deviceType: this.opts.deviceType || "browser",
       deviceName: this.opts.deviceName || "Chrome",
-      fsActions: [],      // 浏览器扩展无文件系统（§6.3：[] = 不支持 fs）
-      programs: [],       // 显式纯虚拟（§6.3：[] = 无程序）
+      fsActions: FS_ACTIONS, // 扩展接入 PageFS（§4.5：与 page 端同一套代码，按 host_id 寻址）
+      programs: [],          // 显式纯虚拟（§6.3：[] = 无程序）
       virtual,
     });
 
@@ -271,19 +287,21 @@ export class AICClient {
       return;
     }
 
-    // 2. deadline 过期拒绝（非空但不可解析 → 拒绝，防"永不过期"请求）
-    let deadlineMs = 0;
-    if (req.deadline) {
-      const dl = new Date(req.deadline).getTime();
-      if (isNaN(dl)) {
-        this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "invalid deadline" });
-        return;
-      }
-      deadlineMs = dl;
-      if (Date.now() > dl) {
-        this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "request expired" });
-        return;
-      }
+    // 2. deadline 必填且未过期（空 = "永不过期"请求，拒绝；格式非法拒绝。
+    //    对齐 Go dispatch.go：请求方为可信服务端，恒签发 RFC3339 deadline）
+    if (!req.deadline) {
+      this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "missing deadline" });
+      return;
+    }
+    const dlMs = new Date(req.deadline).getTime();
+    if (isNaN(dlMs)) {
+      this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "invalid deadline" });
+      return;
+    }
+    const deadlineMs = dlMs;
+    if (Date.now() > dlMs) {
+      this._respond(msg, { msg_id: req.msg_id, state: "rejected", error: "request expired" });
+      return;
     }
 
     // 3. nonce 必填且窗口内缓存去重（空 nonce 直接拒绝，防跳过去重）
@@ -303,11 +321,7 @@ export class AICClient {
 
     // 4. granted_level 纵深检查（§2.4：host 端按 caps 声明再自检，不足 waiting 转审批）
     if (tool === TOOL_FS) {
-      // fs.actions=[] 声明（不支持）：不进入 granted 判定，直接拒绝
-      this._respond(msg, {
-        msg_id: req.msg_id, state: "error",
-        error: "fs not supported on this host (browser extension exposes exec virtual commands only)",
-      });
+      await this._handleFsRequest(msg, req, sid);
       return;
     }
 
@@ -343,6 +357,7 @@ export class AICClient {
       grantedLevel: req.granted_level,
       sessionID: sid,
       msgID: req.msg_id,
+      fs: this.fs, // PageFS 实例（browser screenshot 等本地产出物落盘，§2.2）
     };
 
     const run = async () => {
@@ -358,6 +373,42 @@ export class AICClient {
       await this._enqueue(virt.name, run);
     } else {
       await run();
+    }
+  }
+
+  /**
+   * _handleFsRequest 处理 fs 工具请求（§4/§6.2）：
+   * granted_level 纵深检查（与 vcore.FSRequired 同源）→ PageFS.run 执行。
+   * data = fs JSON 参数全体（action/path/offset/limit/content/edits/workdir?）；
+   * $SESSION 根绑定 subject 中的 sid。
+   */
+  async _handleFsRequest(msg, req, sid) {
+    let params;
+    try {
+      params = JSON.parse(req.data);
+    } catch (_) {
+      params = null;
+    }
+    if (!params || typeof params !== "object") {
+      this._respond(msg, { msg_id: req.msg_id, state: "error", error: "invalid fs data: malformed JSON" });
+      return;
+    }
+    const action = String(params.action || "").toLowerCase();
+    const required = FS_REQUIRED[action] ?? Level.DANGER;
+    if (req.granted_level < required) {
+      const reason = `fs ${action || "?"} requires level ${required} (granted ${req.granted_level})`;
+      this.logf("fs request waiting approval: %s (msg=%s)", reason, req.msg_id);
+      this._respond(msg, {
+        msg_id: req.msg_id, state: "waiting",
+        need_approval: { reason },
+      });
+      return;
+    }
+    try {
+      const out = await this.fs.run(params, { sessionId: sid });
+      this._respond(msg, buildResponse(req.msg_id, out));
+    } catch (err) {
+      this._respond(msg, { msg_id: req.msg_id, state: "error", error: err.message });
     }
   }
 

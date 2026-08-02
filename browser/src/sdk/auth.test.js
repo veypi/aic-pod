@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveKeys } from "./crypto.js";
 import { generateConnectToken, generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
+import { parseRequest } from "./proto.js";
 
 // Node <19 无全局 crypto：用 node:crypto 的 webcrypto shim
 if (!globalThis.crypto?.subtle) {
@@ -55,6 +56,24 @@ test("tool request 验签固定向量（v2 canonical 输入）", async () => {
   // 缺 sig / data 非字符串直接拒绝
   assert.equal(await verifyToolRequestSig({ ...req, sig: "" }, HOST_ID, keys.kTool), false);
   assert.equal(await verifyToolRequestSig({ ...req, data: { action: "ls" } }, HOST_ID, keys.kTool), false);
+});
+
+test("端到端回归：服务端信封文本 → parseRequest → 验签（固定向量）", async () => {
+  const keys = await deriveKeys(SECRET, HOST_ID);
+  // Go 服务端 json.Marshal(proto.ToolRequest) 的线上字节形态：
+  // data 内嵌为原始 JSON 对象（json.RawMessage），不是字符串。
+  // 本用例是 §6.2 验签链路的完整回归：parseRequest 必须字节级保真提取 data，
+  // 否则 verifyToolRequestSig 必然失败（data 被 JSON.parse 物化成对象的历史 bug）。
+  const envelope = '{"msg_id":"msg_001","session_id":"s_abc","tool":"exec","data":{"action":"ls","argv":["-la"]},"granted_level":3,"nonce":"AAAAAAAAAAAAAAAAAAAAAA","deadline":"2026-01-02T03:04:05Z","sig":"' + VEC_TOOL_REQ_SIG + '"}';
+  const req = parseRequest(envelope);
+  assert.ok(req);
+  assert.equal(typeof req.data, "string");
+  assert.equal(await verifyToolRequestSig(req, HOST_ID, keys.kTool), true);
+  // data 字节任何差异（哪怕只多一个空白）验签必失败
+  const spaced = envelope.replace('"data":{"action"', '"data":{ "action"');
+  const req2 = parseRequest(spaced);
+  assert.ok(req2);
+  assert.equal(await verifyToolRequestSig(req2, HOST_ID, keys.kTool), false);
 });
 
 test("connect token 固定向量（e1 格式 + canonical 输入）", async () => {

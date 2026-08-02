@@ -73,7 +73,7 @@ export async function browserHandler(ctx, toolData) {
   }
 
   try {
-    const result = await executeAction(action, pa);
+    const result = await executeAction(action, pa, ctx);
     return result;
   } catch (e) {
     return err0(`browser ${action}: ${e.message}`);
@@ -84,7 +84,7 @@ function err0(message) {
   return { state: "error", error: message, content: message };
 }
 
-async function executeAction(action, pa) {
+async function executeAction(action, pa, ctx) {
   switch (action) {
     case "open": return await actOpen(pa);
     case "click": return await actClick(pa);
@@ -94,7 +94,7 @@ async function executeAction(action, pa) {
     case "get": return await actGet(pa);
     case "network": return await actNetwork(pa);
     case "read": return await actRead(pa);
-    case "screenshot": return await actScreenshot(pa);
+    case "screenshot": return await actScreenshot(pa, ctx);
     case "snapshot": return await actSnapshot(pa);
     case "tab": return await actTab(pa);
     case "wait": return await actWait(pa);
@@ -455,16 +455,20 @@ function extractReadableText(html) {
 
 // ---- screenshot ----
 
-async function actScreenshot(pa) {
+async function actScreenshot(pa, ctx) {
   const quality = Math.min(parseInt(pa.flags["quality"] || "80", 10), 100);
   const tab = await getActiveTab();
-  // §2.2 图片标准：host 返回 image_data（data URI），procs 统一转换为 image_path
-  let dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality });
-  const b64 = dataUrl.replace(/^data:image\/jpeg;base64,/, "");
-  const sizeKB = Math.round((b64.length * 0.75) / 1024);
+  // §2.2：browser 不返回图片数据（仅 fs.read 能把图片带进消息）。
+  // 截图落本 host 的 fs（$SESSION/screenshot/，扩展 IndexedDB Blob 存储），
+  // agent 需要读图时用 fs.read（1host=本 host_id）按 attrs.path 读取。
+  if (!ctx?.fs) throw new Error("fs backend not available on this host");
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality });
+  const blob = await (await fetch(dataUrl)).blob();
+  const name = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
+  const out = await ctx.fs.writeBlob(`$SESSION/screenshot/${name}`, blob, { sessionId: ctx.sessionID });
   return {
-    content: `✓ Screenshot captured (${sizeKB}KB jpeg)`,
-    attrs: { action: "screenshot", image_data: dataUrl },
+    content: `✓ Screenshot saved to ${out.path} (${out.size} bytes; read it with fs.read on this host)`,
+    attrs: { action: "screenshot", path: out.path },
   };
 }
 
