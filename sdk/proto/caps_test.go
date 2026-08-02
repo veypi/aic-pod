@@ -2,6 +2,7 @@ package proto
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -69,14 +70,32 @@ func TestCapsProgramsForms(t *testing.T) {
 func TestCapsVirtualDecl(t *testing.T) {
 	var c Caps
 	mustUnmarshal(t, `{"host_id":"host_a","exec":{"virtual":[
-		{"name":"browser","required_level":2,"stateful":true},
-		{"name":"bg_kill","required_level":3}
+		{"name":"browser","desc":"control a web browser","help":"browser <sub>","level":2},
+		{"name":"bg_kill","level":3},
+		{"name":"unknown_level"}
 	]}}`, &c)
-	if len(c.Exec.Virtual) != 2 {
+	if len(c.Exec.Virtual) != 3 {
 		t.Fatalf("virtual = %v", c.Exec.Virtual)
 	}
-	if c.Exec.Virtual[0].Name != "browser" || !c.Exec.Virtual[0].Stateful || c.Exec.Virtual[0].Backgroundable {
-		t.Errorf("virtual[0] = %+v", c.Exec.Virtual[0])
+	v0 := c.Exec.Virtual[0]
+	if v0.Name != "browser" || v0.Desc != "control a web browser" || v0.Help != "browser <sub>" || v0.RequiredLevel != 2 {
+		t.Errorf("virtual[0] = %+v", v0)
+	}
+	if c.Exec.Virtual[1].RequiredLevel != 3 {
+		t.Errorf("virtual[1] level = %d", c.Exec.Virtual[1].RequiredLevel)
+	}
+	// 未声明 level = 0（不暴露给 AI，仅供服务端按需处理；host 必备指令都会显式声明）
+	if c.Exec.Virtual[2].RequiredLevel != 0 {
+		t.Errorf("virtual[2] level = %d, want 0", c.Exec.Virtual[2].RequiredLevel)
+	}
+	// 序列化：level 非零必出；desc/help 非空必出；零值省略
+	out, _ := json.Marshal(c.Exec.Virtual[0])
+	if !strings.Contains(string(out), "\"level\":2") || !strings.Contains(string(out), "\"desc\"") || !strings.Contains(string(out), "\"help\"") {
+		t.Errorf("virtual[0] marshal = %s", out)
+	}
+	out2, _ := json.Marshal(c.Exec.Virtual[2])
+	if strings.Contains(string(out2), "\"level\"") || strings.Contains(string(out2), "desc") {
+		t.Errorf("virtual[2] marshal should omit zero fields: %s", out2)
 	}
 }
 

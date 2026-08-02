@@ -102,6 +102,9 @@ func cmdRg(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, execErr("rg", "%s", err)
 	}
+	if err := env.CheckPath("rg", abs); err != nil {
+		return nil, err
+	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
 		return nil, execErr("rg", "%s", err)
@@ -161,6 +164,9 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string) (*Res
 	abs, err := env.Resolve(target)
 	if err != nil {
 		return nil, execErr("rg", "%s", err)
+	}
+	if err := env.CheckPath("rg", abs); err != nil {
+		return nil, err
 	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {

@@ -65,13 +65,17 @@ type ExecCaps struct {
 // ProgramsUnrestricted 报告 programs 是否为「不限制」语义。
 func (c ExecCaps) ProgramsUnrestricted() bool { return c.Programs == nil }
 
-// VirtualDecl 是虚拟指令声明（§6.3）。
-// 物理 host 必备 = 核心 7（虚拟包装）+ commands + bg_*。
+// VirtualDecl 是虚拟指令声明（§6.3）。注册信息为 {name, desc, help, level}：
+//   - name：指令名；desc：简短描述（commands 输出给 AI，能力发现用）
+//   - help：完整帮助文档（procs 拦截 `-h` 时内部返回，不下发到执行端）
+//   - level：基础权限等级（仅供 procs 内部审批判断，不暴露给 AI；
+//     风险操作的动态提升由判断端内部表处理，如 git push/reset → Danger）
+// stateful/backgroundable 是指令内部实现细节（串行锁/后台化），不进协议。
 type VirtualDecl struct {
-	Name           string `json:"name"`
-	RequiredLevel  int    `json:"required_level"`
-	Stateful       bool   `json:"stateful,omitempty"`
-	Backgroundable bool   `json:"backgroundable,omitempty"`
+	Name          string `json:"name"`
+	Desc          string `json:"desc,omitempty"`
+	Help          string `json:"help,omitempty"`
+	RequiredLevel int    `json:"level,omitempty"`
 }
 
 // ---- 客户端版本门禁（§6.3） ----

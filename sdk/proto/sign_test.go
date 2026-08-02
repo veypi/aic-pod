@@ -1,6 +1,9 @@
 package proto
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // 固定向量：锁定 HKDF 派生与 canonical 输入的位级一致性（双端零漂移）。
 // 修改派生参数或 canonical 结构必须同步更新本文件，并视为协议变更。
@@ -95,5 +98,48 @@ func TestNonceUnique(t *testing.T) {
 	}
 	if a == b || len(a) != 22 {
 		t.Errorf("nonces = %q %q", a, b)
+	}
+}
+
+// TestToolRequestWireRoundTrip 锁定“签名字节 == 线上字节”性质（§6.2）：
+// data 走服务端真实路径（map → json.Marshal，紧凑 + HTML 转义）时，
+// 签名 → 信封序列化 → 反序列化 → 验签必须成立。覆盖 <>& 转义与非 ASCII。
+// 历史教训：RawMessage 非 canonical（含未转义 <>&/多余空白）时 appendCompact
+// 会改写线上字节，验签静默失败——Data 必须 json.Marshal 产出（见 envelope.go）。
+func TestToolRequestWireRoundTrip(t *testing.T) {
+	data := map[string]any{
+		"action": "browser",
+		"argv":   []string{"open", "https://example.com/?a=1&b=<测试>"},
+	}
+	rawData, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &ToolRequest{
+		MsgID:        "msg_wire",
+		SessionID:    "s_wire",
+		Tool:         ToolExec,
+		Data:         rawData,
+		GrantedLevel: 2,
+		Nonce:        "AAAAAAAAAAAAAAAAAAAAAA",
+		Deadline:     "2026-01-02T03:04:05Z",
+	}
+	SignToolRequest(req, vecHostID, vecKTool)
+
+	// 线上字节（json.Marshal 信封）→ host 端反序列化
+	wire, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ToolRequest
+	if err := json.Unmarshal(wire, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyToolRequest(&back, vecHostID, vecKTool) {
+		t.Error("verify failed after wire round-trip (data contains <>&/非ASCII)")
+	}
+	// 线上字节的 data 段必须与签名输入逐字节一致（appendCompact 幂等）
+	if string(back.Data) != string(rawData) {
+		t.Errorf("wire data = %q, want canonical %q", back.Data, rawData)
 	}
 }

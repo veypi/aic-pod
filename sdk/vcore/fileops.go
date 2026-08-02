@@ -37,6 +37,9 @@ func cmdRm(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, execErr("rm", "%s", err)
 	}
+	if err := env.CheckPath("rm", abs); err != nil {
+		return nil, err
+	}
 	if err := checkRootProtect(env, "rm", abs); err != nil {
 		return nil, err
 	}
@@ -91,6 +94,9 @@ func cmdMkdir(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	abs, err := env.Resolve(pa.pos[0])
 	if err != nil {
 		return nil, execErr("mkdir", "%s", err)
+	}
+	if err := env.CheckPath("mkdir", abs); err != nil {
+		return nil, err
 	}
 	if _, err := env.VFS.Stat(abs); err == nil {
 		if pa.bools["-p"] {
@@ -236,6 +242,12 @@ func resolveSrcDst(env *Env, cmd, rawSrc, rawDst string) (string, string, error)
 	dst, err := env.Resolve(rawDst)
 	if err != nil {
 		return "", "", execErr(cmd, "%s", err)
+	}
+	if err := env.CheckPath(cmd, src); err != nil {
+		return "", "", err
+	}
+	if err := env.CheckPath(cmd, dst); err != nil {
+		return "", "", err
 	}
 	return src, dst, nil
 }

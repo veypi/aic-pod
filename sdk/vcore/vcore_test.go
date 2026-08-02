@@ -109,3 +109,60 @@ func TestRgLargeFile(t *testing.T) {
 		t.Errorf("res = %v %.80q", res.Attrs, res.Content)
 	}
 }
+
+// 安全：Roots 收容（§2.1.1 执行层）——路径越出三根一律 DeniedError，
+// 覆盖 ls/rm/mkdir/cp/mv/curl 等全部指令（read/write/edit 同源）。
+func TestRootsContainment(t *testing.T) {
+	roots := []string{"/home/u1", "/agents/a1", "/sessions/s1"}
+	newEnv := func() *Env {
+		vfs := NewMemVFS()
+		vfs.SetDir("/sessions/s1", testTime)
+		return &Env{
+			VFS:     vfs,
+			Workdir: "/sessions/s1",
+			Vars:    map[string]string{"$USER": "/home/u1", "$AGENT": "/agents/a1", "$SESSION": "/sessions/s1"},
+			Roots:   roots,
+		}
+	}
+
+	cases := []struct {
+		name, action string
+		argv         []string
+	}{
+		{"rm absolute escape", "rm", []string{"/etc/passwd"}},
+		{"rm traversal", "rm", []string{"../../etc/passwd"}},
+		{"mkdir absolute escape", "mkdir", []string{"/tmp/x"}},
+		{"mkdir traversal", "mkdir", []string{"../../x"}},
+		{"cp src escape", "cp", []string{"/etc/passwd", "/sessions/s1/a.txt"}},
+		{"cp dst escape", "cp", []string{"/sessions/s1/a.txt", "/etc/a.txt"}},
+		{"mv dst escape", "mv", []string{"/sessions/s1/a.txt", "/tmp/a.txt"}},
+		{"ls escape", "ls", []string{"/etc"}},
+		{"curl dst escape", "curl", []string{"-o", "/etc/x", "https://example.com"}},
+	}
+	for _, c := range cases {
+		env := newEnv()
+		if _, err := Run(context.Background(), env, c.action, c.argv); err == nil {
+			t.Errorf("%s: escape accepted, want DeniedError", c.name)
+		} else if !strings.Contains(err.Error(), "outside allowed roots") {
+			t.Errorf("%s: wrong error: %v", c.name, err)
+		}
+	}
+
+	// 根内路径放行
+	vfs2 := NewMemVFS()
+	vfs2.SetFile("/sessions/s1/a.txt", []byte("x"), testTime)
+	env := &Env{VFS: vfs2, Workdir: "/sessions/s1", Vars: map[string]string{"$USER": "/home/u1", "$AGENT": "/agents/a1", "$SESSION": "/sessions/s1"}, Roots: roots}
+	if _, err := Run(context.Background(), env, "ls", []string{"/sessions/s1"}); err != nil {
+		t.Errorf("in-root ls rejected: %v", err)
+	}
+}
+
+// 物理 host（Roots=nil）：路径不限制。
+func TestRootsNilUnrestricted(t *testing.T) {
+	vfs := NewMemVFS()
+	vfs.SetFile("/etc/passwd", []byte("x"), testTime)
+	env := &Env{VFS: vfs, Workdir: "/workspace"} // Vars=nil Roots=nil
+	if _, err := Run(context.Background(), env, "ls", []string{"/etc"}); err != nil {
+		t.Errorf("host ls should be unrestricted: %v", err)
+	}
+}

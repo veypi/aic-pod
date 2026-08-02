@@ -54,6 +54,7 @@ var gitSubLevels = map[string]int{
 
 	"push":     proto.LevelDanger, // 外发远端
 	"checkout": proto.LevelDanger, // 可丢弃本地修改
+	"reset":    proto.LevelDanger, // 可丢弃本地修改
 }
 
 // gitValueFlags 是 git 带值 flag 已知表（§5.5：子命令判定先跳过带值 flag）。

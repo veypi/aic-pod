@@ -24,6 +24,9 @@ func cmdLs(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, execErr("ls", "%s", err)
 	}
+	if err := env.CheckPath("ls", abs); err != nil {
+		return nil, err
+	}
 	long := pa.bools["-la"]
 
 	info, err := env.VFS.Stat(abs)

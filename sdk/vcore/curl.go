@@ -63,6 +63,9 @@ func cmdCurl(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, execErr("curl", "%s", err)
 	}
+	if err := env.CheckPath("curl", abs); err != nil {
+		return nil, err
+	}
 	if _, err := env.VFS.Stat(abs); err == nil {
 		return nil, execErr("curl", "destination %s already exists", abs)
 	}

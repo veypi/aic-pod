@@ -32,6 +32,9 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err != nil {
 		return nil, fsErr("read", "%s", err)
 	}
+	if err := env.CheckPath("fs", abs); err != nil {
+		return nil, err
+	}
 
 	info, statErr := env.VFS.Stat(abs)
 	if statErr == nil && !info.IsDir() && info.Size() > streamThreshold {

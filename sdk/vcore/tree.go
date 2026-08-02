@@ -74,6 +74,9 @@ func cmdTree(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, execErr("tree", "%s", err)
 	}
+	if err := env.CheckPath("tree", abs); err != nil {
+		return nil, err
+	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
 		return nil, execErr("tree", "%s", err)

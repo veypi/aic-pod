@@ -18,10 +18,17 @@ const (
 // Data 为指令集原生负载：fs = JSON 参数全体（含 action/path/...）；
 // exec = {"action","argv","workdir"?}。路径展开语义按 §2.1.1：fs 参数与虚拟指令
 // 路径参数为展开后绝对形式；程序命令 argv 原样透传 + workdir 同信封下发。
+//
+// 重要：Data 必须是 json.Marshal 产出的 canonical 形态（紧凑 + HTML 转义）。
+// 签名覆盖 Data 原始字节（data_sha256），而信封序列化（json.Marshal）会对
+// RawMessage 做 appendCompact（剥离空白、<>& 转义为 <>&）——
+// 若 Data 非 canonical（如手工拼装含未转义 <>& 的字节），线上字节与签名
+// 输入不一致，host 端验签必然失败（"invalid request signature"）。
 type ToolRequest struct {
-	MsgID        string          `json:"msg_id"`
-	SessionID    string          `json:"session_id"`
-	Tool         string          `json:"tool"` // fs | exec
+	MsgID        string `json:"msg_id"`
+	SessionID    string `json:"session_id"`
+	Tool         string `json:"tool"` // fs | exec
+	// Data 必须是 canonical JSON（json.Marshal 产出，见类型注释）。
 	Data         json.RawMessage `json:"data"`
 	GrantedLevel int             `json:"granted_level"`
 	Nonce        string          `json:"nonce"`
