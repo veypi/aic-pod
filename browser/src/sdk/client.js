@@ -7,8 +7,9 @@
  *     subject 解析取 sid/tool，响应经 NATS req-reply 返回
  *   - 请求信封 proto.ToolRequest（HMAC-SHA256，K_tool 派生）；响应 proto.ToolResponse
  *   - caps v2：fs.actions=[read/write/edit]（§4.5：与 page 端同一套 PageFS 代码，
- *     扩展 IndexedDB 后端，按 host_id 寻址）+ exec.programs=[]（显式纯虚拟）
- *     + exec.virtual 按扩展能力声明（browser 指令）
+ *     扩展 IndexedDB 后端，按 host_id 寻址）
+ *     + exec.commands 统一命令表 = 恒声明 commands（能力发现，§5.1，与 Go
+ *       buildCommandTable 对齐）+ registerCommand 注册命令（browser 等）
  * Uses @nats-io/nats-core (via bundled ESM) for NATS over WebSocket.
  */
 
@@ -17,11 +18,24 @@ import { deriveKeys } from "./crypto.js";
 import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
 import { hostInboxSubject, parseToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
 import { PageFS } from "./fs.js";
+import { HistoryStore } from "./history.js";
 
 // ---- re-export for handler ----
 export { errors as natsErrors } from "../lib/nats/nats-core.js";
 
 const HEARTBEAT_INTERVAL = 20_000; // 20s
+
+// COMMANDS_DECL 恒声明 commands（§5.1：与 Go sdk/vcore/meta.go 的 commands 条目同源，
+// 禁止另行声明）：desc 输出给 AI（commands），help 由服务端 procs 拦截 `--help` 返回。
+// 服务端对 host 的 commands 走应答式转发（§5.2，与 page 同构），扩展端自答。
+const COMMANDS_DECL = {
+  name: "commands",
+  requiredLevel: Level.READ, // 与 Go levels.go execCoreLevels 一致
+  desc: "discover available commands on a target",
+  help: "commands\n" +
+    "  capability discovery: list declared commands (name + desc) of the target;\n" +
+    "  use `action --help` for the full help of any command",
+};
 
 // FS_REQUIRED 与 Go sdk/vcore/levels.go FSRequired 同源（§2.4，禁止各自另写）：
 // read=Read(1)，write/edit=Write(2)，未声明 action 兜底 Danger(3)。
@@ -53,13 +67,28 @@ export class AICClient {
     this.hostID = null;
     this.uid = null;
     this.credVer = 0;
-    this.virtuals = new Map(); // exec 虚拟指令 name → {requiredLevel, desc, help, handler, stateful, backgroundable}
-    this.chains = new Map();   // stateful 虚拟指令串行链（对齐 Go vcore/browser mutex 语义）
+    this.commands = new Map(); // exec 命令表 name → {name, requiredLevel, desc, help, handler, stateful, backgroundable}
+    // 恒声明 commands（§5.1，Go buildCommandTable 同构）：能力发现自答。
+    // registerCommand("commands", ...) 显式覆盖（保留名，与 page_exec RESERVED 语义一致）。
+    this.commands.set("commands", {
+      name: COMMANDS_DECL.name,
+      requiredLevel: COMMANDS_DECL.requiredLevel,
+      desc: COMMANDS_DECL.desc,
+      help: COMMANDS_DECL.help,
+      handler: () => ({ content: this._commandsJSON(), attrs: { action: "commands" } }),
+      stateful: false,
+      backgroundable: false,
+    });
+    this.chains = new Map();   // stateful 命令串行链（对齐 Go vcore/browser mutex 语义）
     this.nonceCache = new Map(); // 防重放：nonce → deadline ms
+    this._historyStore = new HistoryStore(); // 执行历史 IndexedDB 持久化（SW 重启保留）
+    this._histQ = Promise.resolve(); // 历史写串行队列（保序：add 先于 updateState）
     this.fs = null;            // PageFS 实例（connect 后持有；fs 通道 + browser 截图落盘复用）
     this.heartbeatTimer = null;
     this.reconnecting = false;
     this.closed = false;
+    this._connected = false; // 真实连接状态：仅 wsconnect 成功 + caps 发布完成后为 true
+    this._reconnectAttempt = 0; // 指数退避计数（重连成功后重置）
     this.logf = options.onLog || ((fmt, ...args) => {
       const ts = new Date().toISOString().slice(11, 19);
       console.log(`[${ts}] ${fmt}`, ...args);
@@ -67,18 +96,19 @@ export class AICClient {
   }
 
   /**
-   * Register an exec virtual command (caps v2 §6.3). Must be called before connect().
+   * Register an exec command (caps v2 §6.3 统一命令声明表). Must be called before connect().
    * 注册信息 = {name, desc, help, level}：desc 输出给 AI（commands），help 由服务端
-   * procs 拦截 `-h` 返回，level 仅供服务端审批判断——均与 Go sdk/vcore/meta.go 同源。
-   * stateful/backgroundable 为指令内部实现细节（串行链/后台化），不进协议。
-   * @param {string} name 虚拟指令名（如 "browser"）
+   * procs 拦截 `--help` 返回，level 仅供服务端审批判断——均与 Go sdk/vcore/meta.go 同源。
+   * stateful/backgroundable 为命令内部实现细节（串行链/后台化），不进协议。
+   * @param {string} name 命令名（如 "browser"）
    * @param {number} requiredLevel 基础权限等级（§2.4，风险子命令动态提升由 handler 侧判定）
    * @param {(ctx, data) => Promise<{state, content, error, attrs}>} handler
    *        data = exec 负载 {action, argv, workdir?}
    * @param {{desc?: string, help?: string, stateful?: boolean, backgroundable?: boolean}} [opts]
    */
-  registerVirtual(name, requiredLevel, handler, opts = {}) {
-    this.virtuals.set(name, {
+  registerCommand(name, requiredLevel, handler, opts = {}) {
+    this.commands.set(name, {
+      name,
       requiredLevel,
       desc: opts.desc || "",
       help: opts.help || "",
@@ -143,6 +173,13 @@ export class AICClient {
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
+      // 指数退避（与 aic 页面端 nc.worker.js 对齐）：2s→4s→8s→16s→30s 封顶
+      // +0-100ms 抖动；固定 2s 会对不可达服务器高频重连（浪费 + 服务端日志轰炸）。
+      reconnectDelayHandler: () => {
+        const base = Math.min(2000 * 2 ** this._reconnectAttempt, 30000);
+        this._reconnectAttempt++;
+        return base + Math.floor(Math.random() * 100);
+      },
       pingInterval: 30_000,
       maxPingOut: 3,
       timeout: 10_000,
@@ -178,6 +215,15 @@ export class AICClient {
 
     // Start heartbeat
     this._startHeartbeat();
+    // 真实连接建立（wsconnect resolve + caps 发布成功）后才标记已连接——
+    // 防止错误地址下 wsconnect 无限重连（永不 resolve）时 UI 误报已连接。
+    this._connected = true;
+  }
+
+  // connected 反映 NATS 连接是否真实建立（首连成功过且未 close）。
+  // 断线重连中保持 true（自动恢复），首连失败/未连接为 false。
+  get connected() {
+    return this._connected;
   }
 
   /**
@@ -185,6 +231,7 @@ export class AICClient {
    */
   async close() {
     this.closed = true;
+    this._connected = false;
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -207,6 +254,7 @@ export class AICClient {
             break;
           case "reconnect":
             this.logf("NATS reconnected, republishing caps");
+            this._reconnectAttempt = 0; // 退避计数重置（本次连续重连结束）
             this._publishCaps();
             break;
           case "error":
@@ -221,12 +269,12 @@ export class AICClient {
   }
 
   async _publishCaps() {
-    const virtual = [];
-    for (const [name, v] of this.virtuals) {
-      const d = { name, level: v.requiredLevel };
+    const commands = [];
+    for (const [, v] of this.commands) {
+      const d = { name: v.name, level: v.requiredLevel };
       if (v.desc) d.desc = v.desc;
       if (v.help) d.help = v.help;
-      virtual.push(d);
+      commands.push(d);
     }
     const caps = buildCaps({
       hostID: this.hostID,
@@ -235,13 +283,25 @@ export class AICClient {
       deviceType: this.opts.deviceType || "browser",
       deviceName: this.opts.deviceName || "Chrome",
       fsActions: FS_ACTIONS, // 扩展接入 PageFS（§4.5：与 page 端同一套代码，按 host_id 寻址）
-      programs: [],          // 显式纯虚拟（§6.3：[] = 无程序）
-      virtual,
+      commands,
     });
 
     const subj = `u.${this.uid}.h.${this.hostID}.${this.credVer}.caps`;
     this.nc.publish(subj, JSON.stringify(caps));
-    this.logf("caps published to %s (virtual=%d)", subj, virtual.length);
+    this.logf("caps published to %s (commands=%d)", subj, commands.length);
+  }
+
+  /**
+   * _commandsJSON 返回本 host 的命令表（§5.2：{name, desc} 视图，与 Go
+   * sdk/host/dispatch.go commandsJSON 同构——level 仅供审批判断，help 由服务端
+   * procs 拦截 `--help` 返回，均不暴露给 AI）。
+   */
+  _commandsJSON() {
+    const cmds = [];
+    for (const [, v] of this.commands) {
+      cmds.push({ name: v.name, desc: v.desc });
+    }
+    return JSON.stringify({ commands: cmds });
   }
 
   _startHeartbeat() {
@@ -277,6 +337,17 @@ export class AICClient {
       this._respond(msg, { msg_id: "", state: "error", error: "invalid request: malformed JSON" });
       return;
     }
+
+    // 执行历史：请求解析成功即记录（后续 reject/分发经 _respond 更新状态）
+    this._recordHistory({
+      time: new Date().toISOString(),
+      sid,
+      tool,
+      action: req.action || "",
+      msgId: req.msg_id || "",
+      state: "pending",
+      error: "",
+    });
 
     this.logf("→ request: %s %s (msg=%s sid=%s)", tool, msg.subject, req.msg_id, sid);
 
@@ -331,18 +402,17 @@ export class AICClient {
       return;
     }
 
-    const virt = this.virtuals.get(execData.action);
-    if (!virt) {
-      const supported = [...this.virtuals.keys()].join(", ") || "(none)";
+    const cmd = this.commands.get(execData.action);
+    if (!cmd) {
       this._respond(msg, {
         msg_id: req.msg_id, state: "error",
-        error: `exec: unknown command "${execData.action}" (supported virtual commands on this host: ${supported})`,
+        error: `exec: unknown action "${execData.action}" (not declared by this host; run commands to discover available commands)`,
       });
       return;
     }
 
-    if (req.granted_level < virt.requiredLevel) {
-      const reason = `exec ${execData.action} requires level ${virt.requiredLevel} (granted ${req.granted_level})`;
+    if (req.granted_level < cmd.requiredLevel) {
+      const reason = `exec ${execData.action} requires level ${cmd.requiredLevel} (granted ${req.granted_level})`;
       this.logf("tool request waiting approval: %s (msg=%s)", reason, req.msg_id);
       this._respond(msg, {
         msg_id: req.msg_id, state: "waiting",
@@ -351,7 +421,7 @@ export class AICClient {
       return;
     }
 
-    // 5. 分发执行（stateful 虚拟指令按 action 串行：Go vcore/browser 以 mutex 保护实例，
+    // 5. 分发执行（stateful 命令按 action 串行：Go vcore/browser 以 mutex 保护实例，
     //    JS 扩展为全局单例（多会话共用一组 tab），promise 链等价串行）
     const ctx = {
       grantedLevel: req.granted_level,
@@ -362,15 +432,15 @@ export class AICClient {
 
     const run = async () => {
       try {
-        const result = await virt.handler(ctx, execData);
+        const result = await cmd.handler(ctx, execData);
         this._respond(msg, buildResponse(req.msg_id, result));
       } catch (err) {
         this._respond(msg, { msg_id: req.msg_id, state: "error", error: err.message });
       }
     };
 
-    if (virt.stateful) {
-      await this._enqueue(virt.name, run);
+    if (cmd.stateful) {
+      await this._enqueue(cmd.name, run);
     } else {
       await run();
     }
@@ -420,7 +490,29 @@ export class AICClient {
     return next;
   }
 
+  _recordHistory(entry) {
+    this._histQ = this._histQ
+      .then(() => this._historyStore.add(entry))
+      .catch((e) => this.logf("history add failed: %s", e?.message || e));
+  }
+
+  // historySnapshot 返回最近 200 条执行历史（options 执行历史页）。
+  historySnapshot() {
+    return this._historyStore.list(200);
+  }
+
+  // historyClear 清空执行历史（options 手动清除）。
+  historyClear() {
+    return this._historyStore.clear();
+  }
+
   _respond(msg, resp) {
+    // 回填终态（pending → completed/error/...），经串行队列保证在 add 之后
+    if (resp.msg_id) {
+      this._histQ = this._histQ
+        .then(() => this._historyStore.updateState(resp.msg_id, resp.state, resp.error))
+        .catch((e) => this.logf("history update failed: %s", e?.message || e));
+    }
     const data = JSON.stringify(resp);
     msg.respond(new TextEncoder().encode(data));
     const logAttrs = { ...resp.attrs };

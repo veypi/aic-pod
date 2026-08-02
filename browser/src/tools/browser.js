@@ -4,6 +4,8 @@
  * 向 agent-browser CLI 基准靠拢（§5：物理端向 agent-browser 靠拢，而不是相反）：
  *   - 核心 13 action：open/click/close/download/eval/get/network/read/screenshot/
  *     snapshot/tab/wait/sleep，输入输出结构与 agent-browser 一致
+ *   - eval 走 chrome.debugger CDP Runtime.evaluate（DevTools 语义：不受页面 CSP
+ *     限制、可 await Promise、可访问页面 JS 变量；每次 attach/detach 短提示条）
  *   - 扩展集（save/upload/pipeline/var）未实现 → 统一 unknown action 错误
  *   - @ref 代次机制（§5.3）：每次 snapshot 递增代次号并写入元素定位属性
  *     data-aic-ref="{gen}:e{N}"；按当前 gen 解析，不命中即报统一 stale ref 错误
@@ -255,7 +257,66 @@ async function actDownload(pa) {
   };
 }
 
-// ---- eval ----
+// ---- eval（§5.x：chrome.debugger CDP Runtime.evaluate，DevTools 语义）----
+// 完全不受页面 CSP script-src/unsafe-eval 限制（等价 DevTools 控制台执行）；
+// 可访问页面 JS 变量（window.xxx/框架内部状态），awaitPromise 等待 Promise。
+// 每次 eval attach/detach（Chrome 短暂显示调试提示条）；finally 保证 detach；
+// 超时保护防页面 Promise 挂死。
+
+const CDP_EVAL_TIMEOUT_MS = 30000; // awaitPromise 上限（页面 Promise 挂死防呆）
+const CDP_PROTOCOL = "1.3";
+
+async function cdpEval(tabId, js) {
+  let attachErr;
+  try {
+    attachErr = await chrome.debugger.attach({ tabId }, CDP_PROTOCOL);
+  } catch (e) {
+    throw new Error(`debugger attach failed: ${e?.message || e}`);
+  }
+  if (attachErr) {
+    // attach 返回错误串（如该 tab 已被 DevTools/其他调试器占用）
+    throw new Error(`debugger attach failed: ${attachErr}`);
+  }
+  try {
+    const res = await withTimeout(
+      chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: js,
+        awaitPromise: true,
+        returnByValue: true,
+      }),
+      CDP_EVAL_TIMEOUT_MS,
+      `eval timeout after ${CDP_EVAL_TIMEOUT_MS / 1000}s (awaitPromise)`,
+    );
+    if (res?.exceptionDetails) {
+      const d = res.exceptionDetails;
+      const desc = d.exception?.description || d.text || "exception";
+      throw new Error(desc);
+    }
+    return res?.result?.value;
+  } finally {
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (_) {
+      /* tab 已关闭/已 detach：忽略 */
+    }
+  }
+}
+
+function withTimeout(p, ms, msg) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
 
 async function actEval(pa) {
   let js = pa.positional[0];
@@ -264,24 +325,18 @@ async function actEval(pa) {
   }
   if (!js) throw new Error("script is required");
   const tab = await getActiveTab();
-  const result = await execInTab(tab.id, (_js) => {
-    try {
-      let value;
-      try {
-        value = new Function("return (" + _js + ")")();
-      } catch (_) {
-        value = new Function(_js)();
-      }
-      if (value === undefined) return { text: "undefined" };
-      if (typeof value === "string") return { text: value };
-      return { text: JSON.stringify(value) };
-    } catch (e) {
-      return { error: e.message || String(e) };
-    }
-  }, [js]);
+  const value = await cdpEval(tab.id, js);
+  return { content: formatEvalValue(value), attrs: { action: "eval" } };
+}
 
-  if (result?.error) throw new Error(result.error);
-  return { content: result?.text ?? "undefined", attrs: { action: "eval" } };
+function formatEvalValue(value) {
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function decodeBase64(s) {

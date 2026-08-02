@@ -1,0 +1,80 @@
+/* global.css — AIC 平台设计令牌（取自 aic/ui/assets/global.css :root 块，仅令牌不含布局）；源文件改动需同步 */
+
+:root {
+  /* --- Semantics: Theme (语义主题) --- */
+  /* Primary Action */
+  --color-primary: #4361ee;
+  --color-primary-hover: #2563eb;
+  --color-primary-active: #1d4ed8;
+  --color-primary-text: #fff;
+
+  /* Secondary Action */
+  --color-secondary: #3f37c9;
+  --color-secondary-hover: #3730a3;
+  --color-secondary-active: #332d92;
+  --color-secondary-text: #fff;
+
+  /* Feedback */
+  --color-info: #0ea5e9;
+  --color-success: #22c55e;
+  --color-warning: #fbbf24;
+  --color-danger: #ef4444;
+  --color-danger-hover: #dc2626;
+
+  /* Backgrounds */
+  --bg-color: #f1f8ff;
+  --bg-color-secondary: #f7fcff;
+  --bg-color-tertiary: #e0edf3;
+
+  /* Text */
+  --text-color: #111827;
+  --text-color-secondary: #374151;
+  --text-color-tertiary: #6b7280;
+  --text-color-disabled: #9ca3af;
+  --text-color-inverse: #f1f5f9;
+
+  /* Borders */
+  --border-color: #d1d5db;
+  --border-color-hover: #9ca3af;
+
+  /* --- Dimensions: Spacing & Radius (尺寸) --- */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --spacing-2xl: 40px;
+  --spacing-3xl: 48px;
+
+  /* --- Typography (排版) --- */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  /* Base size */
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-size-2xl: 24px;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 600;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* --- Effects (特效) --- */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg:
+    0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+
+  /* --- Transitions (动画) --- */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}

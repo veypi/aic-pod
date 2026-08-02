@@ -185,10 +185,10 @@ function scanValue(text, start) {
 /**
  * buildCaps 构造 caps v2（§6.3）：
  *   - fsActions：null = 全部 3 个 action；[] = 不支持 fs
- *   - programs：null = 不限制（物理 host 按 PATH 自检）；[] = 纯虚拟（browser 类 host 必须显式）
- *   - virtual：exec 虚拟指令注册声明 [{name, desc?, help?, level}]（§6.3，与 Go sdk/proto.VirtualDecl 同构）
+ *   - commands：exec 统一命令声明表 [{name, desc?, help?, level}]（§6.3，
+ *     与 Go sdk/proto.CommandDecl 同构）；未声明的命令服务端一律拒绝
  */
-export function buildCaps({ hostID, credVer, version, deviceType, deviceName, fsActions = [], programs = [], virtual = [] }) {
+export function buildCaps({ hostID, credVer, version, deviceType, deviceName, fsActions = [], commands = [] }) {
   const caps = {
     host_id: hostID,
     credential_ver: credVer,
@@ -201,11 +201,10 @@ export function buildCaps({ hostID, credVer, version, deviceType, deviceName, fs
       num_cpu: (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 1,
     },
     fs: { actions: fsActions },
-    exec: { programs, virtual },
+    exec: { commands },
   };
   // null 形态显式序列化为 null（JSON.stringify 保留 undefined 会丢键，用 null）
   if (fsActions === null) caps.fs.actions = null;
-  if (programs === null) caps.exec.programs = null;
   return caps;
 }
 

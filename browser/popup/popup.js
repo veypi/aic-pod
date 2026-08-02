@@ -40,7 +40,15 @@ for (const [el, key] of [
 connectBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "connect" }, (resp) => {
     if (chrome.runtime.lastError) return;
-    if (resp?.success) updateConnectionUI(true);
+    if (resp?.success) {
+      updateConnectionUI(true);
+    } else if (resp?.error) {
+      // 连接失败：显示原因，保持未连接状态（不再误报已连接）
+      statusText.textContent = "连接失败";
+      indicator.className = "dot disconnected";
+      indicator.title = resp.error;
+      console.error("[aic-browser] connect failed:", resp.error);
+    }
   });
 });
 

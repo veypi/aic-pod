@@ -5,6 +5,10 @@
 //   - aic-pod/browser/src/sdk/fs.js   — 浏览器扩展端（1host=host_id，扩展 IndexedDB）
 // 两处 origin 不同，IndexedDB 物理隔离；代码必须保持一致，改动双向同步。
 //
+// 权限模型：$USER/$SESSION 仅作路径规范（key 寻址），不做根收容——
+// 浏览器端文件权限是全部的（page/扩展一致），任意绝对路径（含 .. 折叠后
+// 跳出变量根）均可读写；服务端权限门控（等级审批）不受影响。
+//
 // 存储模型（§4.5）：
 //   - 每用户一个 IndexedDB 库（aic-page-fs-{uid}），按根分 store（user/session）；
 //   - key = 解析后的完整绝对路径（/home/{uid}/... → user store；
@@ -46,7 +50,9 @@ function cleanPath(p) {
 }
 
 // resolvePath 按 §2.1.1 可解析层展开：$VAR 最长前缀匹配（后跟 / 或结束）、
-// 逃逸变量根报错、未匹配 $ 按字面相对路径、绝对路径忽略 workdir。
+// 未匹配 $ 按字面相对路径、绝对路径忽略 workdir。
+// 注意：$USER/$SESSION 仅作路径规范（IndexedDB key 寻址），不做根收容——
+// 浏览器端文件权限是全部的（page/扩展一致），.. 折叠后的任意绝对路径均可访问。
 function resolvePath(p, workdir, vars) {
   if (!p) throw new Error("proto: path is empty");
   if (p[0] === "$") {
@@ -59,12 +65,8 @@ function resolvePath(p, workdir, vars) {
       }
     }
     if (name) {
-      const root = vars[name];
-      const joined = cleanPath(root + rest);
-      if (joined !== root && !joined.startsWith(root + "/")) {
-        throw new Error(`proto: path "${p}" escapes root ${name}`);
-      }
-      return joined;
+      // $VAR 展开后允许 .. 跳出变量根（权限全部，仅路径规范化）
+      return cleanPath(vars[name] + rest);
     }
   }
   if (p.startsWith("/")) return cleanPath(p);
@@ -306,7 +308,8 @@ export class PageFS {
     return this._db;
   }
 
-  // _env 构造路径环境：$USER/$SESSION 双根，workdir 缺省 $SESSION（§2.1.1）
+  // _env 构造路径环境：$USER/$SESSION 双根（仅路径规范，无权限收容），
+  // workdir 缺省 $SESSION（§2.1.1）
   _env(sid, workdirRaw) {
     const vars = {
       $USER: `/home/${this._uid}`,
@@ -315,7 +318,7 @@ export class PageFS {
     const workdir = workdirRaw
       ? resolvePath(String(workdirRaw), "", vars)
       : vars.$SESSION;
-    return { vars, workdir, roots: [vars.$USER, vars.$SESSION] };
+    return { vars, workdir };
   }
 
   // run 执行一条 fs 请求（§6.1 body = {msg_id, action, ...fs JSON 参数}）。
@@ -338,16 +341,14 @@ export class PageFS {
     throw fsErr("", `unknown action "${action}" (supported: read, write, edit)`);
   }
 
-  // _resolve 展开路径 + 双根收容（cloud 的 ToolDeniedError 在 page 为执行错误）
+  // _resolve 路径规范化（无根收容：$USER/$SESSION 仅规范路径，权限全部）
   _resolve(rawPath, env, action) {
-    const abs = resolvePath(String(rawPath || ""), env.workdir, env.vars);
-    const inRoots = env.roots.some((r) => abs === r || abs.startsWith(r + "/"));
-    if (!inRoots) throw fsErr(action, `path outside allowed roots: ${abs}`);
-    return abs;
+    return resolvePath(String(rawPath || ""), env.workdir, env.vars);
   }
 
   _storeOf(abs) {
-    return abs.startsWith("/sessions/") ? "session" : "user";
+    // 边界对齐：/sessions 本身也归 session store（否则 ls /sessions 扫错库、恒空）
+    return abs === "/sessions" || abs.startsWith("/sessions/") ? "session" : "user";
   }
 
   async _getFile(abs, action) {
@@ -566,10 +567,26 @@ export class PageFS {
     return { ok: true, path: abs, size: blob.size };
   }
 
+  // writeText 文本写入（vcmd curl 落盘用，§5.4）：内部走 write 语义，返回 {ok,path,size}。
+  async writeText(path, text, ctx = {}) {
+    const r = await this.run({ action: "write", path, content: String(text) }, ctx);
+    return { ok: true, path: r.attrs?.path || path, size: Number(r.attrs?.bytes ?? 0) };
+  }
+
   // list 目录列举：IndexedDB 无目录概念，由全部 key 前缀推导一层子项
   // （深层 key 折叠为目录项；目录无 size）。返回 {ok, path, items}。
   async list(path, ctx = {}) {
     const abs = this.resolve(path, ctx);
+    // 虚拟根 /：双 store 物理隔离，单 store 扫描无法覆盖——返回两个顶级根
+    if (abs === "/") {
+      return {
+        ok: true, path: "/",
+        items: [
+          { name: "home", path: "/home/", dir: true, size: undefined, mtime: undefined },
+          { name: "sessions", path: "/sessions/", dir: true, size: undefined, mtime: undefined },
+        ],
+      };
+    }
     const db = await this._ensureDB();
     const store = this._storeOf(abs);
     const prefix = abs.endsWith("/") ? abs : abs + "/";
@@ -602,6 +619,71 @@ export class PageFS {
     // 排序对齐 vcore（§5.4）：UTF-8 字节序、目录不优先（目录名带 / 后缀自然参与排序）
     const items = [...seen.values()].sort((a, b) => cmpBytes(a.name, b.name));
     return { ok: true, path: prefix, items };
+  }
+
+  // stat 单路径状态（vcmd 虚拟指令用）：文件返回 {path,dir:false,size,mtime}；
+  // 目录由子 key 前缀推导 {path,dir:true,size:0,mtime:undefined}（IndexedDB 无目录记录）；
+  // $USER/$SESSION 根恒存在（无记录也是有效目录）；均不存在返回 null
+  // （与 vcore Stat 语义对齐：不存在报错由调用方处理）。
+  async stat(path, ctx = {}) {
+    const abs = this.resolve(path, ctx);
+    // 根恒存在：/（虚拟根）、/sessions、$USER、$SESSION——IndexedDB 无目录记录，
+    // 但根概念有效（空工作区 ls 得 empty directory）
+    if (abs === "/" || abs === "/sessions" ||
+        abs === `/home/${this._uid}` || (ctx.sessionId && abs === `/sessions/${ctx.sessionId}`)) {
+      return { path: abs, dir: true, size: 0, mtime: undefined };
+    }
+    const db = await this._ensureDB();
+    const store = this._storeOf(abs);
+    const rec = await idbGet(db, store, abs);
+    if (rec !== undefined) {
+      return {
+        path: abs,
+        dir: false,
+        size: rec.c instanceof Blob ? rec.c.size : byteLen(rec.c),
+        mtime: rec.m,
+      };
+    }
+    const prefix = abs.endsWith("/") ? abs : abs + "/";
+    const keys = await idbAllKeys(db, store);
+    if (keys.some((k) => k.startsWith(prefix))) {
+      return { path: prefix, dir: true, size: 0, mtime: undefined };
+    }
+    return null;
+  }
+
+  // walk 递归全量列举（vcmd 的 rg/tree 用）：返回平铺 {path,dir,size,mtime}[]，
+  // 目录由全部 key 前缀推导（含深层中间目录）；不做隐藏/skip 过滤——过滤是
+  // vcore 指令语义（vcmd.js），fs 层只提供原始树。
+  async walk(path, ctx = {}) {
+    const abs = this.resolve(path, ctx);
+    const db = await this._ensureDB();
+    const store = this._storeOf(abs);
+    const prefix = abs.endsWith("/") ? abs : abs + "/";
+    const keys = await idbAllKeys(db, store);
+    const seen = new Map(); // full path -> {path, dir, size, mtime}
+    for (const k of keys) {
+      if (!k.startsWith(prefix)) continue;
+      const rec = await idbGet(db, store, k);
+      seen.set(k, {
+        path: k,
+        dir: false,
+        size: rec?.c instanceof Blob ? rec.c.size : byteLen(rec?.c ?? ""),
+        mtime: rec?.m,
+      });
+    }
+    const dirs = new Set();
+    for (const k of seen.keys()) {
+      const rest = k.slice(prefix.length);
+      if (!rest) continue;
+      let idx = rest.indexOf("/");
+      while (idx >= 0) {
+        dirs.add(prefix + rest.slice(0, idx) + "/");
+        idx = rest.indexOf("/", idx + 1);
+      }
+    }
+    for (const d of dirs) seen.set(d, { path: d, dir: true, size: 0, mtime: undefined });
+    return { ok: true, path: prefix, items: [...seen.values()] };
   }
 
   // remove 删除（对齐 vcore rm 语义）：文件/无子项直接删；有子项（非空目录）

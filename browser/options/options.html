@@ -3,76 +3,79 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AIC Browser Settings</title>
+  <title>设置 — AIC Browser</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <link rel="stylesheet" href="global.css">
   <link rel="stylesheet" href="options.css">
 </head>
-<body>
-  <div class="container">
-    <h1>AIC Browser</h1>
-    <p class="subtitle">将你的浏览器接入 AIC 平台</p>
+<body data-page="settings">
+  <header class="topbar" id="topbar"></header>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="content">
+    <h1>设置</h1>
+    <p class="page-sub">将你的浏览器作为 host 接入 AIC 平台</p>
 
-    <form id="settings-form">
-      <section>
-        <h2>连接</h2>
+    <form id="settings-form" class="card">
+      <h2>连接</h2>
 
-        <label for="key">AIC 环境凭证 (ENV_KEY) <span class="required">*</span></label>
-        <input type="password" id="key" name="key"
-               placeholder="host_id.cred_ver.secret.uid" autocomplete="off">
-        <p class="hint">格式: <code>&lt;env_id&gt;lt;host_id&lt;env_id&gt;gt;.&lt;cred_ver&gt;.&lt;secret&gt;.&lt;uid&gt;</code></p>
+      <label for="key">AIC 环境凭证 (ENV_KEY) <span class="required">*</span></label>
+      <input type="password" id="key" name="key"
+             placeholder="host_id.cred_ver.secret.uid" autocomplete="off">
 
-        <label for="url">服务端地址</label>
-        <input type="text" id="url" name="url" placeholder="wss://ivec.ai/aic/api/nc">
+      <label for="url">服务端地址</label>
+      <input type="text" id="url" name="url" placeholder="wss://ivec.ai/aic/api/nc">
 
-        <label for="deviceName">设备名称</label>
-        <input type="text" id="deviceName" name="deviceName"
-               placeholder="自动使用系统 hostname">
-      </section>
-
-      <section>
-        <h2>浏览器</h2>
-
-        <div class="checkbox-row">
-          <input type="checkbox" id="autoConnect" name="autoConnect">
-          <label for="autoConnect">启动后自动连接</label>
-        </div>
-
-        <div class="checkbox-row">
-          <input type="checkbox" id="background" name="background">
-          <label for="background">后台模式（新窗口不抢夺焦点）</label>
-        </div>
-
-        <div class="checkbox-row">
-          <input type="checkbox" id="incognito" name="incognito">
-          <label for="incognito">隐私模式（使用无痕窗口，不共享 cookie 和登录态）</label>
-        </div>
-
-        <div class="inline-fields">
-          <div>
-            <label for="viewportWidth">默认视口宽度</label>
-            <input type="number" id="viewportWidth" name="viewport.width" min="320" max="3840">
-          </div>
-          <div>
-            <label for="viewportHeight">默认视口高度</label>
-            <input type="number" id="viewportHeight" name="viewport.height" min="240" max="2160">
-          </div>
-        </div>
-
-        <label for="timeout">默认超时 (秒)</label>
-        <input type="number" id="timeout" name="timeout" min="5" max="300">
-      </section>
+      <label for="deviceName">设备名称</label>
+      <input type="text" id="deviceName" name="deviceName"
+             placeholder="自动使用系统 hostname">
 
       <div class="actions">
         <button type="submit" class="btn-primary">保存设置</button>
+        <button type="button" id="connect-btn" class="btn-accent">连接</button>
+        <button type="button" id="disconnect-btn" class="btn-secondary" style="display:none">断开</button>
         <span id="status" class="status"></span>
       </div>
+    </form>
 
-      <div class="connection-status">
-        <span id="conn-indicator" class="indicator disconnected"></span>
-        <span id="conn-text">未连接</span>
-        <button type="button" id="connect-btn" class="btn-secondary">连接</button>
-        <button type="button" id="disconnect-btn" class="btn-secondary" style="display:none">断开</button>
+    <form id="browser-form" class="card">
+      <h2>浏览器</h2>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="autoConnect" name="autoConnect">
+        <label for="autoConnect">启动后自动连接</label>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="background" name="background">
+        <label for="background">后台模式（新窗口不抢夺焦点）</label>
+      </div>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="incognito" name="incognito">
+        <label for="incognito">隐私模式（使用无痕窗口，不共享 cookie 和登录态）</label>
+      </div>
+
+      <div class="inline-fields">
+        <div>
+          <label for="viewportWidth">默认视口宽度</label>
+          <input type="number" id="viewportWidth" name="viewport.width" min="320" max="3840">
+        </div>
+        <div>
+          <label for="viewportHeight">默认视口高度</label>
+          <input type="number" id="viewportHeight" name="viewport.height" min="240" max="2160">
+        </div>
+      </div>
+
+      <label for="timeout">默认超时 (秒)</label>
+      <input type="number" id="timeout" name="timeout" min="5" max="300">
+
+      <div class="actions">
+        <button type="submit" class="btn-primary">保存设置</button>
+        <span id="browser-status" class="status"></span>
       </div>
     </form>
+  </main>
   </div>
 
   <script type="module" src="options.js"></script>

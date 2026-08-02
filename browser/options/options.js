@@ -1,17 +1,20 @@
 /**
- * options.js — Settings page logic for AIC Browser Extension
+ * options.js — 设置页（连接 + 浏览器，合并为单一配置页）。
+ * 侧栏与连接状态轮询由 common.js 统一处理。
  */
 
 import { loadSettings, saveSettings } from "../src/sdk/storage.js";
+import { showStatus, updateConnectionStatus } from "./common.js";
 
-const form = document.getElementById("settings-form");
+const connForm = document.getElementById("settings-form");
+const browserForm = document.getElementById("browser-form");
 const statusEl = document.getElementById("status");
-const connIndicator = document.getElementById("conn-indicator");
+const browserStatusEl = document.getElementById("browser-status");
 const connText = document.getElementById("conn-text");
 const connectBtn = document.getElementById("connect-btn");
 const disconnectBtn = document.getElementById("disconnect-btn");
 
-// ---- Load settings into form ----
+// ---- Load settings into forms ----
 
 async function populateForm() {
   const s = await loadSettings();
@@ -26,37 +29,44 @@ async function populateForm() {
   document.getElementById("timeout").value = s.timeout || 30;
 }
 
-// ---- Save settings ----
+// ---- Save settings（两个表单分区保存） ----
 
-form.addEventListener("submit", async (e) => {
+connForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const settings = {
-    key: document.getElementById("key").value.trim(),
-    url: document.getElementById("url").value.trim() || "wss://ivec.ai/aic/api/nc",
-    deviceName: document.getElementById("deviceName").value.trim(),
-    autoConnect: document.getElementById("autoConnect").checked,
-    background: document.getElementById("background").checked,
-    incognito: document.getElementById("incognito").checked,
-    viewport: {
-      width: parseInt(document.getElementById("viewportWidth").value, 10) || 1280,
-      height: parseInt(document.getElementById("viewportHeight").value, 10) || 720,
-    },
-    timeout: parseInt(document.getElementById("timeout").value, 10) || 30,
-  };
-
+  const settings = await loadSettings();
+  settings.key = document.getElementById("key").value.trim();
+  settings.url = document.getElementById("url").value.trim() || "wss://ivec.ai/aic/api/nc";
+  settings.deviceName = document.getElementById("deviceName").value.trim();
   await saveSettings(settings);
-  showStatus("设置已保存 ✓", "success");
+  showStatus(statusEl, "设置已保存 ✓", "success");
+});
+
+browserForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const settings = await loadSettings();
+  settings.autoConnect = document.getElementById("autoConnect").checked;
+  settings.background = document.getElementById("background").checked;
+  settings.incognito = document.getElementById("incognito").checked;
+  settings.viewport = {
+    width: parseInt(document.getElementById("viewportWidth").value, 10) || 1280,
+    height: parseInt(document.getElementById("viewportHeight").value, 10) || 720,
+  };
+  settings.timeout = parseInt(document.getElementById("timeout").value, 10) || 30;
+  await saveSettings(settings);
+  showStatus(browserStatusEl, "设置已保存 ✓", "success");
 });
 
 // ---- Connection controls ----
 
 connectBtn.addEventListener("click", async () => {
+  connText.textContent = "连接中…";
   chrome.runtime.sendMessage({ type: "connect" }, (resp) => {
     if (resp?.success) {
-      updateConnectionStatus(true);
-      showStatus("已连接 ✓", "success");
+      refreshConnButtons(true);
+      showStatus(statusEl, "已连接 ✓", "success");
     } else {
-      showStatus("连接失败: " + (resp?.error || "unknown"), "error");
+      refreshConnButtons(false);
+      showStatus(statusEl, "连接失败: " + (resp?.error || "unknown"), "error");
     }
   });
 });
@@ -64,50 +74,23 @@ connectBtn.addEventListener("click", async () => {
 disconnectBtn.addEventListener("click", async () => {
   chrome.runtime.sendMessage({ type: "disconnect" }, (resp) => {
     if (resp?.success) {
-      updateConnectionStatus(false);
-      showStatus("已断开", "success");
+      refreshConnButtons(false);
+      showStatus(statusEl, "已断开", "success");
     }
   });
 });
 
-// ---- Status polling ----
-
-async function checkConnection() {
-  try {
-    chrome.runtime.sendMessage({ type: "status" }, (resp) => {
-      if (chrome.runtime.lastError) {
-        updateConnectionStatus(false);
-        return;
-      }
-      updateConnectionStatus(resp?.connected || false);
-    });
-  } catch {
-    updateConnectionStatus(false);
-  }
+// 连接按钮显隐（侧栏指示灯由 common.js 轮询统一维护，这里同步一次按钮态）
+function refreshConnButtons(connected) {
+  updateConnectionStatus(connected);
+  connectBtn.style.display = connected ? "none" : "";
+  disconnectBtn.style.display = connected ? "" : "none";
 }
 
-function updateConnectionStatus(connected) {
-  if (connected) {
-    connIndicator.className = "indicator connected";
-    connText.textContent = "已连接";
-    connectBtn.style.display = "none";
-    disconnectBtn.style.display = "";
-  } else {
-    connIndicator.className = "indicator disconnected";
-    connText.textContent = "未连接";
-    connectBtn.style.display = "";
-    disconnectBtn.style.display = "none";
-  }
-}
-
-function showStatus(msg, type) {
-  statusEl.textContent = msg;
-  statusEl.style.color = type === "error" ? "#e53e3e" : type === "success" ? "#22c55e" : "#666";
-  setTimeout(() => { statusEl.textContent = ""; }, 3000);
-}
+chrome.runtime.sendMessage({ type: "status" }, (resp) => {
+  if (!chrome.runtime.lastError) refreshConnButtons(resp?.connected === true);
+});
 
 // ---- Init ----
 
 populateForm();
-checkConnection();
-setInterval(checkConnection, 5000);

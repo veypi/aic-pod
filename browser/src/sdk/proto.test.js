@@ -61,18 +61,17 @@ test("parseToolReqSubject: 非法 subject 返回 null", () => {
   assert.equal(parseToolReqSubject("x.u1.s.s1.h.h1.exec.req"), null);
 });
 
-// ---- buildCaps（caps v2 三形态） ----
+// ---- buildCaps（caps v2 统一命令表） ----
 
-test("buildCaps: browser 扩展形态（fs=[] 不支持、programs=[] 纯虚拟）", () => {
+test("buildCaps: browser 扩展形态（fs=[] 不支持、命令表声明 browser）", () => {
   const caps = buildCaps({
     hostID: "vec01", credVer: 1, version: "v0.4.0",
     deviceType: "browser", deviceName: "Chrome",
-    fsActions: [], programs: [],
-    virtual: [{ name: "browser", desc: "control a web browser", help: "browser <subcommand>...", level: 2 }],
+    fsActions: [],
+    commands: [{ name: "browser", desc: "control a web browser", help: "browser <subcommand>...", level: 2 }],
   });
   assert.deepEqual(caps.fs, { actions: [] });
-  assert.deepEqual(caps.exec.programs, []);
-  assert.deepEqual(caps.exec.virtual, [
+  assert.deepEqual(caps.exec.commands, [
     { name: "browser", desc: "control a web browser", help: "browser <subcommand>...", level: 2 },
   ]);
   assert.equal(caps.host_id, "vec01");
@@ -83,13 +82,13 @@ test("buildCaps: browser 扩展形态（fs=[] 不支持、programs=[] 纯虚拟�
   assert.equal(typeof caps.device_info.num_cpu, "number");
 });
 
-test("buildCaps: null 形态（全部 fs action / 程序不限制）", () => {
+test("buildCaps: fs null 形态（全部 fs action）", () => {
   const caps = buildCaps({
     hostID: "h1", credVer: 1, version: "v0.4.0",
-    fsActions: null, programs: null, virtual: [],
+    fsActions: null, commands: [],
   });
   assert.equal(JSON.stringify(caps.fs), '{"actions":null}');
-  assert.equal(JSON.stringify(caps.exec.programs), "null");
+  assert.deepEqual(caps.exec.commands, []);
 });
 
 // ---- parseRequest（§6.2：data 字段字节级保真，验签输入） ----
