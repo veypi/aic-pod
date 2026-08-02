@@ -19,8 +19,9 @@ type parsedArgv struct {
 }
 
 // parseArgv 解析虚拟指令 argv（§5.4）：
-//   - 未列 flag → `{cmd}: unknown flag "{flag}"`；
-//   - `--flag=value` 形态不解析，按非法 flag 报错引导两元素形式；
+//   - 未列 flag → 受限反馈 `{cmd}: flag "{flag}" is not supported on this environment (restricted)`；
+//   - 单横线组合 flag（如 `-la`）：全部为已知无值 flag 时展开等价；
+//   - `--flag=value` 形态不解析，按受限反馈引导两元素形式；
 //   - 位置参数个数严格校验（多余报错，不得静默忽略）。
 func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 	out := &parsedArgv{bools: map[string]bool{}, values: map[string]string{}, lists: map[string][]string{}}
@@ -28,7 +29,7 @@ func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 		a := argv[i]
 		if strings.HasPrefix(a, "-") && a != "-" {
 			if strings.Contains(a, "=") {
-				return nil, execErr(cmd, "unknown flag %q (use \"--flag value\" two-element form)", a)
+				return nil, execErr(cmd, "flag %q is not supported on this environment (restricted; use \"--flag value\" two-element form)", a)
 			}
 			if spec.bools[a] {
 				out.bools[a] = true
@@ -50,7 +51,14 @@ func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 				out.lists[a] = append(out.lists[a], argv[i])
 				continue
 			}
-			return nil, execErr(cmd, "unknown flag %q", a)
+			// 单横线组合（-la）：全部为已知无值 flag 时展开（对齐真实命令）
+			if expanded, ok := expandBoolCombo(spec, a); ok {
+				for _, f := range expanded {
+					out.bools[f] = true
+				}
+				continue
+			}
+			return nil, execErr(cmd, "flag %q is not supported on this environment (restricted)", a)
 		}
 		out.pos = append(out.pos, a)
 	}
@@ -61,6 +69,24 @@ func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 		return nil, execErr(cmd, "unexpected argument %q", out.pos[spec.maxPos])
 	}
 	return out, nil
+}
+
+// expandBoolCombo 展开单横线组合 flag（如 "-la" → "-l","-a"）：
+// 每个字符都必须是已声明的无值 flag，否则 ok=false（按未知 flag 走受限反馈）。
+// 双横线长 flag（--files）与单字符 flag 不展开。
+func expandBoolCombo(spec argvSpec, a string) ([]string, bool) {
+	if len(a) <= 2 || strings.HasPrefix(a, "--") {
+		return nil, false
+	}
+	flags := make([]string, 0, len(a)-1)
+	for _, c := range a[1:] {
+		f := "-" + string(c)
+		if !spec.bools[f] {
+			return nil, false
+		}
+		flags = append(flags, f)
+	}
+	return flags, true
 }
 
 // globMatch 是 rg -g 的文件名 glob（§5.4：支持 * 任意序列与 ? 单字符，完整匹配）。

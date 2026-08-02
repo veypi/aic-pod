@@ -8,7 +8,7 @@ import (
 
 // CommandMeta 是指令元数据（§6.3 注册信息三件套）：
 // Desc 为简短描述（commands 输出给 AI 做能力发现）；
-// Help 为完整帮助文档（procs 拦截 `-h` 时内部返回，不下发到执行端）。
+// Help 为完整帮助文档（procs 拦截 `--help` 时内部返回，不下发到执行端）。
 type CommandMeta struct {
 	Desc string
 	Help string
@@ -19,29 +19,39 @@ type CommandMeta struct {
 var commandMeta = map[string]CommandMeta{
 	"ls": {
 		Desc: "list directory entries",
-		Help: "ls [-la] [path]\n" +
+		Help: "ls [-l] [-a] [-t] [-h] [path]\n" +
 			"  list directory entries, sorted by name (UTF-8 byte order)\n" +
-			"  -la    include size and mtime (unix seconds) columns\n" +
-			"  path   defaults to workdir; a single file prints empty content with attrs path_kind=file",
+			"  -l     include size and mtime (unix seconds) columns\n" +
+			"  -a     include entries starting with '.' (hidden by default)\n" +
+			"  -t     sort by mtime, newest first (ties by name)\n" +
+			"  -h     human-readable size (1024-based, with -l; GNU ls -h aligned)\n" +
+			"  path   defaults to workdir",
 	},
 	"rg": {
-		Desc: "search content or list files (ripgrep subset)",
+		Desc: "search content or list files",
 		Help: "rg <pattern> <path> | rg --files [-g <glob>]... [<path>]\n" +
 			"  content search: recursive; output {path}:{line}:{content}\n" +
 			"  -i        case-insensitive\n" +
 			"  -l        print only matching file paths\n" +
 			"  -m N      per-file match limit\n" +
+			"  -n        print line numbers (default behavior, accepted for compatibility)\n" +
+			"  -c        print only match count per file\n" +
+			"  -w        match whole words only\n" +
 			"  -g <glob> filename glob (basename match, repeatable, OR semantics)\n" +
 			"  --files   list files recursively instead of searching\n" +
-			"  regex: RE2/Rust-regex subset — no lookaround, no backreference;\n" +
+			"  --hidden  include hidden files and directories (excluded by default, like real rg)\n" +
+			"  regex: RE2/Rust regex semantics (no lookaround/backreference);\n" +
 			"         use bash -c \"grep -P ...\" on a physical host for PCRE",
 	},
 	"tree": {
 		Desc: "print directory tree (JSON)",
-		Help: "tree [path] [--depth N]\n" +
-			"  structured recursive directory tree, JSON output\n" +
+		Help: "tree [path] [-L N]\n" +
+			"  structured recursive directory tree, JSON output (always structured; no --json flag)\n" +
 			"  path   defaults to workdir\n" +
-			"  --depth default 3, max 5; node cap 2000 (truncated=true)",
+			"  -L N   max depth (native tree semantics; --depth N accepted as alias), default 3, max 5;\n" +
+			"         node cap 2000 (truncated=true)\n" +
+			"  hidden items (.xxx) excluded entirely (GNU tree default; -a not supported);\n" +
+			"  node_modules/vendor/__pycache__/dist/build/.next etc. listed as leaves without recursion",
 	},
 	"curl": {
 		Desc: "download a URL to a file",
@@ -76,10 +86,9 @@ var commandMeta = map[string]CommandMeta{
 			"  root directories are hard-protected",
 	},
 	"git": {
-		Desc: "version control (git subset)",
+		Desc: "version control",
 		Help: "git [-C <path>] <subcommand> [args...]\n" +
-			"  cloud: go-git implementation (repo must be inside UFS roots)\n" +
-			"  host:  system git program, argv passed verbatim\n" +
+			"  version control, semantics aligned with the git CLI\n" +
 			"  subcommands: status/log/diff/branch (read) | init/clone/add/commit/pull (write)\n" +
 			"               | push/checkout (danger — may discard local changes or send remote)\n" +
 			"  remote auth: host uses local git credentials; cloud is anonymous-only",
@@ -187,8 +196,8 @@ Behavior:
 	"commands": {
 		Desc: "discover available commands on a target",
 		Help: "commands\n" +
-			"  capability discovery: list virtual commands (name + desc) of the target;\n" +
-			"  use `action -h` for the full help of any command",
+			"  capability discovery: list declared commands (name + desc) of the target;\n" +
+			"  use `action --help` for the full help of any command",
 	},
 }
 
@@ -201,10 +210,10 @@ func Meta(name string) (CommandMeta, bool) {
 // Decl 组装指令的完整注册声明 {name, desc, help, level}（§6.3）：
 // level 取基础分级（levels.go 同源，不带 argv 的动态提升——提升由判断端按需调用
 // ExecRequired/ExecRequiredIn）。未知指令返回 ok=false。
-func Decl(name string) (proto.VirtualDecl, bool) {
+func Decl(name string) (proto.CommandDecl, bool) {
 	m, ok := commandMeta[name]
 	if !ok {
-		return proto.VirtualDecl{}, false
+		return proto.CommandDecl{}, false
 	}
 	level := proto.LevelDanger // 未知指令 Danger 兜底（与 ExecRequired 一致）
 	if lv, ok := execCoreLevels[name]; ok {
@@ -214,17 +223,17 @@ func Decl(name string) (proto.VirtualDecl, bool) {
 	} else if name == "browser" {
 		level = proto.LevelWrite // 基础 = write；eval/upload 动态提升在 browserRequired
 	}
-	return proto.VirtualDecl{Name: name, Desc: m.Desc, Help: m.Help, RequiredLevel: level}, true
+	return proto.CommandDecl{Name: name, Desc: m.Desc, Help: m.Help, RequiredLevel: level}, true
 }
 
 // AllDecls 返回全部已知虚拟指令的注册声明（排序，供 caps 上报与 commands 聚合）。
-func AllDecls() []proto.VirtualDecl {
+func AllDecls() []proto.CommandDecl {
 	names := make([]string, 0, len(commandMeta))
 	for n := range commandMeta {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	out := make([]proto.VirtualDecl, 0, len(names))
+	out := make([]proto.CommandDecl, 0, len(names))
 	for _, n := range names {
 		if d, ok := Decl(n); ok {
 			out = append(out, d)

@@ -6,8 +6,9 @@ import (
 	"testing"
 )
 
-// caps v2 三形态固定向量（§6.3）：缺省/null = 全集或不限制；[] = 不支持/纯虚拟。
-// 语义区分依赖 *[]string，Do not "simplify" to []string.
+// caps v2 固定向量（§6.3）：fs.actions 三形态（缺省/null = 全集；[] = 不支持）
+// 语义区分依赖 *[]string，Do not "simplify" to []string。
+// exec.commands 为统一命令声明表：未声明的命令一律拒绝（无三形态语义）。
 
 func TestCapsFSActionsForms(t *testing.T) {
 	// 字段缺省
@@ -42,60 +43,35 @@ func TestCapsFSActionsForms(t *testing.T) {
 	}
 }
 
-func TestCapsProgramsForms(t *testing.T) {
-	var c1 Caps // 缺省 = 不限制
-	mustUnmarshal(t, `{"host_id":"host_a","exec":{}}`, &c1)
-	if !c1.Exec.ProgramsUnrestricted() {
-		t.Error("absent programs should be unrestricted")
-	}
-	var c2 Caps // 显式 null = 不限制
-	mustUnmarshal(t, `{"host_id":"host_a","exec":{"programs":null}}`, &c2)
-	if !c2.Exec.ProgramsUnrestricted() {
-		t.Error("null programs should be unrestricted")
-	}
-	var c3 Caps // [] = 纯虚拟（browser 类 host）
-	mustUnmarshal(t, `{"host_id":"host_a","exec":{"programs":[]}}`, &c3)
-	if c3.Exec.ProgramsUnrestricted() || len(*c3.Exec.Programs) != 0 {
-		t.Errorf("[] programs = %v, want non-nil empty", c3.Exec.Programs)
-	}
-	// 序列化保留三形态
-	out, _ := json.Marshal(c3)
-	var back Caps
-	mustUnmarshal(t, string(out), &back)
-	if back.Exec.Programs == nil {
-		t.Error("[] programs lost after round-trip (became nil)")
-	}
-}
-
-func TestCapsVirtualDecl(t *testing.T) {
+func TestCapsCommandDecl(t *testing.T) {
 	var c Caps
-	mustUnmarshal(t, `{"host_id":"host_a","exec":{"virtual":[
+	mustUnmarshal(t, `{"host_id":"host_a","exec":{"commands":[
 		{"name":"browser","desc":"control a web browser","help":"browser <sub>","level":2},
 		{"name":"bg_kill","level":3},
 		{"name":"unknown_level"}
 	]}}`, &c)
-	if len(c.Exec.Virtual) != 3 {
-		t.Fatalf("virtual = %v", c.Exec.Virtual)
+	if len(c.Exec.Commands) != 3 {
+		t.Fatalf("commands = %v", c.Exec.Commands)
 	}
-	v0 := c.Exec.Virtual[0]
+	v0 := c.Exec.Commands[0]
 	if v0.Name != "browser" || v0.Desc != "control a web browser" || v0.Help != "browser <sub>" || v0.RequiredLevel != 2 {
-		t.Errorf("virtual[0] = %+v", v0)
+		t.Errorf("commands[0] = %+v", v0)
 	}
-	if c.Exec.Virtual[1].RequiredLevel != 3 {
-		t.Errorf("virtual[1] level = %d", c.Exec.Virtual[1].RequiredLevel)
+	if c.Exec.Commands[1].RequiredLevel != 3 {
+		t.Errorf("commands[1] level = %d", c.Exec.Commands[1].RequiredLevel)
 	}
 	// 未声明 level = 0（不暴露给 AI，仅供服务端按需处理；host 必备指令都会显式声明）
-	if c.Exec.Virtual[2].RequiredLevel != 0 {
-		t.Errorf("virtual[2] level = %d, want 0", c.Exec.Virtual[2].RequiredLevel)
+	if c.Exec.Commands[2].RequiredLevel != 0 {
+		t.Errorf("commands[2] level = %d, want 0", c.Exec.Commands[2].RequiredLevel)
 	}
 	// 序列化：level 非零必出；desc/help 非空必出；零值省略
-	out, _ := json.Marshal(c.Exec.Virtual[0])
+	out, _ := json.Marshal(c.Exec.Commands[0])
 	if !strings.Contains(string(out), "\"level\":2") || !strings.Contains(string(out), "\"desc\"") || !strings.Contains(string(out), "\"help\"") {
-		t.Errorf("virtual[0] marshal = %s", out)
+		t.Errorf("commands[0] marshal = %s", out)
 	}
-	out2, _ := json.Marshal(c.Exec.Virtual[2])
+	out2, _ := json.Marshal(c.Exec.Commands[2])
 	if strings.Contains(string(out2), "\"level\"") || strings.Contains(string(out2), "desc") {
-		t.Errorf("virtual[2] marshal should omit zero fields: %s", out2)
+		t.Errorf("commands[2] marshal should omit zero fields: %s", out2)
 	}
 }
 

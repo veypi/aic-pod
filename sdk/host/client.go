@@ -2,14 +2,16 @@
 // NATS 连接与认证、caps v2 上报、心跳、req 分发（fs/exec）、bg 注册表、
 // granted_level 纵深检查（与 vcore 分级表同源）。
 //
-// 物理 host 能力：程序（PATH）+ 虚拟指令（核心 7 虚拟包装 + commands + bg_*，
-// 同名虚拟优先——真实核心指令程序不直接暴露，完整 GNU/BSD 语义走 shell 逃生舱）。
+// 物理 host 命令空间 = 统一命令声明表（§5.1）：恒声明（核心 8 虚拟指令 +
+// commands + bg_*）+ 启动探测（shell/git/agent-browser CLI，exec.LookPath）。
+// 未声明的命令一律拒绝，不存在「未知命令透传」。
 package host
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -42,10 +44,12 @@ type Client struct {
 	uid     string
 	credVer uint64
 	replay  *replayCache
-	procs      *exec_procs.Manager // exec 子进程统一托管（§5.8/§5.9）
-	browserMu  sync.Mutex
-	browsers   map[string]*vbrowser.Browser // per-session browser 实例（pod 模式不隔离，§5.6）
-	logf       func(string, ...any)
+	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测）
+	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
+	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
+	browserMu sync.Mutex
+	browsers  map[string]*vbrowser.Browser // per-session browser 实例（pod 模式不隔离，§5.6）
+	logf      func(string, ...any)
 }
 
 // New 创建客户端（不连接）。
@@ -70,13 +74,15 @@ func New(opts Options) *Client {
 			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		}
 	}
-	return &Client{
-		opts:   opts,
-		replay: &replayCache{store: map[string]time.Time{}},
+	c := &Client{
+		opts:     opts,
+		replay:   &replayCache{store: map[string]time.Time{}},
 		procs:    exec_procs.NewManager(opts.ExecTimeout),
 		browsers: map[string]*vbrowser.Browser{},
 		logf:     logf,
 	}
+	c.cmds, c.cmdByName = buildCommandTable()
+	return c
 }
 
 // Connect 连接 NATS，发布 caps v2，订阅会话级 inbox，启动心跳。后台运行，即时返回。
@@ -163,26 +169,61 @@ func (c *Client) Close() error {
 
 // ---- caps v2 上报（§6.3） ----
 
-// buildCaps 构造物理 host 的 caps v2：
-// fs.actions=null（全部 3 个）；exec.programs=null（不限制，PATH 自检）；
-// virtual = 核心 8 虚拟包装 + commands + bg_*（必备，desc/help/level 与 vcore 元数据同源）。
-// git/browser 不在物理 host 声明：git 走程序透传，browser 由浏览器扩展注册。
-func (c *Client) buildCaps() *proto.Caps {
-	virtual := make([]proto.VirtualDecl, 0, 12)
+// buildCommandTable 构建物理 host 的统一命令声明表（§5.1）：
+//   - 恒声明：核心 8 虚拟指令 + commands + bg_list/bg_wait/bg_kill（vcore 元数据同源）
+//   - 启动探测（exec.LookPath，探测到才声明）：
+//     shell（bash/zsh/sh/fish；Windows: powershell/pwsh/cmd）→ level 3（逃生舱）；
+//     git → level 1（本地凭证天然可用）；browser → agent-browser CLI
+func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
+	var cmds []proto.CommandDecl
+	seen := map[string]bool{}
+	add := func(d proto.CommandDecl) {
+		if seen[d.Name] {
+			return
+		}
+		seen[d.Name] = true
+		cmds = append(cmds, d)
+	}
 	for _, name := range vcore.CoreCommandNames() {
 		if d, ok := vcore.Decl(name); ok {
-			virtual = append(virtual, d)
+			add(d)
 		}
 	}
 	for _, name := range []string{"commands", "bg_list", "bg_wait", "bg_kill"} {
 		if d, ok := vcore.Decl(name); ok {
-			virtual = append(virtual, d)
+			add(d)
 		}
 	}
-	// browser：pod 模式（不隔离——用户本机浏览器，§5.6），经 agent-browser CLI 调用
-	if d, ok := vcore.Decl("browser"); ok {
-		virtual = append(virtual, d)
+	// 启动探测：未安装的命令不声明（AI 经 commands 自然发现不可用）
+	for _, sh := range []string{"bash", "zsh", "sh", "fish", "powershell", "pwsh", "cmd"} {
+		if _, err := exec.LookPath(sh); err == nil {
+			add(proto.CommandDecl{
+				Name: sh, Desc: "run shell commands (escape hatch)",
+				Help:          sh + " -c \"<command>\"\n  run arbitrary shell commands with full host semantics (escape hatch)",
+				RequiredLevel: proto.LevelDanger,
+			})
+		}
 	}
+	if _, err := exec.LookPath("git"); err == nil {
+		if d, ok := vcore.Decl("git"); ok {
+			add(d)
+		}
+	}
+	if _, err := exec.LookPath("agent-browser"); err == nil {
+		if d, ok := vcore.Decl("browser"); ok {
+			add(d)
+		}
+	}
+	byName := make(map[string]proto.CommandDecl, len(cmds))
+	for _, d := range cmds {
+		byName[d.Name] = d
+	}
+	return cmds, byName
+}
+
+// buildCaps 构造物理 host 的 caps v2（§6.3）：
+// fs.actions=null（全部 3 个）；exec.commands = 统一命令声明表。
+func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
 	return &proto.Caps{
 		HostID:        c.hostID,
@@ -191,8 +232,8 @@ func (c *Client) buildCaps() *proto.Caps {
 		DeviceType:    c.opts.DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
-		FS:            proto.FSCaps{},                   // actions=null = 全部 3 个
-		Exec:          proto.ExecCaps{Virtual: virtual}, // programs=null = 不限制
+		FS:            proto.FSCaps{},                     // actions=null = 全部 3 个
+		Exec:          proto.ExecCaps{Commands: c.cmds},   // 统一命令声明表
 	}
 }
 
@@ -204,7 +245,7 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 	}
 	data, _ := json.Marshal(c.buildCaps())
 	nc.Publish(subj, data)
-	c.logf("caps published to %s (%d virtual)", subj, len(c.buildCaps().Exec.Virtual))
+	c.logf("caps published to %s (%d commands)", subj, len(c.cmds))
 }
 
 func (c *Client) heartbeatLoop() {

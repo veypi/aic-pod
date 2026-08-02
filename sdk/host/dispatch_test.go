@@ -122,7 +122,7 @@ func TestDispatchGrantedDepthCheck(t *testing.T) {
 func TestDispatchVirtualCommands(t *testing.T) {
 	c, _ := testClient(t)
 
-	// commands：返回 caps v2 能力
+	// commands：返回统一命令表（{name, desc} 视图，无 fs/programs 字段）
 	resp := c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
 		map[string]any{"action": "commands"}, 1))
 	if resp.State != proto.StateCompleted {
@@ -132,15 +132,18 @@ func TestDispatchVirtualCommands(t *testing.T) {
 	if err := json.Unmarshal([]byte(resp.Content), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["programs"] != nil {
-		t.Errorf("programs should be null (unrestricted), got %v", payload["programs"])
+	if _, ok := payload["fs"]; ok {
+		t.Errorf("commands reply should not contain fs field: %v", payload)
 	}
-	virtual := payload["virtual"].([]any)
-	if len(virtual) < 12 { // 核心 8 + commands + bg_*3
-		t.Errorf("virtual = %d", len(virtual))
+	cmds, ok := payload["commands"].([]any)
+	if !ok {
+		t.Fatalf("commands payload = %v", payload)
+	}
+	if len(cmds) < 12 { // 核心 8 + commands + bg_*3（探测项另计）
+		t.Errorf("commands = %d", len(cmds))
 	}
 	hasRg, hasTree := false, false
-	for _, v := range virtual {
+	for _, v := range cmds {
 		if decl, ok := v.(map[string]any); ok {
 			switch decl["name"] {
 			case "rg":
@@ -148,23 +151,32 @@ func TestDispatchVirtualCommands(t *testing.T) {
 			case "tree":
 				hasTree = true
 			}
+			if _, hasDesc := decl["desc"]; !hasDesc {
+				t.Errorf("decl missing desc: %v", decl)
+			}
+			if _, hasLevel := decl["level"]; hasLevel {
+				t.Errorf("level should not be exposed to AI: %v", decl)
+			}
 		}
 	}
 	if !hasRg {
-		t.Error("virtual list missing rg")
+		t.Error("command table missing rg")
 	}
 	if !hasTree {
-		t.Error("virtual list missing tree")
+		t.Error("command table missing tree")
 	}
 
-	// 未知程序 → error unknown action
+	// 未声明命令 → error（统一命令声明模型：无透传）
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
 		map[string]any{"action": "nonexistent-cmd-xyz"}, 3))
 	if resp.State != proto.StateError {
-		t.Fatalf("unknown program: state = %s", resp.State)
+		t.Fatalf("undeclared command: state = %s", resp.State)
+	}
+	if !strings.Contains(resp.Error, "not declared by this host") {
+		t.Errorf("undeclared error = %q", resp.Error)
 	}
 
-	// 虚拟优先：ls 走虚拟指令而非程序（§5.4）
+	// 虚拟优先：ls 走虚拟指令而非本地命令（§5.4）
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
 		map[string]any{"action": "ls", "argv": []string{}}, 1))
 	if resp.State != proto.StateCompleted || resp.Attrs["action"] != "ls" {
@@ -244,26 +256,9 @@ func TestParseWSURL(t *testing.T) {
 	}
 }
 
-// 物理 host 集成 browser（§5.6 pod 模式）：caps 声明 + 分发走 vcore/browser。
+// 物理 host 集成 browser（§5.6 pod 模式）：探测声明 + 分发走 vcore/browser。
 func TestDispatchBrowserVirtual(t *testing.T) {
-	c, _ := testClient(t)
-
-	// caps 声明包含 browser（desc/help/level 与 vcore 元数据同源）
-	caps := c.buildCaps()
-	found := false
-	for _, v := range caps.Exec.Virtual {
-		if v.Name == "browser" {
-			found = true
-			if v.Desc == "" || v.Help == "" || v.RequiredLevel == 0 {
-			t.Errorf("browser decl incomplete: %+v", v)
-		}
-		}
-	}
-	if !found {
-		t.Fatal("caps missing browser virtual")
-	}
-
-	// stub agent-browser：验证分发走 vcore/browser 且参数不带 --session/--namespace（pod 不隔离）
+	// stub agent-browser 先入 PATH（探测发生在 New），再建客户端
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "cli.log")
 	script := "#!/bin/sh\necho \"$@\" >> " + logPath + "\necho ok\n"
@@ -271,8 +266,25 @@ func TestDispatchBrowserVirtual(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	c, _ := testClient(t)
 	c.opts.WorkDir = dir
 
+	// caps 声明包含 browser（desc/help/level 与 vcore 元数据同源）
+	caps := c.buildCaps()
+	found := false
+	for _, v := range caps.Exec.Commands {
+		if v.Name == "browser" {
+			found = true
+			if v.Desc == "" || v.Help == "" || v.RequiredLevel == 0 {
+				t.Errorf("browser decl incomplete: %+v", v)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("caps missing browser command (agent-browser probed)")
+	}
+
+	// 验证分发走 vcore/browser 且参数不带 --session/--namespace（pod 不隔离）
 	data := signedReq(t, c, "exec", map[string]any{
 		"action": "browser", "argv": []string{"open", "https://example.com"},
 	}, 3)

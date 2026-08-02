@@ -15,22 +15,19 @@ import (
 	"github.com/veypi/aic-pod/sdk/vcore"
 )
 
-// 程序命令执行（§5.9）：stdout+stderr 合并写入 {tmp}/aic/{session_id}/{msg_id}.log；
-// 请求 deadline 内完成 → 返回日志前 1000 行（不包装行号，§2.2）；
+// 本地命令执行（§5.9：探测声明的 shell/git）：stdout+stderr 合并写入
+// {tmp}/aic/{session_id}/{msg_id}.log；请求 deadline 内完成 → 返回日志前 1000 行；
 // 到期未完成 → 自动转后台（host 端自有超时，默认 10m），
 // 返回当前前 1000 行 + background=true + bg id（{host}:{sid}:{op_id}）。
+// argv 数组直传，禁止拼接 shell 字符串（§5.5：用户输入不经 shell 解释，杜绝注入）。
 
 const (
 	bgCmdMaxLen   = 120
 	bgWaitDefault = 30
 )
 
-// runProgram 执行程序命令（§5.9）：子进程经 exec_procs 统一托管——
-// stdout+stderr 合并写入 {tmp}/aic/{session_id}/{msg_id}.log；
-// 请求 deadline 内完成 → 返回日志前 1000 行（不包装行号，§2.2）；
-// 到期未完成 → 自动转后台（host 端自有超时，默认 10m），
-// 返回当前前 1000 行 + background=true + bg id（{host}:{sid}:{op_id}）。
-func (c *Client) runProgram(ctx context.Context, sid, msgID, action string, argv []string, workdir string) *proto.ToolResponse {
+// runLocal 执行本地命令（§5.9）：子进程经 exec_procs 统一托管。
+func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv []string, workdir string) *proto.ToolResponse {
 	logPath := filepath.Join(os.TempDir(), "aic", sid, msgID+".log")
 	res, err := c.procs.Start(ctx, exec_procs.StartOptions{
 		ID:      fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),

@@ -87,6 +87,7 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 }
 
 // checkGranted 做 granted >= required 数字比较（与 vcore 分级表同源）。
+// required = 声明表 level 与 vcore 动态表（git/browser 子命令、rm -r 非空提升）取高。
 // 不足返回 waiting + reason（§6.2：host 端动态审批，服务端置 waiting 等用户审批）。
 func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 	required := proto.LevelDanger
@@ -103,12 +104,13 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 			Argv   []string `json:"argv"`
 		}
 		_ = json.Unmarshal(req.Data, &p)
-		if p.Action == "commands" {
-			required = proto.LevelRead
-		} else if isVirtual(p.Action) {
-			required = vcore.ExecRequiredIn(c.newEnv(""), p.Action, p.Argv)
+		if decl, ok := c.cmdByName[p.Action]; ok {
+			required = decl.RequiredLevel
+			if dyn := vcore.ExecRequiredIn(c.newEnv(""), p.Action, p.Argv); dyn > required {
+				required = dyn
+			}
 		}
-		// 程序命令按基线 Danger(3)（§2.4）
+		// 未声明命令按 Danger 兜底（后续路由会拒绝，这里只是纵深检查的保守值）
 	}
 	if req.GrantedLevel < required {
 		return proto.StateWaiting, fmt.Sprintf("%s %s requires level %d (granted %d)",
@@ -146,22 +148,10 @@ func (c *Client) newEnv(workdir string) *vcore.Env {
 	}
 }
 
-// isVirtual 判定 action 是否为虚拟指令（同名虚拟优先，§5.4：
-// 真实核心指令程序不直接暴露，完整 GNU/BSD 语义走 shell 逃生舱）。
-func isVirtual(action string) bool {
-	for _, n := range vcore.CoreCommandNames() {
-		if n == action {
-			return true
-		}
-	}
-	switch action {
-	case "commands", "bg_list", "bg_wait", "bg_kill", "browser":
-		return true
-	}
-	return false
-}
-
-// execCmd 执行 exec 请求：虚拟指令优先，否则按程序处理（§5.9）。
+// execCmd 执行 exec 请求（§5.1 统一命令声明模型）：
+// 按声明表路由——核心虚拟指令走 vcore.Run，browser/bg_* 走特化实现，
+// 本地命令（探测声明的 shell/git）走 runLocal（exec_procs 托管）；
+// 未声明命令一律拒绝（不存在「未知命令透传」）。
 func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest) *proto.ToolResponse {
 	var p struct {
 		Action  string   `json:"action"`
@@ -174,6 +164,10 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	if p.Action == "" {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
 			Error: "exec: action is required"}
+	}
+	if _, ok := c.cmdByName[p.Action]; !ok {
+		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
+			Error: fmt.Sprintf("exec: unknown action %q (not declared by this host; run commands to discover available commands)", p.Action)}
 	}
 
 	env := c.newEnv(p.Workdir)
@@ -194,23 +188,38 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 		return resultToResponse(req.MsgID, res, err)
 	}
 
-	if isVirtual(p.Action) {
+	if isCoreCommand(p.Action) {
 		res, err := vcore.Run(ctx, env, p.Action, p.Argv)
 		return resultToResponse(req.MsgID, res, err)
 	}
 
-	// 程序命令（§5.9）：PATH 查找、workdir = 进程 cwd、日志文件、deadline 超时自动后台化
-	return c.runProgram(ctx, sid, req.MsgID, p.Action, p.Argv, p.Workdir)
+	// 本地命令（§5.9：探测声明的 shell/git）：PATH 查找、workdir = 进程 cwd、
+	// 日志文件、deadline 超时自动后台化，统一经 exec_procs 托管
+	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, p.Workdir)
 }
 
-// commandsJSON 返回本 host 的 caps v2 能力（§5.2：programs=null 不限制）。
+// isCoreCommand 判定 action 是否为核心 8 虚拟指令（vcore 内存执行）。
+func isCoreCommand(action string) bool {
+	for _, n := range vcore.CoreCommandNames() {
+		if n == action {
+			return true
+		}
+	}
+	return false
+}
+
+// commandsJSON 返回本 host 的命令表（§5.2：{name, desc} 视图——
+// level 仅供审批判断，help 由服务端 procs 拦截 `-h` 返回，均不暴露给 AI）。
 func (c *Client) commandsJSON() string {
-	caps := c.buildCaps()
-	data, _ := json.Marshal(map[string]any{
-		"fs":       map[string]any{"actions": proto.AllFSActions},
-		"programs": nil,
-		"virtual":  caps.Exec.Virtual,
-	})
+	type item struct {
+		Name string `json:"name"`
+		Desc string `json:"desc"`
+	}
+	cmds := make([]item, 0, len(c.cmds))
+	for _, d := range c.cmds {
+		cmds = append(cmds, item{Name: d.Name, Desc: d.Desc})
+	}
+	data, _ := json.Marshal(map[string]any{"commands": cmds})
 	return string(data)
 }
 

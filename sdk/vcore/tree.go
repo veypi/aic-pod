@@ -10,15 +10,18 @@ import (
 
 // ---- tree（§5.4，机器消费 JSON 输出，§2.2 显式声明）----
 //
-// tree [path] [--depth N]：递归结构化目录树，一次取回有界子树。
+// tree [path] [-L N|--depth N]：递归结构化目录树，一次取回有界子树。
 // 主要服务前端文件选择器（避免逐级 ls 的雪崩放大）；agent 亦可用（结构化 ls）。
+// 输出恒为 JSON（无 --json 参数——结构化返回是默认形态，前端直接消费）。
 //
-//   - 默认 depth=3，上限 treeMaxDepth；节点上限 treeMaxNodes，超限 truncated=true；
-//   - 递归跳过 treeSkipDirs 与点开头目录（仅不 descend，仍作为叶条目出现——
-//     与前端 tree_cache 的跳过集对齐，避免 .git/node_modules 爆炸）；点文件不跳过；
+//   - -L N / --depth N 同义（参考原生 tree -L）：默认 depth=3，上限 treeMaxDepth；
+//     节点上限 treeMaxNodes，超限 truncated=true；
+//   - 隐藏项（点开头文件/目录）默认完全跳过（不显示不递归，对齐 GNU tree 默认，
+//     -a 才显示）；treeSkipDirs（node_modules 等大目录）不 descend，仍作为叶条目出现
+//     ——与前端 tree_cache 的跳过集对齐，避免 .git/node_modules 爆炸；
 //   - 输出（目录）：{"dir":true,"cwd":<展开后绝对路径>,"truncated":bool,"items":[entry...]}；
-//     输出（文件）：{"dir":false,"name","size","mod_time","mime"}；
-//   - entry：{"name","dir","size","mod_time","mime","items"?}；子目录已展开时带 items
+//     输出（文件）：{"dir":false,"name","size","mod_time"}；
+//   - entry：{"name","dir","size","mod_time","items"?}；子目录已展开时带 items
 //     （空目录为 []），未展开（深度耗尽/被跳过）时省略 items。字段名对齐前端 tree_cache。
 const (
 	treeDefaultDepth = 3
@@ -38,7 +41,6 @@ type treeEntry struct {
 	Dir     bool         `json:"dir"`
 	Size    int64        `json:"size"`
 	ModTime int64        `json:"mod_time"`
-	Mime    string       `json:"mime"`
 	Items   *[]treeEntry `json:"items,omitempty"`
 }
 
@@ -49,19 +51,22 @@ type treeState struct {
 
 func cmdTree(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	pa, err := parseArgv("tree", argvSpec{
-		values: map[string]bool{"--depth": true},
+		values: map[string]bool{"-L": true, "--depth": true},
 		minPos: 0, maxPos: 1,
 	}, argv)
 	if err != nil {
 		return nil, err
 	}
 	depth := treeDefaultDepth
-	if v := pa.values["--depth"]; v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return nil, execErr("tree", "--depth must be >= 1, got %s", v)
+	// -L 与 --depth 同义（原生 tree -L）；后出现者覆盖
+	for _, flag := range []string{"-L", "--depth"} {
+		if v := pa.values[flag]; v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return nil, execErr("tree", "%s must be >= 1, got %s", flag, v)
+			}
+			depth = n
 		}
-		depth = n
 	}
 	if depth > treeMaxDepth {
 		depth = treeMaxDepth
@@ -123,6 +128,10 @@ func buildTreeDir(ctx context.Context, env *Env, dir string, remain int, st *tre
 			break
 		}
 		name := e.Name()
+		// 隐藏项（点开头）完全跳过：不显示不递归（对齐 GNU tree 默认，-a 才显示）
+		if name[0] == '.' {
+			continue
+		}
 		full := dir + "/" + name
 		var size, mt int64
 		if fi, _ := e.Info(); fi != nil {
@@ -131,7 +140,7 @@ func buildTreeDir(ctx context.Context, env *Env, dir string, remain int, st *tre
 		ent := treeEntry{Name: name, Dir: e.IsDir(), Size: size, ModTime: mt}
 		st.count++
 		if e.IsDir() {
-			skipDescend := name[0] == '.' || treeSkipDirs[name]
+			skipDescend := treeSkipDirs[name]
 			if remain > 1 && !skipDescend && !st.truncated {
 				sub := buildTreeDir(ctx, env, full, remain-1, st)
 				ent.Items = &sub // 已展开（空目录为 []），与"未展开省略 items"区分

@@ -11,9 +11,40 @@
       }
     },
     {
-      "name": "ls -la with size and mtime",
+      "name": "ls hides dotfiles by default",
+      "cmd": "ls",
+      "argv": ["/docs"],
+      "files": {"/docs/a.txt": "a", "/docs/.env": "x", "/docs/.git/": ""},
+      "expect": {
+        "content": "a.txt",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -a shows dotfiles",
+      "cmd": "ls",
+      "argv": ["-a", "/docs"],
+      "files": {"/docs/a.txt": "a", "/docs/.env": "x", "/docs/.git/": ""},
+      "expect": {
+        "content": ".env\n.git/\na.txt",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -la combo with size and mtime",
       "cmd": "ls",
       "argv": ["-la", "/docs"],
+      "files": {"/docs/b.txt": "bb", "/docs/a.txt": "a", "/docs/.env": "xyz"},
+      "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000001, "/docs/.env": 1700000002},
+      "expect": {
+        "content": ".env\t3\t1700000002\na.txt\t1\t1700000000\nb.txt\t2\t1700000001",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -l long format",
+      "cmd": "ls",
+      "argv": ["-l", "/docs"],
       "files": {"/docs/b.txt": "bb", "/docs/a.txt": "a"},
       "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000001},
       "expect": {
@@ -22,13 +53,78 @@
       }
     },
     {
-      "name": "ls single file",
+      "name": "ls -l raw size (no -h)",
+      "cmd": "ls",
+      "argv": ["-l", "/docs"],
+      "files": {"/docs/big.bin": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"},
+      "mtimes": {"/docs/big.bin": 1700000000},
+      "expect": {
+        "content": "big.bin\t100\t1700000000",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -lh human readable size",
+      "cmd": "ls",
+      "argv": ["-lh", "/docs"],
+      "files": {"/docs/big.bin": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"},
+      "mtimes": {"/docs/big.bin": 1700000000},
+      "expect": {
+        "content": "big.bin\t100B\t1700000000",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -lh human readable size k/m units",
+      "cmd": "ls",
+      "argv": ["-lh", "/docs"],
+      "files": {"/docs/k.bin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "mtimes": {"/docs/k.bin": 1700000000},
+      "expect": {
+        "content": "k.bin\t1.0K\t1700000000",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -h alone has no effect (GNU alignment)",
+      "cmd": "ls",
+      "argv": ["-h", "/docs"],
+      "files": {"/docs/a.txt": "a"},
+      "expect": {
+        "content": "a.txt",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -t stable: same mtime sorts by name",
+      "cmd": "ls",
+      "argv": ["-t", "/docs"],
+      "files": {"/docs/b.txt": "b", "/docs/a.txt": "a", "/docs/c.txt": "c"},
+      "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000000, "/docs/c.txt": 1700000000},
+      "expect": {
+        "content": "a.txt\nb.txt\nc.txt",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls -t sorts by mtime desc",
+      "cmd": "ls",
+      "argv": ["-t", "/docs"],
+      "files": {"/docs/old.txt": "o", "/docs/new.txt": "n", "/docs/mid.txt": "m"},
+      "mtimes": {"/docs/old.txt": 1700000000, "/docs/new.txt": 1700000002, "/docs/mid.txt": 1700000001},
+      "expect": {
+        "content": "new.txt\nmid.txt\nold.txt",
+        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls single file prints name",
       "cmd": "ls",
       "argv": ["/docs/a.txt"],
       "files": {"/docs/a.txt": "a"},
       "expect": {
-        "content": "",
-        "attrs": {"action": "ls", "path": "/docs/a.txt", "path_kind": "file", "rows": "0", "truncated": "false"}
+        "content": "a.txt",
+        "attrs": {"action": "ls", "path": "/docs/a.txt", "path_kind": "file", "rows": "1", "truncated": "false"}
       }
     },
     {
@@ -75,11 +171,11 @@
       }
     },
     {
-      "name": "ls unknown flag",
+      "name": "ls unknown flag restricted feedback",
       "cmd": "ls",
       "argv": ["-x"],
       "files": {},
-      "expectError": "ls: unknown flag \"-x\""
+      "expectError": "ls: flag \"-x\" is not supported on this environment (restricted)"
     },
     {
       "name": "ls extra positional",
@@ -89,11 +185,11 @@
       "expectError": "ls: unexpected argument \"/b\""
     },
     {
-      "name": "ls flag equals form rejected",
+      "name": "ls flag equals form restricted feedback",
       "cmd": "ls",
       "argv": ["--la=true"],
       "files": {},
-      "expectError": "ls: unknown flag \"--la=true\" (use \"--flag value\" two-element form)"
+      "expectError": "ls: flag \"--la=true\" is not supported on this environment (restricted; use \"--flag value\" two-element form)"
     }
   ]
 }
