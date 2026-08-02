@@ -660,7 +660,7 @@ actual   = Base64URLDecode(request.sig)
   }
 }
 
-图片响应:
+图片响应（host/page 端返回 `image_data` data URI，服务端 procs 统一落盘转换，§2.2）:
 {
   "status": "completed",
   "content": "Image file: /tmp/photo.png (image/png, 245760 bytes)",
@@ -669,7 +669,7 @@ actual   = Base64URLDecode(request.sig)
     "path": "/tmp/photo.png",
     "mime": "image/png",
     "size": "245760",
-    "image_path": "/tmp/photo.png"
+    "image_data": "data:image/png;base64,..."
   }
 }
 ```
@@ -682,7 +682,7 @@ actual   = Base64URLDecode(request.sig)
 | `range` | `"start-end"` 返回的行范围 |
 | `truncated` | 是否因 offset/limit 截断 |
 | `size` | 二进制文件字节数 |
-| `image_path` | 图片文件路径，供 UI 渲染 |
+| `image_data` | 图片 data URI（仅 fs.read 可投递图片，§2.2） |
 
 #### write — 写入文件
 

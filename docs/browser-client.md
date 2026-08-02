@@ -45,7 +45,7 @@
   "agent_version": "v0.4.0",
   "device_type": "browser",
   "device_info": { "os": "Chrome", "arch": "browser", "num_cpu": 8 },
-  "fs": { "actions": [] },
+  "fs": { "actions": ["read", "write", "edit"] },
   "exec": {
     "programs": [],
     "virtual": [
@@ -55,10 +55,16 @@
 }
 ```
 
-- `fs.actions=[]`：不支持 fs（浏览器扩展无文件系统）；
+- `fs.actions=[read/write/edit]`：扩展接入 PageFS（§4.5）——与 page 端同一套代码逻辑
+  （`aic/ui/assets/libs/page_fs.js` 逐字节同步为 `src/sdk/fs.js`），IndexedDB 双根
+  `$USER`/`$SESSION` 存储；扩展与页面的 IndexedDB 因 origin 不同物理隔离，按 host_id 寻址。
+  等级与 vcore.FSRequired 同源（read=1，write/edit=2）；
 - `exec.programs=[]`：显式纯虚拟（无程序执行能力）；
 - `exec.virtual`：按扩展能力声明——`browser`（required_level=2 Write，stateful 串行，
   download/wait 可后台化），与 Go `vcore/browser.VirtualDecl()` 同源。
+- §2.2 图片投递收敛：`browser screenshot` 落本 host 的 fs（`$SESSION/screenshot/`，
+  IndexedDB Blob 存储），不返回 image_data；agent 需要看图时用 `fs.read`（1host=本 host_id）
+  按 attrs.path 读取——只有 fs.read 能把图片带进消息。
 
 ### 工具流量（会话级 subject）
 
@@ -117,7 +123,7 @@ host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 �
 | `get` | 1 | `<what> [sel]` | 获取页面信息 |
 | `network` | 1 | `[id\|--filter ...]` | 网络请求 |
 | `read` | 1 | `[url]` | 提取页面可读文本 |
-| `screenshot` | 1 | `<filename>` | 截图 jpeg 80，必须带文件名 |
+| `screenshot` | 1 | `[--quality N] [--full]` | 截图落 host fs（$SESSION/screenshot/），fs.read 读图 |
 | `snapshot` | 1 | `[-i] [-c] [-d N] [-s sel]` | a11y tree 快照 |
 | `tab` | 1 | `<new\|list\|close\|N>` | 标签页管理 |
 | `wait` | 1 | `<sel\|ms\|--option>` | 等待条件 |
@@ -235,18 +241,18 @@ read [url]
 
 ### screenshot
 ```
-screenshot <filename> [options]
+screenshot [--quality N] [--full]
 ```
 | argv | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `<filename>` | string | ✅ | 文件名，如 `screenshot/page.jpg` |
-| `--format` | enum | | `png` / `jpeg` (默认 jpeg) |
 | `--quality` | int | | jpeg 质量 1-100（默认 80） |
 | `--full` | flag | | 全页面截图 |
 
-默认 jpeg 质量 80。无 filename 时返回 JSON `{filename, data}` (base64)，此为空参后备行为。
+截图（jpeg）落本 host 的 fs：`$SESSION/screenshot/screenshot-{ts}.jpg`（扩展 IndexedDB
+Blob 存储），content/attrs.path 告知落盘位置。不返回图片数据（§2.2）——agent 需要看图时
+用 `fs.read`（1host=本 host_id）读取。
 
-**示例:** `["screenshot/page.jpg"]`, `["--full"]`, `["--format","png"]`
+**示例:** `[]`, `["--full"]`, `["--quality","60"]`
 
 ### snapshot
 ```
