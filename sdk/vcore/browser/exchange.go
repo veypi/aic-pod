@@ -19,6 +19,7 @@ import (
 //     （cloud = $SESSION 根约束由 env.Workdir/Vars 与调用方根收容保证）。
 
 // upload <sel> <file...>：源文件经 VFS 读（§5.6），Danger(3) 由分级表控制。
+// 源路径展开后必须位于 Roots 内（cloud 三根；物理 host Roots=nil 不限制）。
 func (b *Browser) upload(ctx context.Context, env *vcore.Env, args []string) (*vcore.Result, error) {
 	if len(args) < 2 {
 		return nil, &proto.ExecError{Action: "browser", Reason: "upload requires selector and at least one file path"}
@@ -35,6 +36,9 @@ func (b *Browser) upload(ctx context.Context, env *vcore.Env, args []string) (*v
 		abs, err := env.Resolve(raw)
 		if err != nil {
 			return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("upload: %s", err)}
+		}
+		if err := env.CheckPath("browser", abs); err != nil {
+			return nil, err
 		}
 		data, err := env.VFS.ReadFile(abs)
 		if err != nil {
@@ -57,7 +61,8 @@ func (b *Browser) upload(ctx context.Context, env *vcore.Env, args []string) (*v
 }
 
 // download <sel> <path>：落盘路径经 VFS 写（§5.6：cloud 限 $SESSION 根内，
-// 由 env 路径空间保证）；Attrs path 为 VFS 路径。
+// 下载产物是会话级临时产物，不污染 $USER/$AGENT）。
+// 路径展开后先做 Roots 收容（cloud 三根），再在云环境（Vars 非空）收紧到 $SESSION。
 func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (*vcore.Result, error) {
 	if len(args) < 2 {
 		return nil, &proto.ExecError{Action: "browser", Reason: "download requires selector and path"}
@@ -66,6 +71,16 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 	abs, err := env.Resolve(args[1])
 	if err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("download: %s", err)}
+	}
+	if err := env.CheckPath("browser", abs); err != nil {
+		return nil, err
+	}
+	// 云环境（Vars 非空）：download 落盘仅限 $SESSION 根内（§5.6）；物理 host 不限。
+	if sess := env.Vars["$SESSION"]; sess != "" {
+		if abs != sess && !strings.HasPrefix(abs, sess+"/") {
+			return nil, &proto.ExecError{Action: "browser",
+				Reason: fmt.Sprintf("download: path outside $SESSION root: %s", abs)}
+		}
 	}
 	tmpDir, err := os.MkdirTemp(b.cfg.TempDir, "download-*")
 	if err != nil {
@@ -93,8 +108,9 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 	return r, nil
 }
 
-// screenshot [--quality N] [--full]：字节经 VFS 写 $SESSION/screenshot/{ts}.jpg
-// 后返回 image_path（cloud）；host/page 由上层按 §2.2 图片标准另行转换。
+// screenshot [--quality N] [--full]：字节经 VFS 写 screenshot/{ts}.jpg（cloud 为
+// $SESSION/screenshot/），content/path 告知落盘位置，AI 需要看图时再 fs.read。
+// §2.2：browser 不返回 image_data/image_path——只有 fs.read 能把图片带进消息。
 func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string) (*vcore.Result, error) {
 	quality := "80"
 	var passthrough []string
@@ -127,6 +143,9 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 	if err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
 	}
+	if err := env.CheckPath("browser", abs); err != nil {
+		return nil, err
+	}
 	if err := env.VFS.MkdirAll(dirOfVFS(abs)); err != nil {
 		return nil, err
 	}
@@ -134,7 +153,7 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
 	}
 	b.markDirty()
-	r := &vcore.Result{Attrs: map[string]string{"action": "browser", "image_path": abs}}
+	r := &vcore.Result{Attrs: map[string]string{"action": "browser", "path": abs}}
 	r.Content = fmt.Sprintf("✓ Screenshot saved to %s", abs)
 	return r, nil
 }

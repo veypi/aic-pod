@@ -15,10 +15,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/veypi/aic-pod/sdk/exec_procs"
 	"github.com/veypi/aic-pod/sdk/proto"
 	"github.com/veypi/aic-pod/sdk/vcore"
 )
@@ -39,6 +41,12 @@ type Config struct {
 	// TempDir 是文件交换临时目录（upload 暂存 / download 与 screenshot 落地），
 	// 缺省 os.TempDir()/aic-browser-{session}。
 	TempDir string
+	// ExecProcs 是 exec 子进程统一托管（§5.9）：非 nil 时每次 CLI 调用经其管理——
+	// 输出重定向 LogPathFn 指定路径、请求超时自动后台化、前 MaxLines 行返回。
+	// nil = 直连模式（测试/无托管）。
+	ExecProcs *exec_procs.Manager
+	// LogPathFn 生成每次 CLI 调用的输出落盘路径（ExecProcs 非 nil 时必填）。
+	LogPathFn func(msgID string) string
 }
 
 // Browser 是 browser 虚拟指令实例：每个 (session, host) 一个。
@@ -47,15 +55,14 @@ type Browser struct {
 	mu        sync.Mutex
 	saveTimer *time.Timer
 	dirty     bool
+
+	// 当前调用上下文（§5.6 stateful：同 (session, host) 串行，单调用安全）：
+	curID      string            // 本次调用的 msgID（后台条目 ID / 落盘文件名）
+	lastResult *exec_procs.Result // 最近一次 CLI 调用的托管结果（path/background 等）
 }
 
-// VirtualDecl 返回 caps 声明元数据（§6.3）：stateful 串行 + download/wait 可后台化。
-func VirtualDecl() proto.VirtualDecl {
-	return proto.VirtualDecl{Name: "browser", RequiredLevel: proto.LevelWrite, Stateful: true, Backgroundable: true}
-}
-
-// Subcommands 是核心 13 + upload（§5.6；var/pipeline/save 不迁移——
-// var→mem、pipeline→Agent 多次调用、save→自动保存）。
+// Subcommands 是 vcore 平台特化子命令集（§5.6：安全/文件交换/截断/本地实现）。
+// 其余 agent-browser 子命令一律透传（以 agent-browser CLI 为唯一基准，vcore 不做白名单）。
 var Subcommands = []string{
 	"open", "click", "close", "download", "eval", "get", "network",
 	"read", "screenshot", "snapshot", "tab", "wait", "sleep", "upload",
@@ -94,20 +101,16 @@ func (b *Browser) Close() error {
 }
 
 // Handle 是 vcore 虚拟指令入口：exec browser <subcommand> [args...]。
-func (b *Browser) Handle(ctx context.Context, env *vcore.Env, argv []string) (*vcore.Result, error) {
+// Handle 执行一次 browser 指令（§5.6）：msgID 为调用方消息 ID（后台条目 ID / 落盘文件名）。
+// 同一 Browser 实例串行调用（§5.6 stateful），msgID 仅用于当前调用上下文。
+func (b *Browser) Handle(ctx context.Context, env *vcore.Env, msgID string, argv []string) (*vcore.Result, error) {
 	if len(argv) == 0 {
 		return nil, &proto.ExecError{Action: "browser",
-			Reason: "subcommand is required (supported: " + strings.Join(Subcommands, ", ") + ")"}
+			Reason: "subcommand is required (see `browser -h`)"}
 	}
-	sub := argv[0]
-	args := argv[1:]
-	for _, s := range Subcommands {
-		if s == sub {
-			return b.run(ctx, env, sub, args)
-		}
-	}
-	return nil, &proto.ExecError{Action: "browser",
-		Reason: fmt.Sprintf("unknown subcommand %q (supported: %s)", sub, strings.Join(Subcommands, ", "))}
+	b.curID = msgID
+	b.lastResult = nil
+	return b.run(ctx, env, argv[0], argv[1:])
 }
 
 // markDirty 在成功动作后调度 state 自动保存（防抖 1s；close 时同步冲刷）。
@@ -140,15 +143,40 @@ func (b *Browser) saveState(ctx context.Context) {
 	_, _ = b.execCLI(ctx, nil, "state", "save", b.cfg.StatePath)
 }
 
-// execCLI 调用 agent-browser CLI，返回标准输出（错误时返回 trimmed 输出作为错误）。
+// execCLI 调用 agent-browser CLI（§5.9）：
+//   - ExecProcs 托管模式：输出重定向 LogPathFn(msgID)，请求超时自动后台化（
+//     转后台时 lastResult.Background=true + id），返回前 MaxLines 行
+//   - 直连模式（无托管）：CombinedOutput 内存合并
 func (b *Browser) execCLI(ctx context.Context, globalFlags []string, args ...string) (string, error) {
-	cmdArgs := []string{
-		"--namespace", b.cfg.Namespace,
-		"--session", b.cfg.Session,
-		"--user-agent", b.cfg.UserAgent,
+	// 空值不传参：cloud 传 --namespace/--session（隔离）；pod 不传（用户本机默认环境，§5.6）
+	cmdArgs := []string{}
+	if b.cfg.Namespace != "" {
+		cmdArgs = append(cmdArgs, "--namespace", b.cfg.Namespace)
+	}
+	if b.cfg.Session != "" {
+		cmdArgs = append(cmdArgs, "--session", b.cfg.Session)
+	}
+	if b.cfg.UserAgent != "" {
+		cmdArgs = append(cmdArgs, "--user-agent", b.cfg.UserAgent)
 	}
 	cmdArgs = append(cmdArgs, globalFlags...)
 	cmdArgs = append(cmdArgs, args...)
+
+	if b.cfg.ExecProcs != nil && b.cfg.LogPathFn != nil {
+		full := append([]string{b.cfg.ExecPath}, cmdArgs...)
+		res, err := b.cfg.ExecProcs.Start(ctx, exec_procs.StartOptions{
+			ID:      b.curID,
+			Command: strings.Join(full, " "),
+			LogPath: b.cfg.LogPathFn(b.curID),
+			Exec:    full,
+		})
+		if err != nil {
+			return "", err
+		}
+		b.lastResult = res
+		return res.Content, nil
+	}
+
 	cmd := exec.CommandContext(ctx, b.cfg.ExecPath, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
@@ -162,4 +190,21 @@ func (b *Browser) execCLI(ctx context.Context, globalFlags []string, args ...str
 		return "", fmt.Errorf("%s", msg)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// applyExecAttrs 在 run 出口补托管结果 attrs（§5.9）：path/rows/truncated/background/id。
+func (b *Browser) applyExecAttrs(r *vcore.Result) {
+	res := b.lastResult
+	if res == nil {
+		return
+	}
+	r.Attrs["path"] = res.LogPath
+	r.Attrs["rows"] = strconv.Itoa(res.Lines)
+	if res.Truncated {
+		r.Attrs["truncated"] = "true"
+	}
+	if res.Background {
+		r.Attrs["background"] = "true"
+		r.Attrs["id"] = res.ID
+	}
 }
