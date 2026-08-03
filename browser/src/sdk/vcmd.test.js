@@ -145,6 +145,11 @@ class MemFS {
   }
 }
 
+// 读取内容归一化：MemFS writeBlob 存 Uint8Array，writeText 存 string
+function txtOf(c) {
+  return c instanceof Uint8Array ? new TextDecoder().decode(c) : String(c);
+}
+
 // ---- curl 测试辅助：stub 全局 fetch 返回构造的 Response ----
 function stubFetch(resp) {
   const prev = globalThis.fetch;
@@ -581,8 +586,8 @@ test("curl: http error status", async () => {
 // ---- runVCmd 入口 ----
 
 test("runVCmd: unknown builtin", async () => {
-  await assert.rejects(runVCmd("mv", [], new MemFS({}), CTX), (e) =>
-    e.message.includes("unknown builtin (supported: ls, rg, tree, rm, curl)"),
+  await assert.rejects(runVCmd("chmod", [], new MemFS({}), CTX), (e) =>
+    e.message.includes("unknown builtin (supported: ls, rg, tree, rm, curl, cp, mv)"),
   );
 });
 
@@ -590,4 +595,59 @@ test("runVCmd: ls through entry", async () => {
   const fs = new MemFS({ "/d/a.txt": "a" });
   const r = await runVCmd("ls", ["/d"], fs, CTX);
   assert.equal(r.content, "a.txt");
+});
+
+// ---- cp / mv ----
+
+test("mv: 文件重命名", async () => {
+  const fs = new MemFS({ "/d/a.txt": "hello" });
+  const r = await runVCmd("mv", ["/d/a.txt", "/d/b.txt"], fs, CTX);
+  assert.match(r.content, /^moved \/d\/a\.txt to \/d\/b\.txt$/);
+  assert.equal(r.attrs.action, "mv");
+  assert.equal(r.attrs.source_path, "/d/a.txt");
+  assert.equal(txtOf((await fs.readRaw("/d/b.txt", CTX)).content), "hello");
+  await assert.rejects(fs.readRaw("/d/a.txt", CTX), /no such file/);
+});
+
+test("mv: 目录整体移动（含子文件）", async () => {
+  // 二进制文件须按 {content, mtime} 包装（裸 Uint8Array 时 MemFS.readRaw 取不到 content）
+  const fs = new MemFS({ "/p/x/a.txt": "1", "/p/x/sub/b.bin": { content: new Uint8Array([1, 2, 3]), mtime: 1700000000000 } });
+  await runVCmd("mv", ["/p/x", "/p/y"], fs, CTX);
+  assert.equal(txtOf((await fs.readRaw("/p/y/a.txt", CTX)).content), "1");
+  const bin = await fs.readRaw("/p/y/sub/b.bin", CTX);
+  assert.ok(bin.content instanceof Uint8Array && bin.content.byteLength === 3);
+  await assert.rejects(fs.readRaw("/p/x/a.txt", CTX), /no such file/);
+});
+
+test("mv: 目标已存在报错不覆盖", async () => {
+  const fs = new MemFS({ "/d/a.txt": "1", "/d/b.txt": "2" });
+  await assert.rejects(runVCmd("mv", ["/d/a.txt", "/d/b.txt"], fs, CTX), /destination \/d\/b\.txt already exists/);
+  assert.equal(txtOf((await fs.readRaw("/d/b.txt", CTX)).content), "2");
+});
+
+test("mv: 目录移入自身子路径报错", async () => {
+  const fs = new MemFS({ "/p/x/a.txt": "1" });
+  await assert.rejects(runVCmd("mv", ["/p/x", "/p/x/sub"], fs, CTX), /cannot move directory \/p\/x into itself/);
+});
+
+test("mv: 源不存在报错", async () => {
+  const fs = new MemFS({});
+  await assert.rejects(runVCmd("mv", ["/d/nope", "/d/x"], fs, CTX), /cannot stat source \/d\/nope: no such file or directory/);
+});
+
+test("cp: 文件复制（保留源）", async () => {
+  const fs = new MemFS({ "/d/a.txt": "hello" });
+  const r = await runVCmd("cp", ["/d/a.txt", "/d/c.txt"], fs, CTX);
+  assert.match(r.content, /^copied \/d\/a\.txt to \/d\/c\.txt$/);
+  assert.equal(txtOf((await fs.readRaw("/d/a.txt", CTX)).content), "hello");
+  assert.equal(txtOf((await fs.readRaw("/d/c.txt", CTX)).content), "hello");
+});
+
+test("cp: 目录需 -r", async () => {
+  const fs = new MemFS({ "/p/x/a.txt": "1" });
+  await assert.rejects(runVCmd("cp", ["/p/x", "/p/y"], fs, CTX), /is a directory \(use -r\)/);
+  const r = await runVCmd("cp", ["-r", "/p/x", "/p/y"], fs, CTX);
+  assert.match(r.content, /^copied \/p\/x to \/p\/y$/);
+  assert.equal(txtOf((await fs.readRaw("/p/y/a.txt", CTX)).content), "1");
+  assert.equal((await fs.readRaw("/p/x/a.txt", CTX)).content, "1");
 });

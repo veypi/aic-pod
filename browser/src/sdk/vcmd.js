@@ -553,6 +553,65 @@ function byteLenOf(s) {
   return new TextEncoder().encode(s).length;
 }
 
+// ---- cp / mv（对齐 vcore fileops.go §5.4：目标已存在报错不覆盖；目录移入自身子路径报错）----
+
+// 复制单个文件/整棵目录树到 dstAbs（PageFS 无原生 Rename/MkdirAll——writeBlob 自动建父路径）
+async function copyNode(fs, ctx, srcAbs, dstAbs) {
+  const st = await fs.stat(srcAbs, ctx);
+  if (st === null) throw execErr("cp", `cannot stat source ${srcAbs}: no such file or directory`);
+  if (!st.dir) {
+    const r = await fs.readRaw(srcAbs, ctx);
+    const blob = r.content instanceof Blob ? r.content : new Blob([r.content], { type: r.mime || "text/plain" });
+    await fs.writeBlob(dstAbs, blob, ctx);
+    return;
+  }
+  const w = await fs.walk(srcAbs, ctx);
+  for (const it of w.items || []) {
+    if (it.dir) continue;
+    const rel = it.path.slice(srcAbs.length).replace(/^\/+/, "");
+    const r = await fs.readRaw(it.path, ctx);
+    const blob = r.content instanceof Blob ? r.content : new Blob([r.content], { type: r.mime || "text/plain" });
+    await fs.writeBlob(dstAbs + "/" + rel, blob, ctx);
+  }
+}
+
+// cp [-r] <src> <dst>：目录需 -r；目标已存在报错（不覆盖）；dst 为 src 自身或子路径报错。
+export async function cmdCp(fs, ctx, argv) {
+  const pa = parseVCmdArgv("cp", { bools: { "-r": true }, minPos: 2, maxPos: 2 }, argv);
+  const srcAbs = fs.resolve ? await fs.resolve(pa.pos[0], ctx) : pa.pos[0];
+  const dstAbs = fs.resolve ? await fs.resolve(pa.pos[1], ctx) : pa.pos[1];
+  if (srcAbs === dstAbs) throw execErr("cp", `${srcAbs} and ${dstAbs} are identical`);
+  const st = await fs.stat(srcAbs, ctx);
+  if (st === null) throw execErr("cp", `cannot stat source ${srcAbs}: no such file or directory`);
+  if (st.dir) {
+    if (!pa.bools["-r"]) throw execErr("cp", `${srcAbs} is a directory (use -r)`);
+    if (dstAbs.startsWith(srcAbs + "/")) throw execErr("cp", `cannot copy directory ${srcAbs} into itself: ${dstAbs}`);
+  }
+  if ((await fs.stat(dstAbs, ctx)) !== null) throw execErr("cp", `destination ${dstAbs} already exists`);
+  await copyNode(fs, ctx, srcAbs, dstAbs);
+  return { content: `copied ${srcAbs} to ${dstAbs}`, attrs: { action: "cp", path: dstAbs, source_path: srcAbs } };
+}
+
+// mv <src> <dst>：src==dst 报错；目标已存在报错（不覆盖）；目录移入自身子路径报错。
+// PageFS 无原生 Rename：复制（文件/目录树）→ 删除源。
+export async function cmdMv(fs, ctx, argv) {
+  const pa = parseVCmdArgv("mv", { minPos: 2, maxPos: 2 }, argv);
+  const srcAbs = fs.resolve ? await fs.resolve(pa.pos[0], ctx) : pa.pos[0];
+  const dstAbs = fs.resolve ? await fs.resolve(pa.pos[1], ctx) : pa.pos[1];
+  if (srcAbs === dstAbs) throw execErr("mv", `${srcAbs} and ${dstAbs} are identical`);
+  const st = await fs.stat(srcAbs, ctx);
+  if (st === null) throw execErr("mv", `cannot stat source ${srcAbs}: no such file or directory`);
+  if (st.dir && dstAbs.startsWith(srcAbs + "/")) throw execErr("mv", `cannot move directory ${srcAbs} into itself: ${dstAbs}`);
+  if ((await fs.stat(dstAbs, ctx)) !== null) throw execErr("mv", `destination ${dstAbs} already exists`);
+  await copyNode(fs, ctx, srcAbs, dstAbs);
+  try {
+    await fs.remove(srcAbs, { ...ctx, recursive: true });
+  } catch (e) {
+    throw execErr("mv", `cannot remove source ${srcAbs} after copy: ${e?.message || e}`);
+  }
+  return { content: `moved ${srcAbs} to ${dstAbs}`, attrs: { action: "mv", path: dstAbs, source_path: srcAbs } };
+}
+
 // ---- 入口 ----
 
 // runVCmd(action, argv, fs, ctx) → {content, attrs}；错误 throw Error("{cmd}: {原因}")。
@@ -569,6 +628,10 @@ export async function runVCmd(action, argv, fs, ctx = {}) {
       return cmdRm(fs, ctx, argv);
     case "curl":
       return cmdCurl(fs, ctx, argv);
+    case "cp":
+      return cmdCp(fs, ctx, argv);
+    case "mv":
+      return cmdMv(fs, ctx, argv);
   }
-  throw execErr(action, `unknown builtin (supported: ls, rg, tree, rm, curl)`);
+  throw execErr(action, `unknown builtin (supported: ls, rg, tree, rm, curl, cp, mv)`);
 }
