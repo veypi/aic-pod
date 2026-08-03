@@ -84,7 +84,11 @@ func New(cfg Config) *Browser {
 	return &Browser{cfg: cfg}
 }
 
-// Close 冲刷 state 自动保存并清理临时目录。
+// Close 冲刷 state 自动保存、关闭隔离会话（cloud）并清理临时目录。
+// cloud（Namespace 非空）下同步关闭 agent-browser 会话：aic runtime 结束/
+// 休眠时若不清 daemon 会话，Chrome for Testing 实例与 active session 会一直
+// 驻留（session list 越积越多）。pod 模式（Namespace 空）不关——用户本机
+// 浏览器环境不属于平台托管。
 func (b *Browser) Close() error {
 	b.mu.Lock()
 	if b.saveTimer != nil {
@@ -97,7 +101,28 @@ func (b *Browser) Close() error {
 	if dirty {
 		b.saveState(context.Background())
 	}
+	if b.cfg.Namespace != "" {
+		b.closeSession(context.Background())
+	}
 	return os.RemoveAll(b.cfg.TempDir)
+}
+
+// closeSession 关闭当前隔离会话（agent-browser close，--namespace/--session 由
+// execCLI 同款参数规则拼接）。直连执行不经 ExecProcs 托管：Close 时 curID/LogPath
+// 可能已过期，且该调用无需输出回传。会话不存在时 close 无副作用（幂等）。
+func (b *Browser) closeSession(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmdArgs := []string{}
+	if b.cfg.Namespace != "" {
+		cmdArgs = append(cmdArgs, "--namespace", b.cfg.Namespace)
+	}
+	if b.cfg.Session != "" {
+		cmdArgs = append(cmdArgs, "--session", b.cfg.Session)
+	}
+	cmdArgs = append(cmdArgs, "close")
+	cmd := exec.CommandContext(ctx, b.cfg.ExecPath, cmdArgs...)
+	_ = cmd.Run() // 失败（daemon 不在/会话已关）忽略，Close 不因清理失败报错
 }
 
 // Handle 是 vcore 虚拟指令入口：exec browser <subcommand> [args...]。
