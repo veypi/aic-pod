@@ -1,21 +1,20 @@
-// PageFS — 浏览器端 fs 实现（§4.5）：IndexedDB 双根（$USER/$SESSION），read/write/edit。
+// PageFS — 浏览器本地文件系统（v0.13.1 单根模型）：IndexedDB 单库单 store，read/write/edit。
 //
 // 双端复用（同一套代码逻辑，逐字节同步，禁止漂移）：
 //   - aic/ui/assets/libs/page_fs.js   — page 端（1host="page"，页面 IndexedDB）
-//   - aic-pod/browser/src/sdk/fs.js   — 浏览器扩展端（1host=host_id，扩展 IndexedDB）
+//   - aic-pod/browser/src/sdk/page_fs.js — 浏览器扩展端（1host=host_id，扩展 IndexedDB）
 // 两处 origin 不同，IndexedDB 物理隔离；代码必须保持一致，改动双向同步。
 //
-// 权限模型：$USER/$SESSION 仅作路径规范（key 寻址），不做根收容——
-// 浏览器端文件权限是全部的（page/扩展一致），任意绝对路径（含 .. 折叠后
-// 跳出变量根）均可读写；服务端权限门控（等级审批）不受影响。
-//
-// 存储模型（§4.5）：
-//   - 每用户一个 IndexedDB 库（aic-page-fs-{uid}），按根分 store（user/session）；
-//   - key = 解析后的完整绝对路径（/home/{uid}/... → user store；
-//     /sessions/{sid}/... → session store），$SESSION 数据随 session 保留、不自动清除；
+// 存储模型（v0.13.1 单根，与 cloud 的 $SESSION/$USER 资源隔离完全解耦）：
+//   - 固定库名 aic-page-fs，单 store files；key = 规范化绝对路径，根为 "/"；
+//   - 本地空间不分用户/会话（浏览器端无资源隔离需求），$SESSION/$USER 变量不存在；
 //   - 记录 = {c: string|Blob, m: mtime}；文本存 string，二进制存 Blob；
 //   - IndexedDB 无目录概念，write 的"父目录自动创建"天然成立；
 //   - 总量受浏览器 storage quota 管理，写失败（quota exceeded）按执行错误返回。
+//
+// 路径翻译（仅防呆，非隔离）：AI 经 exec 通道（fs.req/vcmd）发来的路径可能带云语义
+// 容器前缀（$SESSION/$USER/$AGENT、/sessions/{x}/、/home/{x}/）——resolve 一律剥离
+// 映射到本地根下（如 $SESSION/foo → /foo）。
 //
 // 行为对齐 vcore（§2.6 三端一致）：offset/limit 1 基、行号前缀、512KB 预算、
 // 二进制分支（page 无 UFS 概念 → 图片走 image_data data URI，超 600KB 阶梯压缩）、
@@ -49,32 +48,21 @@ function cleanPath(p) {
   return out || (isAbs ? "/" : ".");
 }
 
-// resolvePath 按 §2.1.1 可解析层展开：$VAR 最长前缀匹配（后跟 / 或结束）、
-// 未匹配 $ 按字面相对路径、绝对路径忽略 workdir。
-// 注意：$USER/$SESSION 仅作路径规范（IndexedDB key 寻址），不做根收容——
-// 浏览器端文件权限是全部的（page/扩展一致），.. 折叠后的任意绝对路径均可访问。
-function resolvePath(p, workdir, vars) {
+// resolvePath 本地单根解析：剥离云语义容器前缀（$SESSION/$USER/$AGENT、
+// /sessions/{x}/、/home/{x}/ → 本地根下），绝对路径忽略 workdir，
+// 相对路径基于 workdir（缺省 /）。无任何 $ 变量概念。
+function resolvePath(p, workdir) {
   if (!p) throw new Error("proto: path is empty");
-  if (p[0] === "$") {
-    let name = "", rest = "";
-    for (const k of Object.keys(vars)) {
-      if (k.length > name.length && p.startsWith(k) &&
-        (p.length === k.length || p[k.length] === "/")) {
-        name = k;
-        rest = p.slice(k.length);
-      }
-    }
-    if (name) {
-      // $VAR 展开后允许 .. 跳出变量根（权限全部，仅路径规范化）
-      return cleanPath(vars[name] + rest);
-    }
-  }
-  if (p.startsWith("/")) return cleanPath(p);
+  let s = String(p);
+  // 云语义容器前缀剥离（防呆，非隔离）：AI 经 exec 发 $SESSION/foo → /foo
+  s = s.replace(/^\$(?:SESSION|USER|AGENT)(?:\/|$)/, "/");
+  s = s.replace(/^\/(?:sessions|home)\/[^/]+(?:\/|$)/, "/");
+  if (s.startsWith("/")) return cleanPath(s);
   if (!workdir) throw new Error(`proto: relative path "${p}" requires workdir`);
   if (!workdir.startsWith("/")) {
     throw new Error(`proto: workdir must be absolute, got "${workdir}"`);
   }
-  return cleanPath(workdir + "/" + p);
+  return cleanPath(workdir + "/" + s);
 }
 
 // ---- 文本/MIME 判定（对齐 vcore result.go 的关键分支）----
@@ -180,13 +168,12 @@ function doubleEncodingHint(content, oldText) {
 
 // ---- IndexedDB 最小封装 ----
 
-function idbOpen(uid) {
+function idbOpen() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(`aic-page-fs-${uid}`, 1);
+    const req = indexedDB.open(`aic-page-fs`, 1);
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains("user")) db.createObjectStore("user");
-      if (!db.objectStoreNames.contains("session")) db.createObjectStore("session");
+      if (!db.objectStoreNames.contains("files")) db.createObjectStore("files");
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -296,33 +283,27 @@ async function imageDimensions(blob) {
 // ---- PageFS ----
 
 export class PageFS {
-  // opts.uid：当前用户 id（库命名空间 + $USER 根）
-  constructor({ uid } = {}) {
-    if (!uid) throw new Error("page_fs: uid is required");
-    this._uid = uid;
+  // 无参构造：本地单根存储（固定库名 aic-page-fs），不依赖用户/会话。
+  constructor() {
     this._db = null; // 懒打开（首次 run）
   }
 
   async _ensureDB() {
-    if (!this._db) this._db = await idbOpen(this._uid);
+    if (!this._db) this._db = await idbOpen();
     return this._db;
   }
 
-  // _env 构造路径环境：$USER/$SESSION 双根（仅路径规范，无权限收容），
-  // workdir 缺省 $SESSION（§2.1.1）
-  _env(sid, workdirRaw) {
-    const vars = {
-      $USER: `/home/${this._uid}`,
-      $SESSION: `/sessions/${sid}`,
+  // _env 构造路径环境：本地单根，workdir 缺省 /（无 $ 变量、无会话绑定）
+  _env(workdirRaw) {
+    return {
+      workdir: workdirRaw
+        ? resolvePath(String(workdirRaw), "/")
+        : "/",
     };
-    const workdir = workdirRaw
-      ? resolvePath(String(workdirRaw), "", vars)
-      : vars.$SESSION;
-    return { vars, workdir };
   }
 
   // run 执行一条 fs 请求（§6.1 body = {msg_id, action, ...fs JSON 参数}）。
-  // ctx.sessionId 绑定 $SESSION 根。返回 {content, attrs}；错误 throw Error("fs ...")。
+  // 返回 {content, attrs}；错误 throw Error("fs ...")。
   async run(params, ctx = {}) {
     params = params || {};
     const action = String(params.action || "").toLowerCase();
@@ -331,7 +312,7 @@ export class PageFS {
     }
     if (!action) throw fsErr("", "action is required (supported: read, write, edit)");
 
-    const env = this._env(ctx.sessionId || "", params.workdir);
+    const env = this._env(params.workdir);
 
     switch (action) {
       case "read": return this._read(params, env);
@@ -341,19 +322,14 @@ export class PageFS {
     throw fsErr("", `unknown action "${action}" (supported: read, write, edit)`);
   }
 
-  // _resolve 路径规范化（无根收容：$USER/$SESSION 仅规范路径，权限全部）
+  // _resolve 路径规范化（本地单根，resolvePath 内剥离云语义容器前缀）
   _resolve(rawPath, env, action) {
-    return resolvePath(String(rawPath || ""), env.workdir, env.vars);
-  }
-
-  _storeOf(abs) {
-    // 边界对齐：/sessions 本身也归 session store（否则 ls /sessions 扫错库、恒空）
-    return abs === "/sessions" || abs.startsWith("/sessions/") ? "session" : "user";
+    return resolvePath(String(rawPath || ""), env.workdir);
   }
 
   async _getFile(abs, action) {
     const db = await this._ensureDB();
-    const rec = await idbGet(db, this._storeOf(abs), abs);
+    const rec = await idbGet(db, "files", abs);
     if (rec === undefined) throw fsErr(action, `${abs}: no such file or directory`);
     return rec;
   }
@@ -457,7 +433,7 @@ export class PageFS {
     const db = await this._ensureDB();
     try {
       // IndexedDB 无目录概念，"父目录不存在自动创建"天然成立
-      await idbPut(db, this._storeOf(abs), abs, { c: content, m: Date.now() });
+      await idbPut(db, "files", abs, { c: content, m: Date.now() });
     } catch (e) {
       // quota exceeded 等存储层失败按执行错误返回（§4.5）
       throw fsErr("write", e?.message || String(e));
@@ -515,7 +491,7 @@ export class PageFS {
     }
     const db = await this._ensureDB();
     try {
-      await idbPut(db, this._storeOf(abs), abs, { c: content, m: Date.now() });
+      await idbPut(db, "files", abs, { c: content, m: Date.now() });
     } catch (e) {
       throw fsErr("edit", e?.message || String(e));
     }
@@ -532,12 +508,87 @@ export class PageFS {
     };
   }
 
+  // ---- cloud_fs 兼容层（与 $cloud_fs 行为一致：get/put/ls/rm/exists）----
+  // 面向前端程序的操作对象接口（page_exec.page_fs() 直接透传本层）。
+  // 底层方法 readRaw/writeBlob/writeText/list/stat/walk/remove/has 保留
+  // （vcmd 等内部使用，与 cloud_fs 无对应关系）。
+  //
+  // 与 cloud_fs 的文档化差异：
+  //   - resolve() 返回规范化绝对路径（IndexedDB 无 URL 概念；cloud_fs 返回
+  //     完整 URL 供 <img> 直链——page 端取图用 get() 拿 Blob 转 dataURL/objectURL）
+  //   - rm() 递归删除（对齐 httpfs RemoveAll / cloud_fs.rm 语义，无需 recursive）
+
+  // get 整读：文件 {ok, content: string|Blob, mime, size, path}；
+  // 目录 {ok, dir:true, path, items}；均不存在抛错（与 cloud_fs 一致）。
+  async get(path, ctx = {}) {
+    const abs = this.resolve(path, ctx);
+    const db = await this._ensureDB();
+    const store = "files";
+    const rec = await idbGet(db, store, abs);
+    if (rec !== undefined) {
+      if (rec.c instanceof Blob) {
+        const head = new Uint8Array(await rec.c.slice(0, 512).arrayBuffer());
+        return { ok: true, content: rec.c, mime: detectMIME(head, abs), size: rec.c.size, path: abs };
+      }
+      return { ok: true, content: rec.c, mime: "text/plain", size: byteLen(rec.c), path: abs };
+    }
+    // 无文件记录 → 目录判定：本地根 / 恒存在（stat 同款），其余由子 key 前缀推导
+    if (abs === "/") {
+      const l = await this.list(abs, ctx);
+      return { ok: true, dir: true, path: l.path, items: l.items };
+    }
+    const prefix = abs.endsWith("/") ? abs : abs + "/";
+    const keys = await idbAllKeys(db, store);
+    if (keys.some((k) => k.startsWith(prefix))) {
+      const l = await this.list(abs, ctx);
+      return { ok: true, dir: true, path: l.path, items: l.items };
+    }
+    throw fsErr("get", `${abs}: no such file or directory`);
+  }
+
+  // put 整写（覆写，父目录自动创建）：string 文本 / Blob 二进制通吃。
+  // 返回 {ok, path, bytes}（与 cloud_fs.put 一致）。
+  async put(path, content, ctx = {}) {
+    if (content instanceof Blob) {
+      const r = await this.writeBlob(path, content, ctx);
+      return { ok: true, path: r.path, bytes: r.size };
+    }
+    const r = await this.run({ action: "write", path, content: String(content) }, ctx);
+    return { ok: true, path: r.attrs?.path || path, bytes: Number(r.attrs?.bytes ?? 0) };
+  }
+
+  // ls 一层目录列表（= list，cloud_fs 同名）。返回 {ok, path, items}。
+  async ls(path, ctx = {}) {
+    return this.list(path, ctx);
+  }
+
+  // rm 递归删除（对齐 httpfs RemoveAll / cloud_fs.rm）：文件或整棵目录树。
+  // 返回 {ok, removed}（与 cloud_fs.rm 一致）。
+  async rm(path, ctx = {}) {
+    const r = await this.remove(path, { ...ctx, recursive: true });
+    return { ok: true, removed: r.removed };
+  }
+
+  // exists 存在性检查（cloud_fs 风格：{ok, exists}，目录也算存在）。
+  // 原 boolean 语义迁移到 has()。
+  async exists(path, ctx = {}) {
+    const abs = this.resolve(path, ctx);
+    const db = await this._ensureDB();
+    const store = "files";
+    const rec = await idbGet(db, store, abs);
+    if (rec !== undefined) return { ok: true, exists: true };
+    if (abs === "/") return { ok: true, exists: true }; // 本地根恒存在
+    const prefix = abs.endsWith("/") ? abs : abs + "/";
+    const keys = await idbAllKeys(db, store);
+    return { ok: true, exists: keys.some((k) => k.startsWith(prefix)) };
+  }
+
   // ---- 前端层底层方法（供 page_fs 操作对象与内置 exec 指令使用，
   //      不走 NATS 协议信封：文本原文 / Blob 直取 / key 枚举）----
 
-  // resolve 公开路径展开：$VAR → 绝对路径 + 双根收容（与 run 同源）
+  // resolve 公开路径展开：剥离云语义容器前缀 → 本地绝对路径（与 run 同源）
   resolve(rawPath, ctx = {}) {
-    const env = this._env(ctx.sessionId || "", ctx.workdir);
+    const env = this._env(ctx.workdir);
     return this._resolve(String(rawPath || ""), env, "resolve");
   }
 
@@ -560,7 +611,7 @@ export class PageFS {
     const abs = this.resolve(path, ctx);
     const db = await this._ensureDB();
     try {
-      await idbPut(db, this._storeOf(abs), abs, { c: blob, m: Date.now() });
+      await idbPut(db, "files", abs, { c: blob, m: Date.now() });
     } catch (e) {
       throw fsErr("write", e?.message || String(e));
     }
@@ -577,18 +628,8 @@ export class PageFS {
   // （深层 key 折叠为目录项；目录无 size）。返回 {ok, path, items}。
   async list(path, ctx = {}) {
     const abs = this.resolve(path, ctx);
-    // 虚拟根 /：双 store 物理隔离，单 store 扫描无法覆盖——返回两个顶级根
-    if (abs === "/") {
-      return {
-        ok: true, path: "/",
-        items: [
-          { name: "home", path: "/home/", dir: true, size: undefined, mtime: undefined },
-          { name: "sessions", path: "/sessions/", dir: true, size: undefined, mtime: undefined },
-        ],
-      };
-    }
     const db = await this._ensureDB();
-    const store = this._storeOf(abs);
+    const store = "files";
     const prefix = abs.endsWith("/") ? abs : abs + "/";
     const keys = await idbAllKeys(db, store);
     const seen = new Map(); // seg -> {name, path, dir, size, mtime}
@@ -623,18 +664,16 @@ export class PageFS {
 
   // stat 单路径状态（vcmd 虚拟指令用）：文件返回 {path,dir:false,size,mtime}；
   // 目录由子 key 前缀推导 {path,dir:true,size:0,mtime:undefined}（IndexedDB 无目录记录）；
-  // $USER/$SESSION 根恒存在（无记录也是有效目录）；均不存在返回 null
+  // 本地根 / 恒存在（无记录也是有效目录）；均不存在返回 null
   // （与 vcore Stat 语义对齐：不存在报错由调用方处理）。
   async stat(path, ctx = {}) {
     const abs = this.resolve(path, ctx);
-    // 根恒存在：/（虚拟根）、/sessions、$USER、$SESSION——IndexedDB 无目录记录，
-    // 但根概念有效（空工作区 ls 得 empty directory）
-    if (abs === "/" || abs === "/sessions" ||
-        abs === `/home/${this._uid}` || (ctx.sessionId && abs === `/sessions/${ctx.sessionId}`)) {
+    // 本地根恒存在：/（IndexedDB 无目录记录，但根概念有效，空工作区 ls 得 empty directory）
+    if (abs === "/") {
       return { path: abs, dir: true, size: 0, mtime: undefined };
     }
     const db = await this._ensureDB();
-    const store = this._storeOf(abs);
+    const store = "files";
     const rec = await idbGet(db, store, abs);
     if (rec !== undefined) {
       return {
@@ -658,7 +697,7 @@ export class PageFS {
   async walk(path, ctx = {}) {
     const abs = this.resolve(path, ctx);
     const db = await this._ensureDB();
-    const store = this._storeOf(abs);
+    const store = "files";
     const prefix = abs.endsWith("/") ? abs : abs + "/";
     const keys = await idbAllKeys(db, store);
     const seen = new Map(); // full path -> {path, dir, size, mtime}
@@ -689,10 +728,12 @@ export class PageFS {
   // remove 删除（对齐 vcore rm 语义）：文件/无子项直接删；有子项（非空目录）
   // 需 ctx.recursive（-r）否则报错；递归时删除全部子 key。
   // IndexedDB 无目录记录：空目录与不存在不可区分 → 均报 no such file（模型固有限制）。
+  // 本地根 / 禁止删除。
   async remove(path, ctx = {}) {
     const abs = this.resolve(path, ctx);
+    if (abs === "/") throw fsErr("rm", "cannot remove root");
     const db = await this._ensureDB();
-    const store = this._storeOf(abs);
+    const store = "files";
     const rec = await idbGet(db, store, abs);
     if (rec !== undefined) {
       await idbDelete(db, store, abs);
@@ -709,11 +750,11 @@ export class PageFS {
     throw fsErr("rm", `${abs}: no such file or directory`);
   }
 
-  // exists 存在性检查。返回 boolean。
-  async exists(path, ctx = {}) {
+  // has 存在性检查（boolean；原 exists 语义，vcmd 等内部使用）。
+  async has(path, ctx = {}) {
     const abs = this.resolve(path, ctx);
     const db = await this._ensureDB();
-    const rec = await idbGet(db, this._storeOf(abs), abs);
+    const rec = await idbGet(db, "files", abs);
     return rec !== undefined;
   }
 }

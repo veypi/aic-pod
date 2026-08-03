@@ -17,7 +17,7 @@ import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
 import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
 import { hostInboxSubject, parseToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
-import { PageFS } from "./fs.js";
+import { PageFS } from "./page_fs.js";
 import { HistoryStore } from "./history.js";
 
 // ---- re-export for handler ----
@@ -136,9 +136,9 @@ export class AICClient {
     const kConnect = keys.kConnect;
     this.kTool = keys.kTool;
 
-    // fs 后端：与 page 端同一套 PageFS 代码（IndexedDB 双根 $USER/$SESSION），
+    // fs 后端：与 page 端同一套 PageFS 代码（IndexedDB 本地单根），
     // 扩展 origin 独立 → 与页面 IndexedDB 物理隔离，按 host_id 寻址（§4.5）。
-    this.fs = new PageFS({ uid });
+    this.fs = new PageFS();
 
     this.logf("starting aic-browser v%s [%s/%s] (host=%s)", version, deviceType, deviceName, hostID);
 
@@ -475,7 +475,7 @@ export class AICClient {
       return;
     }
     try {
-      const out = await this.fs.run(params, { sessionId: sid });
+      const out = await this.fs.run(params);
       this._respond(msg, buildResponse(req.msg_id, out));
     } catch (err) {
       this._respond(msg, { msg_id: req.msg_id, state: "error", error: err.message });

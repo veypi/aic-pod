@@ -166,11 +166,10 @@ export function globMatch(pattern, s) {
 // 命中即受限反馈并引导 shell 逃生舱（与 Go rgUnsupportedPatterns 一致）。
 const RG_UNSUPPORTED_RE = /(\(\?<?[=!])|(\\[1-9])/;
 
-// defaultTarget 指令缺省目标路径：显式 path > ctx.workdir > 会话根
-// （$SESSION，对齐 vcore workdir 缺省；兼容 page/扩展的 sessionId/sessionID 键）。
+// defaultTarget 指令缺省目标路径：显式 path > ctx.workdir > 本地根 /（v0.13.1 单根，
+// page/扩展本地空间无会话概念）。
 export function defaultTarget(ctx) {
-  const sid = ctx?.sessionId || ctx?.sessionID;
-  return ctx?.workdir || (sid ? `/sessions/${sid}` : "");
+  return ctx?.workdir || "/";
 }
 
 // ---- ls（对齐 vcore ls.go）----
@@ -557,7 +556,7 @@ function byteLenOf(s) {
 // ---- 入口 ----
 
 // runVCmd(action, argv, fs, ctx) → {content, attrs}；错误 throw Error("{cmd}: {原因}")。
-// ctx: {sessionId, workdir?}。fs: PageFS 兼容适配器（见文件头接口）。
+// ctx: {workdir?}。fs: PageFS 兼容适配器（见文件头接口）。
 export async function runVCmd(action, argv, fs, ctx = {}) {
   switch (action) {
     case "ls":

@@ -230,9 +230,7 @@ Behavior:
   // 操作扩展 PageFS（扩展 origin IndexedDB），handler 统一走 runVCmd。
   for (const d of VCMD_DECLS) {
     client.registerCommand(d.name, d.level, async (ctx, data) => {
-      const out = await runVCmd(d.name, data.argv || [], ctx.fs, {
-        sessionId: ctx.sessionID,
-      });
+      const out = await runVCmd(d.name, data.argv || [], ctx.fs);
       return { state: "completed", content: out.content, attrs: out.attrs };
     }, { desc: d.desc, help: d.help });
   }

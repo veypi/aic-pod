@@ -3,12 +3,11 @@
  * 数据源 = PageFS（扩展 IndexedDB，与 background fs 通道同一存储）。
  */
 
-import { loadSettings } from "../src/sdk/storage.js";
-import { PageFS } from "../src/sdk/fs.js";
+import { PageFS } from "../src/sdk/page_fs.js";
 import { showStatus, escapeHtml, fmtSize, cmpStr } from "./common.js";
 
 let fileFs = null;
-let currentPath = "/"; // 虚拟根：/home/{uid} 与 /sessions 双根
+let currentPath = "/"; // 本地根
 let currentFile = ""; // 当前查看/编辑的文件绝对路径
 let currentObjectUrl = null; // 图片预览 objectURL（切换时回收）
 let searchQuery = ""; // 当前搜索词（非空时树面板显示搜索结果）
@@ -24,14 +23,9 @@ const fileSaveBtn = document.getElementById("file-save");
 
 async function ensureFs() {
   if (fileFs) return fileFs;
-  const s = await loadSettings();
-  const parts = (s.key || "").split(".");
-  const uid = parts.length === 4 ? parts[3] : "admin";
-  fileFs = new PageFS({ uid });
+  fileFs = new PageFS(); // 本地单根（无用户/会话绑定）
   return fileFs;
 }
-
-const FILE_CTX = { sessionId: "" }; // 允许浏览任意 /sessions/* 与 /home/* 及任意绝对路径
 
 // ---- 目录树 ----
 
@@ -53,9 +47,9 @@ async function renderTree(rootAbs) {
 async function readDir(abs) {
   try {
     const fs = await ensureFs();
-    const st = await fs.stat(abs, FILE_CTX);
+    const st = await fs.stat(abs);
     if (st === null || !st.dir) return null;
-    const res = await fs.list(abs, FILE_CTX);
+    const res = await fs.list(abs);
     const items = (res.items || []).slice().sort((a, b) =>
       a.dir !== b.dir ? (a.dir ? -1 : 1) : cmpStr(a.name, b.name),
     );
@@ -166,7 +160,7 @@ function clearPreview() {
 async function openFile(abs) {
   try {
     const fs = await ensureFs();
-    const raw = await fs.readRaw(abs, FILE_CTX);
+    const raw = await fs.readRaw(abs);
     clearPreview();
     currentFile = abs;
     fileViewTitle.textContent = abs;
@@ -198,7 +192,7 @@ async function saveFile() {
   if (!currentFile || fileContentEl.disabled) return;
   try {
     const fs = await ensureFs();
-    await fs.writeText(currentFile, fileContentEl.value, FILE_CTX);
+    await fs.writeText(currentFile, fileContentEl.value);
     showStatus(fileStatus, "已保存 ✓", "success");
   } catch (e) {
     showStatus(fileStatus, "保存失败: " + (e?.message || e), "error");
@@ -225,7 +219,7 @@ async function runSearch(q) {
   const results = [];
   try {
     for (const root of SEARCH_ROOTS) {
-      const w = await fs.walk(root, FILE_CTX);
+      const w = await fs.walk(root);
       for (const it of w.items || []) {
         if (it.dir) continue;
         if (it.path.toLowerCase().includes(q)) {
@@ -290,10 +284,10 @@ document.getElementById("file-newfile").addEventListener("click", async () => {
   try {
     const fs = await ensureFs();
     const abs = name.startsWith("/") ? name : `${currentPath === "/" ? "" : currentPath}/${name}`;
-    await fs.writeText(abs, "", FILE_CTX);
+    await fs.writeText(abs, "");
     showStatus(fileStatus, "已创建 ✓", "success");
     await renderTree(currentPath);
-    const st = await fs.stat(abs, FILE_CTX);
+    const st = await fs.stat(abs);
     if (st) await openFile(st.path);
   } catch (e) {
     showStatus(fileStatus, "创建失败: " + (e?.message || e), "error");

@@ -514,13 +514,13 @@ async function actScreenshot(pa, ctx) {
   const quality = Math.min(parseInt(pa.flags["quality"] || "80", 10), 100);
   const tab = await getActiveTab();
   // §2.2：browser 不返回图片数据（仅 fs.read 能把图片带进消息）。
-  // 截图落本 host 的 fs（$SESSION/screenshot/，扩展 IndexedDB Blob 存储），
+  // 截图落本 host 的 fs（/screenshot/，扩展 IndexedDB Blob 存储，本地单根），
   // agent 需要读图时用 fs.read（1host=本 host_id）按 attrs.path 读取。
   if (!ctx?.fs) throw new Error("fs backend not available on this host");
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality });
   const blob = await (await fetch(dataUrl)).blob();
   const name = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
-  const out = await ctx.fs.writeBlob(`$SESSION/screenshot/${name}`, blob, { sessionId: ctx.sessionID });
+  const out = await ctx.fs.writeBlob(`/screenshot/${name}`, blob);
   return {
     content: `✓ Screenshot saved to ${out.path} (${out.size} bytes; read it with fs.read on this host)`,
     attrs: { action: "screenshot", path: out.path },
