@@ -108,19 +108,70 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 	return r, nil
 }
 
-// screenshot [--quality N] [--full]：字节经 VFS 写 screenshot/{ts}.jpg（cloud 为
-// $SESSION/screenshot/），content/path 告知落盘位置，AI 需要看图时再 fs.read。
-// §2.2：browser 不返回 image_data/image_path——只有 fs.read 能把图片带进消息。
+// screenshot [--quality N] [--full|-f|--fullpage] [-o <path>|--output <path>]：
+// 字节经 VFS 写 screenshot/{ts}.jpg（cloud 为 $SESSION/screenshot/，显式 -o 时
+// 写指定路径，云环境限 $SESSION 根内），content/path 告知落盘位置，AI 需要
+// 看图时再 fs.read。§2.2：browser 不返回 image_data/image_path——只有 fs.read
+// 能把图片带进消息。
+//
+// 参数兼容（agent-browser CLI 为唯一基准，历史/AI 常见变体做映射）：
+//   - --fullpage → --full（0.31.x 只认 --full/-f，--fullpage 会被当 selector）
+//   - -o/--output <path> → VFS 目标路径（CLI 无 -o 选项，vcore 自管落盘）
+//   - --help/-h → 直接返回 CLI help，不写临时文件
 func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string) (*vcore.Result, error) {
 	quality := "80"
 	var passthrough []string
+	outPath := "" // -o/--output 显式目标路径（VFS 落盘）
+	helpOnly := false
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--quality" && i+1 < len(args) {
-			quality = args[i+1]
-			i++
-			continue
+		switch args[i] {
+		case "--quality":
+			if i+1 < len(args) {
+				quality = args[i+1]
+				i++
+			}
+		case "--fullpage", "--full", "-f":
+			passthrough = append(passthrough, "--full")
+		case "-o", "--output":
+			if i+1 < len(args) {
+				outPath = args[i+1]
+				i++
+			}
+		case "--help", "-h":
+			helpOnly = true
+		default:
+			passthrough = append(passthrough, args[i])
 		}
-		passthrough = append(passthrough, args[i])
+	}
+
+	if helpOnly {
+		out, err := b.execCLI(ctx, nil, "screenshot", "--help")
+		if err != nil {
+			return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
+		}
+		r := &vcore.Result{Attrs: map[string]string{"action": "browser"}}
+		r.Content = out
+		return r, nil
+	}
+
+	// 目标路径：显式 -o 优先，缺省 screenshot/{ts}.jpg（相对 workdir，cloud=$SESSION）
+	target := fmt.Sprintf("screenshot/%s.jpg", time.Now().Format("2006-01-02T15-04-05"))
+	if outPath != "" {
+		target = outPath
+	}
+	abs, err := env.Resolve(target)
+	if err != nil {
+		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
+	}
+	if err := env.CheckPath("browser", abs); err != nil {
+		return nil, err
+	}
+	// 云环境（Vars 非空）：截图落盘仅限 $SESSION 根内（与 download 同语义，§5.6）
+	if sess := env.Vars["$SESSION"]; sess != "" {
+		if abs != sess && !strings.HasPrefix(abs, sess+"/") {
+			return nil, &proto.ExecError{Action: "browser",
+				Reason: fmt.Sprintf("screenshot: path outside $SESSION root: %s", abs)}
+		}
 	}
 
 	if err := os.MkdirAll(b.cfg.TempDir, 0o700); err != nil {
@@ -139,13 +190,6 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
 	}
 
-	abs, err := env.Resolve(fmt.Sprintf("screenshot/%s.jpg", time.Now().Format("2006-01-02T15-04-05")))
-	if err != nil {
-		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
-	}
-	if err := env.CheckPath("browser", abs); err != nil {
-		return nil, err
-	}
 	if err := env.VFS.MkdirAll(dirOfVFS(abs)); err != nil {
 		return nil, err
 	}
