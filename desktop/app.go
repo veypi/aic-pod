@@ -140,6 +140,7 @@ func (a *App) OpenPlatform(hostURL string) error {
 		}
 		hostURL = hostURL + sep + "local_code=" + url.QueryEscape(a.local.LocalCodeParam())
 	}
+	a.emitLog(fmt.Sprintf("opening platform: %s", hostURL))
 	if w, ok := app.Window.Get("platform"); ok {
 		w.SetURL(hostURL)
 		w.Show()
