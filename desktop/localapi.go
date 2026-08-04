@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -35,13 +36,31 @@ type LocalAPI struct {
 	lockEnd time.Time
 }
 
-// defaultOrigins 是允许跨域访问本地服务的平台源（可扩展）。
+// defaultOrigins 是默认允许跨域访问本地服务的平台源。
 func defaultOrigins() []string {
 	return []string{
 		"https://ivec.ai",
 		"http://localhost:4000",
 		"http://127.0.0.1:4000",
 	}
+}
+
+// allowedOrigins 实际白名单 = 默认列表 + 当前配置 host 的 origin（HOST 环境变量
+// 注入的测试地址等自动放行）。
+func (l *LocalAPI) allowedOrigins() []string {
+	list := defaultOrigins()
+	if cfg, err := l.app.GetConfig(); err == nil && cfg.Host != "" {
+		if u, err := url.Parse(cfg.Host); err == nil && u.Scheme != "" && u.Host != "" {
+			origin := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+			for _, o := range list {
+				if o == origin {
+					return list
+				}
+			}
+			list = append(list, origin)
+		}
+	}
+	return list
 }
 
 func newLocalAPI(app *App) (*LocalAPI, error) {
@@ -112,7 +131,7 @@ func (l *LocalAPI) withSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		allowed := ""
-		for _, o := range defaultOrigins() {
+		for _, o := range l.allowedOrigins() {
 			if o == origin {
 				allowed = o
 				break

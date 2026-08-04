@@ -3,12 +3,21 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 func main() {
 	svc := &App{}
+
+	// HOST 环境变量：启动时注入平台地址（持久化，local 页面 getConfig 一致）
+	if h := strings.TrimSpace(os.Getenv("HOST")); h != "" {
+		cfg, _ := svc.GetConfig()
+		cfg.Host = h
+		_ = svc.SaveConfig(cfg)
+	}
 
 	local, err := newLocalAPI(svc)
 	if err != nil {

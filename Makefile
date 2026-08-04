@@ -105,9 +105,14 @@ clean:
 
 # Wails v3 桌面壳：主窗口直接加载平台页面（无本地前端），local_code 通道由
 # localapi 提供，配置统一走平台 /settings/local。GOWORK=off 避开总工作区干扰。
+# Go 无链接缓存，每次构建 ~30s（cgo + WebKit framework 链接）——
+# 源码无变化时跳过；-s -w 瘦身（19MB→12.8MB）。
 desktop:
-	cd desktop && GOWORK=off go build -o ../$(BIN_DIR)/aic-desktop .
-	@echo "→ $(BIN_DIR)/aic-desktop"
+	@if [ ! -f $(BIN_DIR)/aic-desktop ] || [ -n "$$(find desktop -name '*.go' -newer $(BIN_DIR)/aic-desktop 2>/dev/null | head -1)" ]; then \
+		cd desktop && GOWORK=off go build -ldflags "-s -w" -o ../$(BIN_DIR)/aic-desktop .; \
+	else \
+		echo "→ $(BIN_DIR)/aic-desktop up to date"; \
+	fi
 
 # Docker 镜像构建（需先编译对应平台二进制）
 docker-build: linux-amd64
