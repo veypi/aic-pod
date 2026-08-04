@@ -1,0 +1,485 @@
+// LocalAPI 是本地管理 API（cli/desktop 共用，vigo 框架实现）：
+// 127.0.0.1 随机端口 HTTP 服务，平台页面经 local_code 通道调用。
+//
+// 协议（aic ui local_handler.js）：local_code = "{port}.{code}"（cli 与桌面同格式，
+// 插件为 "ext.{hex}"），所有 API 请求须带 x-aic-code 头。安全边界：
+//   - 仅监听 127.0.0.1 随机端口（不对外）
+//   - Origin 白名单：仅平台源响应 CORS 头（含 Private Network Access 预检）
+//   - code 由进程随机生成（32 hex），生命周期 = 进程；连续 5 次校验失败锁 1 分钟
+package host
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/veypi/vigo"
+	"github.com/veypi/vigo/logv"
+)
+
+// LocalHost 是 LocalAPI 的宿主：host 会话生命周期。
+// cli 用 Runner（sdk/host），desktop 用 App（Wails 壳）实现。
+// 日志不经此接口——统一走 vigo/logv（get_log 从挂入 logv 的 RingBuffer 读取）。
+type LocalHost interface {
+	StartHost(cfg Config) error
+	StopHost()
+	Running() bool
+}
+
+// LocalAPI 本地管理服务。
+// cfg 为启动时 flags 解析的有效配置（flag/env/文件/default），页面写操作
+// （bind/unbind/set_config）同步更新内存态并持久化文件。
+type LocalAPI struct {
+	mu      sync.Mutex
+	host    LocalHost
+	version string
+	log     *RingBuffer
+	cfg     Config
+	srv     *vigo.Application
+	port    int
+	code    string
+	failCnt int
+	lockEnd time.Time
+}
+
+// NewLocalAPI 创建 LocalAPI（不启动）。cfg 为启动解析的有效配置（get_config/
+// get_status/start 的基准）；log 为日志缓冲（get_log 数据源，由调用方创建并挂入
+// vigo/logv）；version 为客户端版本（get_status 返回）。
+func NewLocalAPI(host LocalHost, version string, log *RingBuffer, cfg Config) (*LocalAPI, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	return &LocalAPI{
+		host:    host,
+		version: version,
+		log:     log,
+		cfg:     cfg.Normalize(),
+		code:    hex.EncodeToString(buf),
+	}, nil
+}
+
+// Start 监听 127.0.0.1 随机端口并启动服务。
+func (l *LocalAPI) Start() error {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	l.port = ln.Addr().(*net.TCPAddr).Port
+
+	router := vigo.NewRouter()
+	router.Use(l.security)
+	// 全部端点 Any 注册：OPTIONS 预检由安全中间件短路，handler 内按方法分派
+	for _, p := range []string{
+		"/api/ping",
+		"/api/get_config",
+		"/api/set_config",
+		"/api/bind",
+		"/api/unbind",
+		"/api/get_status",
+		"/api/get_log",
+		"/api/start",
+		"/api/stop",
+	} {
+		router.Any(p, l.dispatch(p))
+	}
+
+	srv, err := vigo.NewServer(vigo.WithHost("127.0.0.1"), vigo.WithPort(0), vigo.WithListener(ln))
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	srv.SetRouter(router)
+	l.srv = srv
+	go func() { _ = srv.Run() }()
+	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d (local_code=%s)", l.port, l.LocalCodeParam())
+	return nil
+}
+
+// Stop 关闭服务（应用退出时调用）。
+func (l *LocalAPI) Stop() {
+	if l.srv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = l.srv.Shutdown(ctx)
+	}
+}
+
+// LocalCodeParam 返回页面 URL 参数值：{port}.{code}。
+func (l *LocalAPI) LocalCodeParam() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return fmt.Sprintf("%d.%s", l.port, l.code)
+}
+
+// Port 返回实际监听端口。
+func (l *LocalAPI) Port() int {
+	return l.port
+}
+
+// ---- 安全中间件 ----
+
+// defaultOrigins 是默认允许跨域访问本地服务的平台源。
+func defaultOrigins() []string {
+	return []string{
+		"https://ivec.ai",
+		"http://localhost:4000",
+		"http://127.0.0.1:4000",
+	}
+}
+
+// allowedOrigins 实际白名单 = 默认列表 + 当前有效配置 host 的 origin
+//（启动 flag/env 注入的测试地址等自动放行）。
+func (l *LocalAPI) allowedOrigins() []string {
+	list := defaultOrigins()
+	if cfg := l.loadEffective(); cfg.Host != "" {
+		if u, err := url.Parse(cfg.Host); err == nil && u.Scheme != "" && u.Host != "" {
+			origin := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+			for _, o := range list {
+				if o == origin {
+					return list
+				}
+			}
+			list = append(list, origin)
+		}
+	}
+	return list
+}
+
+// security 是安全中间件：CORS 白名单 + OPTIONS 预检短路 + code 校验。
+// 校验失败写响应后 x.Stop() 终止后续 handler。
+func (l *LocalAPI) security(x *vigo.X) error {
+	r := x.Request
+	w := x.ResponseWriter()
+	origin := r.Header.Get("Origin")
+	allowed := ""
+	for _, o := range l.allowedOrigins() {
+		if o == origin {
+			allowed = o
+			break
+		}
+	}
+	// 预检：仅白名单 origin 响应 CORS + PNA 头
+	if r.Method == http.MethodOptions {
+		if allowed == "" {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", allowed)
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			w.Header().Set("Access-Control-Allow-Headers", "x-aic-code, content-type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.WriteHeader(http.StatusNoContent)
+		}
+		x.Stop()
+		return nil
+	}
+	if allowed != "" {
+		w.Header().Set("Access-Control-Allow-Origin", allowed)
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	}
+	// /api/ping 无需凭证（探测用）
+	if r.URL.Path != "/api/ping" && !l.checkCode(r) {
+		http.Error(w, "invalid or expired local code", http.StatusUnauthorized)
+		x.Stop()
+		return nil
+	}
+	return nil
+}
+
+// checkCode 校验 x-aic-code：存在、未过期、未锁定；失败计数达 5 次锁 1 分钟。
+func (l *LocalAPI) checkCode(r *http.Request) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if now.Before(l.lockEnd) {
+		return false
+	}
+	if r.Header.Get("x-aic-code") != l.code {
+		l.failCnt++
+		if l.failCnt >= 5 {
+			l.lockEnd = now.Add(time.Minute)
+			l.failCnt = 0
+		}
+		return false
+	}
+	l.failCnt = 0
+	return true
+}
+
+// ---- handlers ----
+
+// dispatch 按端点分派（vigo Any 注册的入口）。
+func (l *LocalAPI) dispatch(path string) func(*vigo.X) error {
+	return func(x *vigo.X) error {
+		w := x.ResponseWriter()
+		switch path {
+		case "/api/ping":
+			if x.Request.Method != http.MethodGet {
+				return methodNotAllowed(w)
+			}
+			_, _ = w.Write([]byte("pong"))
+		case "/api/get_config":
+			if x.Request.Method != http.MethodGet {
+				return methodNotAllowed(w)
+			}
+			writeJSON(w, l.configView())
+		case "/api/set_config":
+			return l.handleSetConfig(w, x.Request)
+		case "/api/bind":
+			return l.handleBind(w, x.Request)
+		case "/api/unbind":
+			return l.handleUnbind(w, x.Request)
+		case "/api/get_status":
+			if x.Request.Method != http.MethodGet {
+				return methodNotAllowed(w)
+			}
+			writeJSON(w, l.statusView())
+		case "/api/get_log":
+			if x.Request.Method != http.MethodGet {
+				return methodNotAllowed(w)
+			}
+			// JSON 字符串（前端 bridge.get_log() 直接当文本用）
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(l.logContent())
+		case "/api/start":
+			return l.handleHostStart(w, x.Request)
+		case "/api/stop":
+			if x.Request.Method != http.MethodPost {
+				return methodNotAllowed(w)
+			}
+			l.host.StopHost()
+			writeJSON(w, map[string]bool{"ok": true})
+		}
+		return nil
+	}
+}
+
+func methodNotAllowed(w http.ResponseWriter) error {
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleBind 绑定设备：保存凭证并自动启动 host 会话。
+// host 由启动参数决定（有效配置），页面只传 credential。
+func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w)
+	}
+	var req struct {
+		Credential string `json:"credential"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return nil
+	}
+	if strings.TrimSpace(req.Credential) == "" {
+		http.Error(w, "credential is empty", http.StatusBadRequest)
+		return nil
+	}
+	// 持久化凭证（基于文件配置，flag/env 覆盖不落盘）
+	fileCfg, err := LoadConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	fileCfg.Key = strings.TrimSpace(req.Credential)
+	if err := SaveConfig(fileCfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	// 内存态同步：启动覆盖保留 + 新凭证
+	l.mu.Lock()
+	l.cfg.Key = strings.TrimSpace(req.Credential)
+	startCfg := l.cfg
+	l.mu.Unlock()
+	if err := l.host.StartHost(startCfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil
+	}
+	writeJSON(w, map[string]any{"ok": true, "host": fileCfg.Host})
+	return nil
+}
+
+// handleUnbind 解绑设备：停止 host 会话并清除配置中的凭证（host/运行参数保留）。
+func (l *LocalAPI) handleUnbind(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w)
+	}
+	l.host.StopHost()
+	fileCfg, err := LoadConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	fileCfg.Key = ""
+	if err := SaveConfig(fileCfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	l.mu.Lock()
+	l.cfg.Key = ""
+	l.mu.Unlock()
+	writeJSON(w, map[string]bool{"ok": true})
+	return nil
+}
+
+// handleHostStart 启动 host 会话（body 可携带临时覆盖，不持久化）。
+func (l *LocalAPI) handleHostStart(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w)
+	}
+	var req struct {
+		Host       string `json:"host"`
+		Credential string `json:"credential"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return nil
+	}
+	// 临时覆盖启动配置（不持久化）
+	l.mu.Lock()
+	cfg := l.cfg
+	l.mu.Unlock()
+	if strings.TrimSpace(req.Host) != "" {
+		cfg.Host = strings.TrimSpace(req.Host)
+	}
+	if strings.TrimSpace(req.Credential) != "" {
+		cfg.Key = strings.TrimSpace(req.Credential)
+	}
+	if err := l.host.StartHost(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+	return nil
+}
+
+// loadEffective 返回当前有效配置（启动解析值 + 页面写操作同步，不持久化）。
+func (l *LocalAPI) loadEffective() Config {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.cfg
+}
+
+// configView 是 get_config 的返回视图：不含凭证相关信息
+//（绑定设备 id 由 get_status.host_id 给出）。
+type configView struct {
+	Host        string `json:"host"`
+	WorkDir     string `json:"work_dir"`
+	ExecTimeout string `json:"exec_timeout"`
+}
+
+func (l *LocalAPI) configView() configView {
+	cfg := l.loadEffective()
+	return configView{Host: cfg.Host, WorkDir: cfg.WorkDir, ExecTimeout: cfg.ExecTimeout}
+}
+
+func boundHostID(credential string) string {
+	parts := strings.Split(strings.TrimSpace(credential), ".")
+	if len(parts) == 4 {
+		return parts[0]
+	}
+	return ""
+}
+
+// statusView 是 get_status 的返回：运行状态 + 基本信息（hostname/host_id/version）。
+type statusView struct {
+	Running  bool   `json:"running"`
+	HostID   string `json:"host_id"`
+	Hostname string `json:"hostname"`
+	Version  string `json:"version"`
+}
+
+func (l *LocalAPI) statusView() statusView {
+	hostname, _ := os.Hostname()
+	return statusView{
+		Running:  l.host.Running(),
+		HostID:   boundHostID(l.loadEffective().Key),
+		Hostname: hostname,
+		Version:  l.version,
+	}
+}
+
+// logContent 返回 get_log 内容（尾部最多缓冲行数）。
+func (l *LocalAPI) logContent() string {
+	if l.log == nil {
+		return ""
+	}
+	return l.log.Content()
+}
+
+// HostsURL 由平台地址推导设备管理页入口 {host}/hosts（host 可带产品壳路径前缀，
+// 如 http://127.0.0.1:4000/rses/aiv → http://127.0.0.1:4000/rses/aiv/hosts）。
+// local_code 由调用方拼接（?local_code={port}.{code}）。
+func HostsURL(hostURL string) string {
+	h := strings.TrimSpace(hostURL)
+	if h == "" {
+		h = DefaultHost
+	}
+	if !strings.Contains(h, "://") {
+		h = "https://" + h
+	}
+	u, err := url.Parse(h)
+	if err != nil || u.Host == "" {
+		return h
+	}
+	p := strings.TrimSuffix(u.Path, "/")
+	if !strings.HasSuffix(p, "/hosts") {
+		p += "/hosts"
+	}
+	u.Path = p
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w)
+	}
+	var req struct {
+		WorkDir     string `json:"work_dir"`
+		ExecTimeout string `json:"exec_timeout"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return nil
+	}
+	if s := strings.TrimSpace(req.ExecTimeout); s != "" {
+		if _, err := time.ParseDuration(s); err != nil {
+			http.Error(w, "invalid exec_timeout: "+err.Error(), http.StatusBadRequest)
+			return nil
+		}
+	}
+	// 持久化运行参数（基于文件配置）
+	fileCfg, err := LoadConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	fileCfg.WorkDir = strings.TrimSpace(req.WorkDir)
+	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
+	if err := SaveConfig(fileCfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	l.mu.Lock()
+	l.cfg.WorkDir = fileCfg.WorkDir
+	l.cfg.ExecTimeout = fileCfg.ExecTimeout
+	l.mu.Unlock()
+	writeJSON(w, map[string]bool{"ok": true})
+	return nil
+}

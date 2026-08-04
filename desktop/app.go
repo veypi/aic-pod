@@ -4,151 +4,44 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/veypi/aic-pod/sdk/host"
+	"github.com/veypi/vigo/logv"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-// App 是桌面壳的 service：host 会话生命周期 + 日志缓冲 + 平台窗口。
-// 配置读写不在这里——统一走 sdk/host 的 Config（UserConfigDir/aic/config.json，
-// 与 cli 共享同一份）。
+// App 是桌面壳：host 会话生命周期（委托 sdk/host.Runner）+ 平台窗口。
+// 配置读写与本地管理 API 全部在 sdk/host（cli/desktop 共享同一份 config.yaml
+// 与同一套 local_code 通道）；desktop 只加 Wails 壳 + 首页窗口连接。
 type App struct {
-	mu     sync.Mutex   // host 会话锁
-	logMu  sync.Mutex   // 日志缓冲锁（独立于 mu：StartHost 持 mu 时 OnLog 回调仍可写日志）
-	client *host.Client // nil = 未运行
-	logs   []string     // 环形日志缓冲（最近 maxLogs 条），供前端拉取
-	local  *LocalAPI    // 本地 HTTP 服务（local_code 通道）
+	runner *host.Runner  // host 生命周期（"desktop" 类型）
+	local  *host.LocalAPI // 本地 HTTP 服务（local_code 通道）
+	cfg    host.Config   // 启动时解析的有效配置（flag/env/文件，与 cli 同一套解析）
 }
 
-const maxLogs = 500
+// NewApp 创建桌面壳。cfg 为 flags 解析后的有效配置。
+func NewApp(cfg host.Config) *App {
+	return &App{runner: host.NewRunner("desktop", version), cfg: cfg}
+}
 
-// AppConfig 是 host.Config 的别名（Wails 绑定与测试沿用旧名）。
-type AppConfig = host.Config
-
-// ---- 配置（薄封装：有效配置 = 配置文件 + AIC_* 环境变量覆盖） ----
-
-// config 返回本次运行的有效配置（env 覆盖不持久化）。
+// config 返回启动时解析的有效配置（flags 解析结果，含 flag/env 覆盖）。
 func (a *App) config() host.Config {
-	cfg, err := host.Load()
-	if err != nil {
-		a.emitLog(fmt.Sprintf("load config: %v", err))
-	}
-	return cfg
+	return a.cfg
 }
 
-// GetConfig 返回有效配置（localapi 展示用）。
-func (a *App) GetConfig() (host.Config, error) {
-	return a.config(), nil
-}
-
-// SaveConfig 持久化配置到共享配置文件。
-func (a *App) SaveConfig(cfg host.Config) error {
-	return host.SaveConfig(cfg)
-}
-
-// ---- host 会话（进程内） ----
-
-// HostStatus 运行时状态。
-type HostStatus struct {
-	Running bool   `json:"running"`
-	Log     string `json:"log"`
-}
-
-func (a *App) emitLog(line string) {
-	// 同步输出到 stdout（桌面壳无 UI，排查依赖终端日志）
-	fmt.Println(line)
-	a.logMu.Lock()
-	a.logs = append(a.logs, line)
-	if len(a.logs) > maxLogs {
-		a.logs = a.logs[len(a.logs)-maxLogs:]
-	}
-	a.logMu.Unlock()
-	// 测试/非 GUI 环境 application.Get() 为 nil，事件推送可跳过
-	if app := application.Get(); app != nil {
-		app.Event.Emit("host-log", line)
-	}
-}
-
-// StartHost 在应用进程内启动 host 会话（与 cli `aic run` 同一入口）。
+// StartHost 启动 host 会话（LocalHost 接口；Runner 内部自保护已运行检查）。
 func (a *App) StartHost(cfg host.Config) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.client != nil {
-		return fmt.Errorf("host already running")
-	}
-	if strings.TrimSpace(cfg.Credential) == "" {
-		return fmt.Errorf("credential is empty — bind a device first")
-	}
-	opts, err := cfg.Options("desktop", version, func(format string, args ...any) {
-		a.emitLog(fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
-	})
-	if err != nil {
-		return err
-	}
-	c, err := host.Connect(opts)
-	if err != nil {
-		return err
-	}
-	a.client = c
-	return nil
+	return a.runner.StartHost(cfg)
 }
 
-// StopHost 停止 host 会话。
+// StopHost 停止 host 会话（LocalHost 接口）。
 func (a *App) StopHost() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.client != nil {
-		a.client.Close()
-		a.client = nil
-	}
+	a.runner.StopHost()
 }
 
-// HostStatusQuery 返回当前运行状态。
-func (a *App) HostStatusQuery() HostStatus {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return HostStatus{Running: a.client != nil}
-}
-
-// HostLog 返回日志缓冲（尾部最多 200 行）。
-func (a *App) HostLog() string {
-	a.logMu.Lock()
-	defer a.logMu.Unlock()
-	if len(a.logs) == 0 {
-		return ""
-	}
-	start := 0
-	if len(a.logs) > 200 {
-		start = len(a.logs) - 200
-	}
-	return strings.Join(a.logs[start:], "\n")
-}
-
-// hostsURL 由平台地址推导设备管理页入口 {host}/hosts（host 可带产品壳路径前缀，
-// 如 http://127.0.0.1:4000/rses/aiv → http://127.0.0.1:4000/rses/aiv/hosts）。
-// 首启直达设备页，local_code 由调用方拼接。
-func hostsURL(hostURL string) string {
-	h := strings.TrimSpace(hostURL)
-	if h == "" {
-		h = host.DefaultHost
-	}
-	if !strings.Contains(h, "://") {
-		h = "https://" + h
-	}
-	u, err := url.Parse(h)
-	if err != nil || u.Host == "" {
-		return h
-	}
-	p := strings.TrimSuffix(u.Path, "/")
-	if !strings.HasSuffix(p, "/hosts") {
-		p += "/hosts"
-	}
-	u.Path = p
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
+// Running 报告 host 会话是否在运行（LocalHost 接口）。
+func (a *App) Running() bool {
+	return a.runner.Running()
 }
 
 // OpenPlatform 打开/聚焦平台窗口。
@@ -157,8 +50,8 @@ func (a *App) OpenPlatform(hostURL string) error {
 	if strings.TrimSpace(hostURL) == "" {
 		hostURL = a.config().Host
 	}
-	if a.config().Credential == "" {
-		hostURL = hostsURL(hostURL)
+	if a.config().Key == "" {
+		hostURL = host.HostsURL(hostURL)
 	}
 	app := application.Get()
 	// 拼 local_code 参数：平台页面据此建立本地通道（aic env.js 存 localStorage）
@@ -169,7 +62,7 @@ func (a *App) OpenPlatform(hostURL string) error {
 		}
 		hostURL = hostURL + sep + "local_code=" + url.QueryEscape(a.local.LocalCodeParam())
 	}
-	a.emitLog(fmt.Sprintf("opening platform: %s", hostURL))
+	logv.Info().Msgf("opening platform: %s", hostURL)
 	if w, ok := app.Window.Get("platform"); ok {
 		w.SetURL(hostURL)
 		w.Show()

@@ -1,21 +1,19 @@
 package main
 
-import "testing"
+import (
+	"testing"
 
-func TestHostsURL(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"", "https://ivec.ai/hosts"},
-		{"https://ivec.ai", "https://ivec.ai/hosts"},
-		{"http://localhost:4000", "http://localhost:4000/hosts"},
-		{"http://localhost:4000/", "http://localhost:4000/hosts"},
-		{"http://127.0.0.1:4000/rses/aiv", "http://127.0.0.1:4000/rses/aiv/hosts"},
-		{"https://ivec.ai/hosts", "https://ivec.ai/hosts"},
-		{"ivec.ai", "https://ivec.ai/hosts"},
-		{"http://x:1/?q=1", "http://x:1/hosts"},
+	"github.com/veypi/aic-pod/sdk/host"
+)
+
+// 桌面壳的 host 生命周期委托 sdk/host.Runner；HostsURL 已迁移 sdk/host
+//（测试见 sdk/host/localapi_test.go TestHostsURL）。
+func TestNewApp(t *testing.T) {
+	app := NewApp(host.Config{})
+	if app == nil || app.runner == nil {
+		t.Fatal("NewApp should initialize runner")
 	}
-	for _, c := range cases {
-		if got := hostsURL(c.in); got != c.want {
-			t.Errorf("hostsURL(%q) = %q, want %q", c.in, got, c.want)
-		}
+	if app.Running() {
+		t.Fatal("new app should not be running")
 	}
 }
