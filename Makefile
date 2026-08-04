@@ -40,10 +40,10 @@
 #
 # ==============================================================================
 
-APP_NAME   := aic-pod
+APP_NAME   := aic
 BIN_DIR    := dist
 MAIN_DIR   := ./cli
-DOCKER_IMAGE ?= veypi/$(APP_NAME)
+DOCKER_IMAGE ?= veypi/aic-pod
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
 GOHOSTARCH := $(shell go env GOHOSTARCH)

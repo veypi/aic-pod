@@ -25,8 +25,9 @@ import (
 
 // Options 客户端配置。
 type Options struct {
+	Host        string        // 平台地址（如 https://ivec.ai），NATSURL 为空时据此推断
 	Credential  string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
-	NATSURL     string        // "nats://host:port" 或 "ws://host/path"（必填）
+	NATSURL     string        // "nats://host:port" 或 "ws://host/path"（空 = 按 Host 推断）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname
 	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
@@ -37,13 +38,13 @@ type Options struct {
 
 // Client 是 host agent 客户端。
 type Client struct {
-	opts    Options
-	nc      *nats.Conn
-	kTool   string
-	hostID  string
-	uid     string
-	credVer uint64
-	replay  *replayCache
+	opts      Options
+	nc        *nats.Conn
+	kTool     string
+	hostID    string
+	uid       string
+	credVer   uint64
+	replay    *replayCache
 	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测）
 	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
 	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
@@ -232,8 +233,8 @@ func (c *Client) buildCaps() *proto.Caps {
 		DeviceType:    c.opts.DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
-		FS:            proto.FSCaps{},                     // actions=null = 全部 3 个
-		Exec:          proto.ExecCaps{Commands: c.cmds},   // 统一命令声明表
+		FS:            proto.FSCaps{},                   // actions=null = 全部 3 个
+		Exec:          proto.ExecCaps{Commands: c.cmds}, // 统一命令声明表
 	}
 }
 

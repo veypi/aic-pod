@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
-	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -16,11 +14,6 @@ var version = "v0.5.1"
 func main() {
 	svc := &App{}
 
-	// HOST 环境变量：仅本次运行覆盖平台地址（不持久化，配置只由 /settings/local 管理）
-	if h := strings.TrimSpace(os.Getenv("HOST")); h != "" {
-		svc.hostOVR = h
-	}
-
 	local, err := newLocalAPI(svc)
 	if err != nil {
 		log.Fatal(err)
@@ -30,13 +23,10 @@ func main() {
 	}
 	svc.local = local
 
-	// 已配置的设备：后台自动连接 host（失败记录日志，不阻塞窗口）
-	if cfg, err := svc.GetConfig(); err == nil && cfg.Credential != "" {
-		hostURL := cfg.Host
-		if svc.hostOVR != "" {
-			hostURL = svc.hostOVR
-		}
-		if err := svc.StartHost(hostURL, cfg.Credential); err != nil {
+	// 已配置的设备：后台自动连接 host（失败记录日志，不阻塞窗口）。
+	// 有效配置 = 配置文件 + AIC_* 环境变量覆盖（与 cli 同一解析链）。
+	if cfg := svc.config(); cfg.Credential != "" {
+		if err := svc.StartHost(cfg); err != nil {
 			svc.emitLog(fmt.Sprintf("auto start host failed: %v", err))
 		}
 	}

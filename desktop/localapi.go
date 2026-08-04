@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/veypi/aic-pod/sdk/host"
 )
 
 // LocalAPI 是桌面壳的本地 HTTP 服务（平台页面经 local_code 通道调用的入口）：
@@ -45,11 +47,11 @@ func defaultOrigins() []string {
 	}
 }
 
-// allowedOrigins 实际白名单 = 默认列表 + 当前配置 host 的 origin（HOST 环境变量
+// allowedOrigins 实际白名单 = 默认列表 + 当前有效配置 host 的 origin（AIC_HOST
 // 注入的测试地址等自动放行）。
 func (l *LocalAPI) allowedOrigins() []string {
 	list := defaultOrigins()
-	if cfg, err := l.app.GetConfig(); err == nil && cfg.Host != "" {
+	if cfg := l.app.config(); cfg.Host != "" {
 		if u, err := url.Parse(cfg.Host); err == nil && u.Scheme != "" && u.Host != "" {
 			origin := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 			for _, o := range list {
@@ -232,21 +234,28 @@ func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "credential is empty", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Host) == "" {
-		req.Host = defaultConfig().Host
-	}
-	if err := l.app.SaveConfig(AppConfig{Host: req.Host, Credential: req.Credential}); err != nil {
+	// 基于文件配置更新（不叠加 env 覆盖，避免把临时值持久化）
+	cfg, err := host.LoadConfig()
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := l.app.StartHost(req.Host, req.Credential); err != nil {
+	if strings.TrimSpace(req.Host) != "" {
+		cfg.Host = strings.TrimSpace(req.Host)
+	}
+	cfg.Credential = strings.TrimSpace(req.Credential)
+	if err := l.app.SaveConfig(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := l.app.StartHost(l.app.config()); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "host": req.Host})
+	writeJSON(w, map[string]any{"ok": true, "host": cfg.Host})
 }
 
-// handleHostStart 启动 host 会话（可携带覆盖配置）。
+// handleHostStart 启动 host 会话（body 可携带临时覆盖，不持久化）。
 func (l *LocalAPI) handleHostStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -260,12 +269,14 @@ func (l *LocalAPI) handleHostStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	hostURL, credential := req.Host, req.Credential
-	if credential == "" {
-		cfg, _ := l.app.GetConfig()
-		hostURL, credential = cfg.Host, cfg.Credential
+	cfg := l.app.config()
+	if strings.TrimSpace(req.Host) != "" {
+		cfg.Host = strings.TrimSpace(req.Host)
 	}
-	if err := l.app.StartHost(hostURL, credential); err != nil {
+	if strings.TrimSpace(req.Credential) != "" {
+		cfg.Credential = strings.TrimSpace(req.Credential)
+	}
+	if err := l.app.StartHost(cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -276,10 +287,10 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// toConfig 将任意 JSON 值安全转换为 AppConfig（字段白名单由 json tag 保证）。
-func toConfig(v any) AppConfig {
+// toConfig 将任意 JSON 值安全转换为 host.Config（字段白名单由 json tag 保证）。
+func toConfig(v any) host.Config {
 	b, _ := json.Marshal(v)
-	var cfg AppConfig
+	var cfg host.Config
 	_ = json.Unmarshal(b, &cfg)
-	return cfg
+	return cfg.Normalize()
 }
