@@ -62,7 +62,7 @@ RUN export http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY:-${HTTP_PROXY}} \
 # 浏览器后端：系统 chromium（两架构统一；无需 agent-browser install）
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 # aic 二进制（Makefile 先编译到 dist/）
-COPY dist/aic-linux-${TARGETARCH} /usr/local/bin/aic
+COPY dist/aic-cli-linux-${TARGETARCH} /usr/local/bin/aic
 RUN mkdir -p /workspace
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   SHELL=/bin/bash \

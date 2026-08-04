@@ -177,12 +177,12 @@ func TestLocalCodeParamFormat(t *testing.T) {
 	}
 }
 
-// set-config 白名单：仅 work_dir/exec_timeout 可写；
-// host/credential/device_name 即使在 body 中也不得被持久化。
+// set-config 白名单：host / work_dir / exec_timeout 可写（host 变更会重启会话）；
+// key 不走 set_config（只走 bind），body 中的 credential 不得被持久化。
 func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // 隔离配置文件（darwin UserConfigDir 用 HOME）
 	api := newTestLocalAPI(t)
-	body := `{"work_dir":"/w","device_name":"box","exec_timeout":"5m","host":"http://evil","credential":"leak"}`
+	body := `{"work_dir":"/w","credential":"leak","exec_timeout":"5m","host":"http://x:1"}`
 	status, resp := api.req(t, "POST", "/api/set_config", api.code, body)
 	if status != http.StatusOK {
 		t.Fatalf("set-config = %d %q", status, resp)
@@ -191,11 +191,11 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkDir != "/w" || cfg.ExecTimeout != "5m" {
+	if cfg.WorkDir != "/w" || cfg.ExecTimeout != "5m" || cfg.Host != "http://x:1" {
 		t.Fatalf("whitelist fields not saved: %+v", cfg)
 	}
-	if cfg.Host != DefaultHost || cfg.Key != "" {
-		t.Fatalf("non-whitelist fields persisted: %+v", cfg)
+	if cfg.Key != "" {
+		t.Fatalf("credential persisted via set_config: %+v", cfg)
 	}
 	// 非法 exec_timeout → 400
 	status, _ = api.req(t, "POST", "/api/set_config", api.code, `{"exec_timeout":"bogus"}`)

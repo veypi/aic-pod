@@ -17,3 +17,10 @@ func TestNewApp(t *testing.T) {
 		t.Fatal("new app should not be running")
 	}
 }
+
+// 托盘图标必须被 go:embed 打入二进制。
+func TestTrayIconEmbedded(t *testing.T) {
+	if len(trayIcon) == 0 {
+		t.Fatal("tray icon not embedded")
+	}
+}

@@ -121,6 +121,13 @@ func (l *LocalAPI) LocalCodeParam() string {
 	return fmt.Sprintf("%d.%s", l.port, l.code)
 }
 
+// Code 返回纯 code（x-aic-code 头用，不含端口前缀）。
+func (l *LocalAPI) Code() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.code
+}
+
 // Port 返回实际监听端口。
 func (l *LocalAPI) Port() int {
 	return l.port
@@ -129,11 +136,13 @@ func (l *LocalAPI) Port() int {
 // ---- 安全中间件 ----
 
 // defaultOrigins 是默认允许跨域访问本地服务的平台源。
+// "null" 为本地设置窗口（wails SetHTML，origin 为 null）——受 code 校验保护。
 func defaultOrigins() []string {
 	return []string{
 		"https://ivec.ai",
 		"http://localhost:4000",
 		"http://127.0.0.1:4000",
+		"null",
 	}
 }
 
@@ -375,17 +384,18 @@ func (l *LocalAPI) loadEffective() Config {
 	return l.cfg
 }
 
-// configView 是 get_config 的返回视图：不含凭证相关信息
-//（绑定设备 id 由 get_status.host_id 给出）。
+// configView 是 get_config 的返回视图（含 key——设置窗口需显示当前凭证；
+// 本地 API 受 code 校验保护）。
 type configView struct {
 	Host        string `json:"host"`
+	Key         string `json:"key"`
 	WorkDir     string `json:"work_dir"`
 	ExecTimeout string `json:"exec_timeout"`
 }
 
 func (l *LocalAPI) configView() configView {
 	cfg := l.loadEffective()
-	return configView{Host: cfg.Host, WorkDir: cfg.WorkDir, ExecTimeout: cfg.ExecTimeout}
+	return configView{Host: cfg.Host, Key: cfg.Key, WorkDir: cfg.WorkDir, ExecTimeout: cfg.ExecTimeout}
 }
 
 func boundHostID(credential string) string {
@@ -451,6 +461,7 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error
 		return methodNotAllowed(w)
 	}
 	var req struct {
+		Host        string `json:"host"`
 		WorkDir     string `json:"work_dir"`
 		ExecTimeout string `json:"exec_timeout"`
 	}
@@ -470,6 +481,9 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return nil
 	}
+	if strings.TrimSpace(req.Host) != "" {
+		fileCfg.Host = strings.TrimSpace(req.Host)
+	}
 	fileCfg.WorkDir = strings.TrimSpace(req.WorkDir)
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
 	if err := SaveConfig(fileCfg); err != nil {
@@ -477,9 +491,19 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error
 		return nil
 	}
 	l.mu.Lock()
+	hostChanged := l.cfg.Host != fileCfg.Host
+	l.cfg.Host = fileCfg.Host
 	l.cfg.WorkDir = fileCfg.WorkDir
 	l.cfg.ExecTimeout = fileCfg.ExecTimeout
+	cfg := l.cfg
 	l.mu.Unlock()
+	// host 变更：重启 host 会话（新地址生效）
+	if hostChanged && l.host.Running() {
+		l.host.StopHost()
+		if err := l.host.StartHost(cfg); err != nil {
+			logv.Warn().Msgf("restart host with new host failed: %v", err)
+		}
+	}
 	writeJSON(w, map[string]bool{"ok": true})
 	return nil
 }

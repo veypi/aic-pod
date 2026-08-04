@@ -166,11 +166,20 @@ make build-browser   # → dist/aic-browser.zip
 
 ## 构建
 
+产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
+
 ```bash
-make                  # 编译当前平台 desktop 二进制
-make all              # 跨平台编译 (linux/darwin/windows)
-make build-browser    # 打包 Chrome Extension → dist/aic-browser.zip
-make docker-build     # 编译 + Docker 镜像
-make docker-push      # 推送镜像
-make clean            # 清理
+make                            # cli 当前平台 → dist/aic-cli-<os>-<arch>
+make cli-all                    # cli 全平台（linux/darwin/windows × amd64/arm64）
+make desktop-darwin-arm64       # desktop macOS → dist/AIC Desktop.app + aic-darwin-arm64.dmg
+make desktop-darwin-amd64       # desktop macOS（Intel）
+make desktop-windows-amd64      # desktop Windows exe（需先: brew install mingw-w64）
+make desktop-all                # desktop 全平台（linux desktop 需容器/CI）
+make build-browser              # 打包 Chrome Extension → dist/aic-browser.zip
+make docker-build               # 编译 cli + Docker 镜像
+make docker-push                # 推送镜像
+make release                    # cli-all + desktop-all + build-browser + GitHub Release
+make clean                      # 清理
 ```
+
+依赖：`wails3`（desktop 资源/打包：`go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.3`）、`go-winres`（windows 资源）、`mingw-w64`（windows desktop 交叉）。

@@ -4,17 +4,17 @@
         <key>CFBundlePackageType</key>
             <string>APPL</string>
         <key>CFBundleName</key>
-            <string>My Product</string>
+            <string>AIC Desktop</string>
         <key>CFBundleExecutable</key>
-            <string></string>
+            <string>aic-desktop</string>
         <key>CFBundleIdentifier</key>
-            <string>com.wails.</string>
+            <string>ai.ivec.desktop</string>
         <key>CFBundleVersion</key>
-            <string>0.1.0</string>
+            <string>{{VERSION}}</string>
         <key>CFBundleGetInfoString</key>
-            <string>This is a comment</string>
+            <string>AIC Desktop — 平台桌面客户端</string>
         <key>CFBundleShortVersionString</key>
-            <string>0.1.0</string>
+            <string>{{VERSION}}</string>
         <key>CFBundleIconFile</key>
             <string>icons</string>
         <key>CFBundleIconName</key>
@@ -24,7 +24,7 @@
         <key>NSHighResolutionCapable</key>
             <string>true</string>
         <key>NSHumanReadableCopyright</key>
-            <string>© now, My Company</string>
+            <string>Copyright (C) 2025-2026 ivec.ai</string>
         <key>NSAppTransportSecurity</key>
         <dict>
             <key>NSAllowsLocalNetworking</key>

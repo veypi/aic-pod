@@ -1,0 +1,133 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  desktop:
+    name: desktop (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15          # arm64
+            target: desktop-darwin-arm64
+          - os: macos-14          # x64
+            target: desktop-darwin-amd64
+          - os: windows-latest
+            target: desktop-windows-amd64
+          - os: ubuntu-latest
+            target: desktop-linux-amd64
+          - os: ubuntu-24.04-arm  # arm64（GTK 原生依赖）
+            target: desktop-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Install dependencies (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libx11-dev libxkbcommon-dev \
+            libgbm-dev libdrm-dev libsoup-3.0-dev
+      - name: Install wails3 / go-winres
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.3
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            go install github.com/tc-hib/go-winres@latest
+            choco install make -y --no-progress
+          fi
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: make ${{ matrix.target }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.target }}
+          path: |
+            dist/*.dmg
+            dist/AIC Desktop.app
+            dist/*.exe
+            dist/*.AppImage
+            dist/aic-linux-*
+          if-no-files-found: error
+          retention-days: 7
+
+  cli:
+    name: cli (${{ matrix.targets }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: cli-linux-amd64 cli-linux-arm64
+          - os: macos-15
+            targets: cli-darwin-arm64 cli-darwin-amd64
+          - os: windows-latest
+            targets: cli-windows-amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Install go-winres (windows)
+        if: runner.os == 'Windows'
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: make ${{ matrix.targets }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.targets }}
+          path: dist/aic-cli-*
+          if-no-files-found: error
+          retention-days: 7
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Chrome Extension
+        run: make build-browser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser
+          path: dist/aic-browser.zip
+          retention-days: 7
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [desktop, cli, browser]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            artifacts/*
