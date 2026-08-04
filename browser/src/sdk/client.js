@@ -59,6 +59,30 @@ function parseCredential(cred) {
   return { hostID, credVer, secret: parts[2], uid: parts[3] };
 }
 
+// resolveNatsURL 由平台地址推导 NATS WebSocket 端点（与 Go sdk/host/natsurl.go 同一语义）：
+// http→ws、https→wss、ws/wss 保留；无 scheme 补 https；host 可带路径前缀。
+export function resolveNatsURL(host) {
+  let h = (host || "").trim() || "https://ivec.ai";
+  if (!h.includes("://")) h = "https://" + h;
+  const u = new URL(h);
+  let scheme = u.protocol.slice(0, -1); // 去冒号
+  if (scheme === "https") scheme = "wss";
+  else if (scheme === "http") scheme = "ws";
+  const prefix = u.pathname.replace(/\/+$/, "");
+  return `${scheme}://${u.host}${prefix}/aic/api/nc`;
+}
+
+// platformURL 由平台地址推导平台页面地址（http/https 页面入口，保留路径前缀）。
+export function platformURL(host) {
+  let h = (host || "").trim() || "https://ivec.ai";
+  if (!h.includes("://")) h = "https://" + h;
+  const u = new URL(h);
+  let scheme = u.protocol;
+  if (scheme === "ws:") scheme = "http:";
+  else if (scheme === "wss:") scheme = "https:";
+  return `${scheme}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+}
+
 export class AICClient {
   constructor(options) {
     this.opts = options;
@@ -142,11 +166,8 @@ export class AICClient {
 
     this.logf("starting aic-browser v%s [%s/%s] (host=%s)", version, deviceType, deviceName, hostID);
 
-    // Build NATS connection options
-    let natsURL = (this.opts.url || "wss://ivec.ai/aic/api/nc").trim();
-    if (!/^wss?:\/\//i.test(natsURL)) {
-      natsURL = "wss://" + natsURL;
-    }
+    // Build NATS connection options（端点完全由 host 推断）
+    const natsURL = resolveNatsURL(this.opts.host);
     this.logf("NATS URL: %s", natsURL);
 
     // Validate URL parseable

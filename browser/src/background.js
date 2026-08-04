@@ -8,10 +8,74 @@
  * 5. Handle connect/disconnect based on settings
  */
 
-import { AICClient } from "./sdk/client.js";
-import { loadSettings } from "./sdk/storage.js";
+import { AICClient, platformURL } from "./sdk/client.js";
+import { loadSettings, saveSettings } from "./sdk/storage.js";
 import { browserHandler } from "./tools/browser.js";
 import { runVCmd } from "./sdk/vcmd.js";
+
+// ---- 本地通道（平台 /settings/local 页面经 content script 桥接调用）----
+// localCode 会话级随机码，生命周期 = 浏览器进程（等同桌面端 local_code 语义）。
+// 格式 "ext.{hex}"：与桌面端 "{port}.{code}" 同串解析，port 段非数字即插件通道。
+const localCode = "ext." + crypto.randomUUID().replaceAll("-", "");
+
+// handleLocalCall 是 /settings/local 页面的本地 API 子集（少于桌面端：
+// 无 work_dir/exec_timeout/get_log）。所有调用须经 code 校验。
+async function handleLocalCall(msg) {
+  if (msg.code !== localCode) {
+    return { error: "invalid local code" };
+  }
+  const settings = await loadSettings();
+  switch (msg.method) {
+    case "get_config":
+      return { data: { host: platformURL(settings.host) } };
+    case "set_config":
+      // 白名单为空：运行参数与设备名均不由插件管理（改名走平台 host.name）
+      return { data: { ok: true } };
+    case "bind": {
+      const credential = String(msg.args?.credential || "").trim();
+      if (!credential) return { error: "credential is empty" };
+      settings.key = credential;
+      await saveSettings(settings);
+      try {
+        await connect(settings);
+      } catch (err) {
+        return { error: err?.message || String(err) };
+      }
+      return { data: { ok: true, host: platformURL(settings.host) } };
+    }
+    case "unbind":
+      await disconnect();
+      settings.key = "";
+      await saveSettings(settings);
+      return { data: { ok: true } };
+    case "get_status": {
+      // host_id 从存储凭证解析（与连接状态无关，断连/未启动也能识别绑定设备）
+      const parts = (settings.key || "").split(".");
+      return {
+        data: {
+          running: client !== null && client.connected === true,
+          host_id: parts.length === 4 ? parts[0] : "",
+          hostname: "Chrome",
+          version: "v" + chrome.runtime.getManifest().version,
+        },
+      };
+    }
+    case "get_log":
+      return { data: "" };
+    case "start":
+      try {
+        await connect(await loadSettings());
+      } catch (err) {
+        return { error: err?.message || String(err) };
+      }
+      return { data: { ok: true } };
+    case "stop":
+      await disconnect();
+      return { data: { ok: true } };
+    default:
+      return { error: "unknown local method: " + msg.method };
+  }
+}
 
 let client = null;
 let connectPromise = null; // 进行中的连接 promise（重复调用合并 await，不误报）
@@ -129,9 +193,8 @@ function connect(settings) {
 
     const c = new AICClient({
       key: settings.key,
-      url: settings.url || "wss://ivec.ai/aic/api/nc",
-      deviceName: settings.deviceName || "Chrome",
-      deviceType: "browser",
+      host: settings.host || "https://ivec.ai",
+            deviceType: "browser",
       // 版本以 manifest.json 为单一来源，上报格式 va.b.c（服务端主版本门禁）
       version: "v" + chrome.runtime.getManifest().version,
       onLog: (fmt, ...args) => console.log(`[aic-browser] ${fmt}`, ...args),
@@ -316,6 +379,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "history:clear":
         if (client) await client.historyClear();
         sendResponse({ success: true });
+        break;
+
+      // popup 获取 /settings/local 链接（携带本次会话 localCode）
+      case "local-link": {
+        const settings = await loadSettings();
+        sendResponse({ url: `${platformURL(settings.host)}/hosts?local_code=${localCode}` });
+        break;
+      }
+
+      // 平台 /settings/local 页面经 content script 桥接的本地调用
+      case "__aic_local":
+        sendResponse(await handleLocalCall(msg));
         break;
 
       default:

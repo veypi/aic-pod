@@ -15,50 +15,50 @@ test("hostSeg: 物理 host 加前缀，保留字/已带前缀原样（幂等）"
   assert.equal(hostSeg(HOST_PAGE), "page");
 });
 
-// ---- ToolReqSubject（§6.1 固定向量） ----
+// ---- ToolReqSubject（§6.1 v3 连接级固定向量，与 Go subject_test.go 同源） ----
 
 test("toolReqSubject: 物理 host 自动加前缀", () => {
-  assert.equal(toolReqSubject("u_vec", "s_abc", "vec01", TOOL_EXEC), "u.u_vec.s.s_abc.h.host_vec01.exec.req");
-  assert.equal(toolReqSubject("u_vec", "s_abc", "vec01", TOOL_FS), "u.u_vec.s.s_abc.h.host_vec01.fs.req");
+  assert.equal(toolReqSubject("u_vec", "vec01", TOOL_EXEC), "u.u_vec.h.host_vec01.exec.req");
+  assert.equal(toolReqSubject("u_vec", "vec01", TOOL_FS), "u.u_vec.h.host_vec01.fs.req");
 });
 
 test("toolReqSubject: page/cloud 保留字原样", () => {
-  assert.equal(toolReqSubject("u_vec", "s_abc", HOST_PAGE, TOOL_EXEC), "u.u_vec.s.s_abc.h.page.exec.req");
-  assert.equal(toolReqSubject("u_vec", "s_abc", HOST_CLOUD, TOOL_EXEC), "u.u_vec.s.s_abc.h.cloud.exec.req");
+  assert.equal(toolReqSubject("u_vec", HOST_PAGE, TOOL_EXEC), "u.u_vec.h.page.exec.req");
+  assert.equal(toolReqSubject("u_vec", HOST_CLOUD, TOOL_EXEC), "u.u_vec.h.cloud.exec.req");
 });
 
 test("toolReqSubject: 非法 segment/tool 报错", () => {
-  assert.throws(() => toolReqSubject("u..x", "s1", "h1", TOOL_EXEC));
-  assert.throws(() => toolReqSubject("u1", "s1", "h1", "browser"), /invalid tool/);
+  assert.throws(() => toolReqSubject("u..x", "h1", TOOL_EXEC));
+  assert.throws(() => toolReqSubject("u1", "h1", "browser"), /invalid tool/);
 });
 
-// ---- HostInboxSubject ----
+// ---- HostInboxSubject（连接级单订阅） ----
 
-test("hostInboxSubject: 会话级单订阅", () => {
-  assert.equal(hostInboxSubject("u_vec", "vec01"), "u.u_vec.s.*.h.host_vec01.>");
+test("hostInboxSubject: 连接级单订阅", () => {
+  assert.equal(hostInboxSubject("u_vec", "vec01"), "u.u_vec.h.host_vec01.>");
 });
 
-// ---- ParseToolReqSubject ----
+// ---- ParseToolReqSubject（连接级 6 段） ----
 
 test("parseToolReqSubject: 解析还原裸 host_id", () => {
   assert.deepEqual(
-    parseToolReqSubject("u.u_vec.s.s_abc.h.host_vec01.exec.req"),
-    { uid: "u_vec", sid: "s_abc", host: "vec01", tool: "exec" }
+    parseToolReqSubject("u.u_vec.h.host_vec01.exec.req"),
+    { uid: "u_vec", host: "vec01", tool: "exec" }
   );
 });
 
 test("parseToolReqSubject: page 保留字原样", () => {
   assert.deepEqual(
-    parseToolReqSubject("u.u_vec.s.s_abc.h.page.fs.req"),
-    { uid: "u_vec", sid: "s_abc", host: "page", tool: "fs" }
+    parseToolReqSubject("u.u_vec.h.page.fs.req"),
+    { uid: "u_vec", host: "page", tool: "fs" }
   );
 });
 
 test("parseToolReqSubject: 非法 subject 返回 null", () => {
   assert.equal(parseToolReqSubject(""), null);
-  assert.equal(parseToolReqSubject("u.u1.s.s1.h.h1.exec"), null); // 缺 req 段
-  assert.equal(parseToolReqSubject("u.u1.s.s1.h.h1.browser.req"), null); // 非 fs|exec
-  assert.equal(parseToolReqSubject("x.u1.s.s1.h.h1.exec.req"), null);
+  assert.equal(parseToolReqSubject("u.u1.h.h1.exec"), null); // 缺 req 段（5 段）
+  assert.equal(parseToolReqSubject("u.u1.h.h1.browser.req"), null); // 非 fs|exec
+  assert.equal(parseToolReqSubject("x.u1.h.h1.exec.req"), null);
 });
 
 // ---- buildCaps（caps v2 统一命令表） ----

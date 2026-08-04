@@ -42,12 +42,16 @@ connectBtn.addEventListener("click", () => {
     if (chrome.runtime.lastError) return;
     if (resp?.success) {
       updateConnectionUI(true);
-    } else if (resp?.error) {
-      // 连接失败：显示原因，保持未连接状态（不再误报已连接）
+    } else {
+      // 连接失败（未绑定 key 等）：跳平台 /settings/local 引导绑定
       statusText.textContent = "连接失败";
       indicator.className = "dot disconnected";
-      indicator.title = resp.error;
-      console.error("[aic-browser] connect failed:", resp.error);
+      indicator.title = resp?.error || "";
+      console.error("[aic-browser] connect failed:", resp?.error);
+      chrome.runtime.sendMessage({ type: "local-link" }, (r2) => {
+        if (chrome.runtime.lastError || !r2?.url) return;
+        chrome.tabs.create({ url: r2.url });
+      });
     }
   });
 });

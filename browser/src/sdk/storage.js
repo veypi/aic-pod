@@ -6,8 +6,7 @@
 
 const DEFAULTS = {
   key: "",
-  url: "wss://ivec.ai/aic/api/nc",
-  deviceName: "",
+  host: "https://ivec.ai", // 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义）
   background: true,
   incognito: false,
   autoConnect: true,
@@ -50,9 +49,9 @@ export async function getCredential() {
 }
 
 /**
- * Get the NATS server URL.
+ * Get the platform host address.
  */
-export async function getNatsUrl() {
+export async function getHost() {
   const s = await loadSettings();
-  return s.url;
+  return s.host;
 }
