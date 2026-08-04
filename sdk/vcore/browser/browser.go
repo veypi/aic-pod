@@ -122,6 +122,7 @@ func (b *Browser) closeSession(ctx context.Context) {
 	}
 	cmdArgs = append(cmdArgs, "close")
 	cmd := exec.CommandContext(ctx, b.cfg.ExecPath, cmdArgs...)
+	exec_procs.SetSysProcAttr(cmd) // Windows 抑制控制台窗口闪动
 	_ = cmd.Run() // 失败（daemon 不在/会话已关）忽略，Close 不因清理失败报错
 }
 
@@ -203,6 +204,7 @@ func (b *Browser) execCLI(ctx context.Context, globalFlags []string, args ...str
 	}
 
 	cmd := exec.CommandContext(ctx, b.cfg.ExecPath, cmdArgs...)
+	exec_procs.SetSysProcAttr(cmd) // Windows 抑制控制台窗口闪动
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", ctx.Err()

@@ -105,8 +105,10 @@ func (a *App) openSettings() {
 		Title:  "AIC Desktop 设置",
 		Width:  480,
 		Height: 440,
+		// 创建时注入 HTML：不给 URL/HTML 时 wails3 默认导航内嵌资产（本应用无），
+		// Windows WebView2 创建即导航 → 显示 no index.html 错误页且 SetHTML 无法补救
+		HTML: settingsHTML(a.local.Port(), a.local.Code()),
 	})
-	w.SetHTML(settingsHTML(a.local.Port(), a.local.Code()))
 	w.Show()
 }
 

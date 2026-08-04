@@ -69,4 +69,4 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   HOST=https://ivec.ai \
   WORK_DIR=/workspace \
   EXEC_TIMEOUT=30m
-ENTRYPOINT ["aic", "run"]
+ENTRYPOINT ["aic"]

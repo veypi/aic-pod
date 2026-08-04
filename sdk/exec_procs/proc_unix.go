@@ -12,7 +12,8 @@ import (
 // newOutputWriter 非 Windows 平台原样直写（子进程输出本就是 UTF-8）。
 func newOutputWriter(w io.Writer) io.Writer { return w }
 
-func setSysProcAttr(cmd *exec.Cmd) {
+// SetSysProcAttr 设置子进程属性：独立进程组（killEntry 按进程组终止）。
+func SetSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 

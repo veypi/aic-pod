@@ -24,7 +24,7 @@ import (
 	"github.com/veypi/vigo/logv"
 )
 
-var version = "v0.5.2"
+var version = "v0.5.3"
 
 // logRing 是日志环形缓冲（本地 API get_log 的数据源）。
 var logRing = host.NewRingBuffer(500)

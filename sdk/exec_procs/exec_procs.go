@@ -120,7 +120,7 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	out := newOutputWriter(f)
 	cmd.Stdout = out
 	cmd.Stderr = out
-	setSysProcAttr(cmd)
+	SetSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
 		f.Close()

@@ -18,7 +18,7 @@ var trayIcon []byte
 
 // version 与 cli 同一来源：Makefile desktop target 经 -X main.version=$(VERSION)
 // 注入 git 版本（如 v0.5.1），desktop 与 cli 永远同一版本。
-var version = "v0.5.2"
+var version = "v0.5.3"
 
 // ---- 日志（统一 vigo/logv；get_log 经 RingBuffer 挂入 logv） ----
 
