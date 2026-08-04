@@ -1,39 +1,37 @@
 package host
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/veypi/vigo/flags"
 )
 
-// Config 是 cli 与 desktop 共享的唯一配置模型。
+// Config 是 cli 与 desktop 共享的唯一配置模型（配置参数就是一个结构体，
+// vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：
 //
-// 落盘位置：os.UserConfigDir()/aic/config.json（0600），两端读写同一份——
-// cli 的 `aic bind` 配好后 desktop 启动即生效，反之亦然。
+//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout）与 env 键
+//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT）的来源，也是配置文件的键
+//   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
+//   - desc tag：-h 帮助文案
 //
-// 解析优先级（Resolve 链，高到低）：
+// 落盘位置：os.UserConfigDir()/aic/config.yaml（flags.DumpCfg，原子写），
+// cli 与 desktop 读写同一份——任一端的修改（编辑文件 / 页面绑定）另一端启动即生效。
 //
-//	显式参数（cli flag / 调用方覆盖） > AIC_* 环境变量 > 配置文件 > 默认值
-//
-// 环境变量统一 AIC_ 前缀（docker 经 --env-file/-e 注入，进程内不读 .env）：
-//
-//	AIC_HOST          平台地址（可带路径前缀，如 http://127.0.0.1:4000/rses/aiv）
-//	AIC_KEY           绑定凭证
-//	AIC_DIR           exec/fs 缺省工作区
-//	AIC_EXEC_TIMEOUT  exec 后台超时（如 30m）
+// 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
 type Config struct {
-	Host        string `json:"host"`                   // 平台地址（默认 DefaultHost，NATS 端点由此推断）
-	Credential  string `json:"credential"`             // 绑定凭证 <host_id>.<cred_ver>.<secret>.<uid>
-	WorkDir     string `json:"work_dir,omitempty"`     // exec/fs 缺省工作区（默认系统临时目录）
-	ExecTimeout string `json:"exec_timeout,omitempty"` // exec 后台超时（默认 30m）
+	Host        string `json:"host" default:"https://ivec.ai" desc:"platform address (NATS endpoint inferred)"`
+	Key         string `json:"key" desc:"binding credential key (from platform device page)"`
+	WorkDir     string `json:"work_dir" desc:"working directory for exec (default: system temp dir)"`
+	ExecTimeout string `json:"exec_timeout" default:"30m" desc:"exec background timeout"`
 }
 
 // DefaultConfig 返回默认配置。
 func DefaultConfig() Config {
-	return Config{Host: DefaultHost}
+	return Config{Host: DefaultHost, ExecTimeout: "30m"}
 }
 
 // Normalize 填充缺省值（Host 空 → DefaultHost）。
@@ -44,40 +42,28 @@ func (cfg Config) Normalize() Config {
 	return cfg
 }
 
-// ConfigPath 返回配置文件路径：UserConfigDir/aic/config.json。
+// ConfigPath 返回配置文件路径：UserConfigDir/aic/config.yaml。
 func ConfigPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "aic", "config.json"), nil
+	return filepath.Join(dir, "aic", "config.yaml"), nil
 }
 
-// LoadConfig 读取配置文件；文件不存在返回默认配置（非错误）。
-// 文件损坏（如进程崩溃导致的截断写入）：备份为 config.json.bad 后返回默认配置，
-// 不让坏文件阻断启动。
+// LoadConfig 读取配置文件（yaml，flags.LoadCfg）；文件不存在返回默认配置（非错误），
+// 损坏文件由 flags 记 warn 并返回当前值，不让坏文件阻断启动。
 func LoadConfig() (Config, error) {
 	p, err := ConfigPath()
 	if err != nil {
 		return DefaultConfig(), err
 	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return DefaultConfig(), nil
-		}
-		return DefaultConfig(), err
-	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		_ = os.Rename(p, p+".bad")
-		return DefaultConfig(), nil
-	}
+	cfg := DefaultConfig()
+	flags.LoadCfg(p, &cfg)
 	return cfg.Normalize(), nil
 }
 
-// SaveConfig 持久化配置（0600，父目录自动创建）。
-// 先写临时文件再 rename，保证原子性——进程崩溃不会留下截断的半文件。
+// SaveConfig 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。
 func SaveConfig(cfg Config) error {
 	p, err := ConfigPath()
 	if err != nil {
@@ -86,41 +72,15 @@ func SaveConfig(cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cfg.Normalize(), "", "  ")
-	if err != nil {
+	if err := flags.DumpCfg(p, cfg.Normalize()); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	// DumpCfg 以 0644 创建，凭证敏感改 0600
+	return os.Chmod(p, 0o600)
 }
 
-// EnvOverlay 将 AIC_* 环境变量覆盖到 cfg 上（不持久化），返回新配置。
-func EnvOverlay(cfg Config) Config {
-	if v := strings.TrimSpace(os.Getenv("AIC_HOST")); v != "" {
-		cfg.Host = v
-	}
-	if v := strings.TrimSpace(os.Getenv("AIC_KEY")); v != "" {
-		cfg.Credential = v
-	}
-	if v := strings.TrimSpace(os.Getenv("AIC_DIR")); v != "" {
-		cfg.WorkDir = v
-	}
-	if v := strings.TrimSpace(os.Getenv("AIC_EXEC_TIMEOUT")); v != "" {
-		cfg.ExecTimeout = v
-	}
-	return cfg.Normalize()
-}
-
-// Load 是配置解析链的便捷入口：配置文件 + AIC_* 环境变量覆盖。
-// 调用方的显式参数在此结果上再做最后一层覆盖。
-// 文件读取失败不阻断 env 覆盖，错误一并返回由调用方决定。
-func Load() (Config, error) {
-	cfg, err := LoadConfig()
-	return EnvOverlay(cfg), err
-}
+// EnvOverlay 与 Load 已随配置解析迁移到 vigo/flags AutoRegister（其 getDefaultValue
+// 优先读环境变量 HOST/CREDENTIAL/WORK_DIR/EXEC_TIMEOUT，再叠加显式 flag），不再自建。
 
 // Options 将配置转换为 host 客户端 Options（解析 ExecTimeout）。
 // deviceType 由调用方指定（cli/desktop），version 为客户端版本（va.b.c）。
@@ -135,7 +95,7 @@ func (cfg Config) Options(deviceType, version string, onLog func(string, ...any)
 	}
 	return Options{
 		Host:        cfg.Host,
-		Credential:  cfg.Credential,
+		Key:         cfg.Key,
 		WorkDir:     cfg.WorkDir,
 		DeviceType:  deviceType,
 		Version:     version,

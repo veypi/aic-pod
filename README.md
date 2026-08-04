@@ -4,18 +4,23 @@ AIC Pod 客户端 — 部署在 PC/服务器上，通过 NATS WebSocket 连接 A
 
 ## 配置
 
-CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.json`
-（macOS: `~/Library/Application Support/aic/config.json`），CLI 的 `aic bind`
-配好后 Desktop 启动即生效，反之亦然。
+CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yaml`
+（macOS: `~/Library/Application Support/aic/config.yaml`），任一端的修改
+（编辑文件 / 页面绑定）另一端启动即生效。
 
-解析优先级：**flag > AIC_* 环境变量 > 配置文件 > 默认值**
+解析由 vigo/flags 承担（AutoRegister 自动注册 flag + env，只需配置结构体），
+优先级：**显式 flag > 环境变量 > 配置文件 > 结构体默认**。
 
 | 环境变量 | CLI flag | 配置键 | 默认值 | 说明 |
 |---|---|---|---|---|
-| `AIC_KEY` | `-key` | `credential` | | 绑定凭证（必填），从 AIC 平台获取 |
-| `AIC_HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
-| `AIC_DIR` | `-dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
-| `AIC_EXEC_TIMEOUT` | `-exec-timeout` | `exec_timeout` | `30m` | 后台执行超时 |
+| `KEY` | `-key` | `key` | | 绑定凭证（必填），从 AIC 平台获取 |
+| `HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
+| `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
+| `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
+
+本地管理 API（LocalAPI）由 sdk/host 提供（cli/desktop 共用，vigo 框架实现）：
+`aic run` 启动时在 127.0.0.1 随机端口监听并**打印带 local_code 的引导链接**，
+用户浏览器访问该链接即可绑定/管理本机（与桌面端同一套通道协议）。
 
 ## CLI
 
@@ -23,21 +28,22 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.jso
 
 从 [Releases](../../releases) 下载对应平台二进制，放入 `PATH` 即可。
 
-### 子命令
+### 用法
 
 ```bash
-aic run                              # 连接运行（读配置文件/env）
-aic run -key "<key>"          # 显式参数覆盖（`aic -key x` 等价）
-aic bind "<key>"             # 凭证写入配置文件（-host 可同改）
-aic config list                      # 查看配置文件内容
-aic config set host http://x:4000    # 修改配置（get/set/list）
-aic version
+aic                                  # 连接运行（打印 management page 链接，浏览器访问即绑定/管理本机）
+aic -key "<key>"               # 临时参数覆盖
+# 查看全部参数：aic -h
 ```
+
+临时参数（-host / -key / -work_dir / -exec_timeout，或对应环境变量）只影响本次运行；
+**永久生效请直接编辑 `UserConfigDir/aic/config.yaml`**（或浏览器打开 management page 绑定/设置，
+页面写操作会自动持久化）。
 
 ### 后台运行 (macOS/Linux)
 
 ```bash
-nohup aic run > aic.log 2>&1 &
+nohup aic > aic.log 2>&1 &
 ```
 
 ## Docker
@@ -54,16 +60,16 @@ make docker-push         # 推送到 Docker Hub
 
 ```bash
 # 最小启动
-docker run -d --name aic-pod -e AIC_KEY="<key>" veypi/aic-pod:latest
+docker run -d --name aic-pod -e KEY="<key>" veypi/aic-pod:latest
 
 # 完整参数
 docker run -d \
   --name aic-pod \
   --restart unless-stopped \
-  -e AIC_KEY="<key>" \
-  -e AIC_DIR=/workspace \
-  -e AIC_EXEC_TIMEOUT=30m \
-  -e AIC_HOST=https://ivec.ai \
+  -e KEY="<key>" \
+  -e WORK_DIR=/workspace \
+  -e EXEC_TIMEOUT=30m \
+  -e HOST=https://ivec.ai \
   -v /host/workspace:/workspace \
   veypi/aic-pod:latest
 ```
@@ -72,7 +78,7 @@ docker run -d \
 |---|---|
 | `--restart unless-stopped` | 容器退出后自动重启 |
 | `-v /host:/workspace` | 将宿主机目录挂载为命令执行工作目录 |
-| `-e AIC_KEY` | 必填，从 AIC 平台获取的绑定凭证 |
+| `-e KEY` | 必填，从 AIC 平台获取的绑定凭证 |
 
 ### 查看日志
 

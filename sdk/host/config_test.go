@@ -25,8 +25,8 @@ func TestConfigLoadDefault(t *testing.T) {
 	if cfg.Host != DefaultHost {
 		t.Fatalf("default host = %q, want %q", cfg.Host, DefaultHost)
 	}
-	if cfg.Credential != "" {
-		t.Fatalf("default credential = %q, want empty", cfg.Credential)
+	if cfg.Key != "" {
+		t.Fatalf("default credential = %q, want empty", cfg.Key)
 	}
 }
 
@@ -34,7 +34,7 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 	isolateConfigDir(t)
 	want := Config{
 		Host:        "http://localhost:4000",
-		Credential:  "h1.2.secret.u1",
+		Key:         "h1.2.secret.u1",
 		WorkDir:     "/workspace",
 		ExecTimeout: "5m",
 	}
@@ -70,32 +70,13 @@ func TestConfigSaveNormalizesHost(t *testing.T) {
 	}
 }
 
-func TestEnvOverlay(t *testing.T) {
-	t.Setenv("AIC_HOST", "http://127.0.0.1:4000")
-	t.Setenv("AIC_KEY", "k")
-	t.Setenv("AIC_DIR", "/w")
-	t.Setenv("AIC_EXEC_TIMEOUT", "1h")
-	cfg := EnvOverlay(DefaultConfig())
-	if cfg.Host != "http://127.0.0.1:4000" || cfg.Credential != "k" ||
-		cfg.WorkDir != "/w" || cfg.ExecTimeout != "1h" {
-		t.Fatalf("env overlay = %+v", cfg)
-	}
-	// 未设置的 env 不覆盖文件值
-	os.Unsetenv("AIC_DIR")
-	base := Config{Host: "h", WorkDir: "/keep"}
-	got := EnvOverlay(base)
-	if got.WorkDir != "/keep" {
-		t.Fatalf("work_dir overwritten: %+v", got)
-	}
-}
-
 func TestConfigOptions(t *testing.T) {
-	cfg := Config{Host: "https://ivec.ai", Credential: "c"}
+	cfg := Config{Host: "https://ivec.ai", Key: "c"}
 	opts, err := cfg.Options("cli", "v0.0.1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Host != "https://ivec.ai" || opts.Credential != "c" || opts.DeviceType != "cli" {
+	if opts.Host != "https://ivec.ai" || opts.Key != "c" || opts.DeviceType != "cli" {
 		t.Fatalf("options = %+v", opts)
 	}
 	if opts.ExecTimeout.String() != "30m0s" {
@@ -121,14 +102,14 @@ func TestConfigPathIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(p) != filepath.Join(dir, "aic") && filepath.Base(p) != "config.json" {
+	if filepath.Dir(p) != filepath.Join(dir, "aic") && filepath.Base(p) != "config.yaml" {
 		t.Fatalf("unexpected path %s", p)
 	}
 }
 
-// 损坏的配置文件：备份为 .bad 并返回默认配置，不阻断启动（进程崩溃截断写入的场景）。
+// 损坏/空配置文件：不阻断启动（flags.LoadCfg 对损坏文件仅 warn，返回当前值）。
 func TestLoadConfigCorrupt(t *testing.T) {
-	dir := isolateConfigDir(t)
+	isolateConfigDir(t)
 	p, err := ConfigPath()
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +117,7 @@ func TestLoadConfigCorrupt(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, nil, 0o600); err != nil { // 0 字节半文件
+	if err := os.WriteFile(p, []byte("::::broken yaml::::\n[\n"), 0o600); err != nil { // 非法 yaml
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig()
@@ -145,22 +126,5 @@ func TestLoadConfigCorrupt(t *testing.T) {
 	}
 	if cfg.Host != DefaultHost {
 		t.Fatalf("host = %q, want default", cfg.Host)
-	}
-	if _, err := os.Stat(p + ".bad"); err != nil {
-		t.Fatalf("corrupt file not backed up: %v", err)
-	}
-	_ = dir
-}
-
-// Load 在文件读取失败时仍应用 env 覆盖。
-func TestLoadEnvOverlayOnError(t *testing.T) {
-	isolateConfigDir(t)
-	t.Setenv("AIC_HOST", "http://env-host:1")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Host != "http://env-host:1" {
-		t.Fatalf("env not applied: %+v", cfg)
 	}
 }

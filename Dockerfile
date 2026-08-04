@@ -66,7 +66,7 @@ COPY dist/aic-linux-${TARGETARCH} /usr/local/bin/aic
 RUN mkdir -p /workspace
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   SHELL=/bin/bash \
-  AIC_HOST=https://ivec.ai \
-  AIC_DIR=/workspace \
-  AIC_EXEC_TIMEOUT=30m
+  HOST=https://ivec.ai \
+  WORK_DIR=/workspace \
+  EXEC_TIMEOUT=30m
 ENTRYPOINT ["aic", "run"]

@@ -26,7 +26,7 @@ import (
 // Options 客户端配置。
 type Options struct {
 	Host        string        // 平台地址（如 https://ivec.ai，可带路径前缀），NATS 端点据此推断
-	Credential  string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
+	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname
 	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
@@ -87,7 +87,7 @@ func New(opts Options) *Client {
 
 // Connect 连接 NATS，发布 caps v2，订阅会话级 inbox，启动心跳。后台运行，即时返回。
 func (c *Client) Connect() error {
-	parts := strings.SplitN(c.opts.Credential, ".", 4)
+	parts := strings.SplitN(c.opts.Key, ".", 4)
 	if len(parts) != 4 {
 		return fmt.Errorf("invalid credential key")
 	}
