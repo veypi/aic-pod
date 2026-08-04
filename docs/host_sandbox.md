@@ -2,7 +2,7 @@
 
 > 状态：设计已确认，待实施
 > 范围：aic-pod 全部客户端形态（desktop 原生 Win/macOS/Linux、容器、未来 embedded）；browser 端无 fs/exec 能力，仅共享决策引擎设计
-> 关联文档：[design.md](./design.md)、[nats_client.md](./nats_client.md)
+> 关联文档：[design.md](./design.md)；协议见 aic 仓库 docs/instruction_sets_v2.md §6
 
 ---
 

@@ -13,15 +13,16 @@
 │  Service Worker (后台常驻)                             │
 │  - NATS over WebSocket 连接                           │
 │  - caps v2 发布 (fs/exec 能力声明，§6.3)              │
-│  - 会话级 inbox 订阅 u.{uid}.s.*.h.host_{id}.>         │
-│    → 验签/防重放/纵深检查 → exec browser 指令分发       │
+│  - 连接级 inbox 订阅 u.{uid}.h.host_{host_id}.>        │
+│    → 验签/防重放/纵深检查 → exec 指令分发               │
 │  - 操作标签页 / 注入脚本 / 截图                         │
 └───────────────────────────────────────────────────────┘
 ```
 
-> **协议（指令集 v2）：** 本扩展是 exec 虚拟指令 host——只暴露 `browser` 虚拟指令
-> （`exec browser <subcommand> [args...]`），无程序执行（`exec.programs=[]` 显式纯虚拟）、
-> 无文件系统（`fs.actions=[]`）。全局参数在插件设置页配置，不出现在工具调用中。
+> **协议（指令集 v2.5）：** 本扩展的 exec 命令表 = 恒声明 `commands`（能力发现）+ 注册命令
+> `browser`（`exec browser <subcommand> [args...]`）+ vcmd 核心虚拟指令（ls/rg/tree/rm/curl，
+> 操作扩展 PageFS）；fs 能力 = read/write/edit（PageFS 后端）。全局参数在插件设置页配置，
+> 不出现在工具调用中。
 
 ## 协议（指令集 v2）
 
@@ -36,41 +37,46 @@
 | `u.{uid}.h.{host_id}.{cred_ver}.caps` | caps v2 JSON | 每次连接/重连发布，服务端以最近一次为准 |
 | `u.{uid}.h.{host_id}.{cred_ver}.presence` | `{host_id, credential_ver, running, sent_at}` | 20s 心跳 |
 
-### caps v2 声明
+### caps v2 声明（统一命令声明表，§6.3）
 
 ```json
 {
   "host_id": "<host_id>",
   "credential_ver": 1,
-  "agent_version": "v0.4.0",
+  "agent_version": "v0.5.1",
   "device_type": "browser",
-  "device_info": { "os": "Chrome", "arch": "browser", "num_cpu": 8 },
+  "device_info": { "os": "Chrome", "arch": "browser", "num_cpu": 18 },
   "fs": { "actions": ["read", "write", "edit"] },
   "exec": {
-    "programs": [],
-    "virtual": [
-      { "name": "browser", "required_level": 2, "stateful": true, "backgroundable": true }
+    "commands": [
+      { "name": "commands", "level": 1, "desc": "..." },
+      { "name": "browser", "level": 2, "desc": "control a web browser (agent-browser CLI)", "help": "..." },
+      { "name": "ls", "level": 1, "desc": "list directory entries", "help": "..." },
+      { "name": "rg", "level": 1, "desc": "search content or list files", "help": "..." },
+      { "name": "tree", "level": 1, "desc": "print directory tree (JSON)", "help": "..." },
+      { "name": "rm", "level": 2, "desc": "remove files or directories", "help": "..." },
+      { "name": "curl", "level": 2, "desc": "download a URL to a file", "help": "..." }
     ]
   }
 }
 ```
 
 - `fs.actions=[read/write/edit]`：扩展接入 PageFS（§4.5）——与 page 端同一套代码逻辑
-  （`aic/ui/assets/libs/page_fs.js` 逐字节同步为 `src/sdk/fs.js`），IndexedDB 双根
-  `$USER`/`$SESSION` 存储；扩展与页面的 IndexedDB 因 origin 不同物理隔离，按 host_id 寻址。
-  等级与 vcore.FSRequired 同源（read=1，write/edit=2）；
-- `exec.programs=[]`：显式纯虚拟（无程序执行能力）；
-- `exec.virtual`：按扩展能力声明——`browser`（required_level=2 Write，stateful 串行，
-  download/wait 可后台化），与 Go `vcore/browser.VirtualDecl()` 同源。
+  （`aic/ui/assets/libs/page_fs.js` ⇆ `src/sdk/page_fs.js` 逐字节同步），IndexedDB 单根；
+  扩展与页面的 IndexedDB 因 origin 不同物理隔离，按 host_id 寻址。等级与 vcore.FSRequired
+  同源（read=1，write/edit=2）；
+- `exec.commands`：统一命令声明表（§5.1）——恒声明 `commands` + 注册命令 `browser`
+  （required_level=2 Write，stateful 串行，download/wait 可后台化，与 Go vcore meta.go 同源）
+  + vcmd 核心虚拟指令（ls/rg/tree/rm/curl，分级与 Go levels.go 对齐，操作扩展 PageFS）；
 - §2.2 图片投递收敛：`browser screenshot` 落本 host 的 fs（`$SESSION/screenshot/`，
   IndexedDB Blob 存储），不返回 image_data；agent 需要看图时用 `fs.read`（1host=本 host_id）
   按 attrs.path 读取——只有 fs.read 能把图片带进消息。
 
-### 工具流量（会话级 subject）
+### 工具流量（连接级 subject，§6.1 v3）
 
-host 端连接时单订阅 `u.{uid}.s.*.h.host_{host_id}.>`（HostInboxSubject），
-覆盖该 host 所有会话的 fs/exec 请求，无 per-session 订阅 churn。请求信封
-（server→host，HMAC-SHA256 签名，K_tool 派生）：
+host 端连接时单订阅 `u.{uid}.h.host_{host_id}.>`（HostInboxSubject），
+覆盖该 host 全部工具请求（fs/exec），执行不绑定会话（session_id 由信封 SessionID 携带），
+无 per-session 订阅 churn。请求信封（server→host，HMAC-SHA256 签名，K_tool 派生）：
 
 ```json
 {
@@ -90,14 +96,13 @@ host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 �
 | 参数 | 默认值 | 必填 | 说明 |
 |---|---|---|---|
 | `key` | | ✅ | AIC 环境凭证 |
-| `url` | `wss://ivec.ai/aic/api/nc` | | AIC 服务端地址 |
-| `deviceName` | 系统 hostname | | 设备展示名称 |
+| `host` | `https://ivec.ai` | | 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义） |
 | `background` | `true` | | 后台模式，新窗口不抢夺焦点 |
 | `incognito` | `false` | | 隐私模式，使用无痕窗口（不共享 cookie/登录态） |
 | `autoConnect` | `true` | | 启动后自动连接 |
 | `viewport.width` | `1280` | | 默认视口宽度 |
 | `viewport.height` | `720` | | 默认视口高度 |
-| `timeout` | `30s` | | 页面操作默认超时 |
+| `timeout` | `30` | | 页面操作默认超时（秒） |
 
 > **注意：** Chrome Extension 运行在用户浏览器内，因此不需要 `browserPath`（浏览器路径）、`userDataDir`（profile 目录）、`headless`（无头模式）等参数。`incognito=true` 通过 `chrome.windows.create({incognito: true})` 实现隔离。
 >
@@ -450,16 +455,25 @@ browser/
 │   │       ├── jetstream.js
 │   │       └── jetstream-internal.js
 │   │
-│   ├── sdk/                      # AIC 客户端 SDK（指令集 v2）
+│   ├── sdk/                      # AIC 客户端 SDK（指令集 v2.5）
 │   │   ├── proto.js              # 协议层：subject/信封/caps v2 纯函数（Go sdk/proto 零漂移）
 │   │   ├── proto.test.js         # subject/caps 固定向量（node --test）
 │   │   ├── crypto.js             # HKDF + HMAC-SHA256 (Web Crypto API)
 │   │   ├── auth.js               # 连接 token (e1.*) + 工具请求验签（v2 canonical 输入）
 │   │   ├── auth.test.js          # 密钥派生/签名固定向量（与 Go vectors_test.go 同源）
-│   │   ├── client.js             # NATS 连接 / caps v2 发布 / 会话级 inbox 订阅 / 分发
+│   │   ├── client.js             # NATS 连接 / caps v2 发布 / 连接级 inbox 订阅 / 分发
+│   │   ├── client.test.js        # 客户端单测（node --test）
+│   │   ├── vcmd.js               # vcmd 核心虚拟指令（ls/rg/tree/rm/curl，与 aic 前端逐字节同步）
+│   │   ├── vcmd.test.js          # vcmd 测试（node --test）
+│   │   ├── page_fs.js            # PageFS（IndexedDB 单根，与 aic 前端逐字节同步）
+│   │   ├── history.js            # 执行历史（IndexedDB 持久化）
 │   │   ├── argv.js               # action+argv 双层解析
 │   │   ├── argv.test.js          # 双层解析测试
 │   │   └── storage.js            # chrome.storage.local 读写封装
+│   │
+│   ├── content/                  # content script（页面桥接）
+│   │   ├── local-bridge.js       # /hosts 页 → background 的本地通道桥（__aic_local）
+│   │   └── network-interceptor.js# 网络请求拦截（browser network 用）
 │   │
 │   └── tools/                    # 虚拟指令实现
 │       └── browser.js            # exec browser 子命令实现（open/click/snapshot/...）
@@ -472,7 +486,7 @@ browser/
 
 ```
 background.js
-  ├── sdk/client.js       → NATS 连接生命周期 + 会话级 inbox 分发
+  ├── sdk/client.js       → NATS 连接生命周期 + 连接级 inbox 分发
   │   ├── sdk/proto.js    → subject/信封/caps v2（纯函数）
   │   ├── sdk/crypto.js   → HKDF 密钥派生
   │   ├── sdk/auth.js     → e1 Token 生成 + 请求验签
@@ -501,9 +515,9 @@ background.js
 |---|---|---|
 | 运行时 | 独立二进制 | Service Worker + Extension APIs |
 | 核心技术 | Go SDK | JS + chrome.tabs / chrome.scripting / chrome.cookies / ... |
-| 核心工具 | `exec`, `fs` | `tabs`, `page`, `network`, `storage` |
-| 输出重定向 | 写入系统临时目录日志文件 | 截图 data URL，其余直接返回 content |
-| 权限等级 | exec=2, fs=1 | tabs=1, page=1, network=1, storage=2 |
+| 核心工具 | exec（统一命令声明表）、fs | browser 指令 + vcmd（ls/rg/tree/rm/curl） |
+| 输出重定向 | 写入系统临时目录日志文件 | browser screenshot 落 PageFS（$SESSION/screenshot/），其余直接返回 content |
+| 权限等级 | exec 分级（ls/rg/tree=1，rm/curl/browser=2），fs=1 | browser=2，vcmd ls/rg/tree=1、rm/curl=2，fs read=1/write·edit=2 |
 | 密钥派生 | Go crypto/hmac + hkdf | Web Crypto API (SubtleCrypto) |
-| NATS 连接 | nats.go | nats.ws (或直接 WebSocket + 协议实现) |
+| NATS 连接 | nats.go | @nats-io/nats-core（bundled ESM） |
 | 安装方式 | 二进制下载 | Chrome Web Store / 本地加载 |
