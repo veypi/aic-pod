@@ -55,7 +55,6 @@ jobs:
           name: desktop-${{ matrix.target }}
           path: |
             dist/*.dmg
-            dist/AIC Desktop.app
             dist/*.exe
             dist/*.AppImage
             dist/aic-linux-*
