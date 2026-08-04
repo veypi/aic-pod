@@ -26,8 +26,8 @@ import (
 // MaxLines 是返回内容的最大行数（与 exec 统一截断语义一致）。
 const MaxLines = 1000
 
-// DefaultExecTimeout 是后台进程的自有超时（§5.8：默认 10m）。
-const DefaultExecTimeout = 10 * time.Minute
+// DefaultExecTimeout 是后台进程的自有超时（§5.8：默认 30m）。
+const DefaultExecTimeout = 30 * time.Minute
 
 // Entry 是一个托管的后台进程条目（进程结束后保留，供 bg_wait 取结果）。
 type Entry struct {
@@ -116,8 +116,10 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	bgCtx, bgCancel := context.WithTimeout(context.Background(), m.execTimeout)
 	cmd := exec.CommandContext(bgCtx, opts.Exec[0], opts.Exec[1:]...)
 	cmd.Dir = opts.Workdir
-	cmd.Stdout = f
-	cmd.Stderr = f
+	// Windows 上经逐行转码（GBK→UTF-8）后落盘，其余平台原样直写
+	out := newOutputWriter(f)
+	cmd.Stdout = out
+	cmd.Stderr = out
 	setSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
@@ -142,6 +144,9 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 
 	go func() {
 		runErr := cmd.Wait()
+		if c, ok := out.(interface{ Close() error }); ok {
+			_ = c.Close() // flush 行尾残留（Windows 转码器）
+		}
 		f.Close()
 		bgCancel()
 		e.ExitCode = 0

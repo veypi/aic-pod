@@ -153,7 +153,7 @@ aic-pod/
 
 **输出：** stdout+stderr 合并写入系统临时目录下 `aic/{session_id}/{request_id}.log`（Linux `/tmp`，macOS `$TMPDIR`，Windows `%TEMP%`），响应 `content` 最多返回前 1000 行。`attrs.path` 指向完整日志，Agent 可通过 fs read 查看全文。
 
-**实现要点：** `exec.Command(action, argv...)` 直接调用，`action` 可以是 shell 也可以是任意可执行文件。后台超时默认 10m（`EXEC_TIMEOUT` 可调），请求 deadline 到期自动转后台；设置独立进程组（`setpgid`）。
+**实现要点：** `exec.Command(action, argv...)` 直接调用，`action` 可以是 shell 也可以是任意可执行文件。后台超时默认 30m（`EXEC_TIMEOUT` 可调），请求 deadline 到期自动转后台；设置独立进程组（`setpgid`）。
 
 #### fs — 文件操作
 
@@ -237,7 +237,7 @@ auth.go       # Token 生成 (canonical + HMAC-SHA256) + 工具请求验签
 crypto.go     # HKDF 密钥派生 (K_connect, K_server, K_tool)
 types.go      # Options/Tool/ToolDef/请求响应载荷类型定义
 argv.go       # action+argv 双层解析 (flagSet/parseActionArgv)
-exec.go       # 命令执行 (setpgid, 默认 10m 超时, exit code) + bg_list/wait/kill
+exec.go       # 命令执行 (setpgid, 默认 30m 超时, exit code) + bg_list/wait/kill
 fs.go         # 文件操作 (10 种 action, 含 download/图片压缩)
 hfs.go        # hfs 结构化文件工具 (浏览器直连, 免签, depth 嵌套)
 search.go     # 搜索遍历/glob 匹配/mime 检测/文本判定

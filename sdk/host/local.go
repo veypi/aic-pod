@@ -17,7 +17,7 @@ import (
 
 // 本地命令执行（§5.9：探测声明的 shell/git）：stdout+stderr 合并写入
 // {tmp}/aic/{session_id}/{msg_id}.log；请求 deadline 内完成 → 返回日志前 1000 行；
-// 到期未完成 → 自动转后台（host 端自有超时，默认 10m），
+// 到期未完成 → 自动转后台（host 端自有超时，默认 30m），
 // 返回当前前 1000 行 + background=true + bg id（{host}:{sid}:{op_id}）。
 // argv 数组直传，禁止拼接 shell 字符串（§5.5：用户输入不经 shell 解释，杜绝注入）。
 

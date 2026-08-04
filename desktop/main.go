@@ -29,7 +29,7 @@ import (
 	"github.com/veypi/aic-pod/sdk/host"
 )
 
-var version = "v0.2.0"
+var version = "v0.5.1"
 
 func main() {
 	_ = godotenv.Load()
@@ -38,13 +38,13 @@ func main() {
 	envCred := getEnv("ENV_KEY", "")
 	workDir := getEnv("WORK_DIR", "")
 	deviceName := getEnv("DEVICE_NAME", "")
-	execTimeoutStr := getEnv("EXEC_TIMEOUT", "10m")
+	execTimeoutStr := getEnv("EXEC_TIMEOUT", "30m")
 
 	flag.StringVar(&natsURL, "url", natsURL, "AIC server URL")
 	flag.StringVar(&envCred, "key", envCred, "Environment key (<env_id>.<cred_ver>.<secret>.<uid>)")
 	flag.StringVar(&workDir, "dir", workDir, "Working directory for exec (default /tmp)")
 	flag.StringVar(&deviceName, "name", deviceName, "Device display name (default hostname)")
-	flag.StringVar(&execTimeoutStr, "exec-timeout", execTimeoutStr, "Exec background timeout (default 10m)")
+	flag.StringVar(&execTimeoutStr, "exec-timeout", execTimeoutStr, "Exec background timeout (default 30m)")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -70,7 +70,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  ENV_KEY      Environment key from 'env create'")
 		fmt.Fprintln(os.Stderr, "  WORK_DIR     Working directory for exec (default: /tmp)")
 		fmt.Fprintln(os.Stderr, "  DEVICE_NAME  Device display name (default: hostname)")
-		fmt.Fprintln(os.Stderr, "  EXEC_TIMEOUT Exec background timeout (default: 10m)")
+		fmt.Fprintln(os.Stderr, "  EXEC_TIMEOUT Exec background timeout (default: 30m)")
 		os.Exit(1)
 	}
 

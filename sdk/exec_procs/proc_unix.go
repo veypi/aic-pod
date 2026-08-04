@@ -3,10 +3,14 @@
 package exec_procs
 
 import (
+	"io"
 	"os/exec"
 	"syscall"
 	"time"
 )
+
+// newOutputWriter 非 Windows 平台原样直写（子进程输出本就是 UTF-8）。
+func newOutputWriter(w io.Writer) io.Writer { return w }
 
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

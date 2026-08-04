@@ -31,7 +31,7 @@ type Options struct {
 	DeviceName  string        // 展示名称，默认 hostname
 	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
 	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
-	ExecTimeout time.Duration // 程序后台自有超时，默认 10m（§5.9）
+	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
 	OnLog       func(format string, args ...any)
 }
 
@@ -66,7 +66,7 @@ func New(opts Options) *Client {
 	// WorkDir 的反斜杠规范形归一由 proto.ResolvePath 在路径运算层统一处理
 	//（Windows 下 os.TempDir() 为反斜杠形，workdir 分支同样归一）。
 	if opts.ExecTimeout <= 0 {
-		opts.ExecTimeout = 10 * time.Minute
+		opts.ExecTimeout = 30 * time.Minute
 	}
 	logf := opts.OnLog
 	if logf == nil {
