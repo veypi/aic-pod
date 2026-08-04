@@ -126,10 +126,39 @@ func (a *App) HostLog() string {
 	return strings.Join(a.logs[start:], "\n")
 }
 
-// OpenPlatform 打开/聚焦平台窗口（远程 host 页面）。
+// hostsURL 由平台地址推导设备管理页入口 {host}/hosts（host 可带产品壳路径前缀，
+// 如 http://127.0.0.1:4000/rses/aiv → http://127.0.0.1:4000/rses/aiv/hosts）。
+// 首启直达设备页，local_code 由调用方拼接。
+func hostsURL(hostURL string) string {
+	h := strings.TrimSpace(hostURL)
+	if h == "" {
+		h = host.DefaultHost
+	}
+	if !strings.Contains(h, "://") {
+		h = "https://" + h
+	}
+	u, err := url.Parse(h)
+	if err != nil || u.Host == "" {
+		return h
+	}
+	p := strings.TrimSuffix(u.Path, "/")
+	if !strings.HasSuffix(p, "/hosts") {
+		p += "/hosts"
+	}
+	u.Path = p
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// OpenPlatform 打开/聚焦平台窗口。
+// 未绑定（无凭证）→ 直达设备管理页 {host}/hosts 引导绑定；已绑定 → 打开平台首页。
 func (a *App) OpenPlatform(hostURL string) error {
 	if strings.TrimSpace(hostURL) == "" {
 		hostURL = a.config().Host
+	}
+	if a.config().Credential == "" {
+		hostURL = hostsURL(hostURL)
 	}
 	app := application.Get()
 	// 拼 local_code 参数：平台页面据此建立本地通道（aic env.js 存 localStorage）
