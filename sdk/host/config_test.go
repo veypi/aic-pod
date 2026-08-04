@@ -76,12 +76,11 @@ func TestEnvOverlay(t *testing.T) {
 	t.Setenv("AIC_KEY", "k")
 	t.Setenv("AIC_DIR", "/w")
 	t.Setenv("AIC_NAME", "n")
-	t.Setenv("AIC_NATS_URL", "ws://x/nc")
 	t.Setenv("AIC_EXEC_TIMEOUT", "1h")
 	cfg := EnvOverlay(DefaultConfig())
 	if cfg.Host != "http://127.0.0.1:4000" || cfg.Credential != "k" ||
 		cfg.WorkDir != "/w" || cfg.DeviceName != "n" ||
-		cfg.NATSURL != "ws://x/nc" || cfg.ExecTimeout != "1h" {
+		cfg.ExecTimeout != "1h" {
 		t.Fatalf("env overlay = %+v", cfg)
 	}
 	// 未设置的 env 不覆盖文件值

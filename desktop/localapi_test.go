@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/veypi/aic-pod/sdk/host"
 )
 
 // newTestLocalAPI 创建测试用 LocalAPI（App 不连 host，配置读写走默认路径）。
@@ -150,5 +152,32 @@ func TestLocalCodeParamFormat(t *testing.T) {
 	}
 	if p[idx+1:] != api.code {
 		t.Fatalf("code mismatch: %q vs %q", p[idx+1:], api.code)
+	}
+}
+
+// set-config 白名单：仅 work_dir/device_name/exec_timeout 可写；
+// host/credential 即使在 body 中也不得被持久化。
+func TestLocalAPISetConfigWhitelist(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // 隔离配置文件（darwin UserConfigDir 用 HOME）
+	api := newTestLocalAPI(t)
+	body := `{"work_dir":"/w","device_name":"box","exec_timeout":"5m","host":"http://evil","credential":"leak"}`
+	status, resp := api.req(t, "POST", "/api/set-config", api.code, body)
+	if status != http.StatusOK {
+		t.Fatalf("set-config = %d %q", status, resp)
+	}
+	cfg, err := host.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkDir != "/w" || cfg.DeviceName != "box" || cfg.ExecTimeout != "5m" {
+		t.Fatalf("whitelist fields not saved: %+v", cfg)
+	}
+	if cfg.Host != host.DefaultHost || cfg.Credential != "" {
+		t.Fatalf("non-whitelist fields persisted: %+v", cfg)
+	}
+	// 非法 exec_timeout → 400
+	status, _ = api.req(t, "POST", "/api/set-config", api.code, `{"exec_timeout":"bogus"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad timeout = %d, want 400", status)
 	}
 }

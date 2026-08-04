@@ -13,10 +13,9 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.jso
 | 环境变量 | CLI flag | 配置键 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `AIC_KEY` | `-key` | `credential` | | 绑定凭证（必填），从 AIC 平台获取 |
-| `AIC_HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址 |
+| `AIC_HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
 | `AIC_DIR` | `-dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `AIC_NAME` | `-name` | `device_name` | 系统 hostname | 设备展示名称 |
-| `AIC_NATS_URL` | `-nats-url` | `nats_url` | 按 host 推断 | NATS WebSocket 端点 |
 | `AIC_EXEC_TIMEOUT` | `-exec-timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 
 ## CLI
@@ -29,8 +28,8 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.jso
 
 ```bash
 aic run                              # 连接运行（读配置文件/env）
-aic run -key "<credential>"          # 显式参数覆盖（`aic -key x` 等价）
-aic bind "<credential>"             # 凭证写入配置文件（-host 可同改）
+aic run -key "<key>"          # 显式参数覆盖（`aic -key x` 等价）
+aic bind "<key>"             # 凭证写入配置文件（-host 可同改）
 aic config list                      # 查看配置文件内容
 aic config set host http://x:4000    # 修改配置（get/set/list）
 aic version
@@ -56,13 +55,13 @@ make docker-push         # 推送到 Docker Hub
 
 ```bash
 # 最小启动
-docker run -d --name aic-pod -e AIC_KEY="<credential>" veypi/aic-pod:latest
+docker run -d --name aic-pod -e AIC_KEY="<key>" veypi/aic-pod:latest
 
 # 完整参数
 docker run -d \
   --name aic-pod \
   --restart unless-stopped \
-  -e AIC_KEY="<credential>" \
+  -e AIC_KEY="<key>" \
   -e AIC_NAME="prod-server-01" \
   -e AIC_DIR=/workspace \
   -e AIC_EXEC_TIMEOUT=30m \

@@ -91,9 +91,7 @@ func (l *LocalAPI) Start() error {
 		cfg, _ := l.app.GetConfig()
 		return cfg
 	}, nil))
-	mux.HandleFunc("/api/set-config", l.handleJSON(nil, func(v any) error {
-		return l.app.SaveConfig(toConfig(v))
-	}))
+	mux.HandleFunc("/api/set-config", l.handleSetConfig)
 	mux.HandleFunc("/api/bind", l.handleBind)
 	mux.HandleFunc("/api/host-status", l.handleJSON(func() any {
 		return l.app.HostStatusQuery()
@@ -216,14 +214,14 @@ func (l *LocalAPI) handleJSON(get func() any, set func(any) error) http.HandlerF
 	}
 }
 
-// handleBind 绑定设备：保存配置并自动启动 host 会话。
+// handleBind 绑定设备：保存凭证并自动启动 host 会话。
+// host 由启动参数决定（有效配置），页面只传 credential。
 func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Host       string `json:"host"`
 		Credential string `json:"credential"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -239,9 +237,6 @@ func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if strings.TrimSpace(req.Host) != "" {
-		cfg.Host = strings.TrimSpace(req.Host)
 	}
 	cfg.Credential = strings.TrimSpace(req.Credential)
 	if err := l.app.SaveConfig(cfg); err != nil {
@@ -278,6 +273,44 @@ func (l *LocalAPI) handleHostStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := l.app.StartHost(cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleSetConfig 保存运行参数。白名单：仅 work_dir / device_name / exec_timeout
+// 可由页面配置——host/nats_url 是启动参数（flag/env），credential 只走 bind。
+func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		WorkDir     string `json:"work_dir"`
+		DeviceName  string `json:"device_name"`
+		ExecTimeout string `json:"exec_timeout"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if s := strings.TrimSpace(req.ExecTimeout); s != "" {
+		if _, err := time.ParseDuration(s); err != nil {
+			http.Error(w, "invalid exec_timeout: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	// 基于文件配置更新（不叠加 env 覆盖，避免把临时值持久化）
+	cfg, err := host.LoadConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cfg.WorkDir = strings.TrimSpace(req.WorkDir)
+	cfg.DeviceName = strings.TrimSpace(req.DeviceName)
+	cfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
+	if err := l.app.SaveConfig(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})

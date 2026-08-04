@@ -12,19 +12,17 @@ const DefaultHost = "https://ivec.ai"
 // natsPath 是服务端 NATS WebSocket 挂载路径（aic Router.Extend("/nc") 挂载在 /aic 前缀下）。
 const natsPath = "/aic/api/nc"
 
-// ResolveNATSURL 将 host/-url 参数归一为 NATS WebSocket 端点：
+// ResolveNATSURL 由平台地址推导 NATS WebSocket 端点（唯一来源，无显式 url 配置）：
 //
-//   - url 非空：原样返回（显式直连 ws://wss://nats:// 均可）
-//   - url 为空：按 host 推断——https→wss、http→ws，取 origin（忽略路径）拼接
-//     /aic/api/nc；host 无 scheme 时按 https 补全；ws/wss scheme 原样保留
+//   - 协议按 scheme 推断：https→wss、http→ws、ws/wss 原样保留；无 scheme 按 https 补全
+//   - host 可携带路径前缀（产品壳挂载场景）：前缀保留并拼接 /aic/api/nc
 //
-// 例：https://ivec.ai → wss://ivec.ai/aic/api/nc
+// 例：
 //
-//	http://localhost:4000 → ws://localhost:4000/aic/api/nc
-func ResolveNATSURL(hostURL, natsURL string) string {
-	if s := strings.TrimSpace(natsURL); s != "" {
-		return s
-	}
+//	https://ivec.ai                  → wss://ivec.ai/aic/api/nc
+//	http://localhost:4000            → ws://localhost:4000/aic/api/nc
+//	http://127.0.0.1:4000/rses/aiv   → ws://127.0.0.1:4000/rses/aiv/aic/api/nc
+func ResolveNATSURL(hostURL string) string {
 	h := strings.TrimSpace(hostURL)
 	if h == "" {
 		h = DefaultHost
@@ -44,5 +42,6 @@ func ResolveNATSURL(hostURL, natsURL string) string {
 	case "http":
 		scheme = "ws"
 	}
-	return fmt.Sprintf("%s://%s%s", scheme, u.Host, natsPath)
+	prefix := strings.TrimSuffix(u.Path, "/")
+	return fmt.Sprintf("%s://%s%s%s", scheme, u.Host, prefix, natsPath)
 }

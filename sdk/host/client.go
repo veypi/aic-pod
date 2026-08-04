@@ -25,9 +25,8 @@ import (
 
 // Options 客户端配置。
 type Options struct {
-	Host        string        // 平台地址（如 https://ivec.ai），NATSURL 为空时据此推断
+	Host        string        // 平台地址（如 https://ivec.ai，可带路径前缀），NATS 端点据此推断
 	Credential  string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
-	NATSURL     string        // "nats://host:port" 或 "ws://host/path"（空 = 按 Host 推断）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname
 	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
@@ -90,11 +89,11 @@ func New(opts Options) *Client {
 func (c *Client) Connect() error {
 	parts := strings.SplitN(c.opts.Credential, ".", 4)
 	if len(parts) != 4 {
-		return fmt.Errorf("invalid credential format: expected <host_id>.<cred_ver>.<secret>.<uid>")
+		return fmt.Errorf("invalid credential key")
 	}
 	c.hostID = parts[0]
 	if _, err := fmt.Sscanf(parts[1], "%d", &c.credVer); err != nil || c.credVer == 0 {
-		return fmt.Errorf("invalid cred_ver in credential: %s", parts[1])
+		return fmt.Errorf("invalid credential key version")
 	}
 	secret := parts[2]
 	c.uid = parts[3]
@@ -107,7 +106,7 @@ func (c *Client) Connect() error {
 
 	c.logf("starting aic-host v%s [%s/%s] (host=%s)", c.opts.Version, c.opts.DeviceType, c.opts.DeviceName, c.hostID)
 
-	natsURL := c.opts.NATSURL
+	natsURL := ResolveNATSURL(c.opts.Host)
 	opts := []nats.Option{
 		nats.Name("aic-host-" + c.hostID),
 		nats.TokenHandler(func() string {

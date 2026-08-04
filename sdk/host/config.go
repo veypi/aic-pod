@@ -20,18 +20,16 @@ import (
 //
 // 环境变量统一 AIC_ 前缀（docker 经 --env-file/-e 注入，进程内不读 .env）：
 //
-//	AIC_HOST          平台地址
+//	AIC_HOST          平台地址（可带路径前缀，如 http://127.0.0.1:4000/rses/aiv）
 //	AIC_KEY           绑定凭证
 //	AIC_DIR           exec/fs 缺省工作区
 //	AIC_NAME          设备展示名称
-//	AIC_NATS_URL      显式 NATS 端点（空 = 按 Host 推断）
 //	AIC_EXEC_TIMEOUT  exec 后台超时（如 30m）
 type Config struct {
-	Host        string `json:"host"`                   // 平台地址（默认 DefaultHost）
+	Host        string `json:"host"`                   // 平台地址（默认 DefaultHost，NATS 端点由此推断）
 	Credential  string `json:"credential"`             // 绑定凭证 <host_id>.<cred_ver>.<secret>.<uid>
 	WorkDir     string `json:"work_dir,omitempty"`     // exec/fs 缺省工作区（默认系统临时目录）
 	DeviceName  string `json:"device_name,omitempty"`  // 展示名称（默认 hostname）
-	NATSURL     string `json:"nats_url,omitempty"`     // 显式 NATS 端点（空 = 按 Host 推断）
 	ExecTimeout string `json:"exec_timeout,omitempty"` // exec 后台超时（默认 30m）
 }
 
@@ -107,9 +105,6 @@ func EnvOverlay(cfg Config) Config {
 	if v := strings.TrimSpace(os.Getenv("AIC_NAME")); v != "" {
 		cfg.DeviceName = v
 	}
-	if v := strings.TrimSpace(os.Getenv("AIC_NATS_URL")); v != "" {
-		cfg.NATSURL = v
-	}
 	if v := strings.TrimSpace(os.Getenv("AIC_EXEC_TIMEOUT")); v != "" {
 		cfg.ExecTimeout = v
 	}
@@ -126,7 +121,7 @@ func Load() (Config, error) {
 	return EnvOverlay(cfg), nil
 }
 
-// Options 将配置转换为 host 客户端 Options（解析 ExecTimeout、推断 NATSURL）。
+// Options 将配置转换为 host 客户端 Options（解析 ExecTimeout）。
 // deviceType 由调用方指定（cli/desktop），version 为客户端版本（va.b.c）。
 func (cfg Config) Options(deviceType, version string, onLog func(string, ...any)) (Options, error) {
 	timeout := 30 * time.Minute
@@ -144,7 +139,6 @@ func (cfg Config) Options(deviceType, version string, onLog func(string, ...any)
 		DeviceName:  cfg.DeviceName,
 		DeviceType:  deviceType,
 		Version:     version,
-		NATSURL:     cfg.NATSURL,
 		ExecTimeout: timeout,
 		OnLog:       onLog,
 	}, nil
