@@ -12,11 +12,9 @@ import (
 func main() {
 	svc := &App{}
 
-	// HOST 环境变量：启动时注入平台地址（持久化，local 页面 getConfig 一致）
+	// HOST 环境变量：仅本次运行覆盖平台地址（不持久化，配置只由 /settings/local 管理）
 	if h := strings.TrimSpace(os.Getenv("HOST")); h != "" {
-		cfg, _ := svc.GetConfig()
-		cfg.Host = h
-		_ = svc.SaveConfig(cfg)
+		svc.hostOVR = h
 	}
 
 	local, err := newLocalAPI(svc)
@@ -30,7 +28,11 @@ func main() {
 
 	// 已配置的设备：后台自动连接 host（失败记录日志，不阻塞窗口）
 	if cfg, err := svc.GetConfig(); err == nil && cfg.Credential != "" {
-		if err := svc.StartHost(cfg.Host, cfg.Credential); err != nil {
+		hostURL := cfg.Host
+		if svc.hostOVR != "" {
+			hostURL = svc.hostOVR
+		}
+		if err := svc.StartHost(hostURL, cfg.Credential); err != nil {
 			svc.emitLog(fmt.Sprintf("auto start host failed: %v", err))
 		}
 	}

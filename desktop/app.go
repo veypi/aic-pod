@@ -16,11 +16,12 @@ import (
 
 // App 是桌面壳的 service：配置管理 + 进程内 host 会话（同一进程，无子进程）。
 type App struct {
-	mu     sync.Mutex   // host 会话锁
-	logMu  sync.Mutex   // 日志缓冲锁（独立于 mu：StartHost 持 mu 时 OnLog 回调仍可写日志）
-	client *host.Client // nil = 未运行
-	logs   []string     // 环形日志缓冲（最近 maxLogs 条），供前端拉取
-	local  *LocalAPI    // 本地 HTTP 服务（local_code 通道）
+	mu      sync.Mutex   // host 会话锁
+	logMu   sync.Mutex   // 日志缓冲锁（独立于 mu：StartHost 持 mu 时 OnLog 回调仍可写日志）
+	client  *host.Client // nil = 未运行
+	logs    []string     // 环形日志缓冲（最近 maxLogs 条），供前端拉取
+	local   *LocalAPI    // 本地 HTTP 服务（local_code 通道）
+	hostOVR string       // HOST 环境变量覆盖（本次运行优先，不持久化）
 }
 
 const (
@@ -90,6 +91,8 @@ type HostStatus struct {
 }
 
 func (a *App) emitLog(line string) {
+	// 同步输出到 stdout（桌面壳无 UI，排查依赖终端日志）
+	fmt.Println(line)
 	a.logMu.Lock()
 	a.logs = append(a.logs, line)
 	if len(a.logs) > maxLogs {
@@ -125,7 +128,7 @@ func (a *App) StartHost(hostURL, credential string) error {
 	c := host.New(host.Options{
 		Credential: credential,
 		NATSURL:    host.ResolveNATSURL(hostURL, ""),
-		Version:    "0.5.1",
+		Version:    "v0.5.1", // 必须带 v 前缀（服务端 ParseMajorVersion 校验）
 		OnLog: func(format string, args ...any) {
 			a.emitLog(fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
 		},
@@ -169,11 +172,12 @@ func (a *App) HostLog() string {
 // OpenPlatform 打开/聚焦平台窗口（远程 host 页面）。
 func (a *App) OpenPlatform(hostURL string) error {
 	if strings.TrimSpace(hostURL) == "" {
-		cfg, err := a.GetConfig()
-		if err != nil || cfg.Host == "" {
-			hostURL = host.DefaultHost
-		} else {
+		if a.hostOVR != "" {
+			hostURL = a.hostOVR
+		} else if cfg, err := a.GetConfig(); err == nil && cfg.Host != "" {
 			hostURL = cfg.Host
+		} else {
+			hostURL = host.DefaultHost
 		}
 	}
 	app := application.Get()
