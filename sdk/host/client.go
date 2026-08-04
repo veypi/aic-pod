@@ -271,6 +271,10 @@ func (c *Client) heartbeatLoop() {
 }
 
 func isAuthError(err error) bool {
+	// 正常关闭（nc.Close()）时 DisconnectErrHandler 的 err 为 nil，直接判否。
+	if err == nil {
+		return false
+	}
 	// nats.go 报 "Authentication Violation"/"Authorization Violation"（首字母大写），
 	// 统一小写后匹配，避免致命认证分支永不命中。
 	s := strings.ToLower(err.Error())

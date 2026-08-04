@@ -15,7 +15,6 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.jso
 | `AIC_KEY` | `-key` | `credential` | | 绑定凭证（必填），从 AIC 平台获取 |
 | `AIC_HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
 | `AIC_DIR` | `-dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
-| `AIC_NAME` | `-name` | `device_name` | 系统 hostname | 设备展示名称 |
 | `AIC_EXEC_TIMEOUT` | `-exec-timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 
 ## CLI
@@ -62,7 +61,6 @@ docker run -d \
   --name aic-pod \
   --restart unless-stopped \
   -e AIC_KEY="<key>" \
-  -e AIC_NAME="prod-server-01" \
   -e AIC_DIR=/workspace \
   -e AIC_EXEC_TIMEOUT=30m \
   -e AIC_HOST=https://ivec.ai \

@@ -36,7 +36,6 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 		Host:        "http://localhost:4000",
 		Credential:  "h1.2.secret.u1",
 		WorkDir:     "/workspace",
-		DeviceName:  "dev-box",
 		ExecTimeout: "5m",
 	}
 	if err := SaveConfig(want); err != nil {
@@ -75,12 +74,10 @@ func TestEnvOverlay(t *testing.T) {
 	t.Setenv("AIC_HOST", "http://127.0.0.1:4000")
 	t.Setenv("AIC_KEY", "k")
 	t.Setenv("AIC_DIR", "/w")
-	t.Setenv("AIC_NAME", "n")
 	t.Setenv("AIC_EXEC_TIMEOUT", "1h")
 	cfg := EnvOverlay(DefaultConfig())
 	if cfg.Host != "http://127.0.0.1:4000" || cfg.Credential != "k" ||
-		cfg.WorkDir != "/w" || cfg.DeviceName != "n" ||
-		cfg.ExecTimeout != "1h" {
+		cfg.WorkDir != "/w" || cfg.ExecTimeout != "1h" {
 		t.Fatalf("env overlay = %+v", cfg)
 	}
 	// 未设置的 env 不覆盖文件值
@@ -126,5 +123,44 @@ func TestConfigPathIsolated(t *testing.T) {
 	}
 	if filepath.Dir(p) != filepath.Join(dir, "aic") && filepath.Base(p) != "config.json" {
 		t.Fatalf("unexpected path %s", p)
+	}
+}
+
+// 损坏的配置文件：备份为 .bad 并返回默认配置，不阻断启动（进程崩溃截断写入的场景）。
+func TestLoadConfigCorrupt(t *testing.T) {
+	dir := isolateConfigDir(t)
+	p, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, nil, 0o600); err != nil { // 0 字节半文件
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("corrupt config should not error: %v", err)
+	}
+	if cfg.Host != DefaultHost {
+		t.Fatalf("host = %q, want default", cfg.Host)
+	}
+	if _, err := os.Stat(p + ".bad"); err != nil {
+		t.Fatalf("corrupt file not backed up: %v", err)
+	}
+	_ = dir
+}
+
+// Load 在文件读取失败时仍应用 env 覆盖。
+func TestLoadEnvOverlayOnError(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv("AIC_HOST", "http://env-host:1")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host != "http://env-host:1" {
+		t.Fatalf("env not applied: %+v", cfg)
 	}
 }

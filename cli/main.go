@@ -9,7 +9,7 @@
 //
 // 配置解析链：显式 flag > AIC_* 环境变量 > 配置文件 > 默认值。
 // 配置文件：os.UserConfigDir()/aic/config.json（与 desktop 共享）。
-// 环境变量：AIC_HOST / AIC_KEY / AIC_DIR / AIC_NAME / AIC_EXEC_TIMEOUT。
+// 环境变量：AIC_HOST / AIC_KEY / AIC_DIR / AIC_EXEC_TIMEOUT。
 package main
 
 import (
@@ -68,7 +68,7 @@ Run "aic <command> -h" for command options.
 
 Config chain: flags > AIC_* env > config file > defaults
   config file: `+configPathHint()+`
-  env: AIC_HOST AIC_KEY AIC_DIR AIC_NAME AIC_EXEC_TIMEOUT`)
+  env: AIC_HOST AIC_KEY AIC_DIR AIC_EXEC_TIMEOUT`)
 }
 
 func configPathHint() string {
@@ -83,7 +83,6 @@ func addCommonFlags(fs *flag.FlagSet, cfg *host.Config) {
 	fs.StringVar(&cfg.Host, "host", cfg.Host, "Platform address")
 	fs.StringVar(&cfg.Credential, "key", cfg.Credential, "Credential key (from the platform's device page)")
 	fs.StringVar(&cfg.WorkDir, "dir", cfg.WorkDir, "Working directory for exec (default: system temp dir)")
-	fs.StringVar(&cfg.DeviceName, "name", cfg.DeviceName, "Device display name (default: hostname)")
 	fs.StringVar(&cfg.ExecTimeout, "exec-timeout", cfg.ExecTimeout, "Exec background timeout (default: 30m)")
 }
 
@@ -172,8 +171,6 @@ var configKeys = map[string]func(*host.Config) *string{
 	"credential":   func(c *host.Config) *string { return &c.Credential },
 	"dir":          func(c *host.Config) *string { return &c.WorkDir },
 	"work_dir":     func(c *host.Config) *string { return &c.WorkDir },
-	"name":         func(c *host.Config) *string { return &c.DeviceName },
-	"device_name":  func(c *host.Config) *string { return &c.DeviceName },
 	"exec_timeout": func(c *host.Config) *string { return &c.ExecTimeout },
 }
 
@@ -199,7 +196,7 @@ func configCmd(args []string) {
 		}
 		field, ok := configKeys[args[0]]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown key %q (host/key/dir/name/exec_timeout)\n", args[0])
+			fmt.Fprintf(os.Stderr, "unknown key %q (host/key/dir/exec_timeout)\n", args[0])
 			os.Exit(1)
 		}
 		fmt.Println(*field(&cfg))
@@ -210,7 +207,7 @@ func configCmd(args []string) {
 		}
 		field, ok := configKeys[args[0]]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown key %q (host/key/dir/name/exec_timeout)\n", args[0])
+			fmt.Fprintf(os.Stderr, "unknown key %q (host/key/dir/exec_timeout)\n", args[0])
 			os.Exit(1)
 		}
 		*field(&cfg) = args[1]

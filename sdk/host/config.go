@@ -23,13 +23,11 @@ import (
 //	AIC_HOST          平台地址（可带路径前缀，如 http://127.0.0.1:4000/rses/aiv）
 //	AIC_KEY           绑定凭证
 //	AIC_DIR           exec/fs 缺省工作区
-//	AIC_NAME          设备展示名称
 //	AIC_EXEC_TIMEOUT  exec 后台超时（如 30m）
 type Config struct {
 	Host        string `json:"host"`                   // 平台地址（默认 DefaultHost，NATS 端点由此推断）
 	Credential  string `json:"credential"`             // 绑定凭证 <host_id>.<cred_ver>.<secret>.<uid>
 	WorkDir     string `json:"work_dir,omitempty"`     // exec/fs 缺省工作区（默认系统临时目录）
-	DeviceName  string `json:"device_name,omitempty"`  // 展示名称（默认 hostname）
 	ExecTimeout string `json:"exec_timeout,omitempty"` // exec 后台超时（默认 30m）
 }
 
@@ -56,6 +54,8 @@ func ConfigPath() (string, error) {
 }
 
 // LoadConfig 读取配置文件；文件不存在返回默认配置（非错误）。
+// 文件损坏（如进程崩溃导致的截断写入）：备份为 config.json.bad 后返回默认配置，
+// 不让坏文件阻断启动。
 func LoadConfig() (Config, error) {
 	p, err := ConfigPath()
 	if err != nil {
@@ -70,12 +70,14 @@ func LoadConfig() (Config, error) {
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return DefaultConfig(), fmt.Errorf("parse %s: %w", p, err)
+		_ = os.Rename(p, p+".bad")
+		return DefaultConfig(), nil
 	}
 	return cfg.Normalize(), nil
 }
 
 // SaveConfig 持久化配置（0600，父目录自动创建）。
+// 先写临时文件再 rename，保证原子性——进程崩溃不会留下截断的半文件。
 func SaveConfig(cfg Config) error {
 	p, err := ConfigPath()
 	if err != nil {
@@ -88,7 +90,11 @@ func SaveConfig(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 // EnvOverlay 将 AIC_* 环境变量覆盖到 cfg 上（不持久化），返回新配置。
@@ -102,9 +108,6 @@ func EnvOverlay(cfg Config) Config {
 	if v := strings.TrimSpace(os.Getenv("AIC_DIR")); v != "" {
 		cfg.WorkDir = v
 	}
-	if v := strings.TrimSpace(os.Getenv("AIC_NAME")); v != "" {
-		cfg.DeviceName = v
-	}
 	if v := strings.TrimSpace(os.Getenv("AIC_EXEC_TIMEOUT")); v != "" {
 		cfg.ExecTimeout = v
 	}
@@ -113,12 +116,10 @@ func EnvOverlay(cfg Config) Config {
 
 // Load 是配置解析链的便捷入口：配置文件 + AIC_* 环境变量覆盖。
 // 调用方的显式参数在此结果上再做最后一层覆盖。
+// 文件读取失败不阻断 env 覆盖，错误一并返回由调用方决定。
 func Load() (Config, error) {
 	cfg, err := LoadConfig()
-	if err != nil {
-		return cfg, err
-	}
-	return EnvOverlay(cfg), nil
+	return EnvOverlay(cfg), err
 }
 
 // Options 将配置转换为 host 客户端 Options（解析 ExecTimeout）。
@@ -136,7 +137,6 @@ func (cfg Config) Options(deviceType, version string, onLog func(string, ...any)
 		Host:        cfg.Host,
 		Credential:  cfg.Credential,
 		WorkDir:     cfg.WorkDir,
-		DeviceName:  cfg.DeviceName,
 		DeviceType:  deviceType,
 		Version:     version,
 		ExecTimeout: timeout,
