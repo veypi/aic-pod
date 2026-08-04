@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIC Desktop</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <img src="/icon.png" alt="AIC" class="logo">
+    <h1>AIC Desktop</h1>
+    <span class="tag">页面访问平台 · 进程内托管 host</span>
+  </div>
+  <button id="btn-open" class="primary">打开平台</button>
+</header>
+
+<main>
+  <section class="card config">
+    <h2>连接配置</h2>
+    <label>平台地址（host）
+      <input id="in-host" type="text" placeholder="https://ivec.ai">
+    </label>
+    <label>环境密钥（credential）
+      <input id="in-key" type="password" placeholder="&lt;env_id&gt;.&lt;cred_ver&gt;.&lt;secret&gt;.&lt;uid&gt;">
+    </label>
+    <div class="row">
+      <button id="btn-save">保存配置</button>
+      <span id="save-hint" class="hint"></span>
+    </div>
+  </section>
+
+  <section class="card cli">
+    <h2>后台 Host</h2>
+    <div class="row">
+      <button id="btn-start" class="primary">启动 Host</button>
+      <button id="btn-stop">停止 Host</button>
+      <span id="host-state" class="state idle">未运行</span>
+    </div>
+    <pre id="host-log" class="log"></pre>
+  </section>
+</main>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

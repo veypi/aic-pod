@@ -42,7 +42,7 @@
 
 APP_NAME   := aic-pod
 BIN_DIR    := dist
-MAIN_DIR   := ./desktop
+MAIN_DIR   := ./cli
 DOCKER_IMAGE ?= veypi/$(APP_NAME)
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
@@ -58,7 +58,7 @@ LDFLAGS    := -s -w -X main.version=$(VERSION)
 BROWSER_DIR := browser
 BROWSER_OUT := dist/aic-browser.zip
 
-.PHONY: build clean all docker-build docker-push release run-docker-test build-browser
+.PHONY: build clean all desktop docker-build docker-push release run-docker-test build-browser
 
 # 默认构建当前平台
 build:
@@ -100,7 +100,15 @@ windows-amd64:
 clean:
 	rm -rf $(BIN_DIR)
 	rm -f $(MAIN_DIR)/rsrc_windows_*.syso
+	rm -rf desktop/src-tauri/target
 	@echo "cleaned $(BIN_DIR)"
+
+# Wails v3 桌面壳：构建前端 + Go 二进制（GOWORK=off 避开总工作区干扰）
+desktop:
+	cd desktop/frontend && [ -d node_modules ] || npm install --registry=https://registry.npmmirror.com
+	cd desktop/frontend && npm run build
+	cd desktop && GOWORK=off go build -o ../$(BIN_DIR)/aic-desktop .
+	@echo "→ $(BIN_DIR)/aic-desktop"
 
 # Docker 镜像构建（需先编译对应平台二进制）
 docker-build: linux-amd64

@@ -28,7 +28,20 @@ go.work.sum
 .env
 
 # go-winres generated Windows resources (built by make windows-amd64)
-desktop/rsrc_*.syso
+cli/rsrc_*.syso
+
+# Rust/Tauri
+desktop/src-tauri/target/
+desktop/src-tauri/binaries/
+
+# Wails desktop (v3)
+desktop/frontend/node_modules/
+desktop/frontend/dist/
+desktop/frontend/bindings/
+desktop/bin/
+desktop/.task/
+desktop/build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
+desktop/build/linux/appimage/build/
 
 # Editor/IDE
 .idea/

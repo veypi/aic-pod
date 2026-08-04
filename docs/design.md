@@ -32,8 +32,12 @@ aic-pod/
 │   ├── cache.go          # 幂等缓存
 │   └── replay.go         # nonce 防重放缓存
 │
-├── desktop/              # PC 桌面客户端入口 (Windows / macOS / Linux)
+├── cli/                  # 命令行 host agent 入口 (Windows / macOS / Linux, Go)
 │   └── main.go
+│
+├── desktop/              # Tauri 桌面应用入口 (窗口/托盘/CLI 生命周期管理, Rust)
+│   ├── src-tauri/
+│   └── src/
 │
 ├── embedded/             # 嵌入式设备客户端入口 (树莓派 / IoT) (未来)
 │   └── main.go
@@ -62,7 +66,7 @@ aic-pod/
 
 ## 客户端类型
 
-### desktop — PC 桌面客户端
+### cli — 命令行 host agent
 
 | 维度 | 说明 |
 |------|------|
@@ -70,8 +74,19 @@ aic-pod/
 | **目标平台** | Windows / macOS / Linux |
 | **权限模型** | 最高（全盘文件、完整 shell） |
 | **能力** | exec（任意命令）、fs（全盘文件操作） |
-| **典型场景** | 开发服务器、个人 PC、CI Runner |
+| **典型场景** | 开发服务器、个人 PC、CI Runner、desktop 后台进程 |
 | **体积** | ~10 MB 单二进制 |
+| **参数** | `-host`（平台地址，默认 https://ivec.ai）+ `-key`；`-url` 可显式指定 NATS 端点（空 = 按 host 推断 https→wss / http→ws，拼接 /aic/api/nc） |
+
+### desktop — Tauri 桌面应用
+
+| 维度 | 说明 |
+|------|------|
+| **语言** | Rust (Tauri 2) + HTML/JS |
+| **目标平台** | Windows / macOS / Linux |
+| **形态** | 主窗口加载平台页面（-host，如 https://ivec.ai），后台托管 cli 进程（sidecar） |
+| **能力** | 窗口/托盘、cli 生命周期（启动/停止/日志）、host + 凭据配置 |
+| **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 cli 注册 |
 
 ### embedded — 嵌入式设备客户端
 
@@ -227,7 +242,7 @@ aic-pod/
 
 ### Go SDK (`sdk/`)
 
-提供完整的 AIC Env 协议实现，desktop 和 embedded 直接复用。
+提供完整的 AIC Env 协议实现，cli、embedded 和 desktop（经 sidecar 复用）直接复用。
 
 **模块划分：**
 
