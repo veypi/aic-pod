@@ -16,7 +16,8 @@ import (
 
 // App 是桌面壳的 service：配置管理 + 进程内 host 会话（同一进程，无子进程）。
 type App struct {
-	mu     sync.Mutex
+	mu     sync.Mutex   // host 会话锁
+	logMu  sync.Mutex   // 日志缓冲锁（独立于 mu：StartHost 持 mu 时 OnLog 回调仍可写日志）
 	client *host.Client // nil = 未运行
 	logs   []string     // 环形日志缓冲（最近 maxLogs 条），供前端拉取
 	local  *LocalAPI    // 本地 HTTP 服务（local_code 通道）
@@ -89,12 +90,12 @@ type HostStatus struct {
 }
 
 func (a *App) emitLog(line string) {
-	a.mu.Lock()
+	a.logMu.Lock()
 	a.logs = append(a.logs, line)
 	if len(a.logs) > maxLogs {
 		a.logs = a.logs[len(a.logs)-maxLogs:]
 	}
-	a.mu.Unlock()
+	a.logMu.Unlock()
 	// 测试/非 GUI 环境 application.Get() 为 nil，事件推送可跳过
 	if app := application.Get(); app != nil {
 		app.Event.Emit("host-log", line)
@@ -153,8 +154,8 @@ func (a *App) HostStatusQuery() HostStatus {
 
 // HostLog 返回日志缓冲（尾部最多 200 行）。
 func (a *App) HostLog() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
 	if len(a.logs) == 0 {
 		return ""
 	}
