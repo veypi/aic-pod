@@ -13,6 +13,15 @@ var assets embed.FS
 func main() {
 	svc := &App{}
 
+	local, err := newLocalAPI(svc)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := local.Start(); err != nil {
+		log.Fatal(err)
+	}
+	svc.local = local
+
 	app := application.New(application.Options{
 		Name:        "AIC Desktop",
 		Description: "AIC Desktop — 页面访问平台，进程内托管 host",
@@ -39,8 +48,9 @@ func main() {
 		log.Fatal("create main window failed")
 	}
 
-	// 应用退出时停止 host 会话（防止 NATS 连接残留）
+	// 应用退出时停止 host 会话（防止 NATS 连接残留）并关闭本地服务
 	defer svc.StopHost()
+	defer local.Stop()
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ type App struct {
 	mu     sync.Mutex
 	client *host.Client // nil = 未运行
 	logs   []string     // 环形日志缓冲（最近 maxLogs 条），供前端拉取
+	local  *LocalAPI    // 本地 HTTP 服务（local_code 通道）
 }
 
 const (
@@ -93,7 +95,10 @@ func (a *App) emitLog(line string) {
 		a.logs = a.logs[len(a.logs)-maxLogs:]
 	}
 	a.mu.Unlock()
-	application.Get().Event.Emit("host-log", line)
+	// 测试/非 GUI 环境 application.Get() 为 nil，事件推送可跳过
+	if app := application.Get(); app != nil {
+		app.Event.Emit("host-log", line)
+	}
 }
 
 func (a *App) status() HostStatus {
@@ -171,6 +176,14 @@ func (a *App) OpenPlatform(hostURL string) error {
 		}
 	}
 	app := application.Get()
+	// 拼 local_code 参数：平台页面据此建立本地通道（aic env.js 存 localStorage）
+	if a.local != nil {
+		sep := "?"
+		if strings.Contains(hostURL, "?") {
+			sep = "&"
+		}
+		hostURL = hostURL + sep + "local_code=" + url.QueryEscape(a.local.LocalCodeParam())
+	}
 	if w, ok := app.Window.Get("platform"); ok {
 		w.SetURL(hostURL)
 		w.Show()
