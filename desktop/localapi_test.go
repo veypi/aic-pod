@@ -61,12 +61,12 @@ func TestLocalAPIPing(t *testing.T) {
 func TestLocalAPICodeRequired(t *testing.T) {
 	api := newTestLocalAPI(t)
 	// 无 code → 401
-	status, _ := api.req(t, "GET", "/api/get-config", "", "")
+	status, _ := api.req(t, "GET", "/api/get_config", "", "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("no code: got %d, want 401", status)
 	}
 	// 错误 code → 401
-	status, _ = api.req(t, "GET", "/api/get-config", "wrong", "")
+	status, _ = api.req(t, "GET", "/api/get_config", "wrong", "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("wrong code: got %d, want 401", status)
 	}
@@ -74,7 +74,7 @@ func TestLocalAPICodeRequired(t *testing.T) {
 
 func TestLocalAPICorrectCode(t *testing.T) {
 	api := newTestLocalAPI(t)
-	status, body := api.req(t, "GET", "/api/get-config", api.code, "")
+	status, body := api.req(t, "GET", "/api/get_config", api.code, "")
 	if status != http.StatusOK {
 		t.Fatalf("correct code: got %d, want 200 (body %s)", status, body)
 	}
@@ -91,13 +91,13 @@ func TestLocalAPIFailLock(t *testing.T) {
 	api := newTestLocalAPI(t)
 	// 连续 5 次错误 → 锁定 1 分钟
 	for i := 0; i < 5; i++ {
-		status, _ := api.req(t, "GET", "/api/get-config", "bad", "")
+		status, _ := api.req(t, "GET", "/api/get_config", "bad", "")
 		if status != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: got %d, want 401", i, status)
 		}
 	}
 	// 锁定期间正确 code 也被拒
-	status, _ := api.req(t, "GET", "/api/get-config", api.code, "")
+	status, _ := api.req(t, "GET", "/api/get_config", api.code, "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("locked: correct code got %d, want 401", status)
 	}
@@ -105,7 +105,7 @@ func TestLocalAPIFailLock(t *testing.T) {
 	api.mu.Lock()
 	api.lockEnd = time.Now().Add(-time.Second)
 	api.mu.Unlock()
-	status, _ = api.req(t, "GET", "/api/get-config", api.code, "")
+	status, _ = api.req(t, "GET", "/api/get_config", api.code, "")
 	if status != http.StatusOK {
 		t.Fatalf("after unlock: got %d, want 200", status)
 	}
@@ -114,7 +114,7 @@ func TestLocalAPIFailLock(t *testing.T) {
 func TestLocalAPICORS(t *testing.T) {
 	api := newTestLocalAPI(t)
 	// 白名单 origin 预检 → 204 + PNA 头
-	req, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get-config", api.port), nil)
+	req, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get_config", api.port), nil)
 	req.Header.Set("Origin", "https://ivec.ai")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestLocalAPICORS(t *testing.T) {
 		t.Fatalf("missing PNA header")
 	}
 	// 非白名单 origin → 403
-	req2, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get-config", api.port), nil)
+	req2, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get_config", api.port), nil)
 	req2.Header.Set("Origin", "https://evil.example.com")
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
@@ -155,13 +155,13 @@ func TestLocalCodeParamFormat(t *testing.T) {
 	}
 }
 
-// set-config 白名单：仅 work_dir/device_name/exec_timeout 可写；
-// host/credential 即使在 body 中也不得被持久化。
+// set-config 白名单：仅 work_dir/exec_timeout 可写；
+// host/credential/device_name 即使在 body 中也不得被持久化。
 func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // 隔离配置文件（darwin UserConfigDir 用 HOME）
 	api := newTestLocalAPI(t)
 	body := `{"work_dir":"/w","device_name":"box","exec_timeout":"5m","host":"http://evil","credential":"leak"}`
-	status, resp := api.req(t, "POST", "/api/set-config", api.code, body)
+	status, resp := api.req(t, "POST", "/api/set_config", api.code, body)
 	if status != http.StatusOK {
 		t.Fatalf("set-config = %d %q", status, resp)
 	}
@@ -169,14 +169,14 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkDir != "/w" || cfg.DeviceName != "box" || cfg.ExecTimeout != "5m" {
+	if cfg.WorkDir != "/w" || cfg.ExecTimeout != "5m" {
 		t.Fatalf("whitelist fields not saved: %+v", cfg)
 	}
 	if cfg.Host != host.DefaultHost || cfg.Credential != "" {
 		t.Fatalf("non-whitelist fields persisted: %+v", cfg)
 	}
 	// 非法 exec_timeout → 400
-	status, _ = api.req(t, "POST", "/api/set-config", api.code, `{"exec_timeout":"bogus"}`)
+	status, _ = api.req(t, "POST", "/api/set_config", api.code, `{"exec_timeout":"bogus"}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad timeout = %d, want 400", status)
 	}

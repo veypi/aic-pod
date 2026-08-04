@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -87,21 +88,16 @@ func (l *LocalAPI) Start() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ping", l.handlePing)
-	mux.HandleFunc("/api/get-config", l.handleJSON(func() any {
-		cfg, _ := l.app.GetConfig()
-		return cfg
-	}, nil))
-	mux.HandleFunc("/api/set-config", l.handleSetConfig)
+	mux.HandleFunc("/api/get_config", l.handleGetConfig)
+	mux.HandleFunc("/api/set_config", l.handleSetConfig)
 	mux.HandleFunc("/api/bind", l.handleBind)
 	mux.HandleFunc("/api/unbind", l.handleUnbind)
-	mux.HandleFunc("/api/host-status", l.handleJSON(func() any {
-		return l.app.HostStatusQuery()
-	}, nil))
-	mux.HandleFunc("/api/host-log", l.handleJSON(func() any {
+	mux.HandleFunc("/api/get_status", l.handleGetStatus)
+	mux.HandleFunc("/api/get_log", l.handleJSON(func() any {
 		return l.app.HostLog()
 	}, nil))
-	mux.HandleFunc("/api/host-start", l.handleHostStart)
-	mux.HandleFunc("/api/host-stop", l.handleJSON(nil, func(v any) error {
+	mux.HandleFunc("/api/start", l.handleHostStart)
+	mux.HandleFunc("/api/stop", l.handleJSON(nil, func(v any) error {
 		l.app.StopHost()
 		return nil
 	}))
@@ -299,8 +295,62 @@ func (l *LocalAPI) handleHostStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// handleSetConfig 保存运行参数。白名单：仅 work_dir / device_name / exec_timeout
-// 可由页面配置——host/nats_url 是启动参数（flag/env），credential 只走 bind。
+// configView 是 get_config 的返回视图：不含凭证相关信息
+//（绑定设备 id 由 get_status.host_id 给出）。
+type configView struct {
+	Host        string `json:"host"`
+	WorkDir     string `json:"work_dir"`
+	ExecTimeout string `json:"exec_timeout"`
+}
+
+func boundHostID(credential string) string {
+	parts := strings.Split(strings.TrimSpace(credential), ".")
+	if len(parts) == 4 {
+		return parts[0]
+	}
+	return ""
+}
+
+// handleGetConfig 返回当前有效配置视图（不含密钥）。
+func (l *LocalAPI) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := l.app.config()
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, configView{
+		Host:        cfg.Host,
+		WorkDir:     cfg.WorkDir,
+		ExecTimeout: cfg.ExecTimeout,
+	})
+}
+
+// statusView 是 get_status 的返回：运行状态 + 基本信息（hostname/host_id/version）。
+type statusView struct {
+	Running  bool   `json:"running"`
+	HostID   string `json:"host_id"`
+	Hostname string `json:"hostname"`
+	Version  string `json:"version"`
+}
+
+func (l *LocalAPI) handleGetStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	hostname, _ := os.Hostname()
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, statusView{
+		Running:  l.app.HostStatusQuery().Running,
+		HostID:   boundHostID(l.app.config().Credential),
+		Hostname: hostname,
+		Version:  version,
+	})
+}
+
+// handleSetConfig 保存运行参数。白名单：仅 work_dir / exec_timeout
+//（host/nats_url 是启动参数，credential 只走 bind，设备名在平台改 host.name）。
 func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -308,7 +358,6 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		WorkDir     string `json:"work_dir"`
-		DeviceName  string `json:"device_name"`
 		ExecTimeout string `json:"exec_timeout"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -328,7 +377,6 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.WorkDir = strings.TrimSpace(req.WorkDir)
-	cfg.DeviceName = strings.TrimSpace(req.DeviceName)
 	cfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
 	if err := l.app.SaveConfig(cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
