@@ -56,7 +56,7 @@ func connSubject(uid, hostID string, credVer uint64, suffix string) (string, err
 
 // ---- 会话级 subject（工具流量，§6.1） ----
 
-// hostSeg 构造会话级 subject 的 host 段：物理 host 加 HostIDPrefix 前缀，
+// hostSeg 构造 subject 的 host 段：物理 host 加 HostIDPrefix 前缀，
 // page/cloud 保留字与已带前缀的输入原样（幂等）。
 func hostSeg(host string) string {
 	if host == HostCloud || host == HostPage || strings.HasPrefix(host, HostIDPrefix) {
@@ -65,7 +65,22 @@ func hostSeg(host string) string {
 	return HostIDPrefix + host
 }
 
-// ToolReqSubject 工具请求：u.{uid}.s.{sid}.h.{host}.{fs|exec}.req
+// HostToolReqSubject 物理 host 工具请求（连接级，§6.1 v3）：
+// u.{uid}.h.host_{host_id}.{tool}.req
+// 执行不绑定会话——session_id 不进 subject（由信封携带，供权限/命名/落盘）。
+// host 段带 HostIDPrefix（与 FrontendDenyPattern 同源，构成权限边界）。
+func HostToolReqSubject(uid, hostID, tool string) (string, error) {
+	if !validSeg(uid) || !validSeg(hostID) {
+		return "", fmt.Errorf("proto: invalid uid/hostID segment")
+	}
+	if tool != ToolFS && tool != ToolExec {
+		return "", fmt.Errorf("proto: invalid tool %q (must be fs|exec)", tool)
+	}
+	return fmt.Sprintf("u.%s.h.%s.%s.req", uid, hostSeg(hostID), tool), nil
+}
+
+// ToolReqSubject 工具请求（会话级，§6.1）：u.{uid}.s.{sid}.h.{host}.{tool}.req
+// 仅 page 保留使用（page 通道仍按会话隔离，连接级改造见 PageConnToolReqSubject 计划）。
 // host 段：物理 host = host_{host_id}（HostIDPrefix，构造时自动添加）；
 // page 保留字原样（1host 寻址同构）。cloud 服务端本地执行，不过 NATS。
 func ToolReqSubject(uid, sid, host, tool string) (string, error) {
@@ -88,19 +103,38 @@ func ExecReqSubject(uid, sid, host string) (string, error) {
 	return ToolReqSubject(uid, sid, host, ToolExec)
 }
 
-// HostInboxSubject 是 host 端连接时的单订阅：u.{uid}.s.*.h.host_{host_id}.>
-// 覆盖该 host 所有会话的 fs/exec 请求，无 per-session 订阅 churn。
-// host 段自动加 HostIDPrefix（与 ToolReqSubject 同源）。
+// HostInboxSubject 是物理 host 端连接时的单订阅：u.{uid}.h.host_{host_id}.>
+// 覆盖该 host 全部工具请求（fs/exec，连接级），无 per-session 订阅 churn。
+// host 段自动加 HostIDPrefix（与 HostToolReqSubject 同源）。
+// 不会匹配 caps/presence（其 host 段为裸 host_id，无前缀）。
 func HostInboxSubject(uid, hostID string) (string, error) {
 	if !validSeg(uid) || !validSeg(hostID) {
 		return "", fmt.Errorf("proto: invalid uid/hostID segment")
 	}
-	return fmt.Sprintf("u.%s.s.*.h.%s.>", uid, hostSeg(hostID)), nil
+	return fmt.Sprintf("u.%s.h.%s.>", uid, hostSeg(hostID)), nil
 }
 
-// ParseToolReqSubject 解析会话级工具请求 subject（host 端从 subject 取 sid
-// 做会话隔离——bg 注册表 {host}:{sid}:{op_id} 命名空间与 topic 一致）。
-// host 段为 host_{host_id}，解析后还原为裸 host_id（与 1host 参数一致）；
+// ParseHostToolReqSubject 解析连接级物理 host 工具请求 subject（6 段）：
+// u.{uid}.h.host_{host_id}.{tool}.req；host 段还原为裸 host_id。
+// session_id 不在 subject 中（信封 SessionID 携带）。
+func ParseHostToolReqSubject(subject string) (uid, hostID, tool string, err error) {
+	parts := strings.Split(subject, ".")
+	// u.{uid}.h.{host}.{tool}.req 恰好 6 段
+	if len(parts) != 6 || parts[0] != "u" || parts[2] != "h" || parts[5] != "req" {
+		return "", "", "", fmt.Errorf("proto: not a host tool request subject: %s", subject)
+	}
+	// 物理 host 连接级 subject 的 host 段必须带 HostIDPrefix（page 保留字走会话级）
+	if !strings.HasPrefix(parts[3], HostIDPrefix) {
+		return "", "", "", fmt.Errorf("proto: host segment missing prefix in subject: %s", subject)
+	}
+	if parts[4] != ToolFS && parts[4] != ToolExec {
+		return "", "", "", fmt.Errorf("proto: invalid tool segment in subject: %s", subject)
+	}
+	return parts[1], strings.TrimPrefix(parts[3], HostIDPrefix), parts[4], nil
+}
+
+// ParseToolReqSubject 解析会话级工具请求 subject（8 段）：
+// u.{uid}.s.{sid}.h.{host}.{tool}.req；host 段还原为裸 host_id。
 // page 保留字原样返回。
 func ParseToolReqSubject(subject string) (uid, sid, host, tool string, err error) {
 	parts := strings.Split(subject, ".")
@@ -129,12 +163,13 @@ func UserAllowPattern(uid string) (string, error) {
 	return fmt.Sprintf("u.%s.>", uid), nil
 }
 
-// FrontendDenyPattern 是前端 JWT 的 sub deny：u.{uid}.s.*.h.host_*.>
-// 物理 host 的工具流量（含文件内容、granted_level）不对浏览器端可观测——
-// 浏览器是注入风险最高的端，签名防伪造不防旁观。
+// FrontendDenyPattern 是前端 JWT 的 sub deny：u.{uid}.h.host_*.>
+// 连接级物理 host 工具流量（含文件内容、granted_level）不对浏览器端可观测——
+// 浏览器是注入风险最高的端，签名防伪造不防旁观；host_ 前缀精确匹配物理
+// host（连接级 subject，§6.1 v3），page 主题（h.page）不受影响。
 func FrontendDenyPattern(uid string) (string, error) {
 	if !validSeg(uid) {
 		return "", fmt.Errorf("proto: invalid uid segment")
 	}
-	return fmt.Sprintf("u.%s.s.*.h.%s*.>", uid, HostIDPrefix), nil
+	return fmt.Sprintf("u.%s.h.%s*.>", uid, HostIDPrefix), nil
 }

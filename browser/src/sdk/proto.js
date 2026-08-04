@@ -32,7 +32,20 @@ export function hostSeg(host) {
   return HOST_ID_PREFIX + host;
 }
 
-/** ToolReqSubject：u.{uid}.s.{sid}.h.{host}.{tool}.req（host 段自动加前缀）。 */
+/** HostToolReqSubject：物理 host 工具请求（连接级，§6.1 v3）u.{uid}.h.host_{host_id}.{tool}.req
+ * 执行不绑定会话——session_id 不进 subject（信封 SessionID 携带）。 */
+export function hostToolReqSubject(uid, hostID, tool) {
+  if (!validSeg(uid) || !validSeg(hostID)) {
+    throw new Error(`proto: invalid uid/hostID segment (uid=${uid} hostID=${hostID})`);
+  }
+  if (tool !== TOOL_FS && tool !== TOOL_EXEC) {
+    throw new Error(`proto: invalid tool ${tool} (must be fs|exec)`);
+  }
+  return `u.${uid}.h.${hostSeg(hostID)}.${tool}.req`;
+}
+
+/** ToolReqSubject：u.{uid}.s.{sid}.h.{host}.{tool}.req（host 段自动加前缀）。
+ * 仅 page 保留使用（page 通道仍按会话隔离）。 */
 export function toolReqSubject(uid, sid, host, tool) {
   if (!validSeg(uid) || !validSeg(sid) || !validSeg(host)) {
     throw new Error(`proto: invalid uid/sid/host segment (uid=${uid} sid=${sid} host=${host})`);
@@ -43,12 +56,37 @@ export function toolReqSubject(uid, sid, host, tool) {
   return `u.${uid}.s.${sid}.h.${hostSeg(host)}.${tool}.req`;
 }
 
-/** HostInboxSubject：host 端连接时的单订阅 u.{uid}.s.*.h.host_{host_id}.>。 */
+/** HostInboxSubject：host 端连接时的单订阅 u.{uid}.h.host_{host_id}.>
+ * 覆盖该 host 全部工具请求（连接级），不会匹配 caps/presence（host 段无前缀）。 */
 export function hostInboxSubject(uid, hostID) {
   if (!validSeg(uid) || !validSeg(hostID)) {
     throw new Error(`proto: invalid uid/hostID segment`);
   }
-  return `u.${uid}.s.*.h.${hostSeg(hostID)}.>`;
+  return `u.${uid}.h.${hostSeg(hostID)}.>`;
+}
+
+/**
+ * ParseHostToolReqSubject 解析连接级物理 host 工具请求 subject（6 段）：
+ * u.{uid}.h.host_{host_id}.{tool}.req → {uid, host(还原裸 id), tool}。
+ * host 段必须带 host_ 前缀（page 保留字走会话级 subject）；非法返回 null。
+ */
+export function parseHostToolReqSubject(subject) {
+  const parts = String(subject || "").split(".");
+  if (parts.length !== 6 || parts[0] !== "u" || parts[2] !== "h" || parts[5] !== "req") {
+    return null;
+  }
+  if (!parts[3].startsWith(HOST_ID_PREFIX)) {
+    return null;
+  }
+  const tool = parts[4];
+  if (tool !== TOOL_FS && tool !== TOOL_EXEC) {
+    return null;
+  }
+  return {
+    uid: parts[1],
+    host: parts[3].slice(HOST_ID_PREFIX.length),
+    tool,
+  };
 }
 
 /**

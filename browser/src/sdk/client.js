@@ -16,7 +16,7 @@
 import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
 import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
-import { hostInboxSubject, parseToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
+import { hostInboxSubject, parseHostToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
 import { PageFS } from "./page_fs.js";
 import { HistoryStore } from "./history.js";
 
@@ -319,24 +319,25 @@ export class AICClient {
   }
 
   /**
-   * 处理一条会话级工具请求（§6.2 host 端验证规范）：
+   * 处理一条工具请求（§6.2 host 端验证规范）：
    * 验签 → deadline 过期拒绝 → nonce 窗口去重 → granted_level 纵深检查 → 分发。
-   * subject: u.{uid}.s.{sid}.h.host_{host_id}.fs|exec.req
+   * subject: u.{uid}.h.host_{host_id}.fs|exec.req（连接级，§6.1 v3——
+   * 执行不绑定会话，sid/tool 从信封读取）。
    */
   async _handleToolRequest(msg) {
-    // 从 subject 解析 sid/tool（会话隔离：bg 命名空间与 topic 一致）
-    const parsed = parseToolReqSubject(msg.subject);
-    if (!parsed) {
+    // 连接级 subject：仅校验形态（无需解析 sid——信封 SessionID 携带）
+    if (!parseHostToolReqSubject(msg.subject)) {
       this._respond(msg, { msg_id: "", state: "error", error: `invalid tool request subject: ${msg.subject}` });
       return;
     }
-    const { sid, tool } = parsed;
 
     const req = parseRequest(new TextDecoder().decode(msg.data));
     if (!req) {
       this._respond(msg, { msg_id: "", state: "error", error: "invalid request: malformed JSON" });
       return;
     }
+    const sid = req.session_id || "";
+    const tool = req.tool;
 
     // 执行历史：请求解析成功即记录（后续 reject/分发经 _respond 更新状态）
     this._recordHistory({

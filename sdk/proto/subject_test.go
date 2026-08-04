@@ -24,12 +24,21 @@ func TestSubjects(t *testing.T) {
 	if err != nil || ex != "u.u1.s.s9.h.page.exec.req" {
 		t.Errorf("ExecReqSubject(page) = %q, %v", ex, err)
 	}
+	// 连接级物理 host subject（§6.1 v3）：执行不绑定会话
+	hfs, err := HostToolReqSubject("u1", "host_abc", ToolFS)
+	if err != nil || hfs != "u.u1.h.host_abc.fs.req" {
+		t.Errorf("HostToolReqSubject = %q, %v", hfs, err)
+	}
+	hfs2, err := HostToolReqSubject("u1", "abc", ToolExec)
+	if err != nil || hfs2 != "u.u1.h.host_abc.exec.req" {
+		t.Errorf("HostToolReqSubject(raw id) = %q, %v", hfs2, err)
+	}
 	inbox, err := HostInboxSubject("u1", "host_abc")
-	if err != nil || inbox != "u.u1.s.*.h.host_abc.>" {
+	if err != nil || inbox != "u.u1.h.host_abc.>" {
 		t.Errorf("HostInboxSubject = %q, %v", inbox, err)
 	}
 	inbox2, err := HostInboxSubject("u1", "abc")
-	if err != nil || inbox2 != "u.u1.s.*.h.host_abc.>" {
+	if err != nil || inbox2 != "u.u1.h.host_abc.>" {
 		t.Errorf("HostInboxSubject(raw id) = %q, %v", inbox2, err)
 	}
 	allow, err := UserAllowPattern("u1")
@@ -37,7 +46,7 @@ func TestSubjects(t *testing.T) {
 		t.Errorf("UserAllowPattern = %q, %v", allow, err)
 	}
 	deny, err := FrontendDenyPattern("u1")
-	if err != nil || deny != "u.u1.s.*.h.host_*.>" {
+	if err != nil || deny != "u.u1.h.host_*.>" {
 		t.Errorf("FrontendDenyPattern = %q, %v", deny, err)
 	}
 	if g := PageQueueGroup("s9"); g != "page-s9" {
@@ -63,7 +72,7 @@ func TestSubjects(t *testing.T) {
 }
 
 func TestParseToolReqSubject(t *testing.T) {
-	// host 段 host_{host_id} 解析后还原为裸 host_id（与 1host 参数一致）
+	// 会话级（page 通道）：host 段 host_{host_id} 解析后还原为裸 host_id
 	uid, sid, host, tool, err := ParseToolReqSubject("u.u1.s.s9.h.host_abc.exec.req")
 	if err != nil || uid != "u1" || sid != "s9" || host != "abc" || tool != ToolExec {
 		t.Errorf("parse = %q %q %q %q, %v", uid, sid, host, tool, err)
@@ -74,13 +83,32 @@ func TestParseToolReqSubject(t *testing.T) {
 		t.Errorf("parse page = %q, %v", phost, err)
 	}
 	for _, s := range []string{
-		"u.u1.h.host_abc.1.caps",       // 连接级
+		"u.u1.h.host_abc.fs.req",       // 连接级（HostToolReqSubject）
 		"u.u1.s.s9.h.host_abc.git.req", // 非法指令集段
 		"u.u1.s.s9.h.host_abc.fs",      // 缺 .req
 		"u.u1.s.s9.h.host_abc.fs.req.extra",
 	} {
 		if _, _, _, _, err := ParseToolReqSubject(s); err == nil {
 			t.Errorf("ParseToolReqSubject(%q) want error", s)
+		}
+	}
+}
+
+func TestParseHostToolReqSubject(t *testing.T) {
+	// 连接级：u.{uid}.h.host_{host_id}.{tool}.req，还原裸 host_id，无 sid
+	uid, host, tool, err := ParseHostToolReqSubject("u.u1.h.host_abc.exec.req")
+	if err != nil || uid != "u1" || host != "abc" || tool != ToolExec {
+		t.Errorf("parse host = %q %q %q, %v", uid, host, tool, err)
+	}
+	for _, s := range []string{
+		"u.u1.s.s9.h.host_abc.fs.req", // 会话级（工具请求应走连接级）
+		"u.u1.h.host_abc.1.caps",      // caps（host 段无前缀 + credVer 段）
+		"u.u1.h.page.fs.req",          // page 保留字不属于物理 host 连接级
+		"u.u1.h.host_abc.git.req",
+		"u.u1.h.host_abc.fs",
+	} {
+		if _, _, _, err := ParseHostToolReqSubject(s); err == nil {
+			t.Errorf("ParseHostToolReqSubject(%q) want error", s)
 		}
 	}
 }
