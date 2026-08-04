@@ -50,6 +50,9 @@ GOHOSTARCH := $(shell go env GOHOSTARCH)
 # VERSION：git 版本（tag 优先，无 tag 时为短 commit hash，如 v0.2.0-3-g9be711f），
 # 注入 desktop 二进制（ldflags -X main.version）并用作 docker 镜像 tag。
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Windows 资源版本号：从 VERSION 提取纯数字点分（v0.5.1-dirty → 0.5.1），
+# go-winres 不接受 dirty 后缀（git-tag 特殊值会产出乱码版本资源）。
+WIN_VERSION := $(shell echo $(VERSION) | sed 's/^v//; s/-.*//')
 LDFLAGS    := -s -w -X main.version=$(VERSION)
 
 BROWSER_DIR := browser
@@ -88,11 +91,15 @@ darwin-arm64:
 
 windows-amd64:
 	@mkdir -p $(BIN_DIR)
+	@echo "→ generating Windows resources (icon + version info)..."
+	cd $(MAIN_DIR) && go-winres make --in ../resources/winres.json --arch amd64 \
+		--product-version $(WIN_VERSION) --file-version $(WIN_VERSION) --out rsrc
 	cd $(MAIN_DIR) && GOWORK=off GOOS=windows GOARCH=amd64 GOWORK=off CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(APP_NAME)-windows-amd64.exe" .
 	@echo "→ $(BIN_DIR)/$(APP_NAME)-windows-amd64.exe"
 
 clean:
 	rm -rf $(BIN_DIR)
+	rm -f $(MAIN_DIR)/rsrc_windows_*.syso
 	@echo "cleaned $(BIN_DIR)"
 
 # Docker 镜像构建（需先编译对应平台二进制）
@@ -151,7 +158,7 @@ help:
 	@echo "  make linux-arm64      build linux/arm64"
 	@echo "  make darwin-amd64     build darwin/amd64"
 	@echo "  make darwin-arm64     build darwin/arm64"
-	@echo "  make windows-amd64    build windows/amd64"
+	@echo "  make windows-amd64    build windows/amd64 (icon+version via go-winres, need: go install github.com/tc-hib/go-winres@latest)"
 	@echo "  make docker-build     build docker image ($(DOCKER_IMAGE):$(VERSION))"
 	@echo "  make docker-build-arm64 build linux/arm64 docker image"
 	@echo "  make docker-push      push docker image"
