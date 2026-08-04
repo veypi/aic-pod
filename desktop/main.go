@@ -47,6 +47,17 @@ func main() {
 		Services: []application.Service{
 			application.NewService(svc),
 		},
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID: "ai.ivec.desktop",
+			ExitCode: 0,
+			OnSecondInstanceLaunch: func(_ application.SecondInstanceData) {
+				// 已运行：聚焦现有平台窗口（local_code 端口唯一，避免多实例端口失配）
+				if w, ok := application.Get().Window.Get("platform"); ok {
+					w.Show()
+					w.Focus()
+				}
+			},
+		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
