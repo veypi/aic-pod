@@ -181,3 +181,26 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 		t.Fatalf("bad timeout = %d, want 400", status)
 	}
 }
+
+// unbind：清除凭证但保留 host/运行参数。
+func TestLocalAPIUnbind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	api := newTestLocalAPI(t)
+	if err := host.SaveConfig(host.Config{Host: "http://x:1", Credential: "h.1.s.u", WorkDir: "/w"}); err != nil {
+		t.Fatal(err)
+	}
+	status, resp := api.req(t, "POST", "/api/unbind", api.code, "{}")
+	if status != http.StatusOK {
+		t.Fatalf("unbind = %d %q", status, resp)
+	}
+	cfg, err := host.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Credential != "" {
+		t.Fatalf("credential not cleared: %+v", cfg)
+	}
+	if cfg.Host != "http://x:1" || cfg.WorkDir != "/w" {
+		t.Fatalf("other fields lost: %+v", cfg)
+	}
+}

@@ -93,6 +93,7 @@ func (l *LocalAPI) Start() error {
 	}, nil))
 	mux.HandleFunc("/api/set-config", l.handleSetConfig)
 	mux.HandleFunc("/api/bind", l.handleBind)
+	mux.HandleFunc("/api/unbind", l.handleUnbind)
 	mux.HandleFunc("/api/host-status", l.handleJSON(func() any {
 		return l.app.HostStatusQuery()
 	}, nil))
@@ -248,6 +249,26 @@ func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "host": cfg.Host})
+}
+
+// handleUnbind 解绑设备：停止 host 会话并清除配置中的凭证（host/运行参数保留）。
+func (l *LocalAPI) handleUnbind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	l.app.StopHost()
+	cfg, err := host.LoadConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cfg.Credential = ""
+	if err := l.app.SaveConfig(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 // handleHostStart 启动 host 会话（body 可携带临时覆盖，不持久化）。
