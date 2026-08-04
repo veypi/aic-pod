@@ -109,7 +109,7 @@ clean:
 # 源码无变化时跳过；-s -w 瘦身（19MB→12.8MB）。
 desktop:
 	@if [ ! -f $(BIN_DIR)/aic-desktop ] || [ -n "$$(find desktop -name '*.go' -newer $(BIN_DIR)/aic-desktop 2>/dev/null | head -1)" ]; then \
-		cd desktop && GOWORK=off go build -ldflags "-s -w" -o ../$(BIN_DIR)/aic-desktop .; \
+		cd desktop && GOWORK=off go build -ldflags "-s -w -X main.version=$(VERSION)" -o ../$(BIN_DIR)/aic-desktop .; \
 	else \
 		echo "→ $(BIN_DIR)/aic-desktop up to date"; \
 	fi

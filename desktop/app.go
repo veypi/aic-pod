@@ -125,15 +125,14 @@ func (a *App) StartHost(hostURL, credential string) error {
 	if strings.TrimSpace(hostURL) == "" {
 		hostURL = host.DefaultHost
 	}
-	c := host.New(host.Options{
+	c, err := host.Connect(hostURL, "", host.Options{
 		Credential: credential,
-		NATSURL:    host.ResolveNATSURL(hostURL, ""),
-		Version:    "v0.5.1", // 必须带 v 前缀（服务端 ParseMajorVersion 校验）
+		Version:    version, // 与 cli 同一版本来源（Makefile -X main.version 注入）
 		OnLog: func(format string, args ...any) {
 			a.emitLog(fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...)))
 		},
 	})
-	if err := c.Connect(); err != nil {
+	if err != nil {
 		return err
 	}
 	a.client = c

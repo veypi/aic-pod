@@ -9,6 +9,10 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
+// version 与 cli 同一来源：Makefile desktop target 经 -X main.version=$(VERSION)
+// 注入 git 版本（如 v0.5.1），desktop 与 cli 永远同一版本。
+var version = "v0.5.1"
+
 func main() {
 	svc := &App{}
 

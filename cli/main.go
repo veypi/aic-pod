@@ -81,16 +81,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := host.New(host.Options{
+	client, err := host.Connect(hostURL, natsURL, host.Options{
 		Credential:  envCred,
-		NATSURL:     host.ResolveNATSURL(hostURL, natsURL),
 		WorkDir:     workDir,
 		DeviceName:  deviceName,
 		Version:     version,
 		ExecTimeout: execTimeout,
 	})
-
-	if err := client.Connect(); err != nil {
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "connect: %v\n", err)
 		os.Exit(1)
 	}
