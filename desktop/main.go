@@ -1,14 +1,11 @@
 package main
 
 import (
-	"embed"
+	"fmt"
 	"log"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
-
-//go:embed all:frontend
-var assets embed.FS
 
 func main() {
 	svc := &App{}
@@ -22,30 +19,28 @@ func main() {
 	}
 	svc.local = local
 
+	// 已配置的设备：后台自动连接 host（失败记录日志，不阻塞窗口）
+	if cfg, err := svc.GetConfig(); err == nil && cfg.Credential != "" {
+		if err := svc.StartHost(cfg.Host, cfg.Credential); err != nil {
+			svc.emitLog(fmt.Sprintf("auto start host failed: %v", err))
+		}
+	}
+
 	app := application.New(application.Options{
 		Name:        "AIC Desktop",
 		Description: "AIC Desktop — 页面访问平台，进程内托管 host",
 		Services: []application.Service{
 			application.NewService(svc),
 		},
-		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(assets),
-		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
 
-	w := app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:     "AIC Desktop",
-		Width:     960,
-		Height:    680,
-		MinWidth:  720,
-		MinHeight: 480,
-		URL:       "/",
-	})
-	if w == nil {
-		log.Fatal("create main window failed")
+	// 主窗口 = 平台页面（URL 自动携带 ?local_code={port}.{code}，
+	// 本地配置统一走平台 /settings/local，桌面壳不再提供本地管理页）
+	if err := svc.OpenPlatform(""); err != nil {
+		log.Fatal(err)
 	}
 
 	// 应用退出时停止 host 会话（防止 NATS 连接残留）并关闭本地服务

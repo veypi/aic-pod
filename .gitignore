@@ -34,8 +34,7 @@ cli/rsrc_*.syso
 desktop/src-tauri/target/
 desktop/src-tauri/binaries/
 
-# Wails desktop (v3，零构建：无 npm/vite)
-desktop/frontend/bindings/
+# Wails desktop (v3，无本地前端：主窗口直接平台页面)
 desktop/bin/
 desktop/.task/
 desktop/build/windows/nsis/MicrosoftEdgeWebview2Setup.exe

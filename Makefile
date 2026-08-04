@@ -103,9 +103,9 @@ clean:
 	rm -rf desktop/src-tauri/target
 	@echo "cleaned $(BIN_DIR)"
 
-# Wails v3 桌面壳：生成绑定（-b 内置 runtime，零 npm）→ Go 二进制（GOWORK=off 避开总工作区干扰）
+# Wails v3 桌面壳：主窗口直接加载平台页面（无本地前端），local_code 通道由
+# localapi 提供，配置统一走平台 /settings/local。GOWORK=off 避开总工作区干扰。
 desktop:
-	cd desktop && GOWORK=off wails3 generate bindings -b -d frontend/bindings
 	cd desktop && GOWORK=off go build -o ../$(BIN_DIR)/aic-desktop .
 	@echo "→ $(BIN_DIR)/aic-desktop"
 
