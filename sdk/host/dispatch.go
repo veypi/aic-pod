@@ -196,7 +196,12 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 
 	// 本地命令（§5.9：探测声明的 shell/git）：PATH 查找、workdir = 进程 cwd、
 	// 日志文件、deadline 超时自动后台化，统一经 exec_procs 托管
-	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, p.Workdir)
+	// workdir 缺省回落：请求未携带时用 host 端配置工作区（与虚拟指令 newEnv 同语义）
+	workdir := p.Workdir
+	if workdir == "" {
+		workdir = c.opts.WorkDir
+	}
+	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, workdir)
 }
 
 // isCoreCommand 判定 action 是否为核心 8 虚拟指令（vcore 内存执行）。

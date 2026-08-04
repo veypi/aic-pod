@@ -300,3 +300,34 @@ func TestDispatchBrowserVirtual(t *testing.T) {
 		t.Errorf("browser args = %s", log)
 	}
 }
+
+// 本地命令 workdir 缺省回落：请求未携带 workdir 时使用 host 端配置工作区（§2.1.1）。
+func TestExecCmdWorkdirFallback(t *testing.T) {
+	wd := t.TempDir()
+	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute})
+	c.hostID = "host_test01"
+
+	// 不带 workdir → bash -c pwd 应返回配置工作区
+	data := signedReq(t, c, "exec", map[string]any{
+		"action": "bash", "argv": []string{"-c", "pwd"},
+	}, 9)
+	resp := c.dispatch(context.Background(), testSubject, data)
+	if resp.State != proto.StateCompleted {
+		t.Fatalf("dispatch: %+v", resp)
+	}
+	if !strings.Contains(resp.Content, wd) {
+		t.Fatalf("cwd = %q, want contains %q", resp.Content, wd)
+	}
+
+	// 显式 workdir 优先
+	data2 := signedReq(t, c, "exec", map[string]any{
+		"action": "bash", "argv": []string{"-c", "pwd"}, "workdir": "/tmp",
+	}, 9)
+	resp2 := c.dispatch(context.Background(), testSubject, data2)
+	if resp2.State != proto.StateCompleted {
+		t.Fatalf("dispatch: %+v", resp2)
+	}
+	if !strings.Contains(resp2.Content, "/tmp") || strings.Contains(resp2.Content, wd) {
+		t.Fatalf("explicit workdir not honored: %q (want /tmp)", resp2.Content)
+	}
+}
