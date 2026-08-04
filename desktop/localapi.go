@@ -16,8 +16,9 @@ import (
 //
 // 平台窗口 URL 携带 ?local_code={port}.{code}，页面（aic ui env.js）存入
 // localStorage，local_handler.js 据此构造桥对象（window.localHandler）。
-// 所有 API 请求须带 x-aic-code 头，code 由桌面随机生成（32 hex）、30 分钟
-// 过期、桌面退出/重启即作废；连续 5 次校验失败锁定 1 分钟。
+// 所有 API 请求须带 x-aic-code 头，code 由桌面随机生成（32 hex），生命周期
+// = 桌面进程：启动时生成存内存，退出即消失，无过期/作废逻辑；
+// 连续 5 次校验失败锁定 1 分钟（防暴力）。
 //
 // 安全边界：
 //   - 仅监听 127.0.0.1 随机端口（不对外）
@@ -30,13 +31,9 @@ type LocalAPI struct {
 	srv     *http.Server
 	port    int
 	code    string
-	codeExp time.Time
 	failCnt int
 	lockEnd time.Time
 }
-
-// localCodeTTL 是 local_code 的有效期（与 aic env.js 30 分钟过期保持一致）。
-const localCodeTTL = 30 * time.Minute
 
 // defaultOrigins 是允许跨域访问本地服务的平台源（可扩展）。
 func defaultOrigins() []string {
@@ -53,9 +50,8 @@ func newLocalAPI(app *App) (*LocalAPI, error) {
 		return nil, err
 	}
 	l := &LocalAPI{
-		app:     app,
-		code:    hex.EncodeToString(buf),
-		codeExp: time.Now().Add(localCodeTTL),
+		app:  app,
+		code: hex.EncodeToString(buf),
 	}
 	return l, nil
 }
@@ -154,9 +150,6 @@ func (l *LocalAPI) checkCode(r *http.Request) bool {
 	defer l.mu.Unlock()
 	now := time.Now()
 	if now.Before(l.lockEnd) {
-		return false
-	}
-	if now.After(l.codeExp) {
 		return false
 	}
 	if r.Header.Get("x-aic-code") != l.code {
