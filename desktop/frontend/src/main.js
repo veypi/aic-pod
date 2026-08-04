@@ -1,6 +1,7 @@
 // AIC Desktop 管理页：配置 + host 会话生命周期 + 日志
-import { Events } from "@wailsio/runtime";
-import { App } from "../bindings/aic-desktop/index";
+// 零构建：Wails AssetServer 内置 /wails/runtime.js，bindings 由 wails3 generate bindings -b 生成
+import { Events } from "/wails/runtime.js";
+import { App } from "./bindings/aic-desktop/index.js";
 
 const $ = (id) => document.getElementById(id);
 const inHost = $("in-host"), inKey = $("in-key");

@@ -103,11 +103,9 @@ clean:
 	rm -rf desktop/src-tauri/target
 	@echo "cleaned $(BIN_DIR)"
 
-# Wails v3 桌面壳：生成绑定 → 构建前端 → Go 二进制（GOWORK=off 避开总工作区干扰）
+# Wails v3 桌面壳：生成绑定（-b 内置 runtime，零 npm）→ Go 二进制（GOWORK=off 避开总工作区干扰）
 desktop:
-	cd desktop/frontend && [ -d node_modules ] || npm install --registry=https://registry.npmmirror.com
-	cd desktop && GOWORK=off wails3 generate bindings -d frontend/bindings
-	cd desktop/frontend && npm run build
+	cd desktop && GOWORK=off wails3 generate bindings -b -d frontend/bindings
 	cd desktop && GOWORK=off go build -o ../$(BIN_DIR)/aic-desktop .
 	@echo "→ $(BIN_DIR)/aic-desktop"
 

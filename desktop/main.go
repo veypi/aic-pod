@@ -7,7 +7,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-//go:embed all:frontend/dist
+//go:embed all:frontend
 var assets embed.FS
 
 func main() {
