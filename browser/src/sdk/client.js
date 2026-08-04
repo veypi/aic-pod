@@ -16,7 +16,7 @@
 import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
 import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
-import { hostInboxSubject, parseHostToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
+import { hostInboxSubject, parseToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
 import { PageFS } from "./page_fs.js";
 import { HistoryStore } from "./history.js";
 
@@ -325,8 +325,8 @@ export class AICClient {
    * 执行不绑定会话，sid/tool 从信封读取）。
    */
   async _handleToolRequest(msg) {
-    // 连接级 subject：仅校验形态（无需解析 sid——信封 SessionID 携带）
-    if (!parseHostToolReqSubject(msg.subject)) {
+    // 连接级 subject：仅校验形态（sid/tool 从信封读取）
+    if (!parseToolReqSubject(msg.subject)) {
       this._respond(msg, { msg_id: "", state: "error", error: `invalid tool request subject: ${msg.subject}` });
       return;
     }
