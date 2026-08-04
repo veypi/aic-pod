@@ -24,30 +24,6 @@ type App struct {
 
 const maxLogs = 500
 
-// consoleURL 由平台地址推导控制台入口（aic SPA 挂载在 {host}/aic/ 下，
-// host 可带产品壳路径前缀，如 http://127.0.0.1:4000/rses/aiv → .../rses/aiv/aic/）。
-func consoleURL(hostURL string) string {
-	h := strings.TrimSpace(hostURL)
-	if h == "" {
-		h = host.DefaultHost
-	}
-	if !strings.Contains(h, "://") {
-		h = "https://" + h
-	}
-	u, err := url.Parse(h)
-	if err != nil || u.Host == "" {
-		return h
-	}
-	p := strings.TrimSuffix(u.Path, "/")
-	if !strings.HasSuffix(p, "/aic") {
-		p += "/aic"
-	}
-	u.Path = p + "/"
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
-}
-
 // AppConfig 是 host.Config 的别名（Wails 绑定与测试沿用旧名）。
 type AppConfig = host.Config
 
@@ -155,7 +131,6 @@ func (a *App) OpenPlatform(hostURL string) error {
 	if strings.TrimSpace(hostURL) == "" {
 		hostURL = a.config().Host
 	}
-	hostURL = consoleURL(hostURL)
 	app := application.Get()
 	// 拼 local_code 参数：平台页面据此建立本地通道（aic env.js 存 localStorage）
 	if a.local != nil {
