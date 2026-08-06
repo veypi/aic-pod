@@ -61,7 +61,7 @@ async function handleLocalCall(msg) {
       };
     }
     case "get_log":
-      return { data: "" };
+      return { data: { log: "" } };
     case "start":
       try {
         await connect(await loadSettings());
@@ -97,8 +97,8 @@ const CONNECT_TIMEOUT_MS = 15000;
 const BROWSER_LEVEL = 2;
 
 // ---- 核心虚拟指令（vcmd，§5.4：与 page 端同一份 vcmd.js，操作扩展 PageFS）----
-// 分级与 Go sdk/vcore/levels.go execCoreLevels 对齐：ls/rg/tree=Read(1)，rm/curl=Write(2)。
-// desc/help 与 Go sdk/vcore/meta.go 同源；curl 无 cloud SSRF 行（扩展 fetch 无该限制）。
+// 分级与 Go libs/vcore/levels.go execCoreLevels 对齐：ls/rg/tree=Read(1)，rm/curl=Write(2)。
+// desc/help 与 Go libs/vcore/meta.go 同源；curl 无 cloud SSRF 行（扩展 fetch 无该限制）。
 const VCMD_DECLS = [
   {
     name: "ls",
@@ -202,7 +202,7 @@ function connect(settings) {
     client = c;
 
   client.registerCommand("browser", BROWSER_LEVEL, browserHandler, {
-    // desc/help 与 Go sdk/vcore/meta.go 的 browser 条目同源（命令语义以 agent-browser 为基准）
+    // desc/help 与 Go libs/vcore/meta.go 的 browser 条目同源（命令语义以 agent-browser 为基准）
     desc: "control a web browser (agent-browser CLI)",
     help: `browser <subcommand> [args...] — browser automation (AIC Browser Extension, v2)
 

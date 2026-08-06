@@ -1,5 +1,5 @@
 // client.test.js — 扩展 host 客户端 caps 恒声明与 commands 自答
-// 对齐 Go sdk/host/client.go buildCommandTable + dispatch.go commandsJSON（§5.1/§5.2）：
+// 对齐 Go libs/host/client.go buildCommandTable + dispatch.go commandsJSON（§5.1/§5.2）：
 //   - caps.exec.commands 恒声明 commands（level=1，desc/help 与 vcore meta.go 同源）
 //   - commands 自答输出 {"commands": [{name, desc}]}（{name, desc} 视图，不含 level/help）
 import { test } from "node:test";
@@ -70,7 +70,7 @@ test("registerCommand 显式覆盖恒声明 commands（保留名）", () => {
   assert.equal(client.commands.get("commands").requiredLevel, 3);
 });
 
-// resolveNatsURL/platformURL：与 Go sdk/host/natsurl.go 同语义
+// resolveNatsURL/platformURL：与 Go libs/host/natsurl.go 同语义
 import { resolveNatsURL, platformURL } from "./client.js";
 
 test("resolveNatsURL: 协议推断与路径前缀", () => {

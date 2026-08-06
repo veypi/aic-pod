@@ -1,4 +1,4 @@
-// argv.js 双层解析测试（与 Go sdk/argv.go、aic libs/tools 行为一致）
+// argv.js 双层解析测试（与 Go libs/vcore/argv.go、aic libs/tools 行为一致）
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseActionArgv, looksLikeFlagName } from "./argv.js";

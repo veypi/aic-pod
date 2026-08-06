@@ -1,7 +1,7 @@
 /**
  * crypto.js — HKDF-SHA256 + HMAC-SHA256 via Web Crypto API
  *
- * Ported from Go SDK: sdk/crypto.go
+ * Ported from Go: libs/proto/sign.go
  * Uses SubtleCrypto instead of Go's crypto/hmac + hkdf package.
  */
 

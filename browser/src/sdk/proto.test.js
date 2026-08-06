@@ -1,4 +1,4 @@
-// proto.test.js — 协议层固定向量（与 Go sdk/proto/subject_test.go 同源）
+// proto.test.js — 协议层固定向量（与 Go libs/proto/subject_test.go 同源）
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

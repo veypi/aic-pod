@@ -1,7 +1,7 @@
 /**
  * auth.js — 连接 token 生成 + 工具请求验签（指令集 v2）
  *
- * Ported from Go SDK: sdk/proto/sign.go
+ * Ported from Go: libs/proto/sign.go
  * canonical 输入与 Go 侧位级一致（JSON 字段序即签名输入序，禁止各自另写）。
  * 固定向量见 sdk/auth.test.js（与 Go vectors_test.go 同源）。
  */

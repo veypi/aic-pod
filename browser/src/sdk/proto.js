@@ -189,7 +189,7 @@ function scanValue(text, start) {
  * buildCaps 构造 caps v2（§6.3）：
  *   - fsActions：null = 全部 3 个 action；[] = 不支持 fs
  *   - commands：exec 统一命令声明表 [{name, desc?, help?, level}]（§6.3，
- *     与 Go sdk/proto.CommandDecl 同构）；未声明的命令服务端一律拒绝
+ *     与 Go libs/proto.CommandDecl 同构）；未声明的命令服务端一律拒绝
  */
 export function buildCaps({ hostID, credVer, version, deviceType, deviceName, fsActions = [], commands = [] }) {
   const caps = {

@@ -1,7 +1,7 @@
 /**
  * client.js — AIC host NATS client for Chrome Extension（指令集 v2）
  *
- * 对齐 Go SDK: sdk/host/client.go + dispatch.go（§6.1/§6.2）：
+ * 对齐 Go: libs/host/client.go + dispatch.go（§6.1/§6.2）：
  *   - 连接级 subject（caps/presence）不变：u.{uid}.h.{host_id}.{cred_ver}.caps|presence
  *   - 工具流量会话级：单订阅 u.{uid}.s.*.h.host_{host_id}.>（HostInboxSubject），
  *     subject 解析取 sid/tool，响应经 NATS req-reply 返回
@@ -25,7 +25,7 @@ export { errors as natsErrors } from "../lib/nats/nats-core.js";
 
 const HEARTBEAT_INTERVAL = 20_000; // 20s
 
-// COMMANDS_DECL 恒声明 commands（§5.1：与 Go sdk/vcore/meta.go 的 commands 条目同源，
+// COMMANDS_DECL 恒声明 commands（§5.1：与 Go libs/vcore/meta.go 的 commands 条目同源，
 // 禁止另行声明）：desc 输出给 AI（commands），help 由服务端 procs 拦截 `--help` 返回。
 // 服务端对 host 的 commands 走应答式转发（§5.2，与 page 同构），扩展端自答。
 const COMMANDS_DECL = {
@@ -37,7 +37,7 @@ const COMMANDS_DECL = {
     "  use `action --help` for the full help of any command",
 };
 
-// FS_REQUIRED 与 Go sdk/vcore/levels.go FSRequired 同源（§2.4，禁止各自另写）：
+// FS_REQUIRED 与 Go libs/vcore/levels.go FSRequired 同源（§2.4，禁止各自另写）：
 // read=Read(1)，write/edit=Write(2)，未声明 action 兜底 Danger(3)。
 const FS_REQUIRED = { read: Level.READ, write: Level.WRITE, edit: Level.WRITE };
 // FS_ACTIONS caps 声明（与 Go proto.AllFSActions 对齐：全集显式声明，非 null）。
@@ -79,7 +79,7 @@ function withTimeout(p, ms, msg) {
   });
 }
 
-// resolveNatsURL 由平台地址推导 NATS WebSocket 端点（与 Go sdk/host/natsurl.go 同一语义）：
+// resolveNatsURL 由平台地址推导 NATS WebSocket 端点（与 Go libs/host/natsurl.go 同一语义）：
 // http→ws、https→wss、ws/wss 保留；无 scheme 补 https；host 可带路径前缀。
 export function resolveNatsURL(host) {
   let h = (host || "").trim() || "https://ivec.ai";
@@ -142,7 +142,7 @@ export class AICClient {
   /**
    * Register an exec command (caps v2 §6.3 统一命令声明表). Must be called before connect().
    * 注册信息 = {name, desc, help, level}：desc 输出给 AI（commands），help 由服务端
-   * procs 拦截 `--help` 返回，level 仅供服务端审批判断——均与 Go sdk/vcore/meta.go 同源。
+   * procs 拦截 `--help` 返回，level 仅供服务端审批判断——均与 Go libs/vcore/meta.go 同源。
    * stateful/backgroundable 为命令内部实现细节（串行链/后台化），不进协议。
    * @param {string} name 命令名（如 "browser"）
    * @param {number} requiredLevel 基础权限等级（§2.4，风险子命令动态提升由 handler 侧判定）

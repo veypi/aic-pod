@@ -1,5 +1,5 @@
 // auth.test.js — 密钥派生与签名固定向量
-// 与 Go sdk/proto/sign_test.go + vectors_test.go 同源（位级一致，零漂移）。
+// 与 Go libs/proto/sign_test.go + vectors_test.go 同源（位级一致，零漂移）。
 // 修改派生参数或 canonical 结构必须同步更新本文件与 Go 侧，并视为协议变更。
 import { test } from "node:test";
 import assert from "node:assert/strict";
