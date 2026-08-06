@@ -6,13 +6,15 @@
  *     snapshot/tab/wait/sleep，输入输出结构与 agent-browser 一致
  *   - eval 走 chrome.debugger CDP Runtime.evaluate（DevTools 语义：不受页面 CSP
  *     限制、可 await Promise、可访问页面 JS 变量；每次 attach/detach 短提示条）
- *   - 扩展集（save/upload/pipeline/var）未实现 → 统一 unknown action 错误
+ *   - agent-browser 独有子命令（type/fill/back/reload/upload 等）未实现 →
+ *     统一 unknown action（help Unsupported 区标注，输入/导航用 eval 替代）
  *   - @ref 代次机制（§5.3）：每次 snapshot 递增代次号并写入元素定位属性
  *     data-aic-ref="{gen}:e{N}"；按当前 gen 解析，不命中即报统一 stale ref 错误
  *   - flags 全双横线长形式（§2.1 双层解析，sdk/argv.js）
  */
 
 import { parseActionArgv } from "../sdk/argv.js";
+import { loadSettings } from "../sdk/storage.js";
 
 // ---- action 全集与 flag 表（§5.2/§2.1） ----
 
@@ -20,8 +22,20 @@ const CORE_ACTIONS = [
   "open", "click", "close", "download", "eval", "get", "network",
   "read", "screenshot", "snapshot", "tab", "wait", "sleep",
 ];
-const EXT_ACTIONS = ["save", "upload", "pipeline", "var"];
-const ALL_ACTIONS = [...CORE_ACTIONS, ...EXT_ACTIONS].sort();
+// 真实支持集（2026-08-06：EXT_ACTIONS 占位 save/upload/pipeline/var 已删除——
+// var/pipeline/save 为旧设计废弃；upload 未实现，列入 help Unsupported 区）。
+const ALL_ACTIONS = [...CORE_ACTIONS].sort();
+
+// agent-browser CLI 有但本 host 未实现的子命令（help Unsupported 区展示，
+// 调用即报 unknown action；type/fill 等输入类用 eval 注入 JS 替代）。
+const UNSUPPORTED_ACTIONS = [
+  "type", "fill", "press", "keyboard", "hover", "focus", "check", "uncheck",
+  "select", "drag", "dblclick", "scroll", "scrollintoview", "pdf", "back",
+  "forward", "reload", "is", "find", "mouse", "set", "cookies", "storage",
+  "diff", "trace", "profiler", "record", "console", "errors", "highlight",
+  "inspect", "clipboard", "batch", "auth", "session", "connect", "pushstate",
+  "mcp", "skills", "upload",
+];
 
 const FLAG_SETS = {
   open: {},
@@ -58,13 +72,11 @@ export async function browserHandler(ctx, toolData) {
   if (!action) {
     return err0(`browser: subcommand is required (supported: ${ALL_ACTIONS.join(", ")})`);
   }
-  if (EXT_ACTIONS.includes(action)) {
-    // §5.2：扩展集物理端可选，未实现报 unknown action
-    return err0(`browser: unknown action "${action}" (supported: ${ALL_ACTIONS.join(", ")})`);
-  }
   const flagSet = FLAG_SETS[action];
   if (!flagSet) {
-    return err0(`browser: unknown action "${action}" (supported: ${ALL_ACTIONS.join(", ")})`);
+    // 未实现子命令（agent-browser 独有）与未知子命令统一报 unknown action；
+    // supported 列表只列真实支持集（2026-08-06 修复：旧版含 EXT 占位名误导 AI）。
+    return err0(`browser: unknown action "${action}" (supported: ${ALL_ACTIONS.join(", ")}; unsupported: ${UNSUPPORTED_ACTIONS.join(", ")})`);
   }
 
   let pa;
@@ -113,6 +125,95 @@ async function getActiveTab() {
   return tab;
 }
 
+// ---- AI 工作区（后台/隐私模式） ----
+// 目标解析优先级：
+//   incognito=true  → 独立无痕窗口内 AI 标签页（不共享 cookie/登录态，与用户主窗口完全隔离）
+//   background=true → 普通窗口内 AI 标签页（共享登录态，创建 active:false 不抢焦点）
+//   两者都关        → 当前激活标签页（协作模式，原行为）
+// 状态持久化 chrome.storage.local（MV3 SW 休眠/重启后恢复；tab 被误关后自动重建）。
+// 工作区模式所有操作不激活 tab、不改变窗口焦点——绝不与用户抢操作。
+
+const WORKER_STORAGE_KEY = "aicWorker";
+
+async function loadWorkerState() {
+  const r = await chrome.storage.local.get(WORKER_STORAGE_KEY);
+  return r[WORKER_STORAGE_KEY] || null;
+}
+
+async function saveWorkerState(state) {
+  await chrome.storage.local.set({ [WORKER_STORAGE_KEY]: state || null });
+}
+
+// 当前是否 AI 工作区模式（后台 or 隐私）
+async function workerMode() {
+  const s = await loadSettings();
+  return s.incognito || s.background !== false;
+}
+
+// 目标 tab 解析：工作区模式返回 AI 专属 tab，协作模式返回用户当前激活 tab
+async function getTargetTab() {
+  const s = await loadSettings();
+  if (s.incognito) return ensureWorkerTab(true);
+  if (s.background !== false) return ensureWorkerTab(false);
+  return getActiveTab();
+}
+
+// 找非无痕 normal 窗口（普通窗口模式避免落在用户的无痕窗口）
+async function findNormalWindow() {
+  const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  return wins.find((w) => !w.incognito) || wins[0] || null;
+}
+
+// 确保 AI 工作区 tab 存在（incognito=true 时在无痕窗口内），返回可用 tab
+async function ensureWorkerTab(incognito) {
+  const st = await loadWorkerState();
+  if (st && st.winIncognito === incognito) {
+    try {
+      const tab = await chrome.tabs.get(st.tabId);
+      const win = await chrome.windows.get(tab.windowId);
+      if (win.incognito === incognito) return tab;
+    } catch { /* tab/窗口已关闭，重建 */ }
+  }
+
+  let winId;
+  if (incognito) {
+    const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
+    const existing = wins.find((w) => w.incognito);
+    if (existing) {
+      winId = existing.id;
+    } else {
+      let win;
+      try {
+        win = await chrome.windows.create({ incognito: true, focused: false });
+      } catch (e) {
+        throw new Error(`incognito window create failed: enable the extension in incognito (chrome://extensions → AIC Browser → Allow in Incognito): ${e?.message || e}`);
+      }
+      winId = win.id;
+    }
+  } else {
+    const win = await findNormalWindow();
+    if (!win) throw new Error("no browser window available");
+    winId = win.id;
+  }
+
+  // 无痕窗口创建时自带一个 about:blank tab，直接复用；否则显式创建（不激活不抢焦点）
+  let tab;
+  if (incognito) {
+    const tabs = await chrome.tabs.query({ windowId: winId });
+    tab = tabs[0] || (await chrome.tabs.create({ windowId: winId, active: false }));
+  } else {
+    tab = await chrome.tabs.create({ windowId: winId, url: "about:blank", active: false });
+  }
+  await saveWorkerState({ winId, tabId: tab.id, winIncognito: incognito });
+  return tab;
+}
+
+// 更新工作区当前 tab（tab new/N/close 后），不激活不抢焦点
+async function setWorkerTab(tabId) {
+  const st = await loadWorkerState();
+  await saveWorkerState({ ...(st || {}), tabId });
+}
+
 async function execInTab(tabId, func, args) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
@@ -146,7 +247,7 @@ async function actOpen(pa) {
   if (!url.startsWith("http://") && !url.startsWith("https://")) {
     throw new Error("only http(s) urls are supported");
   }
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   await chrome.tabs.update(tab.id, { url });
   await waitTabLoad(tab.id, 15000);
   const updated = await chrome.tabs.get(tab.id);
@@ -175,7 +276,7 @@ function waitTabLoad(tabId, ms) {
 async function actClick(pa) {
   const sel = pa.positional[0];
   if (!sel) throw new Error("selector or @ref is required");
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   const loc = makeResolveArgs(tab.id, sel);
   const result = await execInTab(tab.id, (_loc) => {
     let el = null;
@@ -199,14 +300,26 @@ async function actClick(pa) {
 // ---- close ----
 
 async function actClose(pa) {
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  if (tabs.length <= 1) {
-    // §5.5：host 由浏览器自身行为决定，拒绝关闭最后 tab 非错误
-    return { content: "Cannot close last tab", attrs: { action: "close", closed: "false" } };
+  if (!(await workerMode())) {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    if (tabs.length <= 1) {
+      // §5.5：host 由浏览器自身行为决定，拒绝关闭最后 tab 非错误
+      return { content: "Cannot close last tab", attrs: { action: "close", closed: "false" } };
+    }
+    const tab = await getActiveTab();
+    await chrome.tabs.remove(tab.id);
+    return { content: "✓ Browser closed", attrs: { action: "close", closed: "true" } };
   }
-  const tab = await getActiveTab();
-  await chrome.tabs.remove(tab.id);
-  return { content: "✓ Browser closed", attrs: { action: "close", closed: "true" } };
+  // 工作区模式：关闭 AI 工作区当前 tab（不碰用户页面）
+  const wtab = await getTargetTab();
+  const tabs = await chrome.tabs.query({ windowId: wtab.windowId });
+  if (tabs.length <= 1) {
+    return { content: "Cannot close last AI tab", attrs: { action: "close", closed: "false" } };
+  }
+  await chrome.tabs.remove(wtab.id);
+  // 清空工作区状态：下一条指令重建干净的 AI tab（避免目标漂移到用户 tab）
+  await saveWorkerState(null);
+  return { content: "✓ AI tab closed", attrs: { action: "close", closed: "true" } };
 }
 
 // ---- download ----
@@ -216,7 +329,7 @@ async function actDownload(pa) {
   const filename = pa.positional[1];
   if (!sel || !filename) throw new Error("download requires selector and path");
 
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   const loc = makeResolveArgs(tab.id, sel);
 
   // 监听 chrome.downloads 捕获下载
@@ -302,6 +415,42 @@ async function cdpEval(tabId, js) {
   }
 }
 
+// CDP 截图（2026-08-06：captureVisibleTab 只能截当前激活 tab，工作区 tab 不激活——
+// 统一走 Page.captureScreenshot，attach 不要求 tab 活跃，与 eval 同通道）。
+async function cdpScreenshot(tabId, quality) {
+  let attachErr;
+  try {
+    attachErr = await chrome.debugger.attach({ tabId }, CDP_PROTOCOL);
+  } catch (e) {
+    throw new Error(`debugger attach failed: ${e?.message || e}`);
+  }
+  if (attachErr) {
+    throw new Error(`debugger attach failed: ${attachErr}`);
+  }
+  try {
+    const res = await withTimeout(
+      chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", {
+        format: "jpeg",
+        quality,
+      }),
+      CDP_EVAL_TIMEOUT_MS,
+      `screenshot timeout after ${CDP_EVAL_TIMEOUT_MS / 1000}s`,
+    );
+    if (!res?.data) throw new Error("Page.captureScreenshot returned no data");
+    const bin = atob(res.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    // MV3 SW 没有 URL.createObjectURL（实测 "is not a function"）——直接返回 Blob 落盘
+    return new Blob([bytes], { type: "image/jpeg" });
+  } finally {
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (_) {
+      /* tab 已关闭/已 detach：忽略 */
+    }
+  }
+}
+
 function withTimeout(p, ms, msg) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(msg)), ms);
@@ -324,7 +473,7 @@ async function actEval(pa) {
     js = decodeBase64(js || "");
   }
   if (!js) throw new Error("script is required");
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   const value = await cdpEval(tab.id, js);
   return { content: formatEvalValue(value), attrs: { action: "eval" } };
 }
@@ -352,7 +501,7 @@ function decodeBase64(s) {
 async function actGet(pa) {
   const what = pa.positional[0];
   if (!what) throw new Error("get requires a sub-command: text/html/title/url/value/attr/count/box/styles");
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
 
   switch (what) {
     case "title":
@@ -422,7 +571,7 @@ async function actGet(pa) {
 // ---- network ----
 
 async function actNetwork(pa) {
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
 
   if (pa.bools["clear"]) {
     await execInTab(tab.id, () => { window.__aic_network_logs = []; }, []);
@@ -430,7 +579,8 @@ async function actNetwork(pa) {
   }
 
   const reqId = pa.positional[0] || null;
-  if (reqId) {
+  // "requests" 是 list 模式的别名（help 语法），不能当作请求 id
+  if (reqId && reqId !== "requests") {
     const result = await execInTab(tab.id, (_reqId) => {
       const logs = window.__aic_network_logs || [];
       const req = logs.find((r) => r.id === _reqId);
@@ -485,7 +635,7 @@ async function actRead(pa) {
     const html = await resp.text();
     text = extractReadableText(html);
   } else {
-    const tab = await getActiveTab();
+    const tab = await getTargetTab();
     const result = await execInTab(tab.id, () => document.documentElement.outerHTML, []);
     text = extractReadableText(result || "");
   }
@@ -503,26 +653,40 @@ async function actRead(pa) {
 }
 
 function extractReadableText(html) {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script,style,noscript").forEach((el) => el.remove());
-  return (doc.body?.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
+  // MV3 SW 无 DOMParser（实测 "DOMParser is not defined"）——正则剥离：
+  // script/style/noscript → 块级闭合标签与 <br> 插换行 → 剥标签 → 实体解码 → 压空白。
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<\/(div|p|h[1-6]|li|tr|td|th|section|article|header|footer|main|nav|ul|ol|table|blockquote|pre|form|fieldset)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 // ---- screenshot ----
 
 async function actScreenshot(pa, ctx) {
   const quality = Math.min(parseInt(pa.flags["quality"] || "80", 10), 100);
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   // §2.2：browser 不返回图片数据（仅 fs.read 能把图片带进消息）。
   // 截图落本 host 的 fs（/screenshot/，扩展 IndexedDB Blob 存储，本地单根），
   // agent 需要读图时用 fs.read（1host=本 host_id）按 attrs.path 读取。
   if (!ctx?.fs) throw new Error("fs backend not available on this host");
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality });
-  const blob = await (await fetch(dataUrl)).blob();
+  const blob = await cdpScreenshot(tab.id, quality);
   const name = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
-  const out = await ctx.fs.writeBlob(`/screenshot/${name}`, blob);
+  const out = await ctx.fs.put(`/screenshot/${name}`, blob);
   return {
-    content: `✓ Screenshot saved to ${out.path} (${out.size} bytes; read it with fs.read on this host)`,
+    content: `✓ Screenshot saved to ${out.path} (${out.bytes} bytes; read it with fs.read on this host)`,
     attrs: { action: "screenshot", path: out.path },
   };
 }
@@ -530,7 +694,7 @@ async function actScreenshot(pa, ctx) {
 // ---- snapshot（§5.4 树形格式 + §5.3 @ref 代次） ----
 
 async function actSnapshot(pa) {
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   const gen = (refGenByTab.get(tab.id) || 0) + 1;
   refGenByTab.set(tab.id, gen);
 
@@ -680,6 +844,69 @@ async function actSnapshot(pa) {
 async function actTab(pa) {
   const sub = pa.positional[0] || "list";
 
+  // 协作模式：现状（操作当前窗口标签页，创建/切换会激活抢焦点）
+  if (!(await workerMode())) {
+    return actTabCoop(sub, pa);
+  }
+
+  // 工作区模式：tab 系列限定在 AI 工作区窗口内；切换只改 current 不激活 tab
+  // （executeScript/CDP 不要求 tab 激活），绝不抢焦点。
+  const wtab = await getTargetTab();
+  const winId = wtab.windowId;
+
+  if (sub === "new") {
+    const tab = await chrome.tabs.create({ windowId: winId, active: false });
+    await setWorkerTab(tab.id);
+    return { content: `✓ Opened AI tab`, attrs: { action: "tab" } };
+  }
+  if (sub === "list") {
+    const tabs = await chrome.tabs.query({ windowId: winId });
+    const lines = tabs.map((t, i) => {
+      let title = t.title || "";
+      if (title.length > 80) title = title.slice(0, 77) + "...";
+      const prefix = t.id === wtab.id ? "→ " : "";
+      return `${prefix}${i + 1}\t${title}\t${t.url}`;
+    });
+    return {
+      content: lines.join("\n"),
+      attrs: { action: "tab", rows: String(tabs.length) },
+    };
+  }
+  if (sub === "close") {
+    const tabs = await chrome.tabs.query({ windowId: winId });
+    if (tabs.length <= 1) {
+      return { content: "Cannot close last AI tab", attrs: { action: "tab", closed: "false" } };
+    }
+    const nArg = pa.positional[1];
+    let targetId;
+    if (nArg !== undefined) {
+      const n = parseInt(nArg, 10);
+      if (isNaN(n) || n < 1 || n > tabs.length) {
+        throw new Error(`tab index ${nArg} out of range (1-${tabs.length})`);
+      }
+      targetId = tabs[n - 1].id;
+    } else {
+      targetId = wtab.id;
+    }
+    await chrome.tabs.remove(targetId);
+    // 清空工作区状态：下一条指令重建干净的 AI tab（避免目标漂移到用户 tab）
+    await saveWorkerState(null);
+    return { content: "✓ Closed AI tab", attrs: { action: "tab", closed: "true" } };
+  }
+  const n = parseInt(sub, 10);
+  if (!isNaN(n)) {
+    const tabs = await chrome.tabs.query({ windowId: winId });
+    if (n < 1 || n > tabs.length) {
+      throw new Error(`tab index ${n} out of range (1-${tabs.length})`);
+    }
+    await setWorkerTab(tabs[n - 1].id);
+    return { content: `✓ Switched to AI tab ${n}`, attrs: { action: "tab" } };
+  }
+  throw new Error(`unknown tab sub-command "${sub}" (supported: new, list, close, <N>)`);
+}
+
+// 协作模式 tab 管理（现状：当前窗口，创建/切换激活抢焦点）
+async function actTabCoop(sub, pa) {
   if (sub === "new") {
     await chrome.tabs.create({ active: true });
     const tabs = await chrome.tabs.query({ currentWindow: true });
@@ -734,7 +961,7 @@ async function actTab(pa) {
 const WAIT_DEFAULT_MS = 30000;
 
 async function actWait(pa) {
-  const tab = await getActiveTab();
+  const tab = await getTargetTab();
   const first = pa.positional[0];
 
   if (pa.flags["url"]) {
@@ -761,14 +988,20 @@ async function actWait(pa) {
     });
   }
   if (pa.flags["fn"]) {
+    // --fn 是任意 JS 表达式：仍走 new Function（页面 CSP 限制时返回 false 超时，
+    // 与 agent-browser 同语义；建议用 wait <selector> 替代）
     const js = pa.flags["fn"];
-    const ok = await waitPoll(tab.id, WAIT_DEFAULT_MS, `return !!(${js})`);
+    const ok = await waitPoll(tab.id, WAIT_DEFAULT_MS, (_body) => {
+      try { return new Function(_body)(); } catch { return false; }
+    }, [`return !!(${js})`]);
     if (!ok) throw new Error(`timeout after ${WAIT_DEFAULT_MS}ms waiting for fn ${js}`);
     return { content: `✓ wait condition met: fn ${js}`, attrs: { action: "wait" } };
   }
   if (pa.flags["text"]) {
     const text = pa.flags["text"];
-    const ok = await waitPoll(tab.id, WAIT_DEFAULT_MS, `return document.body && document.body.innerText.includes(${JSON.stringify(text)})`);
+    const ok = await waitPoll(tab.id, WAIT_DEFAULT_MS, (_text) => {
+      return !!(document.body && document.body.innerText.includes(_text));
+    }, [text]);
     if (!ok) throw new Error(`timeout after ${WAIT_DEFAULT_MS}ms waiting for text ${text}`);
     return { content: `✓ wait condition met: text ${text}`, attrs: { action: "wait" } };
   }
@@ -783,15 +1016,12 @@ async function actWait(pa) {
     await sleepMs(parseInt(first, 10));
     return { content: `✓ wait condition met: ${first}ms`, attrs: { action: "wait" } };
   }
-  // selector 等待
+  // selector 等待（结构化参数注入，避开 CSP new Function 限制）
   const loc = makeResolveArgs(tab.id, first);
-  const ok = await waitPoll(tab.id, WAIT_DEFAULT_MS, `
-    const loc = ${JSON.stringify(loc)};
-    let el = null;
-    if (loc.ref) el = document.querySelector('[data-aic-ref="' + loc.ref + '"]');
-    else el = document.querySelector(loc.css);
-    return !!el;
-  `);
+  const ok = await waitPoll(tab.id, WAIT_DEFAULT_MS, (_loc) => {
+    if (_loc.ref) return !!document.querySelector(`[data-aic-ref="${_loc.ref}"]`);
+    return !!document.querySelector(_loc.css);
+  }, [loc]);
   if (!ok) throw new Error(`timeout after ${WAIT_DEFAULT_MS}ms waiting for ${first}`);
   return { content: `✓ wait condition met: ${first}`, attrs: { action: "wait" } };
 }
@@ -809,13 +1039,14 @@ async function waitCondition(desc, ms, checkFn) {
   throw new Error(`timeout after ${ms}ms waiting for ${desc}`);
 }
 
-async function waitPoll(tabId, ms, jsBody) {
+// waitPoll 轮询执行注入函数（2026-08-06 修复：原实现注入 new Function 拼 JS，
+// 页面 CSP 无 unsafe-eval 时抛 EvalError → 永远 false → wait <selector> 必超时。
+// 改为结构化参数直传（execInTab 的 func 是真实函数体，不受 CSP 动态执行限制）。
+async function waitPoll(tabId, ms, func, args) {
   const start = Date.now();
   while (Date.now() - start < ms) {
     try {
-      const r = await execInTab(tabId, (_body) => {
-        try { return new Function(_body)(); } catch { return false; }
-      }, [jsBody]);
+      const r = await execInTab(tabId, func, args || []);
       if (r) return true;
     } catch { /* ignore */ }
     await sleepMs(200);

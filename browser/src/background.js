@@ -204,87 +204,37 @@ function connect(settings) {
   client.registerCommand("browser", BROWSER_LEVEL, browserHandler, {
     // desc/help 与 Go sdk/vcore/meta.go 的 browser 条目同源（命令语义以 agent-browser 为基准）
     desc: "control a web browser (agent-browser CLI)",
-    help: `browser <subcommand> [args...] — fast browser automation for AI agents
+    help: `browser <subcommand> [args...] — browser automation (AIC Browser Extension, v2)
 
-Start here:
-  browser snapshot             Accessibility tree with @refs (for AI)
-  browser snapshot -i          Interactive elements only
-  Every element gets a @ref; other actions target it with @<ref>:
-  browser click @e2            Click by ref from snapshot
+Supported (13):
+  open <url>                  Navigate to URL in the AI workspace tab (background/incognito mode) or active tab (coop mode); http/https only
+  read [url]                  Extract readable page text (no url = current page)
+  click <sel|@ref>            Click element (CSS selector or @ref from snapshot)
+  eval <js>                   Run JS via CDP (CSP-independent, DevTools semantics; use for type/fill/navigation workarounds)
+  get <what> [sel]            text / html / title / url / value / attr <sel> <name> / count / box / styles
+  network [id|requests] [--filter s] [--type t] [--method m] [--status n] [--limit n] [--clear]
+                              List / detail network requests (id or "requests" = list)
+  screenshot [--quality N]    Save JPEG to this host's fs (/screenshot/); read it with fs read on this host
+  snapshot [-i] [-c] [-d N] [-s sel]  Accessibility tree with @refs (stale refs require re-snapshot)
+  tab <new|list|close|N>      Manage tabs inside the AI workspace (never activates/steals focus)
+  wait <sel|ms> [--url g] [--load l] [--fn js] [--text t] [--download f]
+                              Wait for selector/ms/condition (default 30s)
+  download <sel> <path>       Click element to trigger a download (waits 30s)
+  close                       Close the AI workspace tab (coop mode: active tab)
+  sleep <dur>                 Sleep (e.g. 1s, 500ms)
 
-Core Commands:
-  open <url>                   Navigate to URL (http/https only)
-  read [url]                   Fetch agent-readable text (NOTE: navigates the page)
-  click <sel> / dblclick <sel> Click / double-click element (or @ref)
-  type <sel> <text>            Type into element
-  fill <sel> <text>            Clear and fill
-  press <key>                  Press key (Enter, Tab, Control+a)
-  keyboard type <text>         Type with real keystrokes (no selector)
-  hover <sel> / focus <sel>    Hover / focus element
-  check <sel> / uncheck <sel>  Check / uncheck checkbox
-  select <sel> <val...>        Select dropdown option
-  drag <src> <dst>             Drag and drop
-  upload <sel> <files...>      Upload files (cloud: sources must be inside $SESSION/$USER/$AGENT)
-  download <sel> <path>        Download file by clicking element (cloud: path inside $SESSION)
-  scroll <dir> [px]            Scroll (up/down/left/right)
-  scrollintoview <sel>         Scroll element into view
-  wait <sel|ms>                Wait for element or time
-  screenshot [--full]          Take screenshot; saved to this host's fs ($SESSION/screenshot/, image is NOT returned — use fs read on this host to view it)
-  pdf <path>                   Save page as PDF
-  snapshot [-i] [-c] [-d N] [-s sel]  Accessibility tree with refs
-  eval <js>                    Run JavaScript (awaits promises)
-  close [--all]                Close browser (--all closes every session)
-
-Navigation:  back / forward / reload
-
-Get Info:  browser get <what> [selector]
-  text, html, value, title, url, count, box, styles (selector required except title/url/value)
-  attr:  browser get attr <selector> <name>
-
-Check State:  browser is <what> <selector>   visible / enabled / checked
-
-Find Elements:  browser find <locator> <value> <action> [text]
-  role, text, label, placeholder, alt, title, testid, first, last, nth
-
-Mouse:  browser mouse <action> [args]   move <x> <y>, down [btn], up [btn], wheel <dy> [dx]
-
-Browser Settings:  browser set <setting> [value]
-  viewport <w> <h>, device <name>, geo <lat> <lng>, offline [on|off], media [dark|light]
-
-Network:  browser network <sub> [args]
-  route <url> [--abort|--body <json>]  Intercept/mock requests
-  unroute [url]                        Remove route
-  requests [--clear] [--filter p] [--type t] [--method m] [--status c]   List requests
-  request <id>                         Request detail (with body)
-  har <start|stop> [path]              Record/export HAR
-
-Storage:
-  cookies [get|set|clear]      Manage cookies
-  storage <local|session>      Manage web storage
-
-Tabs:  browser tab [new|list|close|<n>]   Manage tabs (monotonic ids: t1, t2, ...)
-
-Diff:  browser diff snapshot | diff screenshot --baseline | diff url <u1> <u2>
-
-Debug:
-  trace start | trace stop [path]       Chrome DevTools trace
-  profiler start|stop [path]            Chrome DevTools profile
-  record start <path> [url] | record stop  Video recording (WebM)
-  console [--clear] / errors [--clear]  Console logs / page errors
-  highlight <sel> / inspect / clipboard <op> [text]
-
-Batch:  browser batch [--bail] ["cmd" ...]   Execute multiple commands sequentially
-
-Auth Vault:  browser auth save <name> | auth login <name> | auth list | auth show <name> | auth delete <name>
-
-Sessions:  browser session | session list
-
-Others:  browser connect <port|url> | pushstate <url> | mcp | skills get core
+Unsupported (agent-browser CLI only; calling them returns unknown action):
+  type fill press keyboard hover focus check uncheck select drag dblclick
+  scroll scrollintoview pdf back forward reload is find mouse set cookies
+  storage diff trace profiler record console errors highlight inspect
+  clipboard batch auth session connect pushstate mcp skills upload
+  → 输入/导航/滚动等缺失指令用 eval <js> 替代（如 el.value=...; el.dispatchEvent(new Event('input'))）
 
 Behavior:
   stateful: serialized per (session, host) — click/snapshot races corrupt @refs
-  download/wait can background: returns background=true + id, then bg_wait/bg_kill
-  close auto-restarts: next command launches a fresh browser (cookies/storage reset)`,
+  工作区：background/incognito 模式所有操作在 AI 专属标签页/无痕窗口，不激活不抢焦点；
+  协作模式（两开关都关）操作当前激活标签页
+  close 后下一条指令自动重建工作区标签页（cookies/storage 保留）`,
     stateful: true, // 内部实现细节（串行链），不进协议
     backgroundable: true, // 内部实现细节（后台化），不进协议
   });
@@ -398,6 +348,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })();
   return true; // keep channel open for async response
+});
+
+// ---- SW 保活与自愈重连（2026-08-06）----
+// MV3：SW 空闲 ~30s 被 Chrome 回收，NATS WebSocket 随之断开，且没有任何事件能唤醒
+// 已死的 SW（平台指令要经已断开的 WS 才能到达）→ 全部请求超时，直到用户手动碰扩展。
+// alarms 由浏览器托管：SW 死后仍会按时触发并唤醒它——每 30s 巡检连接状态，断开即重连。
+const KEEPALIVE_ALARM = "aic-keepalive";
+
+chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  const s = await loadSettings();
+  if (!s.key || !s.key.trim() || s.autoConnect === false) return;
+  const alive = client !== null && client.nc && !client.nc.isClosed();
+  if (!alive) {
+    console.log("[aic-browser] keepalive: SW restarted or NATS disconnected, reconnecting");
+    try {
+      await connect(s);
+    } catch (err) {
+      console.log("[aic-browser] keepalive reconnect failed:", err?.message || err);
+    }
+  }
 });
 
 // ---- Startup ----

@@ -27,7 +27,14 @@ const IMAGE_DATA_MAX_BYTES = 600 * 1024; // image_data 投递标准（§2.2，�
 
 // fs JSON 参数的合法字段（§2.1：未知字段报错）
 const ALLOWED_FIELDS = new Set([
-  "msg_id", "action", "path", "workdir", "offset", "limit", "content", "edits",
+  "msg_id",
+  "action",
+  "path",
+  "workdir",
+  "offset",
+  "limit",
+  "content",
+  "edits",
 ]);
 
 // ---- 路径运算（镜像 proto.ResolvePath + WithinRoots，page 无盘符路径）----
@@ -87,25 +94,47 @@ const MAGIC_TABLE = [
 ];
 
 const EXT_MIME = {
-  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-  ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
-  ".pdf": "application/pdf", ".mp4": "video/mp4", ".mp3": "audio/mpeg",
-  ".wav": "audio/wav", ".zip": "application/zip", ".tar": "application/gzip",
-  ".gz": "application/gzip", ".tgz": "application/gzip",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".mp4": "video/mp4",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".zip": "application/zip",
+  ".tar": "application/gzip",
+  ".gz": "application/gzip",
+  ".tgz": "application/gzip",
 };
 
 // detectMIME：magic bytes 嗅探，octet-stream 按扩展名细化（对齐 vcore detectMIME）
 function detectMIME(head, path) {
   let mime = "";
   for (const [magic, m] of MAGIC_TABLE) {
-    if (magic.every((b, i) => head[i] === b)) { mime = m; break; }
+    if (magic.every((b, i) => head[i] === b)) {
+      mime = m;
+      break;
+    }
   }
-  if (!mime && head.length >= 12 &&
-    head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
-    head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50) {
+  if (
+    !mime &&
+    head.length >= 12 &&
+    head[0] === 0x52 &&
+    head[1] === 0x49 &&
+    head[2] === 0x46 &&
+    head[3] === 0x46 &&
+    head[8] === 0x57 &&
+    head[9] === 0x45 &&
+    head[10] === 0x42 &&
+    head[11] === 0x50
+  ) {
     mime = "image/webp"; // RIFF....WEBP
   }
-  if (!mime) mime = isTextBytes(head) ? "text/plain" : "application/octet-stream";
+  if (!mime)
+    mime = isTextBytes(head) ? "text/plain" : "application/octet-stream";
   if (mime === "application/octet-stream") {
     const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
     if (EXT_MIME[ext]) mime = EXT_MIME[ext];
@@ -113,7 +142,12 @@ function detectMIME(head, path) {
   return mime;
 }
 
-const VIEWABLE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const VIEWABLE_IMAGE_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
 
 // truncateContent 按 §2.5 截断：字节上限、UTF-8 边界收刀、只保留完整行
 function truncateContent(s, maxBytes) {
@@ -160,7 +194,7 @@ const unicodeEscapeRe = /\\u[0-9a-fA-F]{4}/g;
 function doubleEncodingHint(content, oldText) {
   if (!oldText.includes("\\u")) return "";
   const decoded = oldText.replace(unicodeEscapeRe, (m) =>
-    String.fromCharCode(parseInt(m.slice(2), 16))
+    String.fromCharCode(parseInt(m.slice(2), 16)),
   );
   if (decoded === oldText || !content.includes(decoded)) return "";
   return ' (hint: oldText contains literal "\\u003c"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters)';
@@ -200,7 +234,10 @@ function idbPut(db, store, key, value) {
 
 function idbAllKeys(db, store) {
   return new Promise((resolve, reject) => {
-    const req = db.transaction(store, "readonly").objectStore(store).getAllKeys();
+    const req = db
+      .transaction(store, "readonly")
+      .objectStore(store)
+      .getAllKeys();
     req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => reject(req.error);
   });
@@ -208,7 +245,10 @@ function idbAllKeys(db, store) {
 
 function idbDelete(db, store, key) {
   return new Promise((resolve, reject) => {
-    const req = db.transaction(store, "readwrite").objectStore(store).delete(key);
+    const req = db
+      .transaction(store, "readwrite")
+      .objectStore(store)
+      .delete(key);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
   });
@@ -232,7 +272,9 @@ function canvasToJpegBlob(canvas, quality) {
   if (typeof canvas.convertToBlob === "function") {
     return canvas.convertToBlob({ type: "image/jpeg", quality });
   }
-  return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+  return new Promise((resolve) =>
+    canvas.toBlob(resolve, "image/jpeg", quality),
+  );
 }
 
 async function compressImage(blob) {
@@ -256,7 +298,9 @@ async function compressImage(blob) {
     scale *= 0.5;
   }
   bmp.close?.();
-  throw new Error(`image still exceeds ${IMAGE_DATA_MAX_BYTES} bytes after downscaling`);
+  throw new Error(
+    `image still exceeds ${IMAGE_DATA_MAX_BYTES} bytes after downscaling`,
+  );
 }
 
 async function blobToBase64(blob) {
@@ -296,9 +340,7 @@ export class PageFS {
   // _env 构造路径环境：本地单根，workdir 缺省 /（无 $ 变量、无会话绑定）
   _env(workdirRaw) {
     return {
-      workdir: workdirRaw
-        ? resolvePath(String(workdirRaw), "/")
-        : "/",
+      workdir: workdirRaw ? resolvePath(String(workdirRaw), "/") : "/",
     };
   }
 
@@ -310,16 +352,23 @@ export class PageFS {
     for (const k of Object.keys(params)) {
       if (!ALLOWED_FIELDS.has(k)) throw fsErr(action, `unknown field "${k}"`);
     }
-    if (!action) throw fsErr("", "action is required (supported: read, write, edit)");
+    if (!action)
+      throw fsErr("", "action is required (supported: read, write, edit)");
 
     const env = this._env(params.workdir);
 
     switch (action) {
-      case "read": return this._read(params, env);
-      case "write": return this._write(params, env);
-      case "edit": return this._edit(params, env);
+      case "read":
+        return this._read(params, env);
+      case "write":
+        return this._write(params, env);
+      case "edit":
+        return this._edit(params, env);
     }
-    throw fsErr("", `unknown action "${action}" (supported: read, write, edit)`);
+    throw fsErr(
+      "",
+      `unknown action "${action}" (supported: read, write, edit)`,
+    );
   }
 
   // _resolve 路径规范化（本地单根，resolvePath 内剥离云语义容器前缀）
@@ -330,7 +379,8 @@ export class PageFS {
   async _getFile(abs, action) {
     const db = await this._ensureDB();
     const rec = await idbGet(db, "files", abs);
-    if (rec === undefined) throw fsErr(action, `${abs}: no such file or directory`);
+    if (rec === undefined)
+      throw fsErr(action, `${abs}: no such file or directory`);
     return rec;
   }
 
@@ -338,7 +388,8 @@ export class PageFS {
 
   async _read(p, env) {
     if (!p.path) throw fsErr("read", "path is required");
-    let offset = 1, limit = 1000;
+    let offset = 1,
+      limit = 1000;
     if (p.offset !== undefined && p.offset !== null) {
       offset = Number(p.offset);
       if (!Number.isInteger(offset) || offset < 1) {
@@ -354,17 +405,20 @@ export class PageFS {
     }
     const abs = this._resolve(p.path, env, "read");
     const rec = await this._getFile(abs, "read");
-    const bytes = rec.c instanceof Blob
-      ? new Uint8Array(await rec.c.arrayBuffer())
-      : new TextEncoder().encode(rec.c);
+    const bytes =
+      rec.c instanceof Blob
+        ? new Uint8Array(await rec.c.arrayBuffer())
+        : new TextEncoder().encode(rec.c);
 
     if (!isTextBytes(bytes)) return this._binaryResult(abs, bytes);
 
-    const text = typeof rec.c === "string" ? rec.c : new TextDecoder().decode(bytes);
+    const text =
+      typeof rec.c === "string" ? rec.c : new TextDecoder().decode(bytes);
     const lines = text.split("\n");
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
     const total = lines.length;
-    if (offset > total) throw fsErr("read", `offset ${offset} exceeds ${total} lines`);
+    if (offset > total)
+      throw fsErr("read", `offset ${offset} exceeds ${total} lines`);
     let end = Math.min(offset - 1 + limit, total);
     let truncated = end < total;
 
@@ -383,7 +437,9 @@ export class PageFS {
     return {
       content: body,
       attrs: {
-        action: "read", path: abs, mime: "text/plain",
+        action: "read",
+        path: abs,
+        mime: "text/plain",
         total_lines: String(total),
         rows: String(end - (offset - 1)),
         range: `${offset}-${end}`,
@@ -395,9 +451,17 @@ export class PageFS {
   // 二进制分支（§4.2）：mime + size；可展示图片走 image_data（page 无 UFS，§2.2）
   async _binaryResult(abs, bytes) {
     const mime = detectMIME(bytes.subarray(0, 512), abs);
-    const attrs = { action: "read", path: abs, mime, size: String(bytes.length) };
+    const attrs = {
+      action: "read",
+      path: abs,
+      mime,
+      size: String(bytes.length),
+    };
     if (!VIEWABLE_IMAGE_MIMES.has(mime)) {
-      return { content: `Binary file: ${abs} (${mime}, ${bytes.length} bytes)`, attrs };
+      return {
+        content: `Binary file: ${abs} (${mime}, ${bytes.length} bytes)`,
+        attrs,
+      };
     }
     let blob = new Blob([bytes], { type: mime });
     const [w, h] = await imageDimensions(blob);
@@ -407,16 +471,21 @@ export class PageFS {
       try {
         c = await compressImage(blob);
       } catch (_) {
-        throw fsErr("read", `image too large even after compression (${bytes.length} bytes)`);
+        throw fsErr(
+          "read",
+          `image too large even after compression (${bytes.length} bytes)`,
+        );
       }
-      attrs.image_compressed =
-        `${bytes.length} bytes → image/jpeg ${c.width}x${c.height} quality ${c.quality} (${c.blob.size} bytes)`;
+      attrs.image_compressed = `${bytes.length} bytes → image/jpeg ${c.width}x${c.height} quality ${c.quality} (${c.blob.size} bytes)`;
       blob = c.blob;
       outMime = "image/jpeg";
     }
     attrs.image_data = `data:${outMime};base64,${await blobToBase64(blob)}`;
     const dim = w > 0 ? `, ${w}x${h}` : "";
-    return { content: `Image file: ${abs} (${mime}${dim}, ${bytes.length} bytes)`, attrs };
+    return {
+      content: `Image file: ${abs} (${mime}${dim}, ${bytes.length} bytes)`,
+      attrs,
+    };
   }
 
   // ---- write（§4.3）：content 必填，整文件覆写 ----
@@ -441,8 +510,11 @@ export class PageFS {
     return {
       content: `wrote file: ${abs} (${lines} lines, ${bytes} bytes)`,
       attrs: {
-        action: "write", path: abs, mode: "overwrite",
-        lines: String(lines), bytes: String(bytes),
+        action: "write",
+        path: abs,
+        mode: "overwrite",
+        lines: String(lines),
+        bytes: String(bytes),
       },
     };
   }
@@ -459,9 +531,10 @@ export class PageFS {
       const bytes = new Uint8Array(await rec.c.arrayBuffer());
       if (!isTextBytes(bytes)) throw fsErr("edit", `${abs} is not a text file`);
     }
-    let content = typeof rec.c === "string"
-      ? rec.c
-      : new TextDecoder().decode(await rec.c.arrayBuffer());
+    let content =
+      typeof rec.c === "string"
+        ? rec.c
+        : new TextDecoder().decode(await rec.c.arrayBuffer());
 
     // 逐个顺序应用：后一个 edit 匹配前一个应用后的内容；
     // 失败条目记录 edit[i]: 原因，不阻塞其余 edit（部分成功语义）。
@@ -470,19 +543,31 @@ export class PageFS {
     for (let i = 0; i < edits.length; i++) {
       const e = edits[i];
       const idx = `edit[${i + 1}]`;
-      if (!e || !e.oldText) { failed.push(`${idx}: oldText is required`); continue; }
+      if (!e || !e.oldText) {
+        failed.push(`${idx}: oldText is required`);
+        continue;
+      }
       if (e.newText === e.oldText) {
-        failed.push(`${idx}: newText must be different from oldText`); continue;
+        failed.push(`${idx}: newText must be different from oldText`);
+        continue;
       }
       const old = e.oldText;
       const first = content.indexOf(old);
-      if (first < 0) { failed.push(`${idx}: oldText not found in file${doubleEncodingHint(content, old)}`); continue; }
-      if (content.indexOf(old, first + old.length) >= 0) {
-        const n = content.split(old).length - 1;
-        failed.push(`${idx}: oldText matches ${n} locations; provide more surrounding context to make it unique`);
+      if (first < 0) {
+        failed.push(
+          `${idx}: oldText not found in file${doubleEncodingHint(content, old)}`,
+        );
         continue;
       }
-      content = content.slice(0, first) + e.newText + content.slice(first + old.length);
+      if (content.indexOf(old, first + old.length) >= 0) {
+        const n = content.split(old).length - 1;
+        failed.push(
+          `${idx}: oldText matches ${n} locations; provide more surrounding context to make it unique`,
+        );
+        continue;
+      }
+      content =
+        content.slice(0, first) + e.newText + content.slice(first + old.length);
       applied++;
     }
     if (applied === 0) {
@@ -508,8 +593,8 @@ export class PageFS {
     };
   }
 
-  // ---- cloud_fs 兼容层（与 $cloud_fs 行为一致：get/put/ls/rm/exists）----
-  // 面向前端程序的操作对象接口（page_exec.page_fs() 直接透传本层）。
+  // ---- 前端操作对象接口（get/put/ls/rm/exists）----
+  // 面向前端程序的操作对象接口（$mod.$page_fs 直接使用，page_exec 不再包装）。
   // 底层方法 readRaw/writeBlob/writeText/list/stat/walk/remove/has 保留
   // （vcmd 等内部使用，与 cloud_fs 无对应关系）。
   //
@@ -521,16 +606,28 @@ export class PageFS {
   // get 整读：文件 {ok, content: string|Blob, mime, size, path}；
   // 目录 {ok, dir:true, path, items}；均不存在抛错（与 cloud_fs 一致）。
   async get(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     const db = await this._ensureDB();
     const store = "files";
     const rec = await idbGet(db, store, abs);
     if (rec !== undefined) {
       if (rec.c instanceof Blob) {
         const head = new Uint8Array(await rec.c.slice(0, 512).arrayBuffer());
-        return { ok: true, content: rec.c, mime: detectMIME(head, abs), size: rec.c.size, path: abs };
+        return {
+          ok: true,
+          content: rec.c,
+          mime: detectMIME(head, abs),
+          size: rec.c.size,
+          path: abs,
+        };
       }
-      return { ok: true, content: rec.c, mime: "text/plain", size: byteLen(rec.c), path: abs };
+      return {
+        ok: true,
+        content: rec.c,
+        mime: "text/plain",
+        size: byteLen(rec.c),
+        path: abs,
+      };
     }
     // 无文件记录 → 目录判定：本地根 / 恒存在（stat 同款），其余由子 key 前缀推导
     if (abs === "/") {
@@ -553,62 +650,109 @@ export class PageFS {
       const r = await this.writeBlob(path, content, ctx);
       return { ok: true, path: r.path, bytes: r.size };
     }
-    const r = await this.run({ action: "write", path, content: String(content) }, ctx);
-    return { ok: true, path: r.attrs?.path || path, bytes: Number(r.attrs?.bytes ?? 0) };
+    const r = await this.run(
+      { action: "write", path, content: String(content) },
+      ctx,
+    );
+    return {
+      ok: true,
+      path: r.attrs?.path || path,
+      bytes: Number(r.attrs?.bytes ?? 0),
+    };
   }
 
   // ls 一层目录列表（= list，cloud_fs 同名）。返回 {ok, path, items}。
+  // opts.depth > 1 时递归展开子目录（items[].items 嵌套，与 cloud/host 对齐）。
   async ls(path, ctx = {}) {
-    return this.list(path, ctx);
+    const r = await this.list(path, ctx);
+    if ((ctx.depth || 1) > 1) {
+      for (const it of r.items) {
+        if (it.dir) it.items = (await this.list(it.path, ctx)).items;
+      }
+    }
+    return r;
   }
 
   // rm 递归删除（对齐 httpfs RemoveAll / cloud_fs.rm）：文件或整棵目录树。
-  // 返回 {ok, removed}（与 cloud_fs.rm 一致）。
+  // 返回 {ok, path, removed}（与 cloud_fs.rm 一致）。
   async rm(path, ctx = {}) {
     const r = await this.remove(path, { ...ctx, recursive: true });
-    return { ok: true, removed: r.removed };
+    return { ok: true, path: this._path(path, ctx), removed: r.removed };
   }
 
-  // exists 存在性检查（cloud_fs 风格：{ok, exists}，目录也算存在）。
-  // 原 boolean 语义迁移到 has()。
-  async exists(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
-    const db = await this._ensureDB();
-    const store = "files";
-    const rec = await idbGet(db, store, abs);
-    if (rec !== undefined) return { ok: true, exists: true };
-    if (abs === "/") return { ok: true, exists: true }; // 本地根恒存在
-    const prefix = abs.endsWith("/") ? abs : abs + "/";
-    const keys = await idbAllKeys(db, store);
-    return { ok: true, exists: keys.some((k) => k.startsWith(prefix)) };
+  // mkdir 本地隐式目录：IndexedDB 无目录记录，no-op（与 cloud_fs 签名一致）。
+  async mkdir(path, ctx = {}) {
+    return { ok: true, path: this._path(path, ctx) };
   }
 
-  // ---- 前端层底层方法（供 page_fs 操作对象与内置 exec 指令使用，
+  // mv 文件移动：get → put → rm（本地组合实现）。
+  async mv(src, dst, ctx = {}) {
+    const r = await this.get(src, ctx);
+    if (r.dir) throw new Error("page_fs.mv: 目录移动未支持");
+    await this.put(dst, r.content, ctx);
+    await this.rm(src, ctx);
+    return { ok: true, path: this._path(dst, ctx) };
+  }
+
+  // home 本地根恒为 /
+  home() {
+    return "/";
+  }
+
+  // search 本地文件名搜索（walk 全量 + 子串匹配），返回 {ok, path, rows}。
+  async search(path, query, ctx = {}) {
+    const abs = this._path(path, ctx);
+    const all = await this.walk(abs, ctx);
+    const q = String(query || "").toLowerCase();
+    const rows = all
+      .filter((it) => it.path.toLowerCase().includes(q))
+      .slice(0, 40);
+    return { ok: true, path: abs, rows };
+  }
+
+  // resolve 资源定位 URL：读内容 → Blob → objectURL（调用方负责 revoke）。
+  async resolve(path, ctx = {}) {
+    const r = await this.get(path, ctx);
+    if (r.dir) throw new Error("page_fs.resolve: 目录无资源定位");
+    const blob =
+      r.content instanceof Blob
+        ? r.content
+        : new Blob([r.content || ""], { type: r.mime || "text/plain" });
+    return URL.createObjectURL(blob);
+  }
+
+  // ---- 前端层底层方法（供内部实现与 AI 通道使用：
   //      不走 NATS 协议信封：文本原文 / Blob 直取 / key 枚举）----
 
-  // resolve 公开路径展开：剥离云语义容器前缀 → 本地绝对路径（与 run 同源）
-  resolve(rawPath, ctx = {}) {
-    const env = this._env(ctx.workdir);
-    return this._resolve(String(rawPath || ""), env, "resolve");
+  // 规格化：确保以 "/" 开头（只判断加不加 "/"，不做 workdir/前缀映射）
+  _path(rawPath, _ctx = {}) {
+    const p = String(rawPath == null ? "" : rawPath);
+    return p.startsWith("/") ? p : "/" + p;
   }
 
   // readRaw 前端友好读：文本返回原文 string，二进制返回 Blob（附 mime/size）
   async readRaw(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     const rec = await this._getFile(abs, "read");
     if (rec.c instanceof Blob) {
       const head = new Uint8Array(await rec.c.slice(0, 512).arrayBuffer());
       const mime = detectMIME(head, abs);
       return { content: rec.c, mime, size: rec.c.size, path: abs };
     }
-    return { content: rec.c, mime: "text/plain", size: byteLen(rec.c), path: abs };
+    return {
+      content: rec.c,
+      mime: "text/plain",
+      size: byteLen(rec.c),
+      path: abs,
+    };
   }
 
   // writeBlob 二进制写入（§2.2：browser 截图等本地产出物落 host fs，
   // agent 经 fs.read 读图；前端层底层方法，不走协议信封）。返回 {ok, path, size}。
   async writeBlob(path, blob, ctx = {}) {
-    if (!(blob instanceof Blob)) throw fsErr("write", "writeBlob: blob is required");
-    const abs = this.resolve(path, ctx);
+    if (!(blob instanceof Blob))
+      throw fsErr("write", "writeBlob: blob is required");
+    const abs = this._path(path, ctx);
     const db = await this._ensureDB();
     try {
       await idbPut(db, "files", abs, { c: blob, m: Date.now() });
@@ -620,14 +764,21 @@ export class PageFS {
 
   // writeText 文本写入（vcmd curl 落盘用，§5.4）：内部走 write 语义，返回 {ok,path,size}。
   async writeText(path, text, ctx = {}) {
-    const r = await this.run({ action: "write", path, content: String(text) }, ctx);
-    return { ok: true, path: r.attrs?.path || path, size: Number(r.attrs?.bytes ?? 0) };
+    const r = await this.run(
+      { action: "write", path, content: String(text) },
+      ctx,
+    );
+    return {
+      ok: true,
+      path: r.attrs?.path || path,
+      size: Number(r.attrs?.bytes ?? 0),
+    };
   }
 
   // list 目录列举：IndexedDB 无目录概念，由全部 key 前缀推导一层子项
   // （深层 key 折叠为目录项；目录无 size）。返回 {ok, path, items}。
   async list(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     const db = await this._ensureDB();
     const store = "files";
     const prefix = abs.endsWith("/") ? abs : abs + "/";
@@ -667,7 +818,7 @@ export class PageFS {
   // 本地根 / 恒存在（无记录也是有效目录）；均不存在返回 null
   // （与 vcore Stat 语义对齐：不存在报错由调用方处理）。
   async stat(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     // 本地根恒存在：/（IndexedDB 无目录记录，但根概念有效，空工作区 ls 得 empty directory）
     if (abs === "/") {
       return { path: abs, dir: true, size: 0, mtime: undefined };
@@ -695,7 +846,7 @@ export class PageFS {
   // 目录由全部 key 前缀推导（含深层中间目录）；不做隐藏/skip 过滤——过滤是
   // vcore 指令语义（vcmd.js），fs 层只提供原始树。
   async walk(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     const db = await this._ensureDB();
     const store = "files";
     const prefix = abs.endsWith("/") ? abs : abs + "/";
@@ -721,7 +872,8 @@ export class PageFS {
         idx = rest.indexOf("/", idx + 1);
       }
     }
-    for (const d of dirs) seen.set(d, { path: d, dir: true, size: 0, mtime: undefined });
+    for (const d of dirs)
+      seen.set(d, { path: d, dir: true, size: 0, mtime: undefined });
     return { ok: true, path: prefix, items: [...seen.values()] };
   }
 
@@ -730,7 +882,7 @@ export class PageFS {
   // IndexedDB 无目录记录：空目录与不存在不可区分 → 均报 no such file（模型固有限制）。
   // 本地根 / 禁止删除。
   async remove(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     if (abs === "/") throw fsErr("rm", "cannot remove root");
     const db = await this._ensureDB();
     const store = "files";
@@ -743,7 +895,8 @@ export class PageFS {
     const keys = await idbAllKeys(db, store);
     const children = keys.filter((k) => k.startsWith(prefix));
     if (children.length > 0) {
-      if (!ctx.recursive) throw fsErr("rm", `${abs} is a non-empty directory (use -r)`);
+      if (!ctx.recursive)
+        throw fsErr("rm", `${abs} is a non-empty directory (use -r)`);
       for (const k of children) await idbDelete(db, store, k);
       return { ok: true, removed: abs, items: children.length };
     }
@@ -752,7 +905,7 @@ export class PageFS {
 
   // has 存在性检查（boolean；原 exists 语义，vcmd 等内部使用）。
   async has(path, ctx = {}) {
-    const abs = this.resolve(path, ctx);
+    const abs = this._path(path, ctx);
     const db = await this._ensureDB();
     const rec = await idbGet(db, "files", abs);
     return rec !== undefined;

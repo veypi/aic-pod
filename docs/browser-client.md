@@ -72,10 +72,10 @@
   IndexedDB Blob 存储），不返回 image_data；agent 需要看图时用 `fs.read`（1host=本 host_id）
   按 attrs.path 读取——只有 fs.read 能把图片带进消息。
 
-### 工具流量（连接级 subject，§6.1 v3）
+### 工具流量（§6.1 v4，subject 带 sid 段定向）
 
 host 端连接时单订阅 `u.{uid}.h.host_{host_id}.>`（HostInboxSubject），
-覆盖该 host 全部工具请求（fs/exec），执行不绑定会话（session_id 由信封 SessionID 携带），
+覆盖该 host 全部工具请求（fs/exec，7 段含 sid 段），sid 由信封 SessionID 携带，
 无 per-session 订阅 churn。请求信封（server→host，HMAC-SHA256 签名，K_tool 派生）：
 
 ```json
@@ -97,14 +97,14 @@ host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 �
 |---|---|---|---|
 | `key` | | ✅ | AIC 环境凭证 |
 | `host` | `https://ivec.ai` | | 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义） |
-| `background` | `true` | | 后台模式，新窗口不抢夺焦点 |
-| `incognito` | `false` | | 隐私模式，使用无痕窗口（不共享 cookie/登录态） |
+| `background` | `true` | | 后台模式：AI 在独立标签页操作（普通窗口，共享登录态），创建 `active:false` 不抢焦点，绝不占用用户当前页面 |
+| `incognito` | `false` | | 隐私模式：AI 在独立无痕窗口操作（不共享 cookie/登录态），与用户主窗口完全隔离 |
 | `autoConnect` | `true` | | 启动后自动连接 |
 | `viewport.width` | `1280` | | 默认视口宽度 |
 | `viewport.height` | `720` | | 默认视口高度 |
 | `timeout` | `30` | | 页面操作默认超时（秒） |
 
-> **注意：** Chrome Extension 运行在用户浏览器内，因此不需要 `browserPath`（浏览器路径）、`userDataDir`（profile 目录）、`headless`（无头模式）等参数。`incognito=true` 通过 `chrome.windows.create({incognito: true})` 实现隔离。
+> **注意：** Chrome Extension 运行在用户浏览器内，因此不需要 `browserPath`（浏览器路径）、`userDataDir`（profile 目录）、`headless`（无头模式）等参数。`incognito=true` 通过 `chrome.windows.create({incognito: true})` 实现隔离（需在 chrome://extensions 为扩展开启「在无痕模式下启用」，否则创建无痕窗口失败并返回明确错误）。
 >
 > 以上参数不出现在 caps 声明和 exec 负载中。
 
@@ -113,7 +113,7 @@ host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 �
 浏览器插件暴露 exec 虚拟指令 `browser`（调用形态 `exec browser <subcommand> [args...]`），
 子命令与 `agent-browser` CLI 签名对齐。caps 声明见上文（required_level=2，stateful，backgroundable）。
 
-> **约定：** 所有操作默认针对**当前活跃标签页**。需切换目标时，先调用 `tab <N>` 切换，后续操作即作用于新 tab。
+> **约定：** 目标页解析优先级（`background`/`incognito` 设置项）：`incognito=true` → 独立无痕窗口内 AI 标签页；`background=true` → 普通窗口内 AI 专属标签页；两者都关（协作模式）→ **当前活跃标签页**，需切换目标时先调用 `tab <N>` 切换。工作区模式下所有操作不激活 tab、不改变窗口焦点（executeScript/CDP 不要求 tab 激活），`tab` 系列限定在 AI 工作区窗口内；screenshot 经 CDP `Page.captureScreenshot`（`captureVisibleTab` 只能截当前激活 tab）。工作区 tab 状态持久化 chrome.storage（SW 重启恢复，误关自动重建）。
 
 ## action 总览
 

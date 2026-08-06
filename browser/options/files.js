@@ -47,10 +47,9 @@ async function renderTree(rootAbs) {
 async function readDir(abs) {
   try {
     const fs = await ensureFs();
-    const st = await fs.stat(abs);
-    if (st === null || !st.dir) return null;
-    const res = await fs.list(abs);
-    const items = (res.items || []).slice().sort((a, b) =>
+    const r = await fs.get(abs);
+    if (!r.dir) return null;
+    const items = (r.items || []).slice().sort((a, b) =>
       a.dir !== b.dir ? (a.dir ? -1 : 1) : cmpStr(a.name, b.name),
     );
     return { name: abs.split("/").filter(Boolean).pop() || abs, items };
@@ -160,7 +159,7 @@ function clearPreview() {
 async function openFile(abs) {
   try {
     const fs = await ensureFs();
-    const raw = await fs.readRaw(abs);
+    const raw = await fs.get(abs);
     clearPreview();
     currentFile = abs;
     fileViewTitle.textContent = abs;
@@ -192,16 +191,15 @@ async function saveFile() {
   if (!currentFile || fileContentEl.disabled) return;
   try {
     const fs = await ensureFs();
-    await fs.writeText(currentFile, fileContentEl.value);
+    await fs.put(currentFile, fileContentEl.value);
     showStatus(fileStatus, "已保存 ✓", "success");
   } catch (e) {
     showStatus(fileStatus, "保存失败: " + (e?.message || e), "error");
   }
 }
 
-// ---- 搜索（跨 /home 与 /sessions 全量文件名/路径子串匹配） ----
+// ---- 搜索（单根全量文件名/路径子串匹配，结构化 search 接口） ----
 
-const SEARCH_ROOTS = ["/home", "/sessions"];
 const SEARCH_LIMIT = 100;
 
 let searchTimer = null;
@@ -218,15 +216,10 @@ async function runSearch(q) {
   const fs = await ensureFs();
   const results = [];
   try {
-    for (const root of SEARCH_ROOTS) {
-      const w = await fs.walk(root);
-      for (const it of w.items || []) {
-        if (it.dir) continue;
-        if (it.path.toLowerCase().includes(q)) {
-          results.push(it);
-          if (results.length >= SEARCH_LIMIT) break;
-        }
-      }
+    const r = await fs.search("/", q);
+    for (const it of r.rows) {
+      if (it.dir) continue;
+      results.push(it);
       if (results.length >= SEARCH_LIMIT) break;
     }
   } catch (e) {
@@ -284,11 +277,10 @@ document.getElementById("file-newfile").addEventListener("click", async () => {
   try {
     const fs = await ensureFs();
     const abs = name.startsWith("/") ? name : `${currentPath === "/" ? "" : currentPath}/${name}`;
-    await fs.writeText(abs, "");
+    const r = await fs.put(abs, "");
     showStatus(fileStatus, "已创建 ✓", "success");
     await renderTree(currentPath);
-    const st = await fs.stat(abs);
-    if (st) await openFile(st.path);
+    await openFile(r.path);
   } catch (e) {
     showStatus(fileStatus, "创建失败: " + (e?.message || e), "error");
   }

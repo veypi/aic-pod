@@ -59,6 +59,26 @@ function parseCredential(cred) {
   return { hostID, credVer, secret: parts[2], uid: parts[3] };
 }
 
+// handler 超时保护（§2026-08-06）：MV3 SW 生命周期下 pending promise 可能永久丢失，
+// 必须在扩展层兜底超时并返回错误（解开 stateful 串行链，防止单条挂起拖死后续指令）。
+const HANDLER_TIMEOUT_MS = 50_000;
+
+function withTimeout(p, ms, msg) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 // resolveNatsURL 由平台地址推导 NATS WebSocket 端点（与 Go sdk/host/natsurl.go 同一语义）：
 // http→ws、https→wss、ws/wss 保留；无 scheme 补 https；host 可带路径前缀。
 export function resolveNatsURL(host) {
@@ -342,11 +362,11 @@ export class AICClient {
   /**
    * 处理一条工具请求（§6.2 host 端验证规范）：
    * 验签 → deadline 过期拒绝 → nonce 窗口去重 → granted_level 纵深检查 → 分发。
-   * subject: u.{uid}.h.host_{host_id}.fs|exec.req（连接级，§6.1 v3——
-   * 执行不绑定会话，sid/tool 从信封读取）。
+   * subject: u.{uid}.h.host_{host_id}.fs|exec.req.{sid}（§6.1 v4——sid 段定向，
+   * sid/tool 从信封读取）。
    */
   async _handleToolRequest(msg) {
-    // 连接级 subject：仅校验形态（sid/tool 从信封读取）
+    // 校验 subject 形态（sid/tool 从信封读取）
     if (!parseToolReqSubject(msg.subject)) {
       this._respond(msg, { msg_id: "", state: "error", error: `invalid tool request subject: ${msg.subject}` });
       return;
@@ -454,7 +474,15 @@ export class AICClient {
 
     const run = async () => {
       try {
-        const result = await cmd.handler(ctx, execData);
+        // handler 超时保护（2026-08-06）：MV3 SW 在执行中被 Chrome 回收时 pending
+        // promise 永不 resolve → 单条挂起会卡死 stateful 串行链，后续所有指令全部
+        // 超时。50s 覆盖正常操作（open 15s / wait 30s / eval 30s / download 30s），
+        // 超时返回错误并解开串行链（后续指令不再排队）。
+        const result = await withTimeout(
+          Promise.resolve().then(() => cmd.handler(ctx, execData)),
+          HANDLER_TIMEOUT_MS,
+          `handler timeout after ${HANDLER_TIMEOUT_MS / 1000}s (service worker likely recycled; command aborted, retry)`,
+        );
         this._respond(msg, buildResponse(req.msg_id, result));
       } catch (err) {
         this._respond(msg, { msg_id: req.msg_id, state: "error", error: err.message });

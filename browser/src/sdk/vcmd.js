@@ -181,7 +181,7 @@ export function defaultTarget(ctx) {
 export async function cmdLs(fs, ctx, argv) {
   const pa = parseVCmdArgv("ls", { bools: { "-l": true, "-a": true, "-t": true, "-h": true }, minPos: 0, maxPos: 1 }, argv);
   const target = pa.pos[0] || defaultTarget(ctx);
-  const abs = fs.resolve ? await fs.resolve(target, ctx) : target;
+  const abs = fs._path ? await fs._path(target, ctx) : target;
   const st = await fs.stat(target, ctx);
   if (st === null) throw execErr("ls", `${abs}: no such file or directory`);
   const long = pa.bools["-l"];
@@ -256,7 +256,7 @@ export async function cmdRg(fs, ctx, argv) {
     }
   }
 
-  const abs = pa.pos.length ? (fs.resolve ? await fs.resolve(pa.pos[pa.pos.length - 1], ctx) : pa.pos[pa.pos.length - 1]) : "";
+  const abs = pa.pos.length ? (fs._path ? await fs._path(pa.pos[pa.pos.length - 1], ctx) : pa.pos[pa.pos.length - 1]) : "";
   const hidden = pa.bools["--hidden"];
 
   if (pa.bools["--files"]) {
@@ -289,7 +289,7 @@ export async function cmdRg(fs, ctx, argv) {
     maxPerFile = n;
   }
   const target = pa.pos[1];
-  const targetAbs = fs.resolve ? await fs.resolve(target, ctx) : target;
+  const targetAbs = fs._path ? await fs._path(target, ctx) : target;
   const st = await fs.stat(target, ctx);
   if (st === null) throw execErr("rg", `${targetAbs}: no such file or directory`);
 
@@ -322,7 +322,7 @@ async function rgWalk(fs, ctx, target, globs, hidden) {
 }
 
 async function rgFiles(fs, ctx, target, globs, hidden) {
-  const abs = fs.resolve ? await fs.resolve(target, ctx) : target;
+  const abs = fs._path ? await fs._path(target, ctx) : target;
   const st = await fs.stat(target, ctx);
   if (st === null) throw execErr("rg", `${abs}: no such file or directory`);
   let files = [];
@@ -408,7 +408,7 @@ export async function cmdTree(fs, ctx, argv) {
     }
   }
   const target = pa.pos[0] || defaultTarget(ctx);
-  const abs = fs.resolve ? await fs.resolve(target, ctx) : target;
+  const abs = fs._path ? await fs._path(target, ctx) : target;
   const st = await fs.stat(target, ctx);
   if (st === null) throw execErr("tree", `${abs}: no such file or directory`);
 
@@ -458,7 +458,7 @@ async function buildTreeDir(fs, ctx, dir, remain, state) {
 export async function cmdRm(fs, ctx, argv) {
   const pa = parseVCmdArgv("rm", { bools: { "-r": true }, minPos: 1, maxPos: 1 }, argv);
   const target = pa.pos[0];
-  const abs = fs.resolve ? await fs.resolve(target, ctx) : target;
+  const abs = fs._path ? await fs._path(target, ctx) : target;
   const st = await fs.stat(target, ctx);
   if (st === null) throw execErr("rm", `${abs}: no such file or directory`);
   let out;
@@ -502,7 +502,7 @@ export async function cmdCurl(fs, ctx, argv) {
     if (!Number.isInteger(n) || n < 1) throw execErr("curl", `--max-size must be >= 1, got ${pa.values["--max-size"]}`);
     maxSizeMB = Math.min(n, 10240);
   }
-  const abs = fs.resolve ? await fs.resolve(dst, ctx) : dst;
+  const abs = fs._path ? await fs._path(dst, ctx) : dst;
   const existing = await fs.stat(dst, ctx);
   if (existing !== null) throw execErr("curl", `destination ${abs} already exists`);
   let resp;
@@ -578,8 +578,8 @@ async function copyNode(fs, ctx, srcAbs, dstAbs) {
 // cp [-r] <src> <dst>：目录需 -r；目标已存在报错（不覆盖）；dst 为 src 自身或子路径报错。
 export async function cmdCp(fs, ctx, argv) {
   const pa = parseVCmdArgv("cp", { bools: { "-r": true }, minPos: 2, maxPos: 2 }, argv);
-  const srcAbs = fs.resolve ? await fs.resolve(pa.pos[0], ctx) : pa.pos[0];
-  const dstAbs = fs.resolve ? await fs.resolve(pa.pos[1], ctx) : pa.pos[1];
+  const srcAbs = fs._path ? await fs._path(pa.pos[0], ctx) : pa.pos[0];
+  const dstAbs = fs._path ? await fs._path(pa.pos[1], ctx) : pa.pos[1];
   if (srcAbs === dstAbs) throw execErr("cp", `${srcAbs} and ${dstAbs} are identical`);
   const st = await fs.stat(srcAbs, ctx);
   if (st === null) throw execErr("cp", `cannot stat source ${srcAbs}: no such file or directory`);
@@ -596,8 +596,8 @@ export async function cmdCp(fs, ctx, argv) {
 // PageFS 无原生 Rename：复制（文件/目录树）→ 删除源。
 export async function cmdMv(fs, ctx, argv) {
   const pa = parseVCmdArgv("mv", { minPos: 2, maxPos: 2 }, argv);
-  const srcAbs = fs.resolve ? await fs.resolve(pa.pos[0], ctx) : pa.pos[0];
-  const dstAbs = fs.resolve ? await fs.resolve(pa.pos[1], ctx) : pa.pos[1];
+  const srcAbs = fs._path ? await fs._path(pa.pos[0], ctx) : pa.pos[0];
+  const dstAbs = fs._path ? await fs._path(pa.pos[1], ctx) : pa.pos[1];
   if (srcAbs === dstAbs) throw execErr("mv", `${srcAbs} and ${dstAbs} are identical`);
   const st = await fs.stat(srcAbs, ctx);
   if (st === null) throw execErr("mv", `cannot stat source ${srcAbs}: no such file or directory`);
@@ -615,7 +615,7 @@ export async function cmdMv(fs, ctx, argv) {
 // ---- 入口 ----
 
 // runVCmd(action, argv, fs, ctx) → {content, attrs}；错误 throw Error("{cmd}: {原因}")。
-// ctx: {workdir?}。fs: PageFS 兼容适配器（见文件头接口）。
+// ctx: {workdir?}。fs: PageFS 接口对象（get/put/ls/rm/exists）。
 export async function runVCmd(action, argv, fs, ctx = {}) {
   switch (action) {
     case "ls":
