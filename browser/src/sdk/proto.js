@@ -15,9 +15,9 @@ export const HOST_PAGE = "page";
 export const TOOL_FS = "fs";
 export const TOOL_EXEC = "exec";
 
-// 会话级 subject 中物理 host 段的强制前缀（§6.1）：
-// 前端 JWT 的 sub deny（u.{uid}.s.*.h.host_*.>）依赖此前缀精确匹配物理 host
-// 工具流量而不误伤 h.page.>。host_id 本身不带前缀（1host 参数/连接级 subject 用裸 id）。
+// 工具流量 subject 中物理 host 段的强制前缀（§6.1）：
+// 前端 JWT 的 sub deny（u.{uid}.h.host_*.>）依赖此前缀精确匹配物理 host
+// 工具流量而不误伤 h.page.>。host_id 本身不带前缀（1host 参数/caps/presence subject 用裸 id）。
 export const HOST_ID_PREFIX = "host_";
 
 function validSeg(s) {
@@ -32,21 +32,21 @@ export function hostSeg(host) {
   return HOST_ID_PREFIX + host;
 }
 
-/** ToolReqSubject：工具请求（连接级，§6.1 v3）u.{uid}.h.{host}.{tool}.req
- * 执行不绑定会话——session_id 不进 subject（信封 SessionID 携带）。
+/** ToolReqSubject：工具请求（§6.1 v4）u.{uid}.h.{host}.{tool}.req.{sid}
+ * sid 段定向投递；无会话直发（run_tool）sid 段用 manual 占位。
  * host 段：物理 host 自动加 host_ 前缀；page/cloud 保留字原样。 */
-export function toolReqSubject(uid, host, tool) {
-  if (!validSeg(uid) || !validSeg(host)) {
-    throw new Error(`proto: invalid uid/host segment (uid=${uid} host=${host})`);
+export function toolReqSubject(uid, host, tool, sid) {
+  if (!validSeg(uid) || !validSeg(host) || !validSeg(sid)) {
+    throw new Error(`proto: invalid uid/host/sid segment (uid=${uid} host=${host} sid=${sid})`);
   }
   if (tool !== TOOL_FS && tool !== TOOL_EXEC) {
     throw new Error(`proto: invalid tool ${tool} (must be fs|exec)`);
   }
-  return `u.${uid}.h.${hostSeg(host)}.${tool}.req`;
+  return `u.${uid}.h.${hostSeg(host)}.${tool}.req.${sid}`;
 }
 
 /** HostInboxSubject：host 端连接时的单订阅 u.{uid}.h.host_{host_id}.>
- * 覆盖该 host 全部工具请求（连接级），不会匹配 caps/presence（host 段无前缀）。 */
+ * 覆盖该 host 全部工具请求（7 段含 sid 段），不会匹配 caps/presence（host 段无前缀）。 */
 export function hostInboxSubject(uid, hostID) {
   if (!validSeg(uid) || !validSeg(hostID)) {
     throw new Error(`proto: invalid uid/hostID segment`);
@@ -55,13 +55,13 @@ export function hostInboxSubject(uid, hostID) {
 }
 
 /**
- * ParseToolReqSubject 解析连接级工具请求 subject（6 段）：
- * u.{uid}.h.{host}.{tool}.req → {uid, host(还原裸 id / page 原样), tool}。
+ * ParseToolReqSubject 解析工具请求 subject（7 段，§6.1 v4）：
+ * u.{uid}.h.{host}.{tool}.req.{sid} → {uid, host(还原裸 id / page 原样), tool, sid}。
  * 非法 subject 返回 null。
  */
 export function parseToolReqSubject(subject) {
   const parts = String(subject || "").split(".");
-  if (parts.length !== 6 || parts[0] !== "u" || parts[2] !== "h" || parts[5] !== "req") {
+  if (parts.length !== 7 || parts[0] !== "u" || parts[2] !== "h" || parts[5] !== "req") {
     return null;
   }
   const tool = parts[4];
@@ -73,6 +73,7 @@ export function parseToolReqSubject(subject) {
     uid: parts[1],
     host: host.startsWith(HOST_ID_PREFIX) ? host.slice(HOST_ID_PREFIX.length) : host,
     tool,
+    sid: parts[6],
   };
 }
 

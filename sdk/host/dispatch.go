@@ -74,8 +74,8 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 		defer cancel()
 	}
 
-	// 5. 分发（连接级 subject 不含 sid——§6.1 v3：执行不绑定会话，
-	//    会话隔离由信封 SessionID 提供（bg 命名空间 {host}:{sid}:{op_id}））
+	// 5. 分发（subject 带 sid 段定向——§6.1 v4；sid 仍从信封 SessionID 读取，
+	//    会话隔离由信封提供（bg 命名空间 {host}:{sid}:{op_id}））
 	sid := req.SessionID
 	switch req.Tool {
 	case proto.ToolFS:
