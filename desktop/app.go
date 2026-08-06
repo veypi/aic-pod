@@ -3,17 +3,17 @@ package main
 import (
 	"fmt"
 	"net/url"
-	"strings"
 
-	pod "github.com/veypi/aic-pod"
+	"github.com/veypi/aic-pod/api"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/vigo/logv"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-// App 是桌面壳：平台窗口管理（托盘/菜单/设置页导航）。
+// App 是桌面壳：frameless 窗口加载本地壳页面（vigo serve，header + iframe 平台页）。
+// 平台导航/窗口按钮全部由壳页面承担（/api/window_*），wails 只提供窗口容器；
 // host 会话生命周期在 api 包（Runner），配置读写走 cfg.Global——
-// cli/desktop 共享同一份 config.yaml 与同一套 local_code 通道，desktop 只加 Wails 壳。
+// cli/desktop 共享同一份 config.yaml。
 type App struct {
 	platform application.Window // 平台窗口（托盘打开/聚焦用，单窗口）
 }
@@ -23,143 +23,119 @@ func NewApp() *App {
 	return &App{}
 }
 
-// OpenPlatform 打开/聚焦平台窗口。
-// 未绑定（无凭证）→ 直达设备管理页 {host}/hosts 引导绑定；已绑定 → 打开平台首页。
-func (a *App) OpenPlatform(hostURL string) error {
-	if strings.TrimSpace(hostURL) == "" {
-		hostURL = cfg.Global.Host
-	}
-	if cfg.Global.Key == "" {
-		// 未绑定 → 直达设备管理页 {host}/hosts
-		o := *cfg.Global
-		o.Host = hostURL
-		hostURL = o.HostsURL()
-	}
-	app := application.Get()
-	// 拼 local_code 参数：平台页面据此建立本地通道（local_handler.js 解析持久化，
-	// 并经 get_status 验证桌面通道后应用桌面壳效果）；URL 已带 local_code（如
-	// OpenPlatformURL 传入的 hosts 页）则不再追加。
-	if cfg.Global.Port() != 0 && !strings.Contains(hostURL, "local_code=") {
-		sep := "?"
-		if strings.Contains(hostURL, "?") {
-			sep = "&"
-		}
-		hostURL = hostURL + sep + "local_code=" + url.QueryEscape(pod.LocalCodeParam())
-	}
-	logv.Info().Msgf("opening platform: %s", hostURL)
-	if w, ok := app.Window.Get("platform"); ok {
-		w.SetURL(hostURL)
+// OpenShell 创建/聚焦壳窗口：URL = 本地壳页面（首次携带 code 秘钥，
+// 壳页面 env.js 存入 localStorage 并在 $fetch 自动注入 x-aic-code）。
+func (a *App) OpenShell() error {
+	if w, ok := application.Get().Window.Get("platform"); ok {
 		w.Show()
 		w.Focus()
 		a.platform = w
 		return nil
 	}
-	w := a.newPlatformWindow("AIC Platform", hostURL)
+	w := application.Get().Window.NewWithOptions(application.WebviewWindowOptions{
+		Name:   "platform",
+		Title:  "AIC Desktop",
+		Width:  1280,
+		Height: 800,
+		MinWidth:  800,
+		MinHeight: 600,
+		// 本地壳页面：header（菜单+窗口按钮）+ iframe 平台页，由 vigo serve
+		URL: fmt.Sprintf("http://127.0.0.1:%d/?code=%s",
+			cfg.Global.Port(), url.QueryEscape(cfg.Global.Code)),
+		// 无系统边框/按钮：自定义标题栏（壳 header 拖动区 + 窗口按钮）
+		Frameless:             true,
+		UseApplicationMenu:    false,
+		MinimiseButtonState:   application.ButtonHidden,
+		MaximiseButtonState:   application.ButtonHidden,
+		CloseButtonState:      application.ButtonHidden,
+		FullscreenButtonState: application.ButtonHidden,
+		// 透明窗口：mac 认 Mac.Backdrop（window+webview 双透明），正常页面有
+		// 背景色不受影响，桌宠页（/pet）透明露出桌面
+		BackgroundType: application.BackgroundTypeTransparent,
+		// mac：内容延伸到标题栏（自定义 header 全高）+ 透明 backdrop
+		Mac: application.MacWindow{
+			Backdrop: application.MacBackdropTransparent,
+			TitleBar: application.MacTitleBar{
+				AppearsTransparent: true,
+				Hide:               true,
+				HideTitle:          true,
+				FullSizeContent:    true,
+			},
+		},
+	})
 	if w == nil {
-		return fmt.Errorf("create platform window failed")
+		return fmt.Errorf("create shell window failed")
 	}
 	a.platform = w
 	return nil
 }
 
-// newPlatformWindow 创建平台主窗口（平台页/本机设置页共用同一窗口）。
-// 直接解锁 wails runtime：页面是外部/本地 URL，fetch 不到 wails 内嵌 runtime，
-// 不会自发 wails:runtime:ready → ExecJS 只入队永不执行（导航菜单等全部失效）。
-// HandleMessage 走与页面桥相同的处理路径，三平台通用、幂等。
-func (a *App) newPlatformWindow(title, url string) application.Window {
-	w := application.Get().Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:   "platform",
-		Title:  title,
-		URL:    url,
-		Width:  1280,
-		Height: 800,
-		// win 窗口挂全局应用菜单（mac 无效果，菜单天然全局）；不设则 win 无菜单栏
-		UseApplicationMenu: true,
-	})
-	if w == nil {
-		return nil
-	}
-	w.HandleMessage("wails:runtime:ready")
-	return w
-}
-
-// OpenPlatformURL 应用内打开指定平台 URL（设置页「更新凭证」入口等）。
-// URL 已由调用方拼好参数；窗口不存在时经 OpenPlatform 创建（其拼参逻辑对已含
-// local_code 的 URL 不再追加）。
-func (a *App) OpenPlatformURL(rawURL string) error {
+// FocusPlatform 显示并聚焦壳窗口（托盘/单实例第二实例用；窗口不存在时创建）。
+func (a *App) FocusPlatform() {
 	if a.platform == nil {
-		return a.OpenPlatform(rawURL)
+		if err := a.OpenShell(); err != nil {
+			logv.Warn().Msgf("open shell failed: %v", err)
+		}
+		return
 	}
-	// 从本机设置页跳回平台时恢复窗口标题
-	a.platform.SetTitle("AIC Platform")
-	a.platform.SetURL(rawURL)
 	a.platform.Show()
 	a.platform.Focus()
-	return nil
 }
 
-// PlatformWindow 返回平台窗口（常驻托盘模式：关闭=隐藏，托盘点击重新打开）。
+// PlatformWindow 返回壳窗口（常驻托盘模式：关闭=隐藏，托盘点击重新打开）。
 func (a *App) PlatformWindow() application.Window {
 	return a.platform
 }
 
-// FocusPlatform 显示并聚焦平台窗口（菜单「打开平台」用；窗口不存在时创建）。
-func (a *App) FocusPlatform() {
-	if a.platform != nil {
-		a.platform.Show()
-		a.platform.Focus()
-		return
-	}
-	if err := a.OpenPlatform(""); err != nil {
-		logv.Warn().Msgf("focus platform failed: %v", err)
-	}
-}
+// 桌宠切换的位置/尺寸缓存：非桌宠记住自己的位置，反复切换互不干扰；
+// 桌宠不缓存——每次进入按鼠标位置出现。
+var (
+	petOrigW, petOrigH int // 非桌宠尺寸（window_pet 时记录，window_restore 还原）
+	normalPosX, normalPosY int // 非桌宠位置缓存（进桌宠时记录，恢复时回去）
+)
 
-// Navigate 原生菜单导航到平台路由（header 隐藏后的页面入口）。
-// 优先 SPA 内跳转（毫秒级，不整页重载）：wails3 的 ExecJS 有 runtimeLoaded 门控——
-// 平台页面经 external 桥发 'wails:runtime:ready'（env.js desktop 分支）后立即执行；
-// pushState+popstate 是标准浏览器事件，vhtml 路由监听 popstate（router.js）。
-// ExecJS 不可用（页面未发 ready 等）或跨域时回退 location.href 整页加载。
-func (a *App) Navigate(route string) {
-	target := strings.TrimSuffix(cfg.Global.Host, "/") + route
-	if cfg.Global.Key == "" {
-		// 未绑定：忽略路由，由 OpenPlatform 统一引导到设备管理页
-		target = cfg.Global.Host
+// 桌宠尺寸（window_pet 时缩至该大小）。
+const petSize = 200
+
+// windowControl 实现 api.WindowControl（壳页面 /api/window_* 的窗口动作）：
+// minimse/maximise(还原)/close(=隐藏，托盘常驻)/fullscreen(toggle)/pet(缩成桌宠，
+// 按鼠标坐标出现在鼠标下方)/restore(桌宠还原)，并回显状态。
+func windowControl(action string, args ...int) api.WindowState {
+	st := api.WindowState{Desktop: true}
+	w, ok := application.Get().Window.Get("platform")
+	if !ok || w == nil {
+		return st
 	}
-	if a.platform == nil {
-		if err := a.OpenPlatform(target); err != nil {
-			logv.Warn().Msgf("navigate %s failed: %v", route, err)
+	switch action {
+	case "window_minimise":
+		w.Minimise()
+	case "window_maximise":
+		w.ToggleMaximise()
+	case "window_close":
+		w.Hide()
+	case "window_fullscreen":
+		w.ToggleFullscreen()
+	case "window_pet":
+		// 记录非桌宠尺寸/位置 → 缩至桌宠大小；位置 = 鼠标下方（前端传屏幕坐标，
+		// wails 坐标同为左上原点 Y-down，语义一致）
+		ow, oh := w.Size()
+		petOrigW, petOrigH = ow, oh
+		normalPosX, normalPosY = w.RelativePosition()
+		w.SetSize(petSize, petSize)
+		if len(args) >= 2 {
+			// 鼠标在宠物中心：窗口以鼠标坐标为中心定位
+			w.SetRelativePosition(args[0]-petSize/2, args[1]-petSize/2)
+		} else {
+			w.Center()
 		}
-		return
-	}
-	js := fmt.Sprintf(`(function(){try{history.pushState({},'',%q);dispatchEvent(new PopStateEvent('popstate'));}catch(e){location.href=%q;}})()`, target, target)
-	a.platform.ExecJS(js)
-	a.platform.Show()
-	a.platform.Focus()
-}
-
-// openSettings 打开/聚焦设置窗口（本地页面，配置 host/key/work_dir/exec_timeout）。
-func (a *App) openSettings() {
-	if cfg.Global.Port() == 0 {
-		return
-	}
-	// 主窗口打开本机设置页（api 包 serve 的 127.0.0.1 页面）：不依赖平台可达，
-	// 单窗口统一——设置 = 主窗口导航到本地地址，「返回平台」导航回平台。
-	// code 经 URL query 传入页面 JS（x-aic-code 头的来源）。
-	url := fmt.Sprintf("http://127.0.0.1:%d/settings?code=%s", cfg.Global.Port(), cfg.Global.Code())
-	if a.platform == nil {
-		w := a.newPlatformWindow("AIC Desktop 设置", url)
-		if w == nil {
-			return
+	case "window_restore":
+		// 还原尺寸，位置回非桌宠缓存
+		if petOrigW > 0 && petOrigH > 0 {
+			w.SetSize(petOrigW, petOrigH)
 		}
-		a.platform = w
-		return
+		w.SetRelativePosition(normalPosX, normalPosY)
 	}
-	a.platform.SetTitle("AIC Desktop 设置")
-	a.platform.SetURL(url)
-	a.platform.Show()
-	a.platform.Focus()
+	st.Maximised = w.IsMaximised()
+	st.Fullscreen = w.IsFullscreen()
+	return st
 }
-
-// 本机设置页已下沉到 api 包（/settings 提供，静态资源 api/ui/settings.html，
-// 主窗口与浏览器共用）。

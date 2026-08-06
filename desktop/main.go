@@ -18,8 +18,8 @@ import (
 //go:embed trayicon.png
 var trayIcon []byte
 
-// main 与 cli 同一套 vigo/flags 解析（-h / -host / -key / -work_dir / -exec_timeout，
-// env: HOST / KEY / WORK_DIR / EXEC_TIMEOUT），主命令启动 Wails 壳。
+// main 与 cli 同一套 vigo/flags 解析（-h / -host / -key / -work_dir / -exec_timeout / -code，
+// env: HOST / KEY / WORK_DIR / EXEC_TIMEOUT / CODE），主命令启动 Wails 壳。
 func main() {
 	// 二进制身份：桌面壳（api.Init 据此创建 Runner）
 	cfg.DeviceType = "desktop"
@@ -47,48 +47,40 @@ func main() {
 	}
 }
 
-// runApp 启动 Wails 壳：本地管理 API + 平台窗口。
+// runApp 启动 Wails 壳：本地服务（vigo 壳页面 + /api）+ frameless 壳窗口。
 func runApp() error {
 	svc := NewApp()
 
-	// open_platform 走应用内窗口跳转（默认系统浏览器仅 cli 用）
-	api.OpenPlatformURL = svc.OpenPlatformURL
+	// 窗口控制注入（壳页面 /api/window_* → wails window API；cli 无窗口不注入）
+	api.WindowControl = windowControl
+
 	if err := pod.Start(); err != nil {
 		return err
 	}
 
 	app := application.New(application.Options{
 		Name:        "AIC Desktop",
-		Description: "AIC Desktop — 页面访问平台，进程内托管 host",
+		Description: "AIC Desktop — 本地壳页面 + 进程内托管 host",
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "ai.ivec.desktop",
 			ExitCode: 0,
 			OnSecondInstanceLaunch: func(_ application.SecondInstanceData) {
-				// 已运行：聚焦现有平台窗口（local_code 端口唯一，避免多实例端口失配）
-				if w, ok := application.Get().Window.Get("platform"); ok {
-					w.Show()
-					w.Focus()
-				}
+				// 已运行：聚焦现有壳窗口（本地服务端口唯一，避免多实例端口失配）
+				svc.FocusPlatform()
 			},
 		},
-		// 常驻托盘：关闭窗口不退出应用（默认即 false，显式声明）
+		// 常驻托盘：关闭窗口不退出应用
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
 	})
 
-	// 原生菜单：mac 菜单栏 / windows 窗口菜单栏（linux 无应用菜单支持，自动降级）。
-	// 编辑菜单同时是 mac webview 内 Cmd+C/V/Z 生效的前提（原生角色经 responder chain）。
-	app.Menu.SetApplicationMenu(buildAppMenu(svc))
-
-	// 主窗口 = 平台页面（URL 自动携带 ?local_code={port}.{code}，
-	// 本地配置统一走平台 /hosts 页，桌面壳不再提供本地管理页）
-	if err := svc.OpenPlatform(""); err != nil {
+	// 壳窗口（本地页面：header + iframe 平台页；无系统菜单/无系统按钮）
+	if err := svc.OpenShell(); err != nil {
 		return err
 	}
 
-	// 常驻托盘：关闭按钮 → 隐藏窗口（进程 + host 会话 + 本地 API 继续运行）
-	// RegisterHook 与 wails 官方 hide-window 示例一致（hook 先于默认关闭处理）
+	// 常驻托盘：关闭按钮 → 隐藏窗口（进程 + host 会话 + 本地服务继续运行）
 	win := svc.PlatformWindow()
 	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
 		win.Hide()
@@ -106,20 +98,16 @@ func runApp() error {
 	tray.SetTooltip("AIC Desktop")
 	menu := application.NewMenu()
 	open := menu.Add("打开")
-	settings := menu.Add("设置")
 	quit := menu.Add("退出")
 	open.OnClick(func(_ *application.Context) {
-		win.Show().Focus()
-	})
-	settings.OnClick(func(_ *application.Context) {
-		svc.openSettings()
+		svc.FocusPlatform()
 	})
 	quit.OnClick(func(_ *application.Context) {
 		app.Quit()
 	})
 	tray.SetMenu(menu)
 	tray.OnClick(func() {
-		win.Show().Focus()
+		svc.FocusPlatform()
 	})
 
 	// 应用退出时停止 host 会话（防止 NATS 连接残留）并关闭本地服务
