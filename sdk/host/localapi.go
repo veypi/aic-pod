@@ -97,7 +97,7 @@ func (l *LocalAPI) Start() error {
 		"/api/stop",
 		"/api/open_url",
 		"/api/open_platform",
-			"/settings",
+		"/settings",
 	} {
 		router.Any(p, l.dispatch(p))
 	}
@@ -156,7 +156,7 @@ func defaultOrigins() []string {
 }
 
 // allowedOrigins 实际白名单 = 默认列表 + 当前有效配置 host 的 origin
-//（启动 flag/env 注入的测试地址等自动放行）。
+// （启动 flag/env 注入的测试地址等自动放行）。
 func (l *LocalAPI) allowedOrigins() []string {
 	list := defaultOrigins()
 	if cfg := l.loadEffective(); cfg.Host != "" {
@@ -546,6 +546,7 @@ func HostsURL(hostURL string) string {
 	u.Fragment = ""
 	return u.String()
 }
+
 func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPost {
 		return methodNotAllowed(w)
