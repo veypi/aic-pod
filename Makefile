@@ -14,7 +14,7 @@
 #   aic-cli-<os>-<arch>          cli 全平台
 #   aic-browser.zip              Chrome 扩展
 #
-# 版本：desktop 二进制与 cli 同源 git 版本（ldflags -X main.version），
+# 版本：desktop 二进制与 cli 同源 git 版本（ldflags -X cfg.Version），
 #       browser 版本 = manifest.json（发版时数字部分保持一致）。
 # ==============================================================================
 
@@ -31,7 +31,7 @@ GOHOSTARCH := $(shell go env GOHOSTARCH)
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 # Windows 资源版本号：纯数字点分（go-winres 不接受 dirty 后缀）
 WIN_VERSION := $(shell echo $(VERSION) | sed 's/^v//; s/-.*//')
-LDFLAGS    := -s -w -X main.version=$(VERSION)
+LDFLAGS    := -s -w -X github.com/veypi/aic-pod/cfg.Version=$(VERSION)
 
 BROWSER_DIR := browser
 BROWSER_OUT := $(BIN_DIR)/aic-browser.zip
