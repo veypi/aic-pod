@@ -91,6 +91,16 @@ func NewManager(execTimeout time.Duration) *Manager {
 	return &Manager{execTimeout: execTimeout, tasks: map[string]*Entry{}}
 }
 
+// SetExecTimeout 更新后台进程超时（配置保存后生效，不影响已在运行的 Entry）。
+func (m *Manager) SetExecTimeout(d time.Duration) {
+	if d <= 0 {
+		d = DefaultExecTimeout
+	}
+	m.mu.Lock()
+	m.execTimeout = d
+	m.mu.Unlock()
+}
+
 // Start 启动子进程并托管（§5.9）：
 //   - stdout+stderr 合并重定向到 opts.LogPath
 //   - ctx 超时 → 自动后台化：进程继续运行，返回 Background=true + ID
@@ -113,7 +123,10 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	}
 
 	// 后台 context：不继承请求 deadline，进程自有超时（bg_kill 或自然终结时释放）
-	bgCtx, bgCancel := context.WithTimeout(context.Background(), m.execTimeout)
+	m.mu.Lock()
+	timeout := m.execTimeout
+	m.mu.Unlock()
+	bgCtx, bgCancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(bgCtx, opts.Exec[0], opts.Exec[1:]...)
 	cmd.Dir = opts.Workdir
 	// Windows 上经逐行转码（GBK→UTF-8）后落盘，其余平台原样直写

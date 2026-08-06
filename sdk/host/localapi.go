@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,11 @@ type LocalHost interface {
 	StartHost(cfg Config) error
 	StopHost()
 	Running() bool
+	// OpenPlatformURL 应用内打开平台 URL（desktop 窗口跳转；cli 无窗口降级系统浏览器）。
+	OpenPlatformURL(url string) error
+	// ApplyConfig 应用新运行配置（保存设置后调用）：保留会话与 bg 任务，
+	// 仅更新参数；NATS 地址变化时重连。
+	ApplyConfig(cfg Config) error
 }
 
 // LocalAPI 本地管理服务。
@@ -89,6 +95,9 @@ func (l *LocalAPI) Start() error {
 		"/api/get_log",
 		"/api/start",
 		"/api/stop",
+		"/api/open_url",
+		"/api/open_platform",
+			"/settings",
 	} {
 		router.Any(p, l.dispatch(p))
 	}
@@ -195,8 +204,9 @@ func (l *LocalAPI) security(x *vigo.X) error {
 		w.Header().Set("Access-Control-Allow-Origin", allowed)
 		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 	}
-	// /api/ping 无需凭证（探测用）
-	if r.URL.Path != "/api/ping" && !l.checkCode(r) {
+	// 页面路径（/settings 等）放行——HTML 无敏感数据，数据读取走 /api/*（带 code 校验）；
+	// /api/ping 无需凭证（探测用）。
+	if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/ping" && !l.checkCode(r) {
 		http.Error(w, "invalid or expired local code", http.StatusUnauthorized)
 		x.Stop()
 		return nil
@@ -267,6 +277,12 @@ func (l *LocalAPI) dispatch(path string) func(*vigo.X) error {
 			}
 			l.host.StopHost()
 			writeJSON(w, map[string]bool{"ok": true})
+		case "/api/open_url":
+			return l.handleOpenURL(w, x.Request)
+		case "/api/open_platform":
+			return l.handleOpenPlatform(w, x.Request)
+		case "/settings":
+			return l.handleSettings(w, x.Request)
 		}
 		return nil
 	}
@@ -312,10 +328,22 @@ func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) error {
 	}
 	// 内存态同步：启动覆盖保留 + 新凭证
 	l.mu.Lock()
+	oldKey := l.cfg.Key
 	l.cfg.Key = strings.TrimSpace(req.Credential)
 	startCfg := l.cfg
 	l.mu.Unlock()
-	if err := l.host.StartHost(startCfg); err != nil {
+	// 已运行时的 bind 语义（2026-08-06 修复）：desktop 启动时 autoConnect 已
+	// StartHost，重复 bind 会误报 host already running 且阻断后续 set_config。
+	// 凭证未变 → 保持运行（幂等）；凭证变了（换绑）→ 重启 host 用新凭证重连。
+	if l.host.Running() {
+		if oldKey != startCfg.Key {
+			l.host.StopHost()
+			if err := l.host.StartHost(startCfg); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return nil
+			}
+		}
+	} else if err := l.host.StartHost(startCfg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return nil
 	}
@@ -323,7 +351,69 @@ func (l *LocalAPI) handleBind(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// handleUnbind 解绑设备：停止 host 会话并清除配置中的凭证（host/运行参数保留）。
+// handleOpenURL 用系统默认浏览器打开外链（desktop 外链委托，2026-08-06）：
+// 平台窗口是 WKWebView（mac 未实现 createWebView，target=_blank 外链点击无反应），
+// 前端 local_handler.js 拦截外链点击经此端点交给系统浏览器（自带多标签）。
+// 仅接受 http/https（防本地命令注入），origin 校验在前端完成。
+func (l *LocalAPI) handleOpenURL(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w)
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return nil
+	}
+	u, err := url.Parse(strings.TrimSpace(req.URL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		http.Error(w, "invalid url (http/https only)", http.StatusBadRequest)
+		return nil
+	}
+	if err := OpenExternal(u.String()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+	return nil
+}
+
+// handleOpenPlatform 应用内打开平台 URL（desktop 窗口跳转；cli 降级系统浏览器）。
+func (l *LocalAPI) handleOpenPlatform(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w)
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return nil
+	}
+	u, err := url.Parse(strings.TrimSpace(req.URL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		http.Error(w, "invalid url (http/https only)", http.StatusBadRequest)
+		return nil
+	}
+	if err := l.host.OpenPlatformURL(u.String()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+	return nil
+}
+
+// handleSettings serve 本机设置页（desktop 主窗口 / cli 浏览器访问，GET）。
+func (l *LocalAPI) handleSettings(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodGet {
+		return methodNotAllowed(w)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(settingsHTML(l.port, l.code)))
+	return nil
+}
+
 func (l *LocalAPI) handleUnbind(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPost {
 		return methodNotAllowed(w)
@@ -484,7 +574,24 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error
 	if strings.TrimSpace(req.Host) != "" {
 		fileCfg.Host = strings.TrimSpace(req.Host)
 	}
-	fileCfg.WorkDir = strings.TrimSpace(req.WorkDir)
+	// work_dir：~ 展开 + 归一绝对路径 + 有效性校验，落盘即真实路径
+	//（Go exec 不做 shell 展开，配置页填 ~/test 会因路径不存在导致所有 exec 失败）
+	wd := strings.TrimSpace(req.WorkDir)
+	if wd != "" {
+		wd = expandHome(wd)
+		abs, err := filepath.Abs(wd)
+		if err != nil {
+			http.Error(w, "invalid work_dir: "+err.Error(), http.StatusBadRequest)
+			return nil
+		}
+		st, err := os.Stat(abs)
+		if err != nil || !st.IsDir() {
+			http.Error(w, "invalid work_dir: not a directory: "+abs, http.StatusBadRequest)
+			return nil
+		}
+		wd = abs
+	}
+	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
 	if err := SaveConfig(fileCfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -492,18 +599,37 @@ func (l *LocalAPI) handleSetConfig(w http.ResponseWriter, r *http.Request) error
 	}
 	l.mu.Lock()
 	hostChanged := l.cfg.Host != fileCfg.Host
+	workDirChanged := l.cfg.WorkDir != fileCfg.WorkDir
+	execTimeoutChanged := l.cfg.ExecTimeout != fileCfg.ExecTimeout
 	l.cfg.Host = fileCfg.Host
 	l.cfg.WorkDir = fileCfg.WorkDir
 	l.cfg.ExecTimeout = fileCfg.ExecTimeout
 	cfg := l.cfg
 	l.mu.Unlock()
-	// host 变更：重启 host 会话（新地址生效）
-	if hostChanged && l.host.Running() {
-		l.host.StopHost()
-		if err := l.host.StartHost(cfg); err != nil {
-			logv.Warn().Msgf("restart host with new host failed: %v", err)
+	// 运行参数变更（host/work_dir/exec_timeout）：应用新配置——保留会话与
+	// bg 任务，仅更新参数；NATS 地址变化时重连（Client.Reconfigure）
+	if l.host.Running() && (hostChanged || workDirChanged || execTimeoutChanged) {
+		if err := l.host.ApplyConfig(cfg); err != nil {
+			logv.Warn().Msgf("apply config failed: %v", err)
 		}
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 	return nil
+}
+
+// expandHome 展开 work_dir 的 ~ 前缀（~ 或 ~/xxx → 用户主目录）。
+// 配置保存时调用：落盘即为真实绝对路径，运行时不再需要 shell 展开语义。
+func expandHome(p string) string {
+	if p == "~" {
+		if h, err := os.UserHomeDir(); err == nil {
+			return h
+		}
+		return p
+	}
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(h, strings.TrimPrefix(p, "~/"))
+		}
+	}
+	return p
 }

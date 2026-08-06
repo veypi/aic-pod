@@ -5,11 +5,35 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// expandHome 展开 ~ 前缀（保存配置时落盘真实绝对路径）；非 ~ 前缀原样返回。
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		in, want string
+	}{
+		{"~", home},
+		{"~/sub/dir", filepath.Join(home, "sub/dir")},
+		{"/abs/path", "/abs/path"},
+		{"relative/path", "relative/path"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := expandHome(c.in); got != c.want {
+			t.Errorf("expandHome(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
 
 // fakeHost 是 LocalHost 的测试替身（不真正连接 NATS）。
 type fakeHost struct {
@@ -35,6 +59,10 @@ func (f *fakeHost) Running() bool {
 	defer f.mu.Unlock()
 	return f.running
 }
+
+func (f *fakeHost) OpenPlatformURL(url string) error { return nil }
+
+func (f *fakeHost) ApplyConfig(cfg Config) error { return nil }
 
 // newTestLocalAPI 创建测试用 LocalAPI（fake host，配置读写走默认路径）。
 func newTestLocalAPI(t *testing.T) *LocalAPI {
@@ -179,10 +207,12 @@ func TestLocalCodeParamFormat(t *testing.T) {
 
 // set-config 白名单：host / work_dir / exec_timeout 可写（host 变更会重启会话）；
 // key 不走 set_config（只走 bind），body 中的 credential 不得被持久化。
+// work_dir 保存时校验有效性并展开为真实绝对路径（~ 展开、不存在 400）。
 func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // 隔离配置文件（darwin UserConfigDir 用 HOME）
 	api := newTestLocalAPI(t)
-	body := `{"work_dir":"/w","credential":"leak","exec_timeout":"5m","host":"http://x:1"}`
+	wd := t.TempDir()
+	body := fmt.Sprintf(`{"work_dir":%q,"credential":"leak","exec_timeout":"5m","host":"http://x:1"}`, wd)
 	status, resp := api.req(t, "POST", "/api/set_config", api.code, body)
 	if status != http.StatusOK {
 		t.Fatalf("set-config = %d %q", status, resp)
@@ -191,7 +221,7 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkDir != "/w" || cfg.ExecTimeout != "5m" || cfg.Host != "http://x:1" {
+	if cfg.WorkDir != wd || cfg.ExecTimeout != "5m" || cfg.Host != "http://x:1" {
 		t.Fatalf("whitelist fields not saved: %+v", cfg)
 	}
 	if cfg.Key != "" {
@@ -201,6 +231,27 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	status, _ = api.req(t, "POST", "/api/set_config", api.code, `{"exec_timeout":"bogus"}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad timeout = %d, want 400", status)
+	}
+	// 无效 work_dir（不存在）→ 400
+	status, resp = api.req(t, "POST", "/api/set_config", api.code, `{"work_dir":"/definitely-not-exist-xyz"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad work_dir = %d %q, want 400", status, resp)
+	}
+	// ~ 展开：~/subdir → $HOME/subdir（绝对路径落盘）
+	sub := filepath.Join(os.Getenv("HOME"), "subdir")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	status, resp = api.req(t, "POST", "/api/set_config", api.code, `{"work_dir":"~/subdir"}`)
+	if status != http.StatusOK {
+		t.Fatalf("set-config ~/subdir = %d %q", status, resp)
+	}
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkDir != sub {
+		t.Fatalf("work_dir not expanded: %q, want %q", cfg.WorkDir, sub)
 	}
 }
 

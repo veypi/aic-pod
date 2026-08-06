@@ -167,6 +167,33 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// Reconfigure 应用新运行配置（保存设置后调用）：
+// 保留 Client 与 exec_procs Manager（bg 任务原样保留），仅更新
+// work_dir/exec_timeout 参数；NATS 地址（host）变化时重连。
+// 凭证/身份字段不变（换绑走 bind 流程重建）。
+// 注：重连后旧 heartbeatLoop 仍引用 c.nc 继续发 presence（幂等，20s 一次，
+// 多一个并发 loop 无功能影响，不额外处理）。
+func (c *Client) Reconfigure(cfg Config) error {
+	opts, err := cfg.Options(c.opts.DeviceType, c.opts.Version, c.opts.OnLog)
+	if err != nil {
+		return err
+	}
+	// 凭证与身份字段保持现有会话不变
+	opts.Key = c.opts.Key
+	opts.DeviceName = c.opts.DeviceName
+	oldURL := ResolveNATSURL(c.opts.Host)
+	c.procs.SetExecTimeout(opts.ExecTimeout)
+	c.opts = opts
+	if ResolveNATSURL(opts.Host) != oldURL {
+		if c.nc != nil {
+			c.nc.Close()
+			c.nc = nil
+		}
+		return c.Connect()
+	}
+	return nil
+}
+
 // ---- caps v2 上报（§6.3） ----
 
 // buildCommandTable 构建物理 host 的统一命令声明表（§5.1）：

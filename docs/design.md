@@ -152,7 +152,7 @@ c.RegisterCommand(proto.CommandDecl{
 | 子包 | 职责 |
 |------|------|
 | `sdk/proto` | 协议层唯一权威：subject 构造/解析（连接级）、ToolRequest/ToolResponse 信封、HKDF 三密钥派生、连接 token 与请求签名（canonical 输入 + HMAC-SHA256）、caps v2、版本门禁、nonce 防重放。固定向量测试锁定双端一致。 |
-| `sdk/host` | host agent 运行时：NATS 连接（TokenHandler 动态签发连接 token）/重连（republish caps）/认证失败处理、caps v2 发布、20s 心跳、请求分发（验签→deadline→nonce 去重→granted_level 纵深检查）、统一命令声明表构建、fs/exec/browser/bg_* 路由、配置模型（Config/解析链/原子持久化）、Runner（host 会话生命周期，cli/desktop 共用）、LocalAPI（本地管理 API：127.0.0.1 随机端口 + local_code 通道，vigo 框架实现）、RingBuffer（日志环形缓冲，挂入 vigo/logv 供 get_log 读取）。 |
+| `sdk/host` | host agent 运行时：NATS 连接（TokenHandler 动态签发连接 token）/重连（republish caps）/认证失败处理、caps v2 发布、20s 心跳、请求分发（验签→deadline→nonce 去重→granted_level 纵深检查）、统一命令声明表构建、fs/exec/browser/bg_* 路由、配置模型（Config/解析链/原子持久化）、Runner（host 会话生命周期，cli/desktop 共用）、LocalAPI（本地管理 API：127.0.0.1 随机端口 + local_code 通道，方法集含 open_url 外链委托，vigo 框架实现）、RingBuffer（日志环形缓冲，挂入 vigo/logv 供 get_log 读取）。 |
 | `sdk/vcore` | 虚拟指令引擎：命令声明表与分级表同包维护（meta.go/levels.go）、ls/rg/tree/curl/rm/mkdir/cp/mv/git 等内存实现、OS VFS 适配接口（OSVFS/memvfs）、argv 双层解析、图片尺寸/压缩。 |
 | `sdk/exec_procs` | 子进程统一托管：stdout+stderr 合并落盘日志、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
 
@@ -192,7 +192,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 
 - NATS over WebSocket（`/aic/api/nc`），连接 token 认证（HMAC-SHA256，K_connect）
 - HKDF 派生 K_connect / K_server / K_tool 三把用途隔离密钥
-- 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req`（工具请求，session_id 由信封携带）
+- 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req.{sid}`（工具请求，§6.1 v4——sid 段定向，信封 SessionID 一致；run_tool 无会话直发用 manual 占位）
 - 即时发布 CAPS → 定时心跳（20s）→ 单订阅 inbox（`u.{uid}.h.host_{host_id}.>`）→ 验签执行 → req-reply 回复
 
 ## 外部扩展

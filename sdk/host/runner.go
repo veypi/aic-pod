@@ -67,3 +67,20 @@ func (r *Runner) Running() bool {
 	defer r.mu.Unlock()
 	return r.client != nil
 }
+
+// OpenPlatformURL 打开平台 URL：cli 无窗口，用系统默认浏览器打开（desktop 应用内跳转）。
+func (r *Runner) OpenPlatformURL(url string) error {
+	return OpenExternal(url)
+}
+
+// ApplyConfig 应用新运行配置（保存设置后调用）：保留会话与 bg 任务，
+// 仅更新参数；NATS 地址变化时重连（Client.Reconfigure）。未运行则直接启动。
+func (r *Runner) ApplyConfig(cfg Config) error {
+	r.mu.Lock()
+	c := r.client
+	r.mu.Unlock()
+	if c == nil {
+		return r.StartHost(cfg)
+	}
+	return c.Reconfigure(cfg)
+}

@@ -1,0 +1,156 @@
+package host
+
+import "fmt"
+
+// settingsHTML 渲染本机设置页（LocalAPI 在 /settings 提供，主窗口/浏览器均可访问）。
+// 页面同源调用 /api/*（x-aic-code 已注入），数据不落平台——平台不可达时仍可配置
+// host/key（改错平台地址的唯一兜底入口）。open_platform 走 Go 侧：desktop 应用内
+// 跳转平台窗口，cli 无窗口降级系统浏览器。
+func settingsHTML(port int, code string) string {
+	return fmt.Sprintf(`<!doctype html>
+<html><head><meta charset="utf-8"><title>AIC Desktop 设置</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:14px -apple-system,"Segoe UI",sans-serif;background:#16181d;color:#e8eaed;
+  display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{width:520px;background:#1e2128;border:1px solid #2a2e37;border-radius:12px;padding:28px 32px}
+h1{font-size:17px;margin:0 0 4px}
+.sub{color:#8b919c;font-size:12px;margin-bottom:18px}
+label{display:block;margin:12px 0 4px;color:#aab0ba;font-size:13px}
+input{width:100%%;padding:8px 10px;border:1px solid #3a3f4a;border-radius:8px;background:#16181d;color:#e8eaed;font-size:13px}
+input:focus{outline:none;border-color:#4b83f6}
+.row{display:flex;gap:8px}
+.row input{flex:1}
+.status{display:flex;align-items:center;gap:8px;margin:16px 0 0;font-size:13px;color:#aab0ba}
+.dot{width:10px;height:10px;border-radius:50%%;background:#666;flex:none}
+.dot.on{background:#4ade80}
+.dot.off{background:#f87171}
+#stext{flex:1}
+.btns{margin-top:22px;display:flex;gap:10px;align-items:center}
+button{padding:9px 16px;border:none;border-radius:8px;background:#3b6ef6;color:#fff;font-size:13px;cursor:pointer}
+button:hover{background:#2f5cd8}
+button:disabled{opacity:.5;cursor:default}
+button.ghost{background:transparent;border:1px solid #3a3f4a;color:#c6cbd4}
+button.ghost:hover{border-color:#4b83f6}
+#msg{font-size:12px;margin-left:auto}
+</style></head><body>
+<div class="card">
+  <h1>AIC Desktop 设置</h1>
+  <div class="sub">本机客户端配置 · 平台不可达时依然可用</div>
+  <div class="status"><span class="dot" id="sdot"></span><span id="stext">检查中…</span></div>
+  <label>平台地址 (host)</label>
+  <input id="host" placeholder="https://ivec.ai">
+  <label>凭证 (key)</label>
+  <div class="row">
+    <input id="key" placeholder="host_id.cred_ver.secret.uid">
+    <button onclick="updateKey()" style="white-space:nowrap">更新</button>
+  </div>
+  <label>工作目录 (work_dir)</label>
+  <input id="work_dir" placeholder="留空 = 系统临时目录">
+  <label>后台超时 (exec_timeout)</label>
+  <input id="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
+  <div class="btns">
+    <button onclick="save()">保存</button>
+    <button id="btnReconnect" onclick="reconnect()">重连</button>
+    <button class="ghost" onclick="backToPlatform()">返回平台</button>
+    <span id="msg"></span>
+  </div>
+</div>
+<script>
+const PORT = %d, CODE = %q;
+async function call(name, body){
+  const r = await fetch('/api/'+name, {
+    method: body===undefined?'GET':'POST',
+    headers: {'x-aic-code': CODE, ...(body?{'Content-Type':'application/json'}:{})},
+    body: body===undefined?undefined:JSON.stringify(body),
+  });
+  if(!r.ok){ const t = await r.text().catch(()=>''); throw new Error(t||('HTTP '+r.status)); }
+  return r.status===204?null:r.json().catch(()=>null);
+}
+function setMsg(el, text, ok){
+  el.textContent = text;
+  el.style.color = ok ? '#4ade80' : '#f87171';
+}
+async function refreshStatus(){
+  const dot = document.getElementById('sdot'), txt = document.getElementById('stext');
+  try{
+    const s = await call('get_status');
+    if(s.running){
+      dot.className = 'dot on';
+      txt.textContent = '已连接 ' + (s.host_id||'') + (s.hostname?' @'+s.hostname:'') + (s.version?' · '+s.version:'');
+    }else{
+      dot.className = 'dot off';
+      txt.textContent = '未连接' + (s.host_id?'（host_id: '+s.host_id+'）':'');
+    }
+  }catch(e){
+    dot.className = 'dot off';
+    txt.textContent = '状态获取失败: '+e.message;
+  }
+}
+(async function(){
+  try{
+    const cfg = await call('get_config');
+    document.getElementById('host').value = cfg.host||'';
+    document.getElementById('key').value = cfg.key||'';
+    document.getElementById('work_dir').value = cfg.work_dir||'';
+    document.getElementById('exec_timeout').value = cfg.exec_timeout||'';
+  }catch(e){ setMsg(document.getElementById('msg'), '加载失败: '+e.message, false); }
+  refreshStatus();
+})();
+// 窗口重新获得焦点（复用 Show 不重载页面）→ 刷新连接状态；
+// 不重拉 get_config——避免覆盖正在编辑/待粘贴的输入框（典型流程：
+// 去 hosts 页复制新凭证回来粘贴）。
+window.addEventListener('focus', () => refreshStatus());
+async function save(){
+  const msg = document.getElementById('msg');
+  const host = document.getElementById('host').value.trim();
+  const key = document.getElementById('key').value.trim();
+  const work_dir = document.getElementById('work_dir').value.trim();
+  const exec_timeout = document.getElementById('exec_timeout').value.trim();
+  try{
+    if(key){ await call('bind', {credential: key}); }
+    await call('set_config', {host: host, work_dir: work_dir, exec_timeout: exec_timeout});
+    setMsg(msg, '已保存', true);
+  }catch(e){ setMsg(msg, '保存失败: '+e.message, false); }
+  refreshStatus();
+}
+async function updateKey(){
+  // 应用内打开 {host}/hosts?local_code={port}.{code}（desktop 主窗口跳转；cli 系统浏览器）
+  const msg = document.getElementById('msg');
+  let host = document.getElementById('host').value.trim();
+  if(!host) host = 'https://ivec.ai';
+  if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) host = 'https://' + host;
+  try{
+    const u = new URL(host);
+    u.pathname = u.pathname.replace(/\/+$/, '') + '/hosts';
+    u.searchParams.set('local_code', PORT + '.' + CODE);
+    await call('open_platform', {url: u.toString()});
+    setMsg(msg, '已打开设备管理页', true);
+  }catch(e){ setMsg(msg, '打开失败: '+e.message, false); }
+}
+async function reconnect(){
+  const msg = document.getElementById('msg');
+  const btn = document.getElementById('btnReconnect');
+  btn.disabled = true;
+  try{
+    await call('stop', {});
+    await call('start', {});
+    setMsg(msg, '已重连', true);
+  }catch(e){ setMsg(msg, '重连失败: '+e.message, false); }
+  btn.disabled = false;
+  refreshStatus();
+}
+async function backToPlatform(){
+  // 回平台首页（走 open_platform：desktop 恢复窗口标题并跳转；cli 系统浏览器打开）
+  const msg = document.getElementById('msg');
+  try{
+    const cfg = await call('get_config');
+    let host = (cfg.host||'https://ivec.ai').trim();
+    if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) host = 'https://' + host;
+    const u = new URL(host);
+    u.searchParams.set('local_code', PORT + '.' + CODE);
+    await call('open_platform', {url: u.toString()});
+  }catch(e){ setMsg(msg, '返回失败: '+e.message, false); }
+}
+</script></body></html>`, port, code)
+}

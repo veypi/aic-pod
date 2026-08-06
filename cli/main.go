@@ -20,6 +20,7 @@ import (
 	"syscall"
 
 	"github.com/veypi/aic-pod/sdk/host"
+	"github.com/veypi/aic-pod/sdk/windpi"
 	"github.com/veypi/vigo/flags"
 	"github.com/veypi/vigo/logv"
 )
@@ -30,6 +31,10 @@ var version = "v0.5.3"
 var logRing = host.NewRingBuffer(500)
 
 func main() {
+	// Windows：进程级 DPI 感知——子进程（powershell/cmd/...）继承该状态，
+	// 屏幕像素 API（GetSystemMetrics/CopyFromScreen）按物理分辨率返回（§windpi）。
+	windpi.Enable()
+
 	// 日志：console（终端）+ ring（get_log）
 	logv.SetLogger(logv.NewLogger(logv.ConsoleWriter(), logRing))
 

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/veypi/aic-pod/sdk/host"
+	"github.com/veypi/aic-pod/sdk/windpi"
 	"github.com/veypi/vigo/flags"
 	"github.com/veypi/vigo/logv"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -28,6 +29,11 @@ var logRing = host.NewRingBuffer(500)
 // main 与 cli 同一套 vigo/flags 解析（-h / -host / -key / -work_dir / -exec_timeout，
 // env: HOST / KEY / WORK_DIR / EXEC_TIMEOUT），主命令启动 Wails 壳。
 func main() {
+	// Windows：进程级 DPI 感知——子进程（powershell/cmd/...）继承该状态，
+	// 屏幕像素 API（GetSystemMetrics/CopyFromScreen）按物理分辨率返回（§windpi）；
+	// manifest 已声明 system 感知时幂等无副作用。
+	windpi.Enable()
+
 	// 日志：console（终端）+ ring（get_log）——与 cli 同一套
 	logv.SetLogger(logv.NewLogger(logv.ConsoleWriter(), logRing))
 
@@ -88,6 +94,10 @@ func runApp(cfg *host.Config) error {
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
 	})
+
+	// 原生菜单：mac 菜单栏 / windows 窗口菜单栏（linux 无应用菜单支持，自动降级）。
+	// 编辑菜单同时是 mac webview 内 Cmd+C/V/Z 生效的前提（原生角色经 responder chain）。
+	app.Menu.SetApplicationMenu(buildAppMenu(svc))
 
 	// 主窗口 = 平台页面（URL 自动携带 ?local_code={port}.{code}，
 	// 本地配置统一走平台 /hosts 页，桌面壳不再提供本地管理页）
