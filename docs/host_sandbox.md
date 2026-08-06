@@ -314,7 +314,7 @@ ssh:     [lateral-movement]       psexec:             [lateral-movement]
 
 | 项 | 仓库/文件 | 内容 |
 |----|-----------|------|
-| A1 | aic-pod `sdk/redact.go`（新）+ `client.go` | respond() 出口 redaction（ENV_KEY 全串 + secret 段） |
+| A1 | aic-pod `libs/host/redact.go`（新）+ `client.go` | respond() 出口 redaction（ENV_KEY 全串 + secret 段） |
 | A2 | aic-pod `desktop/main.go` | `godotenv.Load()` → `godotenv.Read()`；新增 `-key-file` |
 | A3 | aic-pod `Dockerfile` + README | 非 root `USER`；`ENV_KEY_FILE` 文档 |
 | A4 | aic server 等级设置 API | granted ≤ 3 钳制校验 |
@@ -324,20 +324,20 @@ ssh:     [lateral-movement]       psexec:             [lateral-movement]
 
 | 项 | 文件 | 内容 |
 |----|------|------|
-| B1 | `sdk/sandbox/path.go`（新） | CanonicalPath + 五步归一化管线 |
-| B2 | `sdk/sandbox/rules.go`（新） | Rule/规则匹配引擎 + Decision |
-| B3 | `sdk/sandbox/profile_{linux,darwin,windows}.go`（新） | 平台 profile 数据 + 默认规则 |
-| B4 | `sdk/fs.go` | handler 执行前接入 DecideFs；命中 → waiting（state + reason） |
-| B5 | `sdk/fs.go` | handler 自检：按 §6.3 评估 required（含 rm 目录非空判定）后数字比较；caps action 等级声明同步 |
+| B1 | `libs/sandbox/path.go`（新） | CanonicalPath + 五步归一化管线 |
+| B2 | `libs/sandbox/rules.go`（新） | Rule/规则匹配引擎 + Decision |
+| B3 | `libs/sandbox/profile_{linux,darwin,windows}.go`（新） | 平台 profile 数据 + 默认规则 |
+| B4 | `libs/host/fs.go` | handler 执行前接入 DecideFs；命中 → waiting（state + reason） |
+| B5 | `libs/host/fs.go` | handler 自检：按 §6.3 评估 required（含 rm 目录非空判定）后数字比较；caps action 等级声明同步 |
 | B6 | 验证点 | waiting → grant → procs 以 granted=9 重发（同 msg_id、新 nonce/deadline）→ host 数字比较放行的端到端链路走通 |
 
 ### Phase C（P1）：exec 沙箱
 
 | 项 | 文件 | 内容 |
 |----|------|------|
-| C1 | `sdk/sandbox/cmd.go`（新） | CanonicalCommand + shell mini-parser（sh/cmd/powershell） |
-| C2 | `sdk/sandbox/categories_{linux,windows}.yaml` → go:embed | 类别映射数据 |
-| C3 | `sdk/exec.go` | 模式开关（open/guard/allowlist）+ DecideExec 接入 |
+| C1 | `libs/sandbox/cmd.go`（新） | CanonicalCommand + shell mini-parser（sh/cmd/powershell） |
+| C2 | `libs/sandbox/categories_{linux,windows}.yaml` → go:embed | 类别映射数据 |
+| C3 | `libs/host/exec.go` | 模式开关（open/guard/allowlist）+ DecideExec 接入 |
 | C4 | 复合判定 | exec 参数过 CanonicalPath 复用 fs L2 规则 |
 
 ### Phase D（P2）：一致性测试与收尾

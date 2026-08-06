@@ -18,7 +18,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 | `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 
-本地管理 API（LocalAPI）由 sdk/host 提供（cli/desktop 共用，vigo 框架实现）：
+本地管理 API（LocalAPI）由 api 包提供（cli/desktop 共用，vigo 框架实现）：
 `aic run` 启动时在 127.0.0.1 随机端口监听并**打印带 local_code 的引导链接**，
 用户浏览器访问该链接即可绑定/管理本机（与桌面端同一套通道协议）。
 

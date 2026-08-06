@@ -27,7 +27,7 @@
 ## 协议（指令集 v2）
 
 > 与 [aic docs/instruction_sets_v2.md](../aic/docs/instruction_sets_v2.md) §6 对齐，
-> 协议层实现见 `src/sdk/proto.js`（subject/信封/caps 纯函数，Go 侧 `sdk/proto` 零漂移，
+> 协议层实现见 `src/sdk/proto.js`（subject/信封/caps 纯函数，Go 侧 `libs/proto` 零漂移，
 > 固定向量见 `src/sdk/proto.test.js` + `auth.test.js`）。
 
 ### 连接级 subject（host 生命周期）
@@ -456,7 +456,7 @@ browser/
 │   │       └── jetstream-internal.js
 │   │
 │   ├── sdk/                      # AIC 客户端 SDK（指令集 v2.5）
-│   │   ├── proto.js              # 协议层：subject/信封/caps v2 纯函数（Go sdk/proto 零漂移）
+│   │   ├── proto.js              # 协议层：subject/信封/caps v2 纯函数（Go libs/proto 零漂移）
 │   │   ├── proto.test.js         # subject/caps 固定向量（node --test）
 │   │   ├── crypto.js             # HKDF + HMAC-SHA256 (Web Crypto API)
 │   │   ├── auth.js               # 连接 token (e1.*) + 工具请求验签（v2 canonical 输入）
