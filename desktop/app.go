@@ -5,71 +5,46 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/veypi/aic-pod/sdk/host"
+	pod "github.com/veypi/aic-pod"
+	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/vigo/logv"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-// App 是桌面壳：host 会话生命周期（委托 sdk/host.Runner）+ 平台窗口。
-// 配置读写与本地管理 API 全部在 sdk/host（cli/desktop 共享同一份 config.yaml
-// 与同一套 local_code 通道）；desktop 只加 Wails 壳 + 首页窗口连接。
+// App 是桌面壳：平台窗口管理（托盘/菜单/设置页导航）。
+// host 会话生命周期在 api 包（Runner），配置读写走 cfg.Global——
+// cli/desktop 共享同一份 config.yaml 与同一套 local_code 通道，desktop 只加 Wails 壳。
 type App struct {
-	runner   *host.Runner   // host 生命周期（"desktop" 类型）
-	local    *host.LocalAPI  // 本地 HTTP 服务（local_code 通道）
-	cfg      host.Config    // 启动时解析的有效配置（flag/env/文件，与 cli 同一套解析）
 	platform application.Window // 平台窗口（托盘打开/聚焦用，单窗口）
 }
 
-// NewApp 创建桌面壳。cfg 为 flags 解析后的有效配置。
-func NewApp(cfg host.Config) *App {
-	return &App{runner: host.NewRunner("desktop", version), cfg: cfg}
-}
-
-// config 返回启动时解析的有效配置（flags 解析结果，含 flag/env 覆盖）。
-func (a *App) config() host.Config {
-	return a.cfg
-}
-
-// StartHost 启动 host 会话（LocalHost 接口；Runner 内部自保护已运行检查）。
-func (a *App) StartHost(cfg host.Config) error {
-	return a.runner.StartHost(cfg)
-}
-
-// StopHost 停止 host 会话（LocalHost 接口）。
-func (a *App) StopHost() {
-	a.runner.StopHost()
-}
-
-// Running 报告 host 会话是否在运行（LocalHost 接口）。
-func (a *App) Running() bool {
-	return a.runner.Running()
-}
-
-// ApplyConfig 应用新运行配置（LocalHost 接口）：保留会话与 bg 任务，
-// 仅更新参数；NATS 地址变化时重连。
-func (a *App) ApplyConfig(cfg host.Config) error {
-	return a.runner.ApplyConfig(cfg)
+// NewApp 创建桌面壳。
+func NewApp() *App {
+	return &App{}
 }
 
 // OpenPlatform 打开/聚焦平台窗口。
 // 未绑定（无凭证）→ 直达设备管理页 {host}/hosts 引导绑定；已绑定 → 打开平台首页。
 func (a *App) OpenPlatform(hostURL string) error {
 	if strings.TrimSpace(hostURL) == "" {
-		hostURL = a.config().Host
+		hostURL = cfg.Global.Host
 	}
-	if a.config().Key == "" {
-		hostURL = host.HostsURL(hostURL)
+	if cfg.Global.Key == "" {
+		// 未绑定 → 直达设备管理页 {host}/hosts
+		o := *cfg.Global
+		o.Host = hostURL
+		hostURL = o.HostsURL()
 	}
 	app := application.Get()
 	// 拼 local_code 参数：平台页面据此建立本地通道（local_handler.js 解析持久化，
 	// 并经 get_status 验证桌面通道后应用桌面壳效果）；URL 已带 local_code（如
 	// OpenPlatformURL 传入的 hosts 页）则不再追加。
-	if a.local != nil && !strings.Contains(hostURL, "local_code=") {
+	if cfg.Global.Port() != 0 && !strings.Contains(hostURL, "local_code=") {
 		sep := "?"
 		if strings.Contains(hostURL, "?") {
 			sep = "&"
 		}
-		hostURL = hostURL + sep + "local_code=" + url.QueryEscape(a.local.LocalCodeParam())
+		hostURL = hostURL + sep + "local_code=" + url.QueryEscape(pod.LocalCodeParam())
 	}
 	logv.Info().Msgf("opening platform: %s", hostURL)
 	if w, ok := app.Window.Get("platform"); ok {
@@ -146,10 +121,10 @@ func (a *App) FocusPlatform() {
 // pushState+popstate 是标准浏览器事件，vhtml 路由监听 popstate（router.js）。
 // ExecJS 不可用（页面未发 ready 等）或跨域时回退 location.href 整页加载。
 func (a *App) Navigate(route string) {
-	target := strings.TrimSuffix(a.config().Host, "/") + route
-	if a.config().Key == "" {
+	target := strings.TrimSuffix(cfg.Global.Host, "/") + route
+	if cfg.Global.Key == "" {
 		// 未绑定：忽略路由，由 OpenPlatform 统一引导到设备管理页
-		target = a.config().Host
+		target = cfg.Global.Host
 	}
 	if a.platform == nil {
 		if err := a.OpenPlatform(target); err != nil {
@@ -165,12 +140,13 @@ func (a *App) Navigate(route string) {
 
 // openSettings 打开/聚焦设置窗口（本地页面，配置 host/key/work_dir/exec_timeout）。
 func (a *App) openSettings() {
-	if a.local == nil {
+	if cfg.Global.Port() == 0 {
 		return
 	}
-	// 主窗口打开本机设置页（LocalAPI serve 的 127.0.0.1 页面）：不依赖平台可达，
+	// 主窗口打开本机设置页（api 包 serve 的 127.0.0.1 页面）：不依赖平台可达，
 	// 单窗口统一——设置 = 主窗口导航到本地地址，「返回平台」导航回平台。
-	url := fmt.Sprintf("http://127.0.0.1:%d/settings", a.local.Port())
+	// code 经 URL query 传入页面 JS（x-aic-code 头的来源）。
+	url := fmt.Sprintf("http://127.0.0.1:%d/settings?code=%s", cfg.Global.Port(), cfg.Global.Code())
 	if a.platform == nil {
 		w := a.newPlatformWindow("AIC Desktop 设置", url)
 		if w == nil {
@@ -185,5 +161,5 @@ func (a *App) openSettings() {
 	a.platform.Focus()
 }
 
-// 本机设置页已下沉到 sdk/host（LocalAPI /settings 提供，主窗口与浏览器共用，
-// 见 sdk/host/settings.go settingsHTML）。
+// 本机设置页已下沉到 api 包（/settings 提供，静态资源 api/ui/settings.html，
+// 主窗口与浏览器共用）。

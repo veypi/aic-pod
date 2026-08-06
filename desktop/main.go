@@ -4,8 +4,9 @@ import (
 	_ "embed"
 	"os"
 
-	"github.com/veypi/aic-pod/sdk/host"
-	"github.com/veypi/aic-pod/sdk/windpi"
+	pod "github.com/veypi/aic-pod"
+	"github.com/veypi/aic-pod/api"
+	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/vigo/flags"
 	"github.com/veypi/vigo/logv"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -17,36 +18,27 @@ import (
 //go:embed trayicon.png
 var trayIcon []byte
 
-// version 与 cli 同一来源：Makefile desktop target 经 -X main.version=$(VERSION)
-// 注入 git 版本（如 v0.5.1），desktop 与 cli 永远同一版本。
-var version = "v0.5.3"
-
-// ---- 日志（统一 vigo/logv；get_log 经 RingBuffer 挂入 logv） ----
-
-// logRing 是日志环形缓冲（本地 API get_log 的数据源）。
-var logRing = host.NewRingBuffer(500)
-
 // main 与 cli 同一套 vigo/flags 解析（-h / -host / -key / -work_dir / -exec_timeout，
 // env: HOST / KEY / WORK_DIR / EXEC_TIMEOUT），主命令启动 Wails 壳。
 func main() {
-	// Windows：进程级 DPI 感知——子进程（powershell/cmd/...）继承该状态，
-	// 屏幕像素 API（GetSystemMetrics/CopyFromScreen）按物理分辨率返回（§windpi）；
-	// manifest 已声明 system 感知时幂等无副作用。
-	windpi.Enable()
+	// 二进制身份：桌面壳（api.Init 据此创建 Runner）
+	cfg.DeviceType = "desktop"
 
-	// 日志：console（终端）+ ring（get_log）——与 cli 同一套
-	logv.SetLogger(logv.NewLogger(logv.ConsoleWriter(), logRing))
+	// 日志：仅文件（cfg.LogPath，get_log 数据源；GUI 无终端）
+	if lw, err := cfg.LogWriter(); err == nil {
+		logv.SetLogger(logv.NewLogger(lw))
+	}
 
-	// 配置结构体：文件默认值填充后交给 AutoRegister（flag/env 覆盖）
-	cfg, err := host.LoadConfig()
+	// 配置：文件值填充 cfg.Global 后交给 AutoRegister（flag/env 覆盖）
+	o, err := cfg.Load()
 	if err != nil {
 		logv.Warn().Msgf("load config: %v", err)
 	}
 
 	cmd := flags.New("aic-desktop", "AIC Desktop — Wails shell (host agent)")
-	cmd.AutoRegister(&cfg)
+	cmd.AutoRegister(o)
 	// 主命令：启动 Wails 壳（窗口 + 进程内 host 会话）
-	cmd.Command = func() error { return runApp(&cfg) }
+	cmd.Command = func() error { return runApp() }
 
 	cmd.Parse()
 	if err := cmd.Run(); err != nil {
@@ -55,24 +47,14 @@ func main() {
 	}
 }
 
-// runApp 启动 Wails 壳：本地管理 API + 自动连接 host + 平台窗口。
-func runApp(cfg *host.Config) error {
-	svc := NewApp(*cfg)
+// runApp 启动 Wails 壳：本地管理 API + 平台窗口。
+func runApp() error {
+	svc := NewApp()
 
-	local, err := host.NewLocalAPI(svc, version, logRing, *cfg)
-	if err != nil {
+	// open_platform 走应用内窗口跳转（默认系统浏览器仅 cli 用）
+	api.OpenPlatformURL = svc.OpenPlatformURL
+	if err := pod.Start(); err != nil {
 		return err
-	}
-	if err := local.Start(); err != nil {
-		return err
-	}
-	svc.local = local
-
-	// 已配置的设备：后台自动连接 host（失败记录日志，不阻塞窗口）
-	if cfg.Key != "" {
-		if err := svc.StartHost(*cfg); err != nil {
-			logv.Warn().Msgf("auto start host failed: %v", err)
-		}
 	}
 
 	app := application.New(application.Options{
@@ -105,7 +87,7 @@ func runApp(cfg *host.Config) error {
 		return err
 	}
 
-	// 常驻托盘：关闭按钮 → 隐藏窗口（进程 + host 会话 + LocalAPI 继续运行）
+	// 常驻托盘：关闭按钮 → 隐藏窗口（进程 + host 会话 + 本地 API 继续运行）
 	// RegisterHook 与 wails 官方 hide-window 示例一致（hook 先于默认关闭处理）
 	win := svc.PlatformWindow()
 	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
@@ -141,8 +123,7 @@ func runApp(cfg *host.Config) error {
 	})
 
 	// 应用退出时停止 host 会话（防止 NATS 连接残留）并关闭本地服务
-	defer svc.StopHost()
-	defer local.Stop()
+	defer pod.Stop()
 
 	return app.Run()
 }
