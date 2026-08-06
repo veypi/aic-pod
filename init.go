@@ -17,8 +17,8 @@ package pod
 
 import (
 	"context"
+	"embed"
 	_ "embed"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -26,6 +26,7 @@ import (
 	"github.com/veypi/aic-pod/api"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/host"
+	"github.com/veypi/vhtml"
 	"github.com/veypi/vigo"
 	"github.com/veypi/vigo/logv"
 )
@@ -34,9 +35,13 @@ import (
 // /settings 本机设置页（公开页面，数据读取走 /api/*）。
 var Router = vigo.NewRouter()
 
+//go:embed ui
+var uifs embed.FS
+
 func init() {
 	Router.Extend("/api", api.Router)
-	Router.Get("/settings", "Settings Page", Settings)
+	Router.Extend("vhtml", vhtml.Router)
+	_ = vhtml.WrapUI(Router, uifs)
 }
 
 var (
@@ -64,7 +69,7 @@ func Start() error {
 	srv = s
 	mu.Unlock()
 	go func() { _ = s.Run() }()
-	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d (local_code=%s)", cfg.Global.Port(), LocalCodeParam())
+	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d (code=%s)", cfg.Global.Port(), cfg.Global.Code)
 	// 已绑定 → 自动连接 host（失败仅记日志，不阻断本地服务）
 	if cfg.Global.Key != "" {
 		if err := host.Start(*cfg.Global); err != nil {
@@ -86,25 +91,4 @@ func Stop() {
 		defer cancel()
 		_ = s.Shutdown(ctx)
 	}
-}
-
-// LocalCodeParam 返回页面 URL 参数值：{port}.{code}。
-func LocalCodeParam() string {
-	return fmt.Sprintf("%d.%s", cfg.Global.Port(), cfg.Global.Code())
-}
-
-// ---- /settings 本机设置页（静态资源） ----
-
-//go:embed ui/settings.html
-var settingsHTML []byte
-
-// Settings serve 本机设置页（ui/settings.html 静态资源，code 经 URL query
-// 传入页面 JS）。数据不落平台——平台不可达时仍可配置 host/key（改错平台地址的
-// 唯一兜底入口）；open_platform 走 Go 侧：desktop 应用内跳转，cli 降级系统浏览器。
-// 根路由无 After 中间件——自行写响应。
-func Settings(x *vigo.X) error {
-	w := x.ResponseWriter()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, err := w.Write(settingsHTML)
-	return err
 }

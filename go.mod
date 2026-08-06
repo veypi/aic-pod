@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/nats-io/nats.go v1.52.0
 	github.com/rs/zerolog v1.34.0
+	github.com/veypi/vhtml v0.6.1
 	github.com/veypi/vigo v0.7.2
 	golang.org/x/crypto v0.54.0
 	golang.org/x/image v0.44.0

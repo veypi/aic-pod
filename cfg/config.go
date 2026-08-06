@@ -32,8 +32,8 @@ var DeviceType = "cli"
 // Options 是 cli 与 desktop 共享的唯一配置模型（配置参数就是一个结构体，
 // vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：
 //
-//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout）与 env 键
-//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT）的来源，也是配置文件的键
+//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-code）与 env 键
+//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/CODE）的来源，也是配置文件的键
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
 //
@@ -46,10 +46,14 @@ type Options struct {
 	Key         string `json:"key" desc:"binding credential key (from platform device page)"`
 	WorkDir     string `json:"work_dir" desc:"working directory for exec (default: system temp dir)"`
 	ExecTimeout string `json:"exec_timeout" default:"30m" desc:"exec background timeout"`
+	// Code 本地 API 校验码（x-aic-code 头，纯随机秘钥，与端口无关）：
+	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
+	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
+	Code string `json:"code" desc:"local api secret code (empty = random per process)"`
 
 	// 进程级运行时态（unexported，不参与序列化/落盘）：
-	port int    // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
-	code string // local_code 校验码（NewOptions 随机生成，生命周期 = 进程）
+	port     int  // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
+	codeAuto bool // Code 为本次进程随机生成（Save 时跳过落盘）
 }
 
 // Port 返回本地管理 API 监听端口（未启动为 0）。
@@ -58,10 +62,7 @@ func (o *Options) Port() int { return o.port }
 // SetPort 写入本地管理 API 实际监听端口（仅 api.Start 调用）。
 func (o *Options) SetPort(p int) { o.port = p }
 
-// Code 返回 local_code 校验码（x-aic-code 头，不含端口前缀）。
-func (o *Options) Code() string { return o.code }
-
-// newCode 生成 local_code 校验码（32 hex）。
+// newCode 生成校验码（32 hex）。
 func newCode() string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -70,14 +71,14 @@ func newCode() string {
 	return hex.EncodeToString(buf)
 }
 
-// Global 全局有效配置：NewOptions 初始化（code 随即生成）→ Load 填充文件值 →
+// Global 全局有效配置：NewOptions 初始化 → Load 填充文件值（Code 空则随机生成）→
 // flags.AutoRegister(Global) 叠加 flag/env；本地 API 的写操作（bind/set_config）
 // 同步更新 Global 并 Save 落盘。
 var Global = NewOptions()
 
-// NewOptions 返回带默认值的配置实例（code 随机生成，进程级）。
+// NewOptions 返回带默认值的配置实例（Code 留空，由 Load/LoadFile 生成）。
 func NewOptions() *Options {
-	return &Options{Host: DefaultHost, ExecTimeout: "30m", code: newCode()}
+	return &Options{Host: DefaultHost, ExecTimeout: "30m"}
 }
 
 // Normalize 填充缺省值（Host 空 → DefaultHost）。
@@ -149,6 +150,7 @@ func LogWriter() (io.Writer, error) {
 // LoadFile 仅读取配置文件返回独立副本（yaml，flags.LoadCfg），不触碰 Global——
 // 页面写操作（bind/set_config）落盘用：基于文件配置修改，flag/env 启动覆盖不落盘。
 // 文件不存在返回默认配置（非错误），损坏文件由 flags 记 warn 并返回当前值。
+// Code 未配置时随机生成（codeAuto=true，Save 不落盘）。
 func LoadFile() (*Options, error) {
 	o := NewOptions()
 	p, err := Path()
@@ -157,6 +159,10 @@ func LoadFile() (*Options, error) {
 	}
 	flags.LoadCfg(p, o)
 	o.Normalize()
+	if o.Code == "" {
+		o.Code = newCode()
+		o.codeAuto = true
+	}
 	return o, nil
 }
 
@@ -168,6 +174,7 @@ func Load() (*Options, error) {
 }
 
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。
+// 进程随机生成的 Code 不落盘（codeAuto=true 时跳过该字段）。
 func Save(o *Options) error {
 	p, err := Path()
 	if err != nil {
@@ -177,7 +184,11 @@ func Save(o *Options) error {
 		return err
 	}
 	o.Normalize()
-	if err := flags.DumpCfg(p, *o); err != nil {
+	saveCfg := *o
+	if o.codeAuto {
+		saveCfg.Code = "" // 自动生成的秘钥不写回（重启换新）
+	}
+	if err := flags.DumpCfg(p, saveCfg); err != nil {
 		return err
 	}
 	// DumpCfg 以 0644 创建，凭证敏感改 0600

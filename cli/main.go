@@ -13,10 +13,10 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	pod "github.com/veypi/aic-pod"
@@ -53,7 +53,7 @@ func main() {
 	}
 }
 
-// runCmd 启动本地管理 API（含已绑定时自动连接 host），打印带 local_code 的
+// runCmd 启动本地管理 API（含已绑定时自动连接 host），打印带 code 的本地壳
 // 引导链接（用户浏览器访问即绑定/管理本机），阻塞等待 SIGINT/SIGTERM。
 func runCmd() error {
 	if err := pod.Start(); err != nil {
@@ -61,13 +61,8 @@ func runCmd() error {
 	}
 	defer pod.Stop()
 
-	// 带 local_code 的引导链接：{host}/hosts?local_code={port}.{code}
-	link := cfg.Global.HostsURL()
-	sep := "?"
-	if strings.Contains(link, "?") {
-		sep = "&"
-	}
-	link += sep + "local_code=" + url.QueryEscape(pod.LocalCodeParam())
+	// 带 code 的引导链接：本地壳页面（header + iframe 平台页，与桌面同一体验）
+	link := fmt.Sprintf("http://127.0.0.1:%d/?code=%s", cfg.Global.Port(), url.QueryEscape(cfg.Global.Code))
 	logv.Info().Msgf("aic %s (host=%s)", cfg.Version, cfg.Global.Host)
 	logv.Info().Msgf("management page: %s", link)
 	logv.Info().Msgf("local api: http://127.0.0.1:%d", cfg.Global.Port())

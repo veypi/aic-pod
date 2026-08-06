@@ -1,0 +1,238 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>AIC 本地设置</title>
+  <style>
+    body {
+      margin: 0;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      width: 520px;
+      background: var(--bg-color-secondary, #1e2128);
+      border: 1px solid var(--border-color, #2a2e37);
+      border-radius: 12px;
+      padding: 28px 32px
+    }
+
+    h1 {
+      font-size: 17px;
+      margin: 0 0 4px
+    }
+
+    .sub {
+      color: var(--text-color-tertiary, #8b919c);
+      font-size: 12px;
+      margin-bottom: 18px
+    }
+
+    label {
+      display: block;
+      margin: 12px 0 4px;
+      color: var(--text-color-secondary, #aab0ba);
+      font-size: 13px
+    }
+
+    input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border-color, #3a3f4a);
+      border-radius: 8px;
+      background: var(--bg-color, #16181d);
+      color: var(--text-color, #e8eaed);
+      font-size: 13px
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #4b83f6
+    }
+
+    .row {
+      display: flex;
+      gap: 8px
+    }
+
+    .row input {
+      flex: 1
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 16px 0 0;
+      font-size: 13px;
+      color: var(--text-color-secondary, #aab0ba)
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #666;
+      flex: none
+    }
+
+    .dot.on {
+      background: #4ade80
+    }
+
+    .dot.off {
+      background: #f87171
+    }
+
+    #stext {
+      flex: 1
+    }
+
+    .btns {
+      margin-top: 22px;
+      display: flex;
+      gap: 10px;
+      align-items: center
+    }
+
+    button {
+      padding: 9px 16px;
+      border: none;
+      border-radius: 8px;
+      background: #3b6ef6;
+      color: #fff;
+      font-size: 13px;
+      cursor: pointer
+    }
+
+    button:hover {
+      background: #2f5cd8
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: default
+    }
+
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--border-color, #3a3f4a);
+      color: var(--text-color-secondary, #c6cbd4)
+    }
+
+    button.ghost:hover {
+      border-color: #4b83f6
+    }
+
+    #msg {
+      font-size: 12px;
+      margin-left: auto
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>AIC 本地设置</h1>
+    <div class="sub">本机客户端配置 · 平台不可达时依然可用</div>
+    <div class="status"><span class="dot" id="sdot" ref="sdot"></span><span id="stext" ref="stext">检查中…</span></div>
+    <label>平台地址 (host)</label>
+    <input id="host" ref="host" placeholder="https://ivec.ai">
+    <label>凭证 (key)</label>
+    <div class="row">
+      <input id="key" ref="key" placeholder="host_id.cred_ver.secret.uid">
+      <button @click="updateKey()" style="white-space:nowrap">更新</button>
+    </div>
+    <label>工作目录 (work_dir)</label>
+    <input id="work_dir" ref="work_dir" placeholder="留空 = 系统临时目录">
+    <label>后台超时 (exec_timeout)</label>
+    <input id="exec_timeout" ref="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
+    <div class="btns">
+      <button @click="save()">保存</button>
+      <button id="btnReconnect" ref="btnReconnect" @click="reconnect()">重连</button>
+      <button class="ghost" @click="backToPlatform()">返回平台</button>
+      <span id="msg" ref="msg"></span>
+    </div>
+  </div>
+</body>
+<script setup>
+  // 页面与本地 API 同源（壳页面 /settings 路由）：$mod.$fetch 自动携带 x-aic-code
+  setMsg = (text, ok) => {
+    $refs.msg.textContent = text;
+    $refs.msg.style.color = ok ? '#4ade80' : '#f87171';
+  };
+
+  refreshStatus = async () => {
+    try {
+      const s = await $mod.$fetch('/api/get_status');
+      if (s.running) {
+        $refs.sdot.className = 'dot on';
+        $refs.stext.textContent = '已连接 ' + (s.host_id || '') + (s.hostname ? ' @' + s.hostname : '') + (s.version ? ' · ' + s.version : '');
+      } else {
+        $refs.sdot.className = 'dot off';
+        $refs.stext.textContent = '未连接' + (s.host_id ? '（host_id: ' + s.host_id + '）' : '');
+      }
+    } catch (e) {
+      $refs.sdot.className = 'dot off';
+      $refs.stext.textContent = '状态获取失败: ' + e.message;
+    }
+  };
+
+  boot = async () => {
+    try {
+      const cfg = await $mod.$fetch('/api/get_config');
+      $refs.host.value = cfg.host || '';
+      $refs.key.value = cfg.key || '';
+      $refs.work_dir.value = cfg.work_dir || '';
+      $refs.exec_timeout.value = cfg.exec_timeout || '';
+    } catch (e) {setMsg('加载失败: ' + e.message, false);}
+    refreshStatus();
+  };
+  boot();
+
+  // 窗口重新获得焦点 → 刷新连接状态（不重拉 get_config，避免覆盖正在编辑的输入框）
+  window.addEventListener('focus', () => refreshStatus());
+
+  save = async () => {
+    const host = $refs.host.value.trim();
+    const key = $refs.key.value.trim();
+    const work_dir = $refs.work_dir.value.trim();
+    const exec_timeout = $refs.exec_timeout.value.trim();
+    try {
+      if (key) await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
+      await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout}});
+      setMsg('已保存', true);
+    } catch (e) {setMsg('保存失败: ' + e.message, false);}
+    refreshStatus();
+  };
+
+  updateKey = () => {
+    // 切回首页 iframe，导航到 {host}/hosts 绑定（iframe 内平台页经壳 postMessage 通道绑定）
+    let host = $refs.host.value.trim() || 'https://ivec.ai';
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) host = 'https://' + host;
+    host = host.replace(/\/+$/, '');
+    $router.push('/');
+    $mod.$bus.emit('shell-nav', host + '/hosts');
+  };
+
+  reconnect = async () => {
+    $refs.btnReconnect.disabled = true;
+    try {
+      await $mod.$fetch('/api/stop', {method: 'POST', body: {}});
+      await $mod.$fetch('/api/start', {method: 'POST', body: {}});
+      setMsg('已重连', true);
+    } catch (e) {setMsg('重连失败: ' + e.message, false);}
+    $refs.btnReconnect.disabled = false;
+    refreshStatus();
+  };
+
+  backToPlatform = () => {
+    $router.push('/');
+  };
+</script>
+
+</html>

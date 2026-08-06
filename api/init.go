@@ -2,12 +2,12 @@
 // Distributed under terms of the MIT license.
 
 // Package api 是本地管理端点集合（/api/*，由根包 Extend 挂载）。
-// 平台页面经 local_code 通道调用（aic ui local_handler.js）：
-// local_code = "{port}.{code}"（cli 与桌面同格式，插件为 "ext.{hex}"），
-// 所有端点请求须带 x-aic-code 头。安全边界：
+// 调用方：本地壳页面（同源，$mod.$fetch 自动注入 x-aic-code 头，code 为纯秘钥）；
+// Chrome 插件经 content script 桥（ext.{hex}）。所有端点请求须带 x-aic-code 头。
+// 安全边界：
 //   - 仅监听 127.0.0.1 随机端口（不对外）
 //   - Origin 白名单：仅平台源响应 CORS 头（含 Private Network Access 预检）
-//   - code 由进程随机生成（cfg.NewOptions），生命周期 = 进程；连续 5 次校验失败锁 1 分钟
+//   - code 由进程随机生成（cfg.NewOptions，可配置写死）；连续 5 次校验失败锁 1 分钟
 package api
 
 import (
@@ -29,7 +29,7 @@ var OpenPlatformURL = utils.OpenExternal
 
 // Router 本地管理端点：security 中间件（CORS 白名单/PNA + code 校验）+
 // 统一 JSON 响应（common.JsonResponse/JsonErrorResponse）。
-var Router = vigo.NewRouter().Use(security).After(common.JsonResponse, common.JsonErrorResponse)
+var Router = vigo.NewRouter().EnableApiDoc().Use(security).After(common.JsonResponse, common.JsonErrorResponse)
 
 func init() {
 	Router.Get("/ping", "Ping", Ping)
@@ -43,6 +43,14 @@ func init() {
 	Router.Post("/stop", "Stop Host", StopHost)
 	Router.Post("/open_url", "Open URL", OpenURL)
 	Router.Post("/open_platform", "Open Platform", OpenPlatform)
+	// 窗口控制（desktop：壳页面按钮；cli：WindowControl 为 nil，返回 desktop:false）
+	Router.Get("/window_state", "Window State", GetWindowState)
+	Router.Post("/window_minimise", "Window Minimise", WindowMinimise)
+	Router.Post("/window_maximise", "Window Maximise", WindowMaximise)
+	Router.Post("/window_close", "Window Close", WindowClose)
+	Router.Post("/window_fullscreen", "Window Fullscreen", WindowFullscreen)
+	Router.Post("/window_pet", "Window Pet", WindowPet)
+	Router.Post("/window_restore", "Window Restore", WindowRestore)
 	// 兜底：OPTIONS 预检由 security 统一短路（vigo 路由未命中不走 Use 链，
 	// 必须能 match 到路由）；其余未注册路径返回 JSON 404。
 	Router.Any("/**", "Catch All", CatchAll)
@@ -151,7 +159,7 @@ func checkCode(r *http.Request) bool {
 	if now.Before(lockEnd) {
 		return false
 	}
-	if r.Header.Get("x-aic-code") != cfg.Global.Code() {
+	if r.Header.Get("x-aic-code") != cfg.Global.Code {
 		failCnt++
 		if failCnt >= 5 {
 			lockEnd = now.Add(time.Minute)

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta name="description" content="AIC Platform Frame" details="Remote platform page in iframe">
+  <title>AIC</title>
+</head>
+
+<style>
+  body {
+    width: 100%;
+  }
+
+  iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: var(--bg-color);
+  }
+</style>
+
+<body>
+  <iframe ref='core' @load="greet"></iframe>
+</body>
+
+<script setup>
+  // ---- iframe 平台页：初始地址（前端决策：已绑定 → 平台首页；未绑定 → hosts 引导） ----
+  iframeSrc = ""
+  calcSrc = async () => {
+    const cfg = await $mod.$fetch("/api/get_config").catch(() => ({}))
+    const base = (cfg.host || "https://ivec.ai").replace(/\/+$/, "")
+    iframeSrc = (cfg.key ? base + "/" : base + "/hosts")
+  }
+  calcSrc().then(() => {
+    if (!$refs.core.src) $refs.core.src = iframeSrc
+  })
+
+  // ---- 布局菜单导航（layout 发事件） ----
+  $mod.$bus.on("shell-nav", (url) => {
+    if (url && $refs.core) $refs.core.src = url
+  })
+
+  // ---- 父子通道：平台页（iframe 内）经 postMessage 请求本地 API，壳代调 ----
+  window.addEventListener("message", (ev) => {
+    const frame = $refs.core
+    if (!frame || ev.source !== frame.contentWindow) return
+    const d = ev.data
+    if (!d || typeof d !== "object" || d.type !== "__aic_local" || !d.requestId) return
+    const body = d.args === undefined ? undefined : d.args
+    const opts = body === undefined ? {} : {method: "POST", body}
+    $mod.$fetch("/api/" + d.method, opts)
+      .then((data) => {
+        ev.source.postMessage(
+          {type: "__aic_local_resp", requestId: d.requestId, data},
+          ev.origin,
+        )
+      })
+      .catch((err) => {
+        ev.source.postMessage(
+          {type: "__aic_local_resp", requestId: d.requestId, error: err.message || String(err)},
+          ev.origin,
+        )
+      })
+  })
+
+  // ---- 握手：告知 iframe 内平台页「存在本地壳」（local_handler.js 据此启用 postMessage 通道） ----
+  // iframe 每次加载/导航后触发（@load），平台页可能重载需重新握手
+  greet = () => {
+    const frame = $refs.core
+    if (!frame || !frame.src) return
+    let origin = ""
+    try {origin = new URL(frame.src).origin} catch (e) { }
+    if (origin) frame.contentWindow.postMessage({type: "__aic_shell"}, origin)
+  }
+</script>
+
+</html>

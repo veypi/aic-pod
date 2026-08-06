@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,10 +19,20 @@ import (
 	"github.com/veypi/vigo"
 )
 
+// randCode 生成随机校验码（测试环境，等价 cfg 的 newCode）。
+func randCode() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 // initTestAPI 初始化测试用本地服务（配置读写走默认路径）。
 func initTestAPI(t *testing.T) {
 	t.Helper()
 	cfg.Global = cfg.NewOptions()
+	if cfg.Global.Code == "" {
+		cfg.Global.Code = randCode() // NewOptions 不再预生成，测试环境手动补（同 Load 语义）
+	}
 	mu.Lock()
 	failCnt = 0
 	lockEnd = time.Time{}
@@ -92,7 +104,7 @@ func TestLocalAPICodeRequired(t *testing.T) {
 
 func TestLocalAPICorrectCode(t *testing.T) {
 	initTestAPI(t)
-	status, body := req(t, "GET", "/api/get_config", cfg.Global.Code(), "")
+	status, body := req(t, "GET", "/api/get_config", cfg.Global.Code, "")
 	if status != http.StatusOK {
 		t.Fatalf("correct code: got %d, want 200 (body %s)", status, body)
 	}
@@ -115,7 +127,7 @@ func TestLocalAPIFailLock(t *testing.T) {
 		}
 	}
 	// 锁定期间正确 code 也被拒
-	status, _ := req(t, "GET", "/api/get_config", cfg.Global.Code(), "")
+	status, _ := req(t, "GET", "/api/get_config", cfg.Global.Code, "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("locked: correct code got %d, want 401", status)
 	}
@@ -123,7 +135,7 @@ func TestLocalAPIFailLock(t *testing.T) {
 	mu.Lock()
 	lockEnd = time.Now().Add(-time.Second)
 	mu.Unlock()
-	status, _ = req(t, "GET", "/api/get_config", cfg.Global.Code(), "")
+	status, _ = req(t, "GET", "/api/get_config", cfg.Global.Code, "")
 	if status != http.StatusOK {
 		t.Fatalf("after unlock: got %d, want 200", status)
 	}
@@ -161,15 +173,14 @@ func TestLocalAPICORS(t *testing.T) {
 	}
 }
 
-func TestLocalCodeParamFormat(t *testing.T) {
+func TestCodeFormat(t *testing.T) {
 	initTestAPI(t)
-	p := fmt.Sprintf("%d.%s", cfg.Global.Port(), cfg.Global.Code())
-	idx := strings.IndexByte(p, '.')
-	if idx <= 0 || idx == len(p)-1 {
-		t.Fatalf("local_code format: %q", p)
+	if cfg.Global.Code == "" {
+		t.Fatal("code should be generated")
 	}
-	if p[idx+1:] != cfg.Global.Code() {
-		t.Fatalf("code mismatch: %q vs %q", p[idx+1:], cfg.Global.Code())
+	// code 是纯秘钥（可配置/随机），不再携带端口与分隔符
+	if strings.ContainsAny(cfg.Global.Code, ".\n\t ") {
+		t.Fatalf("code must be a plain secret (no port/separators): %q", cfg.Global.Code)
 	}
 }
 
@@ -181,7 +192,7 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	initTestAPI(t)
 	wd := t.TempDir()
 	body := fmt.Sprintf(`{"work_dir":%q,"credential":"leak","exec_timeout":"5m","host":"http://x:1"}`, wd)
-	status, resp := req(t, "POST", "/api/set_config", cfg.Global.Code(), body)
+	status, resp := req(t, "POST", "/api/set_config", cfg.Global.Code, body)
 	if status != http.StatusOK {
 		t.Fatalf("set-config = %d %q", status, resp)
 	}
@@ -196,12 +207,12 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 		t.Fatalf("credential persisted via set_config: %+v", o)
 	}
 	// 非法 exec_timeout → 400
-	status, _ = req(t, "POST", "/api/set_config", cfg.Global.Code(), `{"exec_timeout":"bogus"}`)
+	status, _ = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"exec_timeout":"bogus"}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad timeout = %d, want 400", status)
 	}
 	// 无效 work_dir（不存在）→ 400
-	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code(), `{"work_dir":"/definitely-not-exist-xyz"}`)
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"work_dir":"/definitely-not-exist-xyz"}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad work_dir = %d %q, want 400", status, resp)
 	}
@@ -210,7 +221,7 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code(), `{"work_dir":"~/subdir"}`)
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"work_dir":"~/subdir"}`)
 	if status != http.StatusOK {
 		t.Fatalf("set-config ~/subdir = %d %q", status, resp)
 	}
@@ -230,7 +241,7 @@ func TestLocalAPIUnbind(t *testing.T) {
 	if err := cfg.Save(&cfg.Options{Host: "http://x:1", Key: "h.1.s.u", WorkDir: "/w"}); err != nil {
 		t.Fatal(err)
 	}
-	status, resp := req(t, "POST", "/api/unbind", cfg.Global.Code(), "{}")
+	status, resp := req(t, "POST", "/api/unbind", cfg.Global.Code, "{}")
 	if status != http.StatusOK {
 		t.Fatalf("unbind = %d %q", status, resp)
 	}
@@ -249,7 +260,7 @@ func TestLocalAPIUnbind(t *testing.T) {
 // get_log：日志文件不存在返回空串 JSON。
 func TestLocalAPIGetLog(t *testing.T) {
 	initTestAPI(t)
-	status, body := req(t, "GET", "/api/get_log", cfg.Global.Code(), "")
+	status, body := req(t, "GET", "/api/get_log", cfg.Global.Code, "")
 	if status != http.StatusOK {
 		t.Fatalf("get_log = %d", status)
 	}

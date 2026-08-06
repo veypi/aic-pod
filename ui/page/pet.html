@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta name="description" content="AIC Desktop Pet" details="Floating pet, click to return">
+  <title>AIC Pet</title>
+</head>
+
+<style>
+  body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent !important;
+    overflow: hidden;
+    cursor: pointer;
+  }
+
+  .pet {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    -webkit-user-drag: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+</style>
+
+<body>
+  <img src="/assets/ai.svg" class="pet" @dblclick="back()" title="双击返回首页，按住拖动">
+</body>
+
+<script setup>
+  // 桌宠模式：窗口已缩至最小 + 透明背景（document.body 背景清除，露出桌面）
+  document.body.style.background = 'transparent'
+
+  // 双击返回首页：恢复窗口尺寸 + 切回首页（iframe 页）
+  back = () => {
+    document.body.style.background = ''
+    $mod.$fetch('/api/window_restore', { method: 'POST', body: {} }).catch(() => { })
+    $router.push('/')
+  }
+
+  // 按住拖动桌宠（wails 桥 → startDrag，OS 接管窗口移动）：
+  // 移动超过 4px 才触发，双击（不移动）不受影响
+  const bridge =
+    (window.chrome && window.chrome.webview && window.chrome.webview.postMessage)
+      ? window.chrome.webview
+      : (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.external)
+        ? window.webkit.messageHandlers.external
+        : null
+  let downX = 0, downY = 0, moving = false
+  document.addEventListener('mousedown', (e) => {
+    downX = e.screenX
+    downY = e.screenY
+    moving = false
+  })
+  document.addEventListener('mousemove', (e) => {
+    if (moving || !bridge) return
+    if (Math.abs(e.screenX - downX) > 4 || Math.abs(e.screenY - downY) > 4) {
+      moving = true
+      bridge.postMessage('wails:drag')
+    }
+  })
+</script>
+
+<script deactive>
+  // 离开桌宠（路由切换/缓存）时恢复 body 背景，避免首页透明露出桌面
+  document.body.style.background = ''
+</script>
+
+</html>
