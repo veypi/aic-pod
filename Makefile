@@ -8,9 +8,9 @@
 #   docker（veypi/aic-pod）      : 容器内运行 cli
 #
 # 构建产物（dist/）：
-#   aic-darwin-<arch>.dmg        desktop mac（.app 内嵌）
-#   aic-windows-amd64.exe        desktop windows（需 mingw-w64）
-#   aic-linux-<arch>             desktop linux（需容器/CI，GTK 依赖）
+#   aic-desktop-darwin-<arch>.dmg        desktop mac（.app 内嵌）
+#   aic-desktop-windows-amd64.exe        desktop windows（需 mingw-w64）
+#   aic-desktop-linux-<arch>             desktop linux（需容器/CI，GTK 依赖）
 #   aic-cli-<os>-<arch>          cli 全平台
 #   aic-browser.zip              Chrome 扩展
 #
@@ -105,9 +105,9 @@ desktop-darwin-%:
 	cp -R $(DESKTOP_APP) "$(BIN_DIR)/dmg-staging/"
 	ln -s /Applications "$(BIN_DIR)/dmg-staging/Applications"
 	hdiutil create -volname "AIC Desktop" -srcfolder "$(BIN_DIR)/dmg-staging" \
-		-ov -format UDZO "$(BIN_DIR)/aic-darwin-$*.dmg" 2>&1 | tail -1
+		-ov -format UDZO "$(BIN_DIR)/aic-desktop-darwin-$*.dmg" 2>&1 | tail -1
 	rm -rf "$(BIN_DIR)/dmg-staging"
-	@echo "→ $(BIN_DIR)/aic-darwin-$*.dmg"
+	@echo "→ $(BIN_DIR)/aic-desktop-darwin-$*.dmg"
 
 # Windows：mingw-w64 交叉（brew install mingw-w64）→ exe（含图标/版本资源）
 desktop-windows-%:
@@ -119,25 +119,27 @@ desktop-windows-%:
 		--product-version $(WIN_VERSION) --file-version $(WIN_VERSION) --out rsrc
 	cd $(DESKTOP_DIR) && GOWORK=off GOOS=windows GOARCH=$* CGO_ENABLED=1 \
 		CC=x86_64-w64-mingw32-gcc go build -ldflags "$(LDFLAGS) -H windowsgui" \
-		-o "../$(BIN_DIR)/aic-windows-$*.exe" .
-	@echo "→ $(BIN_DIR)/aic-windows-$*.exe"
+		-o "../$(BIN_DIR)/aic-desktop-windows-$*.exe" .
+	@echo "→ $(BIN_DIR)/aic-desktop-windows-$*.exe"
 
 # Linux desktop：GTK/webkit2gtk 依赖，需在 linux 环境构建（CI/容器）；产物为 AppImage。
 desktop-linux-%:
 	@mkdir -p $(BIN_DIR)
 	$(MAKE) desktop-resources
 	cd $(DESKTOP_DIR) && GOWORK=off GOOS=linux GOARCH=$* CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" \
-		-o "../$(BIN_DIR)/aic-linux-$*" .
-	@echo "→ $(BIN_DIR)/aic-linux-$*（打包 AppImage）"
+		-o "../$(BIN_DIR)/aic-desktop-linux-$*" .
+	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*（打包 AppImage）"
 	rm -rf /tmp/aic-appimage
 	mkdir -p /tmp/aic-appimage/build
-	cp "$(BIN_DIR)/aic-linux-$*" /tmp/aic-appimage/aic-desktop
+	cp "$(BIN_DIR)/aic-desktop-linux-$*" /tmp/aic-appimage/aic-desktop
 	cp $(DESKTOP_DIR)/appicon.png /tmp/aic-appimage/aic-desktop.png
 	cp $(DESKTOP_DIR)/linux/aic-desktop.desktop /tmp/aic-appimage/aic-desktop.desktop
 	cd /tmp/aic-appimage && wails3 generate appimage \
 		-binary aic-desktop -icon aic-desktop.png -desktopfile aic-desktop.desktop \
 		-outputdir "$(abspath $(BIN_DIR))" -builddir /tmp/aic-appimage/build 2>&1 | tail -3
-	@echo "→ $(BIN_DIR)/AIC Desktop.AppImage（linux/$*）"
+	# 规范命名 aic-desktop-linux-<arch>.AppImage
+	@mv "$(BIN_DIR)"/*.AppImage "$(BIN_DIR)/aic-desktop-linux-$*.AppImage"
+	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage（linux/$*）"
 
 # ==============================================================================
 # Docker（容器内运行 cli）

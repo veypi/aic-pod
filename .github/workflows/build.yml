@@ -57,7 +57,7 @@ jobs:
             dist/*.dmg
             dist/*.exe
             dist/*.AppImage
-            dist/aic-linux-*
+            dist/aic-desktop-linux-*
           if-no-files-found: error
           retention-days: 7
 

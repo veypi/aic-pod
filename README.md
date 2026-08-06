@@ -171,7 +171,7 @@ make build-browser   # → dist/aic-browser.zip
 ```bash
 make                            # cli 当前平台 → dist/aic-cli-<os>-<arch>
 make cli-all                    # cli 全平台（linux/darwin/windows × amd64/arm64）
-make desktop-darwin-arm64       # desktop macOS → dist/AIC Desktop.app + aic-darwin-arm64.dmg
+make desktop-darwin-arm64       # desktop macOS → dist/AIC Desktop.app + aic-desktop-darwin-arm64.dmg
 make desktop-darwin-amd64       # desktop macOS（Intel）
 make desktop-windows-amd64      # desktop Windows exe（需先: brew install mingw-w64）
 make desktop-all                # desktop 全平台（linux desktop 需容器/CI）
