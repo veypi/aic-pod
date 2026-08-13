@@ -69,10 +69,13 @@ var gitSubLevels = map[string]int{
 	"add":    proto.LevelWrite,
 	"commit": proto.LevelWrite,
 	"pull":   proto.LevelWrite,
+	// 切分支（git 自身拒覆盖未提交修改，安全）；pathspec 形态（checkout -- <path>，
+	// 丢弃工作区修改）由 gitRequired 检测 "--" 提升至 Danger——与 restore/reset 同级
+	"checkout": proto.LevelWrite,
+	"switch":   proto.LevelWrite, // checkout 的切分支现代同义词
 
-	"push":     proto.LevelDanger, // 外发远端
-	"checkout": proto.LevelDanger, // 可丢弃本地修改
-	"reset":    proto.LevelDanger, // 可丢弃本地修改
+	"push":  proto.LevelDanger, // 外发远端
+	"reset": proto.LevelDanger, // 可丢弃本地修改
 }
 
 // gitValueFlags 是 git 带值 flag 已知表（§5.5：子命令判定先跳过带值 flag）。
@@ -129,6 +132,15 @@ func gitRequired(argv []string) int {
 			continue
 		}
 		if lv, ok := gitSubLevels[a]; ok {
+			// checkout 的 pathspec 形态（checkout -- <path> / checkout <commit> -- <path>）
+			// 丢弃工作区未提交修改，不可恢复——与 reset 同级 Danger
+			if a == "checkout" {
+				for _, rest := range argv[i+1:] {
+					if rest == "--" {
+						return proto.LevelDanger
+					}
+				}
+			}
 			return lv
 		}
 		return proto.LevelDanger // 未知子命令按 Danger 兜底
