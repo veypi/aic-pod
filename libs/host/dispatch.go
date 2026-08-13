@@ -64,11 +64,15 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 	}
 
 	// 4. granted_level 纵深检查（§2.4 判定分工：host 端按 caps 声明 + 本地规则再自检）
+	//    waiting = 可审批（NeedApproval）；rejected = 不可审批（Error，如 level 0 禁用）
 	if state, reason := c.checkGranted(&req); state != "" {
-		return &proto.ToolResponse{
-			MsgID: req.MsgID, State: state,
-			NeedApproval: &proto.NeedApproval{Reason: reason},
+		resp := &proto.ToolResponse{MsgID: req.MsgID, State: state}
+		if state == proto.StateWaiting {
+			resp.NeedApproval = &proto.NeedApproval{Reason: reason}
+		} else {
+			resp.Error = reason
 		}
+		return resp
 	}
 
 	if !deadline.IsZero() {
@@ -95,6 +99,10 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 // 删非空目录提升）取高。
 // 不足返回 waiting + reason（§6.2：host 端动态审批，服务端置 waiting 等用户审批）。
 func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
+	// 0 = 显式禁用：直接拒绝，不可审批绕过（与服务端 procs 同语义，纵深防御）。
+	if req.GrantedLevel == proto.LevelNone {
+		return proto.StateRejected, "tool is explicitly denied (level 0)"
+	}
 	required := proto.LevelDanger
 	switch req.Tool {
 	case proto.ToolFS:
@@ -105,8 +113,9 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 		required = vcore.FSRequiredIn(c.newEnv(""), p.Action, req.Data)
 	case proto.ToolExec:
 		var p struct {
-			Action string   `json:"action"`
-			Argv   []string `json:"argv"`
+			Action    string   `json:"action"`
+			Argv      []string `json:"argv"`
+			NoSandbox bool     `json:"nosandbox"`
 		}
 		_ = json.Unmarshal(req.Data, &p)
 		if decl, ok := c.cmdByName[p.Action]; ok {
@@ -114,6 +123,12 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 			if dyn := vcore.ExecRequired(p.Action, p.Argv); dyn > required {
 				required = dyn
 			}
+		}
+		// nosandbox 免沙箱请求：required 下限 Critical(4)（用户不可授予 ⇒ 必审批；
+		// 审批放行后 granted=9 + nosandbox 标记随行下发，exec_procs 仅据此标记
+		// 免沙箱——审批本身（9 无标记）仍沙箱执行，§5.10）
+		if p.NoSandbox && required < proto.LevelCritical {
+			required = proto.LevelCritical
 		}
 		// 未声明命令按 Danger 兜底（后续路由会拒绝，这里只是纵深检查的保守值）
 	}
@@ -159,9 +174,10 @@ func (c *Client) newEnv(workdir string) *vcore.Env {
 // 未声明命令一律拒绝（不存在「未知命令透传」）。
 func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest) *proto.ToolResponse {
 	var p struct {
-		Action  string   `json:"action"`
-		Argv    []string `json:"argv"`
-		Workdir string   `json:"workdir"`
+		Action    string   `json:"action"`
+		Argv      []string `json:"argv"`
+		Workdir   string   `json:"workdir"`
+		NoSandbox bool     `json:"nosandbox"`
 	}
 	if err := json.Unmarshal(req.Data, &p); err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "invalid exec data: " + err.Error()}
@@ -207,13 +223,15 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	}
 
 	// 本地命令（§5.9：探测声明的 shell/git）：PATH 查找、workdir = 进程 cwd、
-	// 日志文件、deadline 超时自动后台化，统一经 exec_procs 托管
+	// 日志文件、deadline 超时自动后台化，统一经 exec_procs 托管；
+	// granted level 与 nosandbox 随行传给 exec_procs（§5.10：沙箱去留只由
+	// 显式 nosandbox 决定——审批通过（9）不豁免沙箱）
 	// workdir 缺省回落：请求未携带时用 host 端配置工作区（与虚拟指令 newEnv 同语义）
 	workdir := p.Workdir
 	if workdir == "" {
 		workdir = c.opts.WorkDir
 	}
-	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, workdir)
+	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, workdir, req.GrantedLevel, p.NoSandbox)
 }
 
 // isCoreCommand 判定 action 是否为 exec 核心虚拟指令（vcore 内存执行）。

@@ -17,6 +17,12 @@ func SetSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+// applyToken 无令牌注入（非 windows 平台恒 0，no-op）。
+func applyToken(cmd *exec.Cmd, token uintptr) error { return nil }
+
+// closeToken 无句柄可关（非 windows 平台恒 0，no-op）。
+func closeToken(token uintptr) {}
+
 // killEntry 终止后台条目：子进程先对整个进程组发 SIGTERM，5s 未退出补
 // SIGKILL（§5.8）；托管任务（pid=0）无进程，仅 cancel 中止任务体。
 func killEntry(e *Entry) {

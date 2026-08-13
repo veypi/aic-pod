@@ -146,10 +146,13 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 		return r, nil
 	}
 
-	// 目标路径：显式 -o 优先，缺省 screenshot/{ts}.jpg（相对 workdir，cloud=会话空间根）
+	// 目标路径：显式 -o 优先；缺省 = ScreenshotDir/{ts}.jpg（host 端配置目录/临时目录，
+	// 正斜杠绝对 OS 路径）或相对 workdir 的 screenshot/{ts}.jpg（cloud 会话空间）。
 	target := fmt.Sprintf("screenshot/%s.jpg", time.Now().Format("2006-01-02T15-04-05"))
 	if outPath != "" {
 		target = outPath
+	} else if b.cfg.ScreenshotDir != "" {
+		target = b.cfg.ScreenshotDir + "/" + time.Now().Format("2006-01-02T15-04-05") + ".jpg"
 	}
 	abs, err := env.Resolve(target)
 	if err != nil {
@@ -188,7 +191,8 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 }
 
 func dirOfVFS(p string) string {
-	if i := strings.LastIndex(p, "/"); i > 0 {
+	// 兼容正斜杠（VFS 语义）与反斜杠（Windows 绝对 OS 路径）
+	if i := strings.LastIndexAny(p, "/\\"); i > 0 {
 		return p[:i]
 	}
 	return "/"

@@ -74,8 +74,21 @@ type StartOptions struct {
 	ID      string   // 后台条目 ID（{host}:{sid}:{op_id} 或 msgID）
 	Command string   // 展示名（bg_list）
 	LogPath string   // 输出落盘路径（父目录自动创建）
-	Workdir string   // 进程 cwd（空 = 继承）
+	Workdir string   // 进程 cwd（空 = 继承）；兼作沙箱 workspace-write 的可写根
 	Exec    []string // argv：Exec[0] = 程序名
+	// Level 是本次调用的授予等级（§2.4/§5.10 沙箱 profile 选择）：
+	// 1 = read-only 沙箱；2/3/4/9 = workspace-write 沙箱；
+	// 0 = 未设置/异常值，按 read-only 兜底（fail-closed——
+	// host 外部调用的 level 0 已被 dispatch 拒绝，
+	// 到这里的 0 只会是调用方 bug，宁可过紧也不可裸跑）。
+	// 注意：LevelApproved(9) 只是「审批通过」的等级语义，不免沙箱——
+	// 免沙箱唯一通道是 NoSandbox。
+	Level int
+	// NoSandbox 是免沙箱执行标记（§5.10），唯二合法来源：
+	//   - 内部调用方（cloud/host 端 browser，由执行环境自身管控）；
+	//   - 外部请求显式携带 nosandbox 且经人工审批（required Critical(4)
+	//     ⇒ 必审批；审批本身不免沙箱，仅放行该标记）。
+	NoSandbox bool
 }
 
 // Manager 是 exec 子进程托管管理器（每 session 一个）。
@@ -124,24 +137,59 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		return nil, fmt.Errorf("exec: create log file: %v", err)
 	}
 
+	// 沙箱包装（§5.10）：未显式免沙箱（NoSandbox）的进程调用一律进沙箱——
+	// 审批通过（9）也不例外，免沙箱只能由显式 nosandbox 请求 + 审批获得；
+	// 无可用后端时 fail-closed 返回错误（命令不执行，绝不静默裸跑）。
+	execArgv := opts.Exec
+	var plan launchPlan
+	if !opts.NoSandbox && len(opts.Exec) > 0 {
+		var err error
+		plan, err = planConfined(opts.Level, opts.Workdir, opts.Exec)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		execArgv = plan.argv
+	}
+
 	// 后台 context：不继承请求 deadline，进程自有超时（bg_kill 或自然终结时释放）
 	m.mu.Lock()
 	timeout := m.execTimeout
 	m.mu.Unlock()
 	bgCtx, bgCancel := context.WithTimeout(context.Background(), timeout)
-	cmd := exec.CommandContext(bgCtx, opts.Exec[0], opts.Exec[1:]...)
+	cmd := exec.CommandContext(bgCtx, execArgv[0], execArgv[1:]...)
 	cmd.Dir = opts.Workdir
+	if plan.env != nil {
+		cmd.Env = mergeEnv(plan.env)
+	}
 	// Windows 上经逐行转码（GBK→UTF-8）后落盘，其余平台原样直写
 	out := newOutputWriter(f)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	SetSysProcAttr(cmd)
+	if plan.token != 0 {
+		if err := applyToken(cmd, plan.token); err != nil {
+			f.Close()
+			bgCancel()
+			closeToken(plan.token)
+			if plan.cleanup != nil {
+				plan.cleanup()
+			}
+			return nil, fmt.Errorf("exec: apply token: %v", err)
+		}
+	}
 
 	if err := cmd.Start(); err != nil {
 		f.Close()
 		bgCancel()
+		closeToken(plan.token)
+		if plan.cleanup != nil {
+			plan.cleanup()
+		}
 		return nil, fmt.Errorf("exec: %v", err)
 	}
+	// spawn 成功后令牌句柄可释放（子进程持有副本）
+	closeToken(plan.token)
 
 	e := &Entry{
 		ID:      opts.ID,
@@ -164,6 +212,10 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		}
 		f.Close()
 		bgCancel()
+		// 沙箱清理（windows：私有临时目录删除，ACE 随目录消失）
+		if plan.cleanup != nil {
+			plan.cleanup()
+		}
 		e.ExitCode = 0
 		if ee, ok := runErr.(*exec.ExitError); ok {
 			e.ExitCode = ee.ExitCode()

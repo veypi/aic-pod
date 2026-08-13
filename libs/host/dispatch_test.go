@@ -90,11 +90,25 @@ func TestDispatchVerifyChain(t *testing.T) {
 func TestDispatchGrantedDepthCheck(t *testing.T) {
 	c, _ := testClient(t)
 
-	// granted=1 执行程序命令（基线 Danger 3）→ waiting 动态审批
+	// granted=0 显式禁用 → rejected（不可审批，§2.4 level 0 语义）
 	resp := c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
+		map[string]any{"action": "commands", "argv": []string{}}, 0))
+	if resp.State != proto.StateRejected || resp.NeedApproval != nil {
+		t.Fatalf("level 0: state = %s needApproval = %v err = %q", resp.State, resp.NeedApproval, resp.Error)
+	}
+
+	// granted=1 执行程序命令（基线 Danger 3）→ waiting 动态审批
+	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
 		map[string]any{"action": "bash", "argv": []string{"-c", "true"}}, 1))
 	if resp.State != proto.StateWaiting || resp.NeedApproval == nil {
 		t.Fatalf("program low grant: state = %s needApproval = %v", resp.State, resp.NeedApproval)
+	}
+
+	// nosandbox → required 提升 Critical(4)：granted 3（用户可授予上限）仍 waiting（必审批）
+	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
+		map[string]any{"action": "bash", "argv": []string{"-c", "true"}, "nosandbox": true}, 3))
+	if resp.State != proto.StateWaiting || resp.NeedApproval == nil {
+		t.Fatalf("nosandbox grant 3: state = %s needApproval = %v", resp.State, resp.NeedApproval)
 	}
 
 	// granted=3 执行程序命令 → 放行（true 立即返回）

@@ -39,8 +39,16 @@ type Config struct {
 	// 不占指令位，§5.6）；空 = 不自动保存。cloud = 会话数据目录；pod 按需。
 	StatePath string
 	// TempDir 是文件交换临时目录（upload 暂存 / download 与 screenshot 落地），
-	// 缺省 os.TempDir()/aic-browser-{session}。
+	// 缺省 os.TempDir()/aic-browser-{session}。host 端应指向工具状态目录
+	// （UserConfigDir/aic/browser/{sid}），cloud 端保持系统临时目录。
 	TempDir string
+	// ScreenshotDir 是截图缺省落盘目录（正斜杠绝对 OS 路径）；空 = 相对 workdir
+	// 的 screenshot/{ts}.jpg（cloud 会话空间语义）。host 端指向系统临时目录
+	// 下的 aic/screenshot（临时产物，不污染用户工作区）。
+	ScreenshotDir string
+	// NoSandbox 显式免沙箱（cloud 端：容器内无沙箱后端，由服务端执行环境
+	// 自行管控；host 端：pod 模式不隔离，§5.6）。
+	NoSandbox bool
 	// ExecProcs 是 exec 子进程统一托管（§5.9）：非 nil 时每次 CLI 调用经其管理——
 	// 输出重定向 LogPathFn 指定路径、请求超时自动后台化、前 MaxLines 行返回。
 	// nil = 直连模式（测试/无托管）。
@@ -191,10 +199,11 @@ func (b *Browser) execCLI(ctx context.Context, globalFlags []string, args ...str
 	if b.cfg.ExecProcs != nil && b.cfg.LogPathFn != nil {
 		full := append([]string{b.cfg.ExecPath}, cmdArgs...)
 		res, err := b.cfg.ExecProcs.Start(ctx, exec_procs.StartOptions{
-			ID:      b.curID,
-			Command: strings.Join(full, " "),
-			LogPath: b.cfg.LogPathFn(b.curID),
-			Exec:    full,
+			ID:        b.curID,
+			Command:   strings.Join(full, " "),
+			LogPath:   b.cfg.LogPathFn(b.curID),
+			Exec:      full,
+			NoSandbox: b.cfg.NoSandbox,
 		})
 		if err != nil {
 			return "", err

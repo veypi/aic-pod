@@ -26,15 +26,19 @@ const (
 	bgWaitDefault = 30
 )
 
-// runLocal 执行本地命令（§5.9）：子进程经 exec_procs 统一托管。
-func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv []string, workdir string) *proto.ToolResponse {
+// runLocal 执行本地命令（§5.9）：子进程经 exec_procs 统一托管；
+// level 为本次调用的授予等级（沙箱 profile 选择，§5.10）；
+// noSandbox 为请求显式携带的免沙箱标记（已过 checkGranted 的 Critical(4) 必审批门）。
+func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv []string, workdir string, level int, noSandbox bool) *proto.ToolResponse {
 	logPath := filepath.Join(os.TempDir(), "aic", sid, msgID+".log")
 	res, err := c.procs.Start(ctx, exec_procs.StartOptions{
-		ID:      fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
-		Command: strings.TrimSpace(action + " " + strings.Join(argv, " ")),
-		LogPath: logPath,
-		Workdir: workdir, // 缺省 = host 端配置工作区（调用方已填充）
-		Exec:    append([]string{action}, argv...),
+		ID:        fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
+		Command:   strings.TrimSpace(action + " " + strings.Join(argv, " ")),
+		LogPath:   logPath,
+		Workdir:   workdir, // 缺省 = host 端配置工作区（调用方已填充）
+		Exec:      append([]string{action}, argv...),
+		Level:     level,
+		NoSandbox: noSandbox,
 	})
 	if err != nil {
 		return errResp(msgID, err.Error())

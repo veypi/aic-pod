@@ -122,6 +122,17 @@ func Path() (string, error) {
 	return filepath.Join(dir, "aic", "config.yaml"), nil
 }
 
+// StateDir 返回工具状态根目录：UserConfigDir/aic（与 config.yaml/log 同根）。
+// 工具自身的持久状态（browser 数据目录等，不暴露给 AI）一律放这里，
+// 禁止落用户工作区（workdir 可能是 git 仓库）。
+func StateDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "aic"), nil
+}
+
 // LogPath 返回日志文件路径：UserConfigDir/aic/aic.log（get_log 的数据源）。
 func LogPath() (string, error) {
 	dir, err := os.UserConfigDir()
