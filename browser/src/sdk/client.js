@@ -90,7 +90,7 @@ export function resolveNatsURL(host) {
   if (scheme === "https") scheme = "wss";
   else if (scheme === "http") scheme = "ws";
   const prefix = u.pathname.replace(/\/+$/, "");
-  return `${scheme}://${u.host}${prefix}/aic/api/nc`;
+  return `${scheme}://${u.host}${prefix}/api/nc`;
 }
 
 // platformURL 由平台地址推导平台页面地址（http/https 页面入口，保留路径前缀）。

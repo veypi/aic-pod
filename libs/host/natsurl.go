@@ -8,19 +8,19 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 )
 
-// natsPath 是服务端 NATS WebSocket 挂载路径（aic Router.Extend("/nc") 挂载在 /aic 前缀下）。
-const natsPath = "/aic/api/nc"
+// natsPath 是服务端 NATS WebSocket 挂载路径（Router.Extend("/api/nc")）。
+const natsPath = "/api/nc"
 
 // ResolveNATSURL 由平台地址推导 NATS WebSocket 端点（唯一来源，无显式 url 配置）：
 //
 //   - 协议按 scheme 推断：https→wss、http→ws、ws/wss 原样保留；无 scheme 按 https 补全
-//   - host 可携带路径前缀（产品壳挂载场景）：前缀保留并拼接 /aic/api/nc
+//   - host 可携带路径前缀（产品壳挂载场景）：前缀保留并拼接 /api/nc
 //
 // 例：
 //
-//	https://ivec.ai                  → wss://ivec.ai/aic/api/nc
-//	http://localhost:4000            → ws://localhost:4000/aic/api/nc
-//	http://127.0.0.1:4000/rses/aiv   → ws://127.0.0.1:4000/rses/aiv/aic/api/nc
+//	https://ivec.ai                  → wss://ivec.ai/api/nc
+//	http://localhost:4000            → ws://localhost:4000/api/nc
+//	http://127.0.0.1:4000/rses/aiv   → ws://127.0.0.1:4000/rses/aiv/api/nc
 func ResolveNATSURL(hostURL string) string {
 	h := strings.TrimSpace(hostURL)
 	if h == "" {
