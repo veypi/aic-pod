@@ -35,6 +35,8 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
+      - name: Install npm dependencies
+        run: npm ci --prefix desktop
       - name: Build
         run: make ${{ matrix.target }}
       - name: Upload artifacts
