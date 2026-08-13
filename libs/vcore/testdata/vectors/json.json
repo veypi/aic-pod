@@ -1,0 +1,322 @@
+{
+  "cases": [
+    {
+      "name": "view_skeleton_default_depth",
+      "cmd": "json",
+      "argv": ["view", "/doc.json"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "/doc.json: object (6 keys)\n  count: number\n  name: string(4)\n  nested: object (2 keys)\n    inner: object (2 keys)\n      x: number\n      y: string(4)\n    items: array[2]\n  nothing: null\n  ok: bool\n  tags: array[3]",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_skeleton_depth_1",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--depth", "1"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "/doc.json: object (6 keys)\n  count: number\n  name: string(4)\n  nested: object (2 keys)\n  nothing: null\n  ok: bool\n  tags: array[3]",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_skeleton_values",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--values", "--depth", "1"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "/doc.json: object (6 keys)\n  count: number 42\n  name: string(4) \"demo\"\n  nested: object (2 keys)\n  nothing: null\n  ok: bool true\n  tags: array[3]",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_key_object",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--key", "nested.inner"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "{\n  \"x\": 1,\n  \"y\": \"text\"\n}",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_key_array_bracket",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--key", "tags[1]", "--compact"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "\"b\"",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_key_array_dot_index",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--key", "nested.items.1", "--compact"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "20",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_raw",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--raw"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}"
+      },
+      "expect": {
+        "content": "{\n  \"name\": \"demo\",\n  \"count\": 42,\n  \"ok\": true,\n  \"tags\": [\"a\", \"b\", \"c\"],\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    },\n    \"items\": [10, 20]\n  },\n  \"nothing\": null\n}",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      }
+    },
+    {
+      "name": "view_missing_key",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--key", "nope"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expectError": "json: key \"nope\" not found"
+    },
+    {
+      "name": "view_raw_key_conflict",
+      "cmd": "json",
+      "argv": ["view", "/doc.json", "--raw", "--key", "a"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expectError": "json view: --raw cannot be combined with --key"
+    },
+    {
+      "name": "set_string",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "name", "hello world"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"count\": 42,\n  \"name\": \"hello world\"\n}\n"
+      }
+    },
+    {
+      "name": "set_number",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "count", "123"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"count\": 123,\n  \"name\": \"demo\"\n}\n"
+      }
+    },
+    {
+      "name": "set_object_literal",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "nested", "{\"x\": 9}"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"nested\": {\n    \"x\": 1\n  }\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"nested\": {\n    \"x\": 9\n  }\n}\n"
+      }
+    },
+    {
+      "name": "set_auto_create",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "a.b.c", "1"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\"\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"a\": {\n    \"b\": {\n      \"c\": 1\n    }\n  },\n  \"name\": \"demo\"\n}\n"
+      }
+    },
+    {
+      "name": "set_array_index",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "tags[0]", "z"],
+      "files": {
+        "/doc.json": "{\n  \"tags\": [\"a\", \"b\"]\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"tags\": [\n    \"z\",\n    \"b\"\n  ]\n}\n"
+      }
+    },
+    {
+      "name": "set_out_of_range",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "tags[9]", "z"],
+      "files": {
+        "/doc.json": "{\"tags\": [\"a\"]}"
+      },
+      "expectError": "json: index 9 out of range (array len 1)"
+    },
+    {
+      "name": "del_key",
+      "cmd": "json",
+      "argv": ["del", "/doc.json", "nothing"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"nothing\": null\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"name\": \"demo\"\n}\n"
+      }
+    },
+    {
+      "name": "del_array_element",
+      "cmd": "json",
+      "argv": ["del", "/doc.json", "tags[1]"],
+      "files": {
+        "/doc.json": "{\n  \"tags\": [\"a\", \"b\", \"c\"]\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"tags\": [\n    \"a\",\n    \"c\"\n  ]\n}\n"
+      }
+    },
+    {
+      "name": "del_missing",
+      "cmd": "json",
+      "argv": ["del", "/doc.json", "nope"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expectError": "json: key \"nope\" not found"
+    },
+    {
+      "name": "append",
+      "cmd": "json",
+      "argv": ["append", "/doc.json", "tags", "d"],
+      "files": {
+        "/doc.json": "{\n  \"tags\": [\"a\", \"b\"]\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"tags\": [\n    \"a\",\n    \"b\",\n    \"d\"\n  ]\n}\n"
+      }
+    },
+    {
+      "name": "append_create",
+      "cmd": "json",
+      "argv": ["append", "/doc.json", "newlist", "1"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\"\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"newlist\": [\n    1\n  ]\n}\n"
+      }
+    },
+    {
+      "name": "append_nested_create",
+      "cmd": "json",
+      "argv": ["append", "/doc.json", "x.y", "1"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\"\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"x\": {\n    \"y\": [\n      1\n    ]\n  }\n}\n"
+      }
+    },
+    {
+      "name": "append_not_array",
+      "cmd": "json",
+      "argv": ["append", "/doc.json", "count", "1"],
+      "files": {
+        "/doc.json": "{\"count\": 1}"
+      },
+      "expectError": "json: append: target is not an array"
+    },
+    {
+      "name": "merge",
+      "cmd": "json",
+      "argv": ["merge", "/doc.json", "{\"count\": 1, \"added\": true}"],
+      "files": {
+        "/doc.json": "{\n  \"name\": \"demo\",\n  \"count\": 42\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"added\": true,\n  \"count\": 1,\n  \"name\": \"demo\"\n}\n"
+      }
+    },
+    {
+      "name": "merge_shallow_replace",
+      "cmd": "json",
+      "argv": ["merge", "/doc.json", "{\"nested\": {\"inner\": {\"x\": 99}}}"],
+      "files": {
+        "/doc.json": "{\n  \"nested\": {\n    \"inner\": {\n      \"x\": 1,\n      \"y\": \"text\"\n    }\n  }\n}"
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"nested\": {\n    \"inner\": {\n      \"x\": 99\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "name": "merge_non_object",
+      "cmd": "json",
+      "argv": ["merge", "/doc.json", "[1,2]"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expectError": "json merge: merge value must be a JSON object"
+    },
+    {
+      "name": "set_ok_output",
+      "cmd": "json",
+      "argv": ["set", "/doc.json", "name", "x"],
+      "files": {
+        "/doc.json": "{\"name\": \"demo\"}"
+      },
+      "expect": {
+        "content": "{\"bytes\":18,\"ok\":true,\"ops\":[\"set name\"],\"path\":\"/doc.json\"}",
+        "attrs": { "action": "json", "path": "/doc.json" }
+      },
+      "expectFiles": {
+        "/doc.json": "{\n  \"name\": \"x\"\n}\n"
+      }
+    },
+    {
+      "name": "help",
+      "cmd": "json",
+      "argv": ["--help"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expect": {
+        "content": "json <view|set|del|append|merge> ... — JSON file tool (no external deps)\n\nSubcommands:\n  view    structure skeleton or extract a subtree (large-file safe)\n  set     set a value at a dotted path\n  del     delete a dotted path\n  append  append a value to an array at a dotted path\n  merge   shallow-merge an object (Object.assign({}, doc, new))\n\nUse `json <subcommand> --help` for details.",
+        "attrs": { "action": "json" }
+      }
+    },
+    {
+      "name": "sub_help_view",
+      "cmd": "json",
+      "argv": ["view", "--help"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expect": {
+        "content": "json view <path> [--key <dotted.path>] [--depth N] [--values] [--raw] [--compact]\n  view a JSON file — default: structure skeleton (no values, large-file safe)\n  <path>     JSON file (must be valid JSON, max 64MB)\n  --key      extract a subtree: dotted segments a.b.c, array index [0] or .0\n             (missing key → error); output pretty JSON, --compact: single line\n  --depth N  skeleton depth limit (default 4, max 10); deeper nodes show type only\n  --values   include scalar values in skeleton (truncated 200 chars)\n  --raw      raw file bytes (truncated; not combinable with --key)",
+        "attrs": { "action": "json" }
+      }
+    },
+    {
+      "name": "unknown_subcommand",
+      "cmd": "json",
+      "argv": ["wat"],
+      "files": {
+        "/doc.json": "{\"a\": 1}"
+      },
+      "expectError": "json: unknown subcommand \"wat\" (view|set|del|append|merge)"
+    }
+  ]
+}

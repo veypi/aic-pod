@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +30,7 @@ const MaxLines = 1000
 // DefaultExecTimeout 是后台进程的自有超时（§5.8：默认 30m）。
 const DefaultExecTimeout = 30 * time.Minute
 
-// Entry 是一个托管的后台进程条目（进程结束后保留，供 bg_wait 取结果）。
+// Entry 是一个托管的后台条目（进程结束后保留，供 bg_wait 取结果）。
 type Entry struct {
 	ID       string // {host}:{sid}:{op_id} 或 {msg_id}
 	Command  string
@@ -38,9 +39,10 @@ type Entry struct {
 	Timeout  time.Duration // 进程自有超时（bg_list 展示 remaining）
 	ExitCode int
 
-	pid    int
+	pid    int // 0 = 托管任务（非子进程，kill 仅 cancel）
 	cancel context.CancelFunc
 	done   chan struct{}
+	runErr error // 托管任务体的错误（同步路径原样返回，日志同写）
 }
 
 // Done 报告进程是否已终结。
@@ -176,6 +178,76 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		return m.readResult(e, false), nil
 	case <-ctx.Done():
 		// 请求超时 → 自动后台化：进程继续运行
+		return m.readResult(e, true), nil
+	}
+}
+
+// TaskOptions 是 StartTask 的入参（托管任务：非子进程的任务体，如 curl 抓取）。
+type TaskOptions struct {
+	ID      string // 后台条目 ID
+	Command string // 展示名（bg_list）
+	LogPath string // 输出落盘路径（父目录自动创建）
+	// Run 是任务体：输出写 out（日志文件）；返回 error = 任务失败
+	// （同步路径原样返回该错误；后台路径错误写入日志，bg_wait 可见）。
+	Run func(ctx context.Context, out io.Writer) error
+}
+
+// StartTask 启动托管任务（§5.9 与子进程同一套语义）：
+//   - Run 的输出重定向到 opts.LogPath
+//   - ctx 超时 → 自动后台化：任务继续运行，返回 Background=true + ID
+//   - 同步完成且 Run 返回 error → 原样返回该错误（ExitCode=-1）
+//   - 正常完成 → 返回日志前 MaxLines 行
+func (m *Manager) StartTask(ctx context.Context, opts TaskOptions) (*Result, error) {
+	if opts.Run == nil {
+		return nil, fmt.Errorf("exec: task body is required")
+	}
+	logDir := filepath.Dir(opts.LogPath)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, fmt.Errorf("exec: create log dir: %v", err)
+	}
+	f, err := os.Create(opts.LogPath)
+	if err != nil {
+		return nil, fmt.Errorf("exec: create log file: %v", err)
+	}
+
+	m.mu.Lock()
+	timeout := m.execTimeout
+	m.mu.Unlock()
+	bgCtx, bgCancel := context.WithTimeout(context.Background(), timeout)
+	e := &Entry{
+		ID:      opts.ID,
+		Command: opts.Command,
+		LogPath: opts.LogPath,
+		Started: time.Now(),
+		Timeout: timeout,
+		pid:     0, // 非子进程：kill 仅 cancel
+		cancel:  bgCancel,
+		done:    make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.tasks[opts.ID] = e
+	m.mu.Unlock()
+
+	go func() {
+		runErr := opts.Run(bgCtx, f)
+		if runErr != nil {
+			e.runErr = runErr
+			e.ExitCode = -1
+			// 后台路径同步路径都能从日志看到失败原因
+			fmt.Fprintf(f, "task failed: %s\n", runErr)
+		}
+		f.Close()
+		bgCancel()
+		close(e.done)
+	}()
+
+	select {
+	case <-e.done:
+		if e.runErr != nil {
+			return nil, e.runErr
+		}
+		return m.readResult(e, false), nil
+	case <-ctx.Done():
 		return m.readResult(e, true), nil
 	}
 }

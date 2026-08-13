@@ -19,10 +19,10 @@
 └───────────────────────────────────────────────────────┘
 ```
 
-> **协议（指令集 v2.5）：** 本扩展的 exec 命令表 = 恒声明 `commands`（能力发现）+ 注册命令
-> `browser`（`exec browser <subcommand> [args...]`）+ vcmd 核心虚拟指令（ls/rg/tree/rm/curl，
-> 操作扩展 PageFS）；fs 能力 = read/write/edit（PageFS 后端）。全局参数在插件设置页配置，
-> 不出现在工具调用中。
+> **协议（指令集 v2.6）：** 本扩展的 exec 命令表 = 恒声明 `commands`（能力发现）+ 注册命令
+> `browser`（`exec browser <subcommand> [args...]`）；fs 能力 = 8 action
+> （read/write/edit/ls/rg/cp/mv/rm，PageFS+fsops 后端，与 page 端逐字节同源）。
+> 全局参数在插件设置页配置，不出现在工具调用中。
 
 ## 协议（指令集 v2）
 
@@ -67,7 +67,7 @@
   同源（read=1，write/edit=2）；
 - `exec.commands`：统一命令声明表（§5.1）——恒声明 `commands` + 注册命令 `browser`
   （required_level=2 Write，stateful 串行，download/wait 可后台化，与 Go vcore meta.go 同源）
-  + vcmd 核心虚拟指令（ls/rg/tree/rm/curl，分级与 Go levels.go 对齐，操作扩展 PageFS）；
+  + fs 8 action（read/write/edit/ls/rg/cp/mv/rm，分级与 Go levels.go 对齐，操作扩展 PageFS）；
 - §2.2 图片投递收敛：`browser screenshot` 落本 host 的 fs（`$SESSION/screenshot/`，
   IndexedDB Blob 存储），不返回 image_data；agent 需要看图时用 `fs.read`（1host=本 host_id）
   按 attrs.path 读取——只有 fs.read 能把图片带进消息。
@@ -463,8 +463,8 @@ browser/
 │   │   ├── auth.test.js          # 密钥派生/签名固定向量（与 Go vectors_test.go 同源）
 │   │   ├── client.js             # NATS 连接 / caps v2 发布 / 连接级 inbox 订阅 / 分发
 │   │   ├── client.test.js        # 客户端单测（node --test）
-│   │   ├── vcmd.js               # vcmd 核心虚拟指令（ls/rg/tree/rm/curl，与 aic 前端逐字节同步）
-│   │   ├── vcmd.test.js          # vcmd 测试（node --test）
+│   │   ├── fsops.js              # fs 指令集 ls/rg/cp/mv/rm（与 aic 前端逐字节同步）
+│   │   ├── fsops.test.js         # fsops 测试（node --test，vcore 向量同源）
 │   │   ├── page_fs.js            # PageFS（IndexedDB 单根，与 aic 前端逐字节同步）
 │   │   ├── history.js            # 执行历史（IndexedDB 持久化）
 │   │   ├── argv.js               # action+argv 双层解析
@@ -515,9 +515,9 @@ background.js
 |---|---|---|
 | 运行时 | 独立二进制 | Service Worker + Extension APIs |
 | 核心技术 | Go SDK | JS + chrome.tabs / chrome.scripting / chrome.cookies / ... |
-| 核心工具 | exec（统一命令声明表）、fs | browser 指令 + vcmd（ls/rg/tree/rm/curl） |
+| 核心工具 | exec（统一命令声明表）、fs | browser 指令 + fs 8 action（PageFS） |
 | 输出重定向 | 写入系统临时目录日志文件 | browser screenshot 落 PageFS（$SESSION/screenshot/），其余直接返回 content |
-| 权限等级 | exec 分级（ls/rg/tree=1，rm/curl/browser=2），fs=1 | browser=2，vcmd ls/rg/tree=1、rm/curl=2，fs read=1/write·edit=2 |
+| 权限等级 | exec 分级（curl/json=2 起、browser=2），fs=1 | browser=2，fs read/ls/rg=1、write/edit/cp/mv/rm=2 |
 | 密钥派生 | Go crypto/hmac + hkdf | Web Crypto API (SubtleCrypto) |
 | NATS 连接 | nats.go | @nats-io/nats-core（bundled ESM） |
 | 安装方式 | 二进制下载 | Chrome Web Store / 本地加载 |

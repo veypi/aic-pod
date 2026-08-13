@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/vcore"
 )
@@ -88,7 +91,8 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 }
 
 // checkGranted 做 granted >= required 数字比较（与 vcore 分级表同源）。
-// required = 声明表 level 与 vcore 动态表（git/browser 子命令、rm -r 非空提升）取高。
+// required = 声明表 level 与 vcore 动态表（git/browser 子命令、fs rm recursive
+// 删非空目录提升）取高。
 // 不足返回 waiting + reason（§6.2：host 端动态审批，服务端置 waiting 等用户审批）。
 func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 	required := proto.LevelDanger
@@ -98,7 +102,7 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 			Action string `json:"action"`
 		}
 		_ = json.Unmarshal(req.Data, &p)
-		required = vcore.FSRequired(p.Action)
+		required = vcore.FSRequiredIn(c.newEnv(""), p.Action, req.Data)
 	case proto.ToolExec:
 		var p struct {
 			Action string   `json:"action"`
@@ -107,7 +111,7 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 		_ = json.Unmarshal(req.Data, &p)
 		if decl, ok := c.cmdByName[p.Action]; ok {
 			required = decl.RequiredLevel
-			if dyn := vcore.ExecRequiredIn(c.newEnv(""), p.Action, p.Argv); dyn > required {
+			if dyn := vcore.ExecRequired(p.Action, p.Argv); dyn > required {
 				required = dyn
 			}
 		}
@@ -172,6 +176,10 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	}
 
 	env := c.newEnv(p.Workdir)
+	// 任务托管（curl 无 -o）：输出落盘 {tmp}/aic/{sid}/{msg_id}.log，
+	// 超时自动后台化（与本地命令同一 exec_procs 机制，§5.9）。
+	env.Tasks = &hostTaskRunner{c: c, sid: sid}
+	env.TaskID = req.MsgID
 	switch p.Action {
 	case "commands":
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
@@ -179,6 +187,10 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "browser":
 		// §5.6 pod 模式：agent-browser CLI，不隔离（用户本机浏览器）
 		return c.runBrowser(ctx, sid, req, p.Argv)
+	case "json":
+		// json 虚拟指令（vcore 内存实现）：view/set/del/append/merge
+		res, err := vcore.Run(ctx, env, p.Action, p.Argv)
+		return resultToResponse(req.MsgID, res, err)
 	case "bg_list":
 		return resultToResponse(req.MsgID, c.bgList(sid), nil)
 	case "bg_wait":
@@ -204,7 +216,8 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, workdir)
 }
 
-// isCoreCommand 判定 action 是否为核心 8 虚拟指令（vcore 内存执行）。
+// isCoreCommand 判定 action 是否为 exec 核心虚拟指令（vcore 内存执行）。
+// 文件类指令（ls/rg/cp/mv/rm）属 fs 指令集，不在此列。
 func isCoreCommand(action string) bool {
 	for _, n := range vcore.CoreCommandNames() {
 		if n == action {
@@ -212,6 +225,35 @@ func isCoreCommand(action string) bool {
 		}
 	}
 	return false
+}
+
+// hostTaskRunner 实现 vcore.TaskRunner：托管任务（curl 无 -o）经 exec_procs
+// 统一托管，输出落盘 {tmp}/aic/{sid}/{msg_id}.log（与本地命令同一机制，§5.9）。
+type hostTaskRunner struct {
+	c   *Client
+	sid string
+}
+
+func (r *hostTaskRunner) StartTask(ctx context.Context, opts vcore.TaskOptions) (*vcore.TaskResult, error) {
+	id := fmt.Sprintf("%s:%s:%s", r.c.hostID, r.sid, opts.ID)
+	logPath := filepath.Join(os.TempDir(), "aic", r.sid, opts.ID+".log")
+	res, err := r.c.procs.StartTask(ctx, exec_procs.TaskOptions{
+		ID:      id,
+		Command: opts.Command,
+		LogPath: logPath,
+		Run:     opts.Run,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &vcore.TaskResult{
+		Content:    res.Content,
+		Lines:      res.Lines,
+		Truncated:  res.Truncated,
+		Background: res.Background,
+		ID:         res.ID,
+		LogPath:    res.LogPath,
+	}, nil
 }
 
 // commandsJSON 返回本 host 的命令表（§5.2：{name, desc} 视图——

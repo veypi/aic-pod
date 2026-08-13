@@ -2,8 +2,8 @@
   "cases": [
     {
       "name": "rm file",
-      "cmd": "rm",
-      "argv": ["/tmp.txt"],
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "/tmp.txt"},
       "files": {"/tmp.txt": "x"},
       "expect": {
         "content": "removed /tmp.txt",
@@ -13,8 +13,8 @@
     },
     {
       "name": "rm empty dir",
-      "cmd": "rm",
-      "argv": ["/d"],
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "/d"},
       "files": {"/d/": ""},
       "expect": {
         "content": "removed /d",
@@ -23,16 +23,16 @@
       "expectFiles": {}
     },
     {
-      "name": "rm non-empty dir without -r",
-      "cmd": "rm",
-      "argv": ["/d"],
+      "name": "rm non-empty dir without recursive",
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "/d"},
       "files": {"/d/a.txt": "a"},
-      "expectError": "rm: /d is a non-empty directory (use -r)"
+      "expectError": "fs rm: /d is a non-empty directory (set recursive=true)"
     },
     {
-      "name": "rm -r counts items",
-      "cmd": "rm",
-      "argv": ["-r", "/d"],
+      "name": "rm recursive counts items",
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "/d", "recursive": true},
       "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b"},
       "expect": {
         "content": "removed /d (3 items)",
@@ -42,68 +42,32 @@
     },
     {
       "name": "rm root protection",
-      "cmd": "rm",
-      "argv": ["-r", "/users/u1"],
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "/users/u1", "recursive": true},
       "protectRoots": ["/users/u1"],
       "files": {"/users/u1/a.txt": "a"},
       "expectError": "rm: cannot remove root directory /users/u1"
     },
     {
       "name": "rm drive root protection (backslash input normalized)",
-      "cmd": "rm",
-      "argv": ["-r", "C:\\"],
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "C:\\", "recursive": true},
       "protectRoots": ["C:"],
       "files": {},
       "expectError": "rm: cannot remove root directory C:"
     },
     {
       "name": "rm drive root protection (slash input)",
-      "cmd": "rm",
-      "argv": ["C:/"],
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "C:/"},
       "protectRoots": ["C:"],
       "files": {},
       "expectError": "rm: cannot remove root directory C:"
     },
     {
-      "name": "mkdir basic",
-      "cmd": "mkdir",
-      "argv": ["/newdir"],
-      "files": {},
-      "expect": {
-        "content": "created /newdir",
-        "attrs": {"action": "mkdir", "path": "/newdir"}
-      },
-      "expectFiles": {"/newdir/": ""}
-    },
-    {
-      "name": "mkdir exists without -p",
-      "cmd": "mkdir",
-      "argv": ["/d"],
-      "files": {"/d/": ""},
-      "expectError": "mkdir: /d already exists"
-    },
-    {
-      "name": "mkdir -p idempotent",
-      "cmd": "mkdir",
-      "argv": ["-p", "/d"],
-      "files": {"/d/": ""},
-      "expect": {
-        "content": "created /d",
-        "attrs": {"action": "mkdir", "path": "/d"}
-      },
-      "expectFiles": {"/d/": ""}
-    },
-    {
-      "name": "mkdir parent missing without -p",
-      "cmd": "mkdir",
-      "argv": ["/a/b"],
-      "files": {},
-      "expectError": "mkdir: parent directory does not exist: /a"
-    },
-    {
       "name": "cp file",
-      "cmd": "cp",
-      "argv": ["/a.txt", "/b.txt"],
+      "cmd": "fs",
+      "params": {"action": "cp", "src": "/a.txt", "dst": "/b.txt"},
       "files": {"/a.txt": "content"},
       "expect": {
         "content": "copied /a.txt to /b.txt",
@@ -113,22 +77,22 @@
     },
     {
       "name": "cp destination exists",
-      "cmd": "cp",
-      "argv": ["/a.txt", "/b.txt"],
+      "cmd": "fs",
+      "params": {"action": "cp", "src": "/a.txt", "dst": "/b.txt"},
       "files": {"/a.txt": "x", "/b.txt": "y"},
-      "expectError": "cp: destination /b.txt already exists"
+      "expectError": "fs cp: destination /b.txt already exists"
     },
     {
-      "name": "cp dir without -r",
-      "cmd": "cp",
-      "argv": ["/d", "/e"],
+      "name": "cp dir without recursive",
+      "cmd": "fs",
+      "params": {"action": "cp", "src": "/d", "dst": "/e"},
       "files": {"/d/a.txt": "a"},
-      "expectError": "cp: /d is a directory (use -r)"
+      "expectError": "fs cp: /d is a directory (set recursive=true)"
     },
     {
-      "name": "cp -r dir",
-      "cmd": "cp",
-      "argv": ["-r", "/d", "/e"],
+      "name": "cp recursive dir",
+      "cmd": "fs",
+      "params": {"action": "cp", "src": "/d", "dst": "/e", "recursive": true},
       "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b"},
       "expect": {
         "content": "copied /d to /e",
@@ -138,15 +102,26 @@
     },
     {
       "name": "cp into itself",
-      "cmd": "cp",
-      "argv": ["-r", "/d", "/d/sub"],
+      "cmd": "fs",
+      "params": {"action": "cp", "src": "/d", "dst": "/d/sub", "recursive": true},
       "files": {"/d/a.txt": "a"},
-      "expectError": "cp: cannot copy directory /d into itself: /d/sub"
+      "expectError": "fs cp: cannot copy directory /d into itself: /d/sub"
+    },
+    {
+      "name": "cp auto-creates dst parent",
+      "cmd": "fs",
+      "params": {"action": "cp", "src": "/a.txt", "dst": "/new/dir/b.txt"},
+      "files": {"/a.txt": "content"},
+      "expect": {
+        "content": "copied /a.txt to /new/dir/b.txt",
+        "attrs": {"action": "cp", "path": "/new/dir/b.txt", "source_path": "/a.txt"}
+      },
+      "expectFiles": {"/a.txt": "content", "/new/": "", "/new/dir/": "", "/new/dir/b.txt": "content"}
     },
     {
       "name": "mv file",
-      "cmd": "mv",
-      "argv": ["/old.txt", "/new.txt"],
+      "cmd": "fs",
+      "params": {"action": "mv", "src": "/old.txt", "dst": "/new.txt"},
       "files": {"/old.txt": "content"},
       "expect": {
         "content": "moved /old.txt to /new.txt",
@@ -156,22 +131,22 @@
     },
     {
       "name": "mv identical",
-      "cmd": "mv",
-      "argv": ["/a.txt", "/a.txt"],
+      "cmd": "fs",
+      "params": {"action": "mv", "src": "/a.txt", "dst": "/a.txt"},
       "files": {"/a.txt": "x"},
-      "expectError": "mv: /a.txt and /a.txt are identical"
+      "expectError": "fs mv: /a.txt and /a.txt are identical"
     },
     {
       "name": "mv destination exists",
-      "cmd": "mv",
-      "argv": ["/a.txt", "/b.txt"],
+      "cmd": "fs",
+      "params": {"action": "mv", "src": "/a.txt", "dst": "/b.txt"},
       "files": {"/a.txt": "x", "/b.txt": "y"},
-      "expectError": "mv: destination /b.txt already exists"
+      "expectError": "fs mv: destination /b.txt already exists"
     },
     {
       "name": "mv root protection",
-      "cmd": "mv",
-      "argv": ["/users/u1", "/elsewhere"],
+      "cmd": "fs",
+      "params": {"action": "mv", "src": "/users/u1", "dst": "/elsewhere"},
       "protectRoots": ["/users/u1"],
       "files": {"/users/u1/a.txt": "a"},
       "expectError": "mv: cannot move root directory /users/u1"

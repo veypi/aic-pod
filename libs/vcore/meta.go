@@ -14,76 +14,20 @@ type CommandMeta struct {
 	Help string
 }
 
-// commandMeta 是全部虚拟指令的元数据表（核心 8 + git/browser/bg_*/commands）。
+// commandMeta 是 exec 全部虚拟指令的元数据表（curl + git/browser/json/bg_*/commands）。
+// 文件类指令（ls/rg/cp/mv/rm 等）已迁入 fs 指令集（8 action，静态 schema）。
 // desc/help 与 levels.go 分级表同包维护，禁止各端另行声明。
 var commandMeta = map[string]CommandMeta{
-	"ls": {
-		Desc: "list directory entries",
-		Help: "ls [-l] [-a] [-t] [-h] [path]\n" +
-			"  list directory entries, sorted by name (UTF-8 byte order)\n" +
-			"  -l     include size and mtime (unix seconds) columns\n" +
-			"  -a     include entries starting with '.' (hidden by default)\n" +
-			"  -t     sort by mtime, newest first (ties by name)\n" +
-			"  -h     human-readable size (1024-based, with -l; GNU ls -h aligned)\n" +
-			"  path   defaults to workdir",
-	},
-	"rg": {
-		Desc: "search content or list files",
-		Help: "rg <pattern> <path> | rg --files [-g <glob>]... [<path>]\n" +
-			"  content search: recursive; output {path}:{line}:{content}\n" +
-			"  -i        case-insensitive\n" +
-			"  -l        print only matching file paths\n" +
-			"  -m N      per-file match limit\n" +
-			"  -n        print line numbers (default behavior, accepted for compatibility)\n" +
-			"  -c        print only match count per file\n" +
-			"  -w        match whole words only\n" +
-			"  -g <glob> filename glob (basename match, repeatable, OR semantics)\n" +
-			"  --files   list files recursively instead of searching\n" +
-			"  --hidden  include hidden files and directories (excluded by default, like real rg)\n" +
-			"  regex: RE2/Rust regex semantics (no lookaround/backreference);\n" +
-			"         use bash -c \"grep -P ...\" on a physical host for PCRE",
-	},
-	"tree": {
-		Desc: "print directory tree (JSON)",
-		Help: "tree [path] [-L N]\n" +
-			"  structured recursive directory tree, JSON output (always structured; no --json flag)\n" +
-			"  path   defaults to workdir\n" +
-			"  -L N   max depth (native tree semantics; --depth N accepted as alias), default 3, max 5;\n" +
-			"         node cap 2000 (truncated=true)\n" +
-			"  hidden items (.xxx) excluded entirely (GNU tree default; -a not supported);\n" +
-			"  node_modules/vendor/__pycache__/dist/build/.next etc. listed as leaves without recursion",
-	},
 	"curl": {
-		Desc: "download a URL to a file",
-		Help: "curl -o <path> <url> [--max-size <MB>]\n" +
-			"  HTTP(S) GET, streamed to <path>; target must not exist\n" +
-			"  --max-size default 1024MB, cap 10240MB (aborts and cleans partial file)\n" +
+		Desc: "download a URL to a file, or fetch content into output",
+		Help: "curl [-L] [-o <path>] <url> [--max-size <MB>]\n" +
+			"  HTTP(S) GET\n" +
+			"  with -o: stream to <path> (requires fs write; target must not exist)\n" +
+			"  without -o: output into content (task-managed: logged, auto-background on timeout,\n" +
+			"    first-1000-lines truncation; bg_wait to continue)\n" +
+			"    binary content is rejected on sniff — use -o <path> to save it as a file\n" +
+			"  --max-size default 1024MB, cap 10240MB (aborts over-limit downloads)\n" +
 			"  cloud: loopback/private/link-local targets rejected (SSRF guard)",
-	},
-	"rm": {
-		Desc: "remove files or directories",
-		Help: "rm [-r] <path>\n" +
-			"  remove a file or empty directory; -r for recursive delete\n" +
-			"  root directories are hard-protected (cannot be removed)",
-	},
-	"mkdir": {
-		Desc: "create directories",
-		Help: "mkdir [-p] <path>\n" +
-			"  without -p: parent must exist and target must not exist\n" +
-			"  -p: recursive create, idempotent on existing",
-	},
-	"cp": {
-		Desc: "copy files or directories",
-		Help: "cp [-r] <src> <dst>\n" +
-			"  copy within the same host (no cross-host copy)\n" +
-			"  -r required for directories; dst must not exist;\n" +
-			"  copying a directory into itself is rejected",
-	},
-	"mv": {
-		Desc: "move or rename files or directories",
-		Help: "mv <src> <dst>\n" +
-			"  move within the same host; dst must not exist;\n" +
-			"  root directories are hard-protected",
 	},
 	"git": {
 		Desc: "version control",
@@ -115,8 +59,8 @@ Core Commands:
   check <sel> / uncheck <sel>  Check / uncheck checkbox
   select <sel> <val...>        Select dropdown option
   drag <src> <dst>             Drag and drop
-  upload <sel> <files...>      Upload files (cloud: sources must be inside $SESSION/$USER/$AGENT)
-  download <sel> <path>        Download file by clicking element (cloud: path inside $SESSION)
+  upload <sel> <files...>      Upload files (cloud: sources must be inside the session space)
+  download <sel> <path>        Download file by clicking element (cloud: path inside the session space)
   scroll <dir> [px]            Scroll (up/down/left/right)
   scrollintoview <sel>         Scroll element into view
   wait <sel|ms>                Wait for element or time
@@ -199,6 +143,49 @@ Behavior:
 			"  capability discovery: list declared commands (name + desc) of the target;\n" +
 			"  use `action --help` for the full help of any command",
 	},
+	"json": {
+		Desc: "view and edit JSON files",
+		Help: "json <view|set|del|append|merge> ... — JSON file tool (no external deps)\n" +
+			"\n" +
+			"Subcommands:\n" +
+			"  view    structure skeleton or extract a subtree (large-file safe)\n" +
+			"  set     set a value at a dotted path\n" +
+			"  del     delete a dotted path\n" +
+			"  append  append a value to an array at a dotted path\n" +
+			"  merge   shallow-merge an object (Object.assign({}, doc, new))\n" +
+			"\n" +
+			"Use `json <subcommand> --help` for details.",
+	},
+}
+
+// jsonSubHelp 是 json 子命令级帮助文档（`json <sub> --help` 内部返回）。
+var jsonSubHelp = map[string]string{
+	"view": "json view <path> [--key <dotted.path>] [--depth N] [--values] [--raw] [--compact]\n" +
+		"  view a JSON file — default: structure skeleton (no values, large-file safe)\n" +
+		"  <path>     JSON file (must be valid JSON, max 64MB)\n" +
+		"  --key      extract a subtree: dotted segments a.b.c, array index [0] or .0\n" +
+		"             (missing key → error); output pretty JSON, --compact: single line\n" +
+		"  --depth N  skeleton depth limit (default 4, max 10); deeper nodes show type only\n" +
+		"  --values   include scalar values in skeleton (truncated 200 chars)\n" +
+		"  --raw      raw file bytes (truncated; not combinable with --key)",
+	"set": "json set <path> <key> <value>\n" +
+		"  set a value at a dotted path (missing containers auto-created)\n" +
+		"  <key>    dotted path: a.b.c / a.b[0].c / a.b.0.c\n" +
+		"  <value>  parsed as JSON literal (true/false/null/number/object/array);\n" +
+		"           otherwise kept as string\n" +
+		"  output: {\"ok\":true,\"path\":\"...\",\"ops\":[\"set a.b\"],\"bytes\":N}",
+	"del": "json del <path> <key>\n" +
+		"  delete a dotted path (missing key → error)\n" +
+		"  output: {\"ok\":true,\"path\":\"...\",\"ops\":[\"del a.b\"],\"bytes\":N}",
+	"append": "json append <path> <key> <value>\n" +
+		"  append a value to the array at <key>\n" +
+		"  <key> not existing → created as [value]; target not an array → error\n" +
+		"  output: {\"ok\":true,\"path\":\"...\",\"ops\":[\"append a.b\"],\"bytes\":N}",
+	"merge": "json merge <path> <json>\n" +
+		"  shallow-merge: doc = Object.assign({}, doc, parse(<json>))\n" +
+		"  top-level keys added/overwritten; nested objects and arrays replaced wholesale;\n" +
+		"  document must be a JSON object\n" +
+		"  output: {\"ok\":true,\"path\":\"...\",\"ops\":[\"merge\"],\"bytes\":N}",
 }
 
 // Meta 返回指令元数据（desc/help）。未知指令返回 ok=false。
@@ -220,6 +207,8 @@ func Decl(name string) (proto.CommandDecl, bool) {
 		level = lv
 	} else if name == "git" {
 		level = proto.LevelRead // 基础 = read（读操作）；push/reset/checkout 动态提升在 gitRequired
+	} else if name == "json" {
+		level = proto.LevelRead // 基础 = read（view）；set/del/append/merge 动态提升在 jsonRequired
 	} else if name == "browser" {
 		level = proto.LevelWrite // 基础 = write；eval/upload 动态提升在 browserRequired
 	}

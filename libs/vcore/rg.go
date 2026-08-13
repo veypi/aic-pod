@@ -6,28 +6,25 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
-// rg 正则语义与 Rust regex 同族：线性时间、无回溯、无 lookaround/backreference
-// ——命中拒绝清单时引导 bash -c "grep -P ..." 逃生舱（受限反馈，§5.4）。
+// fsRg 实现 rg（§4.6）：内容搜索与文件列举。JSON 参数：
 //
-// 两种模式：
-//
-//	rg --files [-g GLOB]... [--hidden] [path]                  递归列出文件（字节序）
-//	rg [-i] [-l] [-m N] [-n] [-c] [-w] [--hidden] [-g GLOB]... <pattern> <path>   内容搜索
+//	{files:true, glob?, hidden?, path?}                       递归列出文件（字节序）
+//	{pattern, path?, glob?, hidden?, insensitive?, word?,      内容搜索
+//	 files_only?, count?, max_per_file?}
 //
 // 输出为 rg 管道格式：内容搜索 {path}:{line}:{content}（行尾 \r 剥除）；
-// -l 每命中文件输出路径一行；-c 每命中文件输出 {path}:{count}；
-// -w 词边界匹配；--files 每行一个文件路径。
+// files_only 每命中文件输出路径一行；count 每命中文件输出 {path}:{count}；
+// files 模式每行一个文件路径。
 //
-// 对齐真实 rg：默认跳过隐藏文件与隐藏目录（点开头），--hidden 收录；
-// 平台行为（非 flag，真 rg 无对应项，文档明示）：全局 100 行上限 + truncated 标记、
-// 512KB 输出预算、skipDirs 与点目录跳过、二进制文件跳过。
-// -g glob 按文件名匹配（basename，* 任意序列 / ? 单字符，完整匹配），
-// 多 -g 为 OR；不支持 ! 否定前缀与 ** 跨目录（真 rg 子集外的能力不引入）。
+// 对齐真实 rg：默认跳过隐藏文件与隐藏目录（点开头），hidden 收录；
+// 平台行为（文档明示）：全局 100 行上限 + truncated 标记、512KB 输出预算、
+// skipDirs 与点目录跳过、二进制文件跳过。
+// glob 按文件名匹配（basename，* 任意序列 / ? 单字符，完整匹配），
+// 多 glob 为 OR；不支持 ! 否定前缀与 ** 跨目录。
 
 // rgUnsupportedPatterns 是 Rust regex 同族不支持的特性清单（lookaround/backreference），
 // 与 JS 端校验清单一致：命中即显式报错并引导 shell 逃生舱。
@@ -44,87 +41,73 @@ const rgDefaultLimit = 100
 // skipDirs 是 rg 递归不进入的目录（§5.4：node_modules/vendor 与 . 开头目录）。
 var skipDirs = map[string]bool{"node_modules": true, "vendor": true}
 
-func cmdRg(ctx context.Context, env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("rg", argvSpec{
-		bools:  map[string]bool{"--files": true, "--hidden": true, "-i": true, "-l": true, "-n": true, "-c": true, "-w": true},
-		values: map[string]bool{"-m": true},
-		lists:  map[string]bool{"-g": true},
-		minPos: 0, maxPos: 2,
-	}, argv)
-	if err != nil {
-		return nil, err
-	}
-	globs := pa.lists["-g"]
-	for _, g := range globs {
+func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
+	for _, g := range p.Glob {
 		if strings.Contains(g, "!") || strings.Contains(g, "**") {
-			return nil, execErr("rg", "glob %q is not supported on this environment (restricted: no '!' negation or '**')", g)
+			return nil, fsErr("rg", "glob %q is not supported on this environment (restricted: no '!' negation or '**')", g)
 		}
 	}
 
-	// --files 模式：纯文件列举，不接受搜索 flag（--hidden 是文件收录开关，允许）
-	if pa.bools["--files"] {
-		if pa.bools["-i"] || pa.bools["-l"] || pa.bools["-n"] || pa.bools["-c"] || pa.bools["-w"] || pa.values["-m"] != "" {
-			return nil, execErr("rg", "--files cannot be used with search flags (-i, -l, -m, -n, -c, -w)")
-		}
-		if len(pa.pos) > 1 {
-			return nil, execErr("rg", "unexpected argument %q", pa.pos[1])
+	// files 模式：纯文件列举，不接受搜索参数
+	if p.Files {
+		if p.Pattern != "" || p.Insensitive || p.FilesOnly || p.Count || p.Word || p.MaxPerFile > 0 {
+			return nil, fsErr("rg", "files mode cannot be combined with search params (pattern, insensitive, files_only, count, word, max_per_file)")
 		}
 		target := env.Workdir
-		if len(pa.pos) == 1 {
-			target = pa.pos[0]
+		if p.Path != "" {
+			target = p.Path
 		}
-		return rgFiles(ctx, env, target, globs, pa.bools["--hidden"])
+		return rgFiles(ctx, env, target, p.Glob, p.Hidden)
 	}
 
-	// 搜索模式：pattern + path 两个位置参数
-	if len(pa.pos) < 2 {
-		return nil, execErr("rg", "missing argument: rg [OPTIONS] <pattern> <path>")
+	// 搜索模式：pattern 必填，path 缺省 = workdir
+	if p.Pattern == "" {
+		return nil, fsErr("rg", "pattern is required (or set files=true to list files)")
 	}
-	pattern := pa.pos[0]
 	for _, re := range rgUnsupportedPatterns {
-		if re.MatchString(pattern) {
-			return nil, execErr("rg", "%s", rgUnsupportedHint)
+		if re.MatchString(p.Pattern) {
+			return nil, fsErr("rg", "%s", rgUnsupportedHint)
 		}
 	}
-	if pa.bools["-w"] {
-		// 词边界（-w）：pattern 包裹 \b...\b（真 rg 语义）
+	pattern := p.Pattern
+	if p.Word {
+		// 词边界：pattern 包裹 \b...\b（真 rg -w 语义）
 		pattern = `\b(?:` + pattern + `)\b`
 	}
-	if pa.bools["-i"] {
+	if p.Insensitive {
 		pattern = "(?i)" + pattern
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil, execErr("rg", "invalid pattern: %s", err)
+		return nil, fsErr("rg", "invalid pattern: %s", err)
 	}
-	maxPerFile := 0
-	if v := pa.values["-m"]; v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			return nil, execErr("rg", "-m must be >= 1, got %s", v)
-		}
-		maxPerFile = n
+	if p.MaxPerFile < 0 {
+		return nil, fsErr("rg", "max_per_file must be >= 0, got %d", p.MaxPerFile)
 	}
 
-	abs, err := env.Resolve(pa.pos[1])
+	target := env.Workdir
+	if p.Path != "" {
+		target = p.Path
+	}
+	abs, err := env.Resolve(target)
 	if err != nil {
-		return nil, execErr("rg", "%s", err)
+		return nil, fsErr("rg", "%s", err)
 	}
 	if err := env.CheckPath("rg", abs); err != nil {
 		return nil, err
 	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
-		return nil, execErr("rg", "%s", err)
+		return nil, fsErr("rg", "%s", err)
 	}
-	// 候选文件集：单文件直搜（显式路径不受 -g 过滤）；目录递归按字节序遍历。
+	// 候选文件集：单文件直搜（显式路径不受 glob 过滤）；目录递归按字节序遍历。
 	var candidates []string
 	if !info.IsDir() {
 		candidates = []string{abs}
-	} else if err := rgWalk(ctx, env, abs, globs, pa.bools["--hidden"], func(p string) { candidates = append(candidates, p) }); err != nil {
-		return nil, execErr("rg", "%s", err)
+	} else if err := rgWalk(ctx, env, abs, p.Glob, p.Hidden, func(p string) { candidates = append(candidates, p) }); err != nil {
+		return nil, fsErr("rg", "%s", err)
 	}
-	return rgSearch(env, abs, pa.pos[0], candidates, re, maxPerFile, pa.bools["-l"], pa.bools["-c"])
+	return rgSearch(env, abs, p.Pattern, candidates, re, p.MaxPerFile, p.FilesOnly, p.Count)
 }
 
 // rgWalk 递归收集目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
@@ -176,21 +159,21 @@ func globOK(globs []string, name string) bool {
 func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidden bool) (*Result, error) {
 	abs, err := env.Resolve(target)
 	if err != nil {
-		return nil, execErr("rg", "%s", err)
+		return nil, fsErr("rg", "%s", err)
 	}
 	if err := env.CheckPath("rg", abs); err != nil {
 		return nil, err
 	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
-		return nil, execErr("rg", "%s", err)
+		return nil, fsErr("rg", "%s", err)
 	}
 	var files []string
 	if !info.IsDir() {
 		// 单文件显式路径：直出（不受隐藏/glob 过滤，对齐真实 rg 显式路径语义）
 		files = []string{abs}
 	} else if err := rgWalk(ctx, env, abs, globs, hidden, func(p string) { files = append(files, p) }); err != nil {
-		return nil, execErr("rg", "%s", err)
+		return nil, fsErr("rg", "%s", err)
 	}
 	// UTF-8 字节序排序（禁止 locale 相关排序，§5.4）
 	sort.Strings(files)

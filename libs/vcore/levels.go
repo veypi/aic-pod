@@ -1,6 +1,7 @@
 package vcore
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/veypi/aic-pod/libs/proto"
@@ -12,26 +13,43 @@ import (
 // FSRequired 返回 fs action 的 required level（§2.4）。
 func FSRequired(action string) int {
 	switch action {
-	case "read":
+	case "read", "ls", "rg":
 		return proto.LevelRead
-	case "write", "edit":
+	case "write", "edit", "cp", "mv", "rm":
 		return proto.LevelWrite
 	}
 	return proto.LevelDanger // 未声明兜底
 }
 
-// execCoreLevels 是核心虚拟指令的静态 required level。
-// rm 的动态提升（-r 非空目录 = Danger）见 ExecRequiredIn。
-var execCoreLevels = map[string]int{
-	"ls":   proto.LevelRead,
-	"rg":   proto.LevelRead,
-	"tree": proto.LevelRead,
+// FSRequiredIn 是 FSRequired 的环境感知版本：rm recursive 删除非空目录
+// 动态提升至 Danger(3)（§2.4：不可逆破坏性）。data 为 fs JSON 参数原文。
+func FSRequiredIn(env *Env, action string, data []byte) int {
+	lv := FSRequired(action)
+	if action != "rm" || env == nil || env.VFS == nil {
+		return lv
+	}
+	var p struct {
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
+	}
+	_ = json.Unmarshal(data, &p)
+	if !p.Recursive || p.Path == "" {
+		return lv
+	}
+	abs, err := env.Resolve(p.Path)
+	if err != nil {
+		return lv // 判定失败按 Write，由执行路径报真正的错误
+	}
+	entries, err := env.VFS.ReadDir(abs)
+	if err == nil && len(entries) > 0 {
+		return proto.LevelDanger
+	}
+	return lv
+}
 
-	"curl":  proto.LevelWrite,
-	"mkdir": proto.LevelWrite,
-	"cp":    proto.LevelWrite,
-	"mv":    proto.LevelWrite,
-	"rm":    proto.LevelWrite, // 文件/空目录
+// execCoreLevels 是核心虚拟指令的静态 required level。
+var execCoreLevels = map[string]int{
+	"curl": proto.LevelWrite,
 
 	"bg_list":  proto.LevelRead,
 	"bg_wait":  proto.LevelRead,
@@ -72,9 +90,17 @@ var browserSubLevels = map[string]int{
 	"upload": proto.LevelDanger, // 文件外发
 }
 
+// jsonSubLevels 是 json 子命令分级（view=Read，修改类=Write——对齐 fs write/edit）。
+var jsonSubLevels = map[string]int{
+	"view":   proto.LevelRead,
+	"set":    proto.LevelWrite,
+	"del":    proto.LevelWrite,
+	"append": proto.LevelWrite,
+	"merge":  proto.LevelWrite,
+}
+
 // ExecRequired 返回 exec action 的 required level：
 // 内建表 → git/browser 子命令 → Danger(3) 兜底（程序基线 + 未声明虚拟指令，§2.4）。
-// rm 的动态提升需要文件系统信息，用 ExecRequiredIn。
 func ExecRequired(action string, argv []string) int {
 	if lv, ok := execCoreLevels[action]; ok {
 		return lv
@@ -84,29 +110,10 @@ func ExecRequired(action string, argv []string) int {
 		return gitRequired(argv)
 	case "browser":
 		return browserRequired(argv)
+	case "json":
+		return jsonRequired(argv)
 	}
 	return proto.LevelDanger
-}
-
-// ExecRequiredIn 是 ExecRequired 的环境感知版本：
-// rm -r 非空目录动态提升至 Danger(3)（§2.4：不可逆破坏性）。
-func ExecRequiredIn(env *Env, action string, argv []string) int {
-	if action != "rm" {
-		return ExecRequired(action, argv)
-	}
-	pa, err := parseArgv("rm", argvSpec{bools: map[string]bool{"-r": true}, minPos: 1, maxPos: 1}, argv)
-	if err != nil || !pa.bools["-r"] {
-		return proto.LevelWrite
-	}
-	abs, err := env.Resolve(pa.pos[0])
-	if err != nil {
-		return proto.LevelWrite // 判定失败按 Write，由执行路径报真正的错误
-	}
-	entries, err := env.VFS.ReadDir(abs)
-	if err == nil && len(entries) > 0 {
-		return proto.LevelDanger
-	}
-	return proto.LevelWrite
 }
 
 // gitRequired 判定 git 子命令等级：跳过带值 flag（-C/-c 已知表），
@@ -140,6 +147,22 @@ func browserRequired(argv []string) int {
 		}
 	}
 	if lv, ok := browserSubLevels[sub]; ok {
+		return lv
+	}
+	return proto.LevelWrite
+}
+
+// jsonRequired 判定 json 子命令等级：首个非 flag 参数（json 无带值 flag）。
+// 未知子命令按 Write 兜底（修改类，保守）。
+func jsonRequired(argv []string) int {
+	sub := ""
+	for _, a := range argv {
+		if !strings.HasPrefix(a, "-") {
+			sub = a
+			break
+		}
+	}
+	if lv, ok := jsonSubLevels[sub]; ok {
 		return lv
 	}
 	return proto.LevelWrite

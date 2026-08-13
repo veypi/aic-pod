@@ -165,59 +165,51 @@ func TestBrowserPassthroughSubcommand(t *testing.T) {
 	}
 }
 
-// 安全：download 落盘越界拒绝（Roots 收容 + 云环境 $SESSION 收紧，§5.6）。
+// 安全：download 落盘越界拒绝（chroot 单根收容，§5.6：空间内任意路径放行，
+// ".." 经 path.Clean 被钳在空间内，无法逃逸）。
 func TestBrowserDownloadPathSandbox(t *testing.T) {
 	execPath, _ := stubCLI(t)
 	vfs := vcore.NewMemVFS()
 	cloudEnv := &vcore.Env{
 		VFS:     vfs,
-		Workdir: "/sessions/s1",
-		Vars:    map[string]string{"$USER": "/home/u1", "$AGENT": "/agents/a1", "$SESSION": "/sessions/s1"},
-		Roots:   []string{"/home/u1", "/agents/a1", "/sessions/s1"},
+		Workdir: "/",
+		Roots:   []string{"/"},
 	}
 	b := New(Config{ExecPath: execPath, Namespace: "u1", Session: "s1", TempDir: t.TempDir()})
 	defer b.Close()
 
-	// $SESSION 内：放行
-	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"download", "@e1", "/sessions/s1/a.bin"}); err != nil {
-		t.Fatalf("in-session download rejected: %v", err)
+	// 空间内：放行
+	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"download", "@e1", "/a.bin"}); err != nil {
+		t.Fatalf("in-space download rejected: %v", err)
 	}
-	// $SESSION 外但三根内：拒绝（§5.6 下载产物不污染 $USER/$AGENT）
-	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"download", "@e1", "/home/u1/evil.bin"}); err == nil {
-		t.Fatal("download to $USER accepted, want reject")
+	// 路径穿越被 chroot 钳回空间内（/evil.bin），放行但不逃逸
+	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"download", "@e1", "../../evil.bin"}); err != nil {
+		t.Fatalf("traversal should be clamped into space: %v", err)
 	}
-	// 三根外：拒绝（Roots 收容）
-	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"download", "@e1", "/etc/evil.bin"}); err == nil {
-		t.Fatal("download to /etc accepted, want reject")
-	}
-	// 路径穿越：拒绝
-	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"download", "@e1", "../../evil.bin"}); err == nil {
-		t.Fatal("download traversal accepted, want reject")
+	if _, err := vfs.Stat("/evil.bin"); err != nil {
+		t.Fatalf("traversal target should land at /evil.bin: %v", err)
 	}
 }
 
-// 安全：upload 源文件越界拒绝（Roots 收容）。
+// 安全：upload 源文件越界拒绝（chroot 单根收容）。
 func TestBrowserUploadPathSandbox(t *testing.T) {
 	execPath, _ := stubCLI(t)
 	vfs := vcore.NewMemVFS()
-	vfs.SetFile("/sessions/s1/ok.txt", []byte("ok"), time.Now())
+	vfs.SetFile("/ok.txt", []byte("ok"), time.Now())
 	cloudEnv := &vcore.Env{
 		VFS:     vfs,
-		Workdir: "/sessions/s1",
-		Vars:    map[string]string{"$USER": "/home/u1", "$AGENT": "/agents/a1", "$SESSION": "/sessions/s1"},
-		Roots:   []string{"/home/u1", "/agents/a1", "/sessions/s1"},
+		Workdir: "/",
+		Roots:   []string{"/"},
 	}
 	b := New(Config{ExecPath: execPath, Namespace: "u1", Session: "s1", TempDir: t.TempDir()})
 	defer b.Close()
 
-	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"upload", "@f", "/sessions/s1/ok.txt"}); err != nil {
-		t.Fatalf("in-root upload rejected: %v", err)
+	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"upload", "@f", "/ok.txt"}); err != nil {
+		t.Fatalf("in-space upload rejected: %v", err)
 	}
+	// 穿越被钳回空间内后文件不存在 → 执行错误（读不到内容）
 	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"upload", "@f", "../../etc/passwd"}); err == nil {
-		t.Fatal("upload traversal accepted, want reject")
-	}
-	if _, err := b.Handle(context.Background(), cloudEnv, "msg-1", []string{"upload", "@f", "/etc/passwd"}); err == nil {
-		t.Fatal("upload absolute escape accepted, want reject")
+		t.Fatal("upload of nonexistent in-space file accepted, want error")
 	}
 }
 

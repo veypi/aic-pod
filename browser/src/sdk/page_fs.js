@@ -1,4 +1,5 @@
-// PageFS — 浏览器本地文件系统（v0.13.1 单根模型）：IndexedDB 单库单 store，read/write/edit。
+// PageFS — 浏览器本地文件系统（v0.13.1 单根模型）：IndexedDB 单库单 store，
+// fs 指令集 8 action（read/write/edit 本类实现，ls/rg/cp/mv/rm 委托 fsops.js）。
 //
 // 双端复用（同一套代码逻辑，逐字节同步，禁止漂移）：
 //   - aic/ui/assets/libs/page_fs.js   — page 端（1host="page"，页面 IndexedDB）
@@ -12,7 +13,7 @@
 //   - IndexedDB 无目录概念，write 的"父目录自动创建"天然成立；
 //   - 总量受浏览器 storage quota 管理，写失败（quota exceeded）按执行错误返回。
 //
-// 路径翻译（仅防呆，非隔离）：AI 经 exec 通道（fs.req/vcmd）发来的路径可能带云语义
+// 路径翻译（仅防呆，非隔离）：AI 经 fs 通道发来的路径可能带云语义
 // 容器前缀（$SESSION/$USER/$AGENT、/sessions/{x}/、/home/{x}/）——resolve 一律剥离
 // 映射到本地根下（如 $SESSION/foo → /foo）。
 //
@@ -21,6 +22,8 @@
 // edit 唯一匹配/重叠校验。错误文案与 vcore 保持一致。
 // 实现取舍：>8MB 大文件不整读是 Go 端的内存优化，输出语义相同；
 // 浏览器端 Blob.text() 整读，输出与流式分支逐字节一致。
+
+import { runFsOps } from "./fsops.js";
 
 const MAX_CONTENT_BYTES = 512 << 10; // 512KB（§2.5，三端一致）
 const IMAGE_DATA_MAX_BYTES = 600 * 1024; // image_data 投递标准（§2.2，三端一致）
@@ -35,6 +38,21 @@ const ALLOWED_FIELDS = new Set([
   "limit",
   "content",
   "edits",
+  "depth",
+  "all",
+  "sort",
+  "pattern",
+  "glob",
+  "files",
+  "hidden",
+  "insensitive",
+  "word",
+  "files_only",
+  "count",
+  "max_per_file",
+  "src",
+  "dst",
+  "recursive",
 ]);
 
 // ---- 路径运算（镜像 proto.ResolvePath + WithinRoots，page 无盘符路径）----
@@ -345,6 +363,8 @@ export class PageFS {
   }
 
   // run 执行一条 fs 请求（§6.1 body = {msg_id, action, ...fs JSON 参数}）。
+  // 8 action：read/write/edit 为本类方法；ls/rg/cp/mv/rm 委托 fsops.js
+  // （PageFS 原语驱动，与 vcore 语义一致）。
   // 返回 {content, attrs}；错误 throw Error("fs ...")。
   async run(params, ctx = {}) {
     params = params || {};
@@ -353,7 +373,7 @@ export class PageFS {
       if (!ALLOWED_FIELDS.has(k)) throw fsErr(action, `unknown field "${k}"`);
     }
     if (!action)
-      throw fsErr("", "action is required (supported: read, write, edit)");
+      throw fsErr("", "action is required (supported: read, write, edit, ls, rg, cp, mv, rm)");
 
     const env = this._env(params.workdir);
 
@@ -364,10 +384,16 @@ export class PageFS {
         return this._write(params, env);
       case "edit":
         return this._edit(params, env);
+      case "ls":
+      case "rg":
+      case "cp":
+      case "mv":
+      case "rm":
+        return runFsOps(this, params, { workdir: env.workdir });
     }
     throw fsErr(
       "",
-      `unknown action "${action}" (supported: read, write, edit)`,
+      `unknown action "${action}" (supported: read, write, edit, ls, rg, cp, mv, rm)`,
     );
   }
 
@@ -596,7 +622,7 @@ export class PageFS {
   // ---- 前端操作对象接口（get/put/ls/rm/exists）----
   // 面向前端程序的操作对象接口（$mod.$page_fs 直接使用，page_exec 不再包装）。
   // 底层方法 readRaw/writeBlob/writeText/list/stat/walk/remove/has 保留
-  // （vcmd 等内部使用，与 cloud_fs 无对应关系）。
+  // （fsops 等内部使用，与 cloud_fs 无对应关系）。
   //
   // 与 cloud_fs 的文档化差异：
   //   - resolve() 返回规范化绝对路径（IndexedDB 无 URL 概念；cloud_fs 返回
@@ -762,7 +788,7 @@ export class PageFS {
     return { ok: true, path: abs, size: blob.size };
   }
 
-  // writeText 文本写入（vcmd curl 落盘用，§5.4）：内部走 write 语义，返回 {ok,path,size}。
+  // writeText 文本写入：内部走 write 语义，返回 {ok,path,size}。
   async writeText(path, text, ctx = {}) {
     const r = await this.run(
       { action: "write", path, content: String(text) },
@@ -813,7 +839,7 @@ export class PageFS {
     return { ok: true, path: prefix, items };
   }
 
-  // stat 单路径状态（vcmd 虚拟指令用）：文件返回 {path,dir:false,size,mtime}；
+  // stat 单路径状态（fsops 用）：文件返回 {path,dir:false,size,mtime}；
   // 目录由子 key 前缀推导 {path,dir:true,size:0,mtime:undefined}（IndexedDB 无目录记录）；
   // 本地根 / 恒存在（无记录也是有效目录）；均不存在返回 null
   // （与 vcore Stat 语义对齐：不存在报错由调用方处理）。
@@ -842,9 +868,9 @@ export class PageFS {
     return null;
   }
 
-  // walk 递归全量列举（vcmd 的 rg/tree 用）：返回平铺 {path,dir,size,mtime}[]，
+  // walk 递归全量列举（fsops 的 rg/ls 用）：返回平铺 {path,dir,size,mtime}[]，
   // 目录由全部 key 前缀推导（含深层中间目录）；不做隐藏/skip 过滤——过滤是
-  // vcore 指令语义（vcmd.js），fs 层只提供原始树。
+  // 指令语义（fsops.js），fs 层只提供原始树。
   async walk(path, ctx = {}) {
     const abs = this._path(path, ctx);
     const db = await this._ensureDB();
@@ -903,7 +929,7 @@ export class PageFS {
     throw fsErr("rm", `${abs}: no such file or directory`);
   }
 
-  // has 存在性检查（boolean；原 exists 语义，vcmd 等内部使用）。
+  // has 存在性检查（boolean；原 exists 语义，fsops 等内部使用）。
   async has(path, ctx = {}) {
     const abs = this._path(path, ctx);
     const db = await this._ensureDB();

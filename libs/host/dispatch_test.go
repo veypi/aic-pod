@@ -51,15 +51,15 @@ const testSubject = "u.u1.s.s1.h.host_test01.exec.req"
 func TestDispatchVerifyChain(t *testing.T) {
 	c, _ := testClient(t)
 
-	// 合法签名 → 执行（ls 是虚拟指令，granted 1 足够）
-	raw1 := signedReq(t, c, "exec", map[string]any{"action": "ls", "argv": []string{}}, 1)
+	// 合法签名 → 执行（commands 是虚拟指令，granted 1 足够）
+	raw1 := signedReq(t, c, "exec", map[string]any{"action": "commands", "argv": []string{}}, 1)
 	resp := c.dispatch(context.Background(), testSubject, raw1)
 	if resp.State != proto.StateCompleted {
 		t.Fatalf("state = %s err = %q", resp.State, resp.Error)
 	}
 
 	// 篡改签名 → rejected
-	raw := signedReq(t, c, "exec", map[string]any{"action": "ls"}, 1)
+	raw := signedReq(t, c, "exec", map[string]any{"action": "commands"}, 1)
 	var req proto.ToolRequest
 	_ = json.Unmarshal(raw, &req)
 	req.GrantedLevel = 9 // 篡改 granted_level
@@ -76,7 +76,7 @@ func TestDispatchVerifyChain(t *testing.T) {
 	}
 
 	// 过期 deadline → rejected request expired
-	raw2 := signedReq(t, c, "exec", map[string]any{"action": "ls"}, 1)
+	raw2 := signedReq(t, c, "exec", map[string]any{"action": "commands"}, 1)
 	_ = json.Unmarshal(raw2, &req)
 	req.Deadline = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
 	proto.SignToolRequest(&req, c.hostID, c.kTool)
@@ -139,17 +139,19 @@ func TestDispatchVirtualCommands(t *testing.T) {
 	if !ok {
 		t.Fatalf("commands payload = %v", payload)
 	}
-	if len(cmds) < 12 { // 核心 8 + commands + bg_*3（探测项另计）
+	if len(cmds) < 6 { // curl + json + commands + bg_*3（探测项另计）
 		t.Errorf("commands = %d", len(cmds))
 	}
-	hasRg, hasTree := false, false
+	hasCurl, hasJSON := false, false
 	for _, v := range cmds {
 		if decl, ok := v.(map[string]any); ok {
 			switch decl["name"] {
-			case "rg":
-				hasRg = true
-			case "tree":
-				hasTree = true
+			case "curl":
+				hasCurl = true
+			case "json":
+				hasJSON = true
+			case "ls", "rg", "tree", "rm", "mkdir", "cp", "mv":
+				t.Errorf("file command should not be declared by exec: %v", decl["name"])
 			}
 			if _, hasDesc := decl["desc"]; !hasDesc {
 				t.Errorf("decl missing desc: %v", decl)
@@ -159,11 +161,11 @@ func TestDispatchVirtualCommands(t *testing.T) {
 			}
 		}
 	}
-	if !hasRg {
-		t.Error("command table missing rg")
+	if !hasCurl {
+		t.Error("command table missing curl")
 	}
-	if !hasTree {
-		t.Error("command table missing tree")
+	if !hasJSON {
+		t.Error("command table missing json")
 	}
 
 	// 未声明命令 → error（统一命令声明模型：无透传）
@@ -176,11 +178,18 @@ func TestDispatchVirtualCommands(t *testing.T) {
 		t.Errorf("undeclared error = %q", resp.Error)
 	}
 
-	// 虚拟优先：ls 走虚拟指令而非本地命令（§5.4）
+	// 文件类指令已迁入 fs：exec 不再声明 ls（§4/§5 拆分；granted=3 越过纵深检查达路由）
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
-		map[string]any{"action": "ls", "argv": []string{}}, 1))
-	if resp.State != proto.StateCompleted || resp.Attrs["action"] != "ls" {
-		t.Fatalf("virtual ls: state=%s attrs=%v", resp.State, resp.Attrs)
+		map[string]any{"action": "ls", "argv": []string{}}, 3))
+	if resp.State != proto.StateError || !strings.Contains(resp.Error, "not declared by this host") {
+		t.Fatalf("ls should be undeclared on exec: state=%s err=%q", resp.State, resp.Error)
+	}
+
+	// 虚拟指令分发：curl 缺参数报参数错误（证明路由到 vcore 而非未声明）
+	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
+		map[string]any{"action": "curl", "argv": []string{}}, 2))
+	if resp.State != proto.StateError || !strings.Contains(resp.Error, "missing argument") {
+		t.Fatalf("virtual curl: state=%s err=%q", resp.State, resp.Error)
 	}
 }
 
@@ -237,7 +246,7 @@ func TestParseWSURL(t *testing.T) {
 		base      string
 		proxyPath string
 	}{
-		{"wss://ivec.ai/aic/api/nc", "wss://ivec.ai", "/aic/api/nc"},
+		{"wss://ivec.ai/api/nc", "wss://ivec.ai", "/api/nc"},
 		{"ws://host/path", "ws://host", "/path"},
 		{"wss://host", "wss://host", ""},
 		{"ws://host:8080/a/b", "ws://host:8080", "/a/b"},

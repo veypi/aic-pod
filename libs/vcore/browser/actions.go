@@ -195,10 +195,10 @@ func (b *Browser) exportFile(ctx context.Context, env *vcore.Env, cliCmd, rawPat
 	if err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("%s: %s", cliCmd, err)}
 	}
-	if err := env.VFS.MkdirAll(dirOfVFS(abs)); err != nil {
+	if err := env.VFS.MkdirAll(dirOfVFS(abs), 0o755); err != nil {
 		return nil, err
 	}
-	if err := env.VFS.WriteFile(abs, data); err != nil {
+	if err := env.VFS.WriteFile(abs, data, 0o644); err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("%s: %s", cliCmd, err)}
 	}
 	b.markDirty()

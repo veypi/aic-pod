@@ -16,10 +16,10 @@ import (
 //   - upload：源文件限 VFS 路径空间内（路径展开 + 越界拒绝由调用方鉴权策略保证），
 //     读内容暂存临时目录后上传；
 //   - download / screenshot：CLI 落临时目录，字节经 VFS 写入目标路径
-//     （cloud = $SESSION 根约束由 env.Workdir/Vars 与调用方根收容保证）。
+//     （cloud = 会话空间约束由 env.Roots 与 chroot 保证）。
 
 // upload <sel> <file...>：源文件经 VFS 读（§5.6），Danger(3) 由分级表控制。
-// 源路径展开后必须位于 Roots 内（cloud 三根；物理 host Roots=nil 不限制）。
+// 源路径展开后必须位于 Roots 内（cloud 会话空间根 /；物理 host Roots=nil 不限制）。
 func (b *Browser) upload(ctx context.Context, env *vcore.Env, args []string) (*vcore.Result, error) {
 	if len(args) < 2 {
 		return nil, &proto.ExecError{Action: "browser", Reason: "upload requires selector and at least one file path"}
@@ -60,9 +60,8 @@ func (b *Browser) upload(ctx context.Context, env *vcore.Env, args []string) (*v
 	return r, nil
 }
 
-// download <sel> <path>：落盘路径经 VFS 写（§5.6：cloud 限 $SESSION 根内，
-// 下载产物是会话级临时产物，不污染 $USER/$AGENT）。
-// 路径展开后先做 Roots 收容（cloud 三根），再在云环境（Vars 非空）收紧到 $SESSION。
+// download <sel> <path>：落盘路径经 VFS 写（§5.6：cloud 限会话空间内，
+// 下载产物是会话级临时产物）。路径展开后做 Roots 收容（cloud 会话空间根 /）。
 func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (*vcore.Result, error) {
 	if len(args) < 2 {
 		return nil, &proto.ExecError{Action: "browser", Reason: "download requires selector and path"}
@@ -74,13 +73,6 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 	}
 	if err := env.CheckPath("browser", abs); err != nil {
 		return nil, err
-	}
-	// 云环境（Vars 非空）：download 落盘仅限 $SESSION 根内（§5.6）；物理 host 不限。
-	if sess := env.Vars["$SESSION"]; sess != "" {
-		if abs != sess && !strings.HasPrefix(abs, sess+"/") {
-			return nil, &proto.ExecError{Action: "browser",
-				Reason: fmt.Sprintf("download: path outside $SESSION root: %s", abs)}
-		}
 	}
 	tmpDir, err := os.MkdirTemp(b.cfg.TempDir, "download-*")
 	if err != nil {
@@ -96,10 +88,10 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 	if err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("download: %s", err)}
 	}
-	if err := env.VFS.MkdirAll(dirOfVFS(abs)); err != nil {
+	if err := env.VFS.MkdirAll(dirOfVFS(abs), 0o755); err != nil {
 		return nil, err
 	}
-	if err := env.VFS.WriteFile(abs, data); err != nil {
+	if err := env.VFS.WriteFile(abs, data, 0o644); err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("download: %s", err)}
 	}
 	b.markDirty()
@@ -109,8 +101,8 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 }
 
 // screenshot [--quality N] [--full|-f|--fullpage] [-o <path>|--output <path>]：
-// 字节经 VFS 写 screenshot/{ts}.jpg（cloud 为 $SESSION/screenshot/，显式 -o 时
-// 写指定路径，云环境限 $SESSION 根内），content/path 告知落盘位置，AI 需要
+// 字节经 VFS 写 screenshot/{ts}.jpg（cloud 为会话空间 /screenshot/，显式 -o 时
+// 写指定路径，云环境限会话空间内），content/path 告知落盘位置，AI 需要
 // 看图时再 fs.read。§2.2：browser 不返回 image_data/image_path——只有 fs.read
 // 能把图片带进消息。
 //
@@ -154,7 +146,7 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 		return r, nil
 	}
 
-	// 目标路径：显式 -o 优先，缺省 screenshot/{ts}.jpg（相对 workdir，cloud=$SESSION）
+	// 目标路径：显式 -o 优先，缺省 screenshot/{ts}.jpg（相对 workdir，cloud=会话空间根）
 	target := fmt.Sprintf("screenshot/%s.jpg", time.Now().Format("2006-01-02T15-04-05"))
 	if outPath != "" {
 		target = outPath
@@ -165,13 +157,6 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 	}
 	if err := env.CheckPath("browser", abs); err != nil {
 		return nil, err
-	}
-	// 云环境（Vars 非空）：截图落盘仅限 $SESSION 根内（与 download 同语义，§5.6）
-	if sess := env.Vars["$SESSION"]; sess != "" {
-		if abs != sess && !strings.HasPrefix(abs, sess+"/") {
-			return nil, &proto.ExecError{Action: "browser",
-				Reason: fmt.Sprintf("screenshot: path outside $SESSION root: %s", abs)}
-		}
 	}
 
 	if err := os.MkdirAll(b.cfg.TempDir, 0o700); err != nil {
@@ -190,10 +175,10 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
 	}
 
-	if err := env.VFS.MkdirAll(dirOfVFS(abs)); err != nil {
+	if err := env.VFS.MkdirAll(dirOfVFS(abs), 0o755); err != nil {
 		return nil, err
 	}
-	if err := env.VFS.WriteFile(abs, data); err != nil {
+	if err := env.VFS.WriteFile(abs, data, 0o644); err != nil {
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
 	}
 	b.markDirty()

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/vigo/contrib/ufs"
 )
 
 func dirOf(p string) string { return path.Dir(p) }
@@ -25,17 +26,17 @@ func checkRootProtect(env *Env, cmd, p string) error {
 	return nil
 }
 
-// ---- rm（§5.4）----
+// ---- rm（§4.7）----
 
-// rm [-r] <path>：文件/空目录直接删；目录无 -r 报错；-r 递归删除。
-func cmdRm(ctx context.Context, env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("rm", argvSpec{bools: map[string]bool{"-r": true}, minPos: 1, maxPos: 1}, argv)
-	if err != nil {
-		return nil, err
+// fsRm 实现 rm：{path, recursive}。文件/空目录直接删；非空目录需 recursive=true。
+// recursive 删非空目录的权限动态提升（Danger）在 FSRequiredIn（§2.4）。
+func fsRm(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
+	if p.Path == "" {
+		return nil, fsErr("rm", "path is required")
 	}
-	abs, err := env.Resolve(pa.pos[0])
+	abs, err := env.Resolve(p.Path)
 	if err != nil {
-		return nil, execErr("rm", "%s", err)
+		return nil, fsErr("rm", "%s", err)
 	}
 	if err := env.CheckPath("rm", abs); err != nil {
 		return nil, err
@@ -45,20 +46,20 @@ func cmdRm(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
-		return nil, execErr("rm", "%s", err)
+		return nil, fsErr("rm", "%s", err)
 	}
 	count := 0
 	if info.IsDir() {
 		entries, _ := env.VFS.ReadDir(abs)
-		if len(entries) > 0 && !pa.bools["-r"] {
-			return nil, execErr("rm", "%s is a non-empty directory (use -r)", abs)
+		if len(entries) > 0 && !p.Recursive {
+			return nil, fsErr("rm", "%s is a non-empty directory (set recursive=true)", abs)
 		}
 		if len(entries) > 0 {
 			count = countEntries(env.VFS, abs)
 		}
 	}
 	if err := env.VFS.RemoveAll(abs); err != nil {
-		return nil, execErr("rm", "%s", err)
+		return nil, fsErr("rm", "%s", err)
 	}
 	r := newResult("rm", abs)
 	r.Content = fmt.Sprintf("removed %s", abs)
@@ -69,7 +70,7 @@ func cmdRm(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	return r, nil
 }
 
-func countEntries(vfs VFS, dir string) int {
+func countEntries(vfs ufs.FS, dir string) int {
 	entries, err := vfs.ReadDir(dir)
 	if err != nil {
 		return 0
@@ -83,68 +84,32 @@ func countEntries(vfs VFS, dir string) int {
 	return n
 }
 
-// ---- mkdir（§5.4）----
+// ---- cp / mv（§4.8）----
 
-// mkdir [-p] <path>：无 -p 时父目录必须存在、目标已存在报错；-p 递归创建且幂等。
-func cmdMkdir(ctx context.Context, env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("mkdir", argvSpec{bools: map[string]bool{"-p": true}, minPos: 1, maxPos: 1}, argv)
-	if err != nil {
-		return nil, err
+// fsCp 实现 cp：{src, dst, recursive}。目标已存在报错（不覆盖）；目录需
+// recursive=true；dst 为 src 自身或子路径报错；dst 父目录自动创建。
+func fsCp(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
+	if p.Src == "" || p.Dst == "" {
+		return nil, fsErr("cp", "src and dst are required")
 	}
-	abs, err := env.Resolve(pa.pos[0])
-	if err != nil {
-		return nil, execErr("mkdir", "%s", err)
-	}
-	if err := env.CheckPath("mkdir", abs); err != nil {
-		return nil, err
-	}
-	if _, err := env.VFS.Stat(abs); err == nil {
-		if pa.bools["-p"] {
-			r := newResult("mkdir", abs)
-			r.Content = fmt.Sprintf("created %s", abs)
-			return r, nil // -p 幂等成功
-		}
-		return nil, execErr("mkdir", "%s already exists", abs)
-	}
-	if !pa.bools["-p"] {
-		if _, err := env.VFS.Stat(dirOf(abs)); err != nil {
-			return nil, execErr("mkdir", "parent directory does not exist: %s", dirOf(abs))
-		}
-	}
-	if err := env.VFS.MkdirAll(abs); err != nil {
-		return nil, execErr("mkdir", "%s", err)
-	}
-	r := newResult("mkdir", abs)
-	r.Content = fmt.Sprintf("created %s", abs)
-	return r, nil
-}
-
-// ---- cp / mv（§5.4）----
-
-// cp [-r] <src> <dst>：目标已存在报错（不覆盖）；目录需 -r；dst 为 src 自身或子路径报错。
-func cmdCp(ctx context.Context, env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("cp", argvSpec{bools: map[string]bool{"-r": true}, minPos: 2, maxPos: 2}, argv)
-	if err != nil {
-		return nil, err
-	}
-	src, dst, err := resolveSrcDst(env, "cp", pa.pos[0], pa.pos[1])
+	src, dst, err := resolveSrcDst(env, "cp", p.Src, p.Dst)
 	if err != nil {
 		return nil, err
 	}
 	info, err := env.VFS.Stat(src)
 	if err != nil {
-		return nil, execErr("cp", "cannot stat source %s: %s", src, err)
+		return nil, fsErr("cp", "cannot stat source %s: %s", src, err)
 	}
 	if info.IsDir() {
-		if !pa.bools["-r"] {
-			return nil, execErr("cp", "%s is a directory (use -r)", src)
+		if !p.Recursive {
+			return nil, fsErr("cp", "%s is a directory (set recursive=true)", src)
 		}
 		if dst == src || strings.HasPrefix(dst, src+"/") {
-			return nil, execErr("cp", "cannot copy directory %s into itself: %s", src, dst)
+			return nil, fsErr("cp", "cannot copy directory %s into itself: %s", src, dst)
 		}
 	}
 	if _, err := env.VFS.Stat(dst); err == nil {
-		return nil, execErr("cp", "destination %s already exists", dst)
+		return nil, fsErr("cp", "destination %s already exists", dst)
 	}
 	if info.IsDir() {
 		if err := copyDir(env.VFS, src, dst); err != nil {
@@ -153,13 +118,13 @@ func cmdCp(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	} else {
 		data, err := env.VFS.ReadFile(src)
 		if err != nil {
-			return nil, execErr("cp", "cannot read source %s: %s", src, err)
+			return nil, fsErr("cp", "cannot read source %s: %s", src, err)
 		}
-		if err := env.VFS.MkdirAll(dirOf(dst)); err != nil {
-			return nil, execErr("cp", "%s", err)
+		if err := env.VFS.MkdirAll(dirOf(dst), 0o755); err != nil {
+			return nil, fsErr("cp", "%s", err)
 		}
-		if err := env.VFS.WriteFile(dst, data); err != nil {
-			return nil, execErr("cp", "cannot write destination %s: %s", dst, err)
+		if err := env.VFS.WriteFile(dst, data, 0o644); err != nil {
+			return nil, fsErr("cp", "cannot write destination %s: %s", dst, err)
 		}
 	}
 	r := newResult("cp", dst)
@@ -168,13 +133,13 @@ func cmdCp(ctx context.Context, env *Env, argv []string) (*Result, error) {
 	return r, nil
 }
 
-func copyDir(vfs VFS, src, dst string) error {
-	if err := vfs.MkdirAll(dst); err != nil {
-		return execErr("cp", "cannot create directory %s: %s", dst, err)
+func copyDir(vfs ufs.FS, src, dst string) error {
+	if err := vfs.MkdirAll(dst, 0o755); err != nil {
+		return fsErr("cp", "cannot create directory %s: %s", dst, err)
 	}
 	entries, err := vfs.ReadDir(src)
 	if err != nil {
-		return execErr("cp", "cannot read directory %s: %s", src, err)
+		return fsErr("cp", "cannot read directory %s: %s", src, err)
 	}
 	for _, e := range entries {
 		s, d := src+"/"+e.Name(), dst+"/"+e.Name()
@@ -185,48 +150,47 @@ func copyDir(vfs VFS, src, dst string) error {
 		} else {
 			data, err := vfs.ReadFile(s)
 			if err != nil {
-				return execErr("cp", "cannot read %s: %s", s, err)
+				return fsErr("cp", "cannot read %s: %s", s, err)
 			}
-			if err := vfs.WriteFile(d, data); err != nil {
-				return execErr("cp", "cannot write %s: %s", d, err)
+			if err := vfs.WriteFile(d, data, 0o644); err != nil {
+				return fsErr("cp", "cannot write %s: %s", d, err)
 			}
 		}
 	}
 	return nil
 }
 
-// mv <src> <dst>：src==dst 报错；目标已存在报错；目录移入自身子路径报错；
-// src 适用与 rm 同等的根目录硬保护（否则 rm 根保护可被 mv 绕过）。
-func cmdMv(ctx context.Context, env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("mv", argvSpec{minPos: 2, maxPos: 2}, argv)
-	if err != nil {
-		return nil, err
+// fsMv 实现 mv：{src, dst}。src==dst 报错；目标已存在报错；目录移入自身子路径
+// 报错；dst 父目录自动创建；src 适用与 rm 同等的根目录硬保护。
+func fsMv(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
+	if p.Src == "" || p.Dst == "" {
+		return nil, fsErr("mv", "src and dst are required")
 	}
-	src, dst, err := resolveSrcDst(env, "mv", pa.pos[0], pa.pos[1])
+	src, dst, err := resolveSrcDst(env, "mv", p.Src, p.Dst)
 	if err != nil {
 		return nil, err
 	}
 	if src == dst {
-		return nil, execErr("mv", "%s and %s are identical", src, dst)
+		return nil, fsErr("mv", "%s and %s are identical", src, dst)
 	}
 	if err := checkRootProtect(env, "mv", src); err != nil {
 		return nil, err
 	}
 	info, err := env.VFS.Stat(src)
 	if err != nil {
-		return nil, execErr("mv", "cannot stat source %s: %s", src, err)
+		return nil, fsErr("mv", "cannot stat source %s: %s", src, err)
 	}
 	if info.IsDir() && strings.HasPrefix(dst, src+"/") {
-		return nil, execErr("mv", "cannot move directory %s into itself: %s", src, dst)
+		return nil, fsErr("mv", "cannot move directory %s into itself: %s", src, dst)
 	}
 	if _, err := env.VFS.Stat(dst); err == nil {
-		return nil, execErr("mv", "destination %s already exists", dst)
+		return nil, fsErr("mv", "destination %s already exists", dst)
 	}
-	if err := env.VFS.MkdirAll(dirOf(dst)); err != nil {
-		return nil, execErr("mv", "%s", err)
+	if err := env.VFS.MkdirAll(dirOf(dst), 0o755); err != nil {
+		return nil, fsErr("mv", "%s", err)
 	}
 	if err := env.VFS.Rename(src, dst); err != nil {
-		return nil, execErr("mv", "cannot move %s to %s: %s", src, dst, err)
+		return nil, fsErr("mv", "cannot move %s to %s: %s", src, dst, err)
 	}
 	r := newResult("mv", dst)
 	r.Attrs["source_path"] = src
@@ -237,11 +201,11 @@ func cmdMv(ctx context.Context, env *Env, argv []string) (*Result, error) {
 func resolveSrcDst(env *Env, cmd, rawSrc, rawDst string) (string, string, error) {
 	src, err := env.Resolve(rawSrc)
 	if err != nil {
-		return "", "", execErr(cmd, "%s", err)
+		return "", "", fsErr(cmd, "%s", err)
 	}
 	dst, err := env.Resolve(rawDst)
 	if err != nil {
-		return "", "", execErr(cmd, "%s", err)
+		return "", "", fsErr(cmd, "%s", err)
 	}
 	if err := env.CheckPath(cmd, src); err != nil {
 		return "", "", err

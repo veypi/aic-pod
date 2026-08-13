@@ -11,7 +11,6 @@
 import { AICClient, platformURL } from "./sdk/client.js";
 import { loadSettings, saveSettings } from "./sdk/storage.js";
 import { browserHandler } from "./tools/browser.js";
-import { runVCmd } from "./sdk/vcmd.js";
 
 // ---- 本地通道（平台 /settings/local 页面经 content script 桥接调用）----
 // localCode 会话级随机码，生命周期 = 浏览器进程（等同桌面端 local_code 语义）。
@@ -91,74 +90,10 @@ const CONNECT_TIMEOUT_MS = 15000;
 //   required_level = 2（Write：局部、可逆、低爆炸半径）
 //   stateful = true（同 (session, host) 串行，服务端 slocks 保证）
 //   backgroundable = true（download/wait 长操作可后台化）
-// fs.actions = [read/write/edit]（§4.5：与 page 端同一套 PageFS 代码，扩展 IndexedDB 后端，
-//   按 host_id 寻址；browser screenshot 产出物落 $SESSION/screenshot/，fs.read 读图，§2.2）。
+// fs.actions = [read/write/edit/ls/rg/cp/mv/rm]（§4：与 page 端同一套 PageFS+fsops 代码，
+//   扩展 IndexedDB 后端，按 host_id 寻址；browser screenshot 产出物落 /screenshot/，fs.read 读图，§2.2）。
 
 const BROWSER_LEVEL = 2;
-
-// ---- 核心虚拟指令（vcmd，§5.4：与 page 端同一份 vcmd.js，操作扩展 PageFS）----
-// 分级与 Go libs/vcore/levels.go execCoreLevels 对齐：ls/rg/tree=Read(1)，rm/curl=Write(2)。
-// desc/help 与 Go libs/vcore/meta.go 同源；curl 无 cloud SSRF 行（扩展 fetch 无该限制）。
-const VCMD_DECLS = [
-  {
-    name: "ls",
-    level: 1,
-    desc: "list directory entries",
-    help: `ls [-l] [-a] [-t] [-h] [path]
-  list directory entries, sorted by name (UTF-8 byte order)
-  -l     include size and mtime (unix seconds) columns
-  -a     include entries starting with '.' (hidden by default)
-  -t     sort by mtime, newest first (ties by name)
-  -h     human-readable size (1024-based, with -l)
-  path   defaults to workdir`,
-  },
-  {
-    name: "rg",
-    level: 1,
-    desc: "search content or list files",
-    help: `rg <pattern> <path> | rg --files [-g <glob>]... [<path>]
-  content search: recursive; output {path}:{line}:{content}
-  -i        case-insensitive
-  -l        print only matching file paths
-  -m N      per-file match limit
-  -n        print line numbers (default behavior, accepted for compatibility)
-  -c        print only match count per file
-  -w        match whole words only
-  -g <glob> filename glob (basename match, repeatable, OR semantics)
-  --files   list files recursively instead of searching
-  --hidden  include hidden files and directories (excluded by default, like real rg)
-  regex: RE2/Rust regex semantics (no lookaround/backreference);
-         use bash -c "grep -P ..." on a physical host for PCRE`,
-  },
-  {
-    name: "tree",
-    level: 1,
-    desc: "print directory tree (JSON)",
-    help: `tree [path] [-L N]
-  structured recursive directory tree, JSON output (always structured; no --json flag)
-  path   defaults to workdir
-  -L N   max depth (native tree semantics; --depth N accepted as alias), default 3, max 5;
-         node cap 2000 (truncated=true)
-  hidden items (.xxx) excluded entirely (GNU tree default; -a not supported);
-  node_modules/vendor/__pycache__/dist/build/.next etc. listed as leaves without recursion`,
-  },
-  {
-    name: "rm",
-    level: 2,
-    desc: "remove files or directories",
-    help: `rm [-r] <path>
-  remove a file or empty directory; -r for recursive delete
-  root directories are hard-protected (cannot be removed)`,
-  },
-  {
-    name: "curl",
-    level: 2,
-    desc: "download a URL to a file",
-    help: `curl -o <path> <url> [--max-size <MB>]
-  HTTP(S) GET, streamed to <path>; target must not exist
-  --max-size default 1024MB, cap 10240MB (aborts and cleans partial file)`,
-  },
-];
 
 // ---- Lifecycle ----
 
@@ -239,14 +174,8 @@ Behavior:
     backgroundable: true, // 内部实现细节（后台化），不进协议
   });
 
-  // 核心虚拟指令（vcmd，§5.4）：ls/rg/tree/rm/curl 与 page 端同构，
-  // 操作扩展 PageFS（扩展 origin IndexedDB），handler 统一走 runVCmd。
-  for (const d of VCMD_DECLS) {
-    client.registerCommand(d.name, d.level, async (ctx, data) => {
-      const out = await runVCmd(d.name, data.argv || [], ctx.fs);
-      return { state: "completed", content: out.content, attrs: out.attrs };
-    }, { desc: d.desc, help: d.help });
-  }
+  // 文件类指令已迁入 fs 通道（8 action，PageFS+fsops）：exec 侧只注册 browser
+  //（恒声明 commands 由 client 自带）。
 
     try {
       await c.connect();

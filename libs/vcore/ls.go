@@ -2,135 +2,165 @@ package vcore
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"path"
 	"sort"
-	"strings"
 )
 
-// ---- ls（§5.4）----
+// ---- ls（§4.5：目录列举，depth>1 即递归树——吸收原 tree 指令）----
+//
+// fs ls 参数：{path?, depth=1(≤5), all=false, sort="name"|"time"}。
+// 输出恒为 JSON（机器消费，§2.2 显式声明）：
+//   - 目录：{"dir":true,"cwd":<展开后绝对路径>,"truncated":bool,"items":[entry...]}
+//   - 文件：{"dir":false,"name","size","mod_time"}
+//   - entry：{"name","dir","size","mod_time","items"?}；子目录已展开时带 items
+//     （空目录为 []），未展开（深度耗尽/被跳过）时省略 items。字段名对齐前端 tree_cache。
+//
+// 规则：隐藏项（点开头）默认完全跳过（不显示不递归），all=true 收录；
+// lsSkipDirs（node_modules 等大目录）不 descend，仍作为叶条目出现；
+// 节点上限 lsMaxNodes，超限 truncated=true。
+const (
+	lsDefaultDepth = 1
+	lsMaxDepth     = 5
+	lsMaxNodes     = 2000
+)
 
-// ls [-l] [-a] [-t] [-h] [path]：path 缺省 = workdir；目录每行一个条目名
-// （目录加 / 后缀）；默认隐藏点文件，-a 显示；-l 追加 size/mtime_unix 列，
-// -h 人类可读大小（1024 进制，仅 -l 时生效，对齐 GNU ls -h）；
-// -t 按 mtime 降序（同 mtime 按名称升序，稳定），默认名称 UTF-8 字节序；
-// 单文件输出文件名（Attrs path_kind=file）。help 统一 --help（-h 为 human flag）。
-func cmdLs(ctx context.Context, env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("ls", argvSpec{
-		bools:  map[string]bool{"-l": true, "-a": true, "-t": true, "-h": true},
-		minPos: 0, maxPos: 1,
-	}, argv)
-	if err != nil {
-		return nil, err
+// lsSkipDirs 是递归时不 descend 的目录名（与前端 tree_cache 的跳过集对齐）。
+var lsSkipDirs = map[string]bool{
+	"node_modules": true, "vendor": true, "__pycache__": true,
+	"bower_components": true, "dist": true, "build": true, "target": true,
+	".next": true, ".nuxt": true, "coverage": true, ".turbo": true, ".output": true,
+}
+
+type lsEntry struct {
+	Name    string    `json:"name"`
+	Dir     bool      `json:"dir"`
+	Size    int64     `json:"size"`
+	ModTime int64     `json:"mod_time"`
+	Items   *[]lsEntry `json:"items,omitempty"`
+}
+
+type lsState struct {
+	count     int
+	truncated bool
+}
+
+func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
+	depth := lsDefaultDepth
+	if p.Depth != nil {
+		if *p.Depth < 1 {
+			return nil, fsErr("ls", "depth must be >= 1, got %d", *p.Depth)
+		}
+		depth = *p.Depth
 	}
+	if depth > lsMaxDepth {
+		depth = lsMaxDepth
+	}
+	byTime := false
+	switch p.Sort {
+	case "", "name":
+	case "time":
+		byTime = true
+	default:
+		return nil, fsErr("ls", "sort must be \"name\" or \"time\", got %q", p.Sort)
+	}
+
 	target := env.Workdir
-	if len(pa.pos) == 1 {
-		target = pa.pos[0]
+	if p.Path != "" {
+		target = p.Path
 	}
 	abs, err := env.Resolve(target)
 	if err != nil {
-		return nil, execErr("ls", "%s", err)
+		return nil, fsErr("ls", "%s", err)
 	}
 	if err := env.CheckPath("ls", abs); err != nil {
 		return nil, err
 	}
-	long, all, byTime, human := pa.bools["-l"], pa.bools["-a"], pa.bools["-t"], pa.bools["-h"]
-
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
-		return nil, execErr("ls", "%s", err)
+		return nil, fsErr("ls", "%s", err)
 	}
+
 	r := newResult("ls", abs)
+	// 单文件：直接返回文件条目（前端 tree_cache 走 dir===false 分支）
 	if !info.IsDir() {
-		// 单文件：输出文件名（对齐真实 ls）
-		r.Content = formatLsLine(info.Name(), false, info.Size(), info.ModTime().Unix(), long, human)
-		r.Attrs["path_kind"] = "file"
+		e := lsEntry{Name: path.Base(abs), Dir: false, Size: info.Size(), ModTime: info.ModTime().Unix()}
+		b, _ := json.Marshal(e)
+		r.Content = string(b)
 		r.set("rows", 1)
 		r.set("truncated", false)
 		return r, nil
 	}
-	entries, err := env.VFS.ReadDir(abs)
-	if err != nil {
-		return nil, execErr("ls", "%s", err)
-	}
-	// 默认隐藏点文件与 "." 开头条目（对齐真实 ls），-a 显示全部
-	visible := entries[:0]
-	for _, e := range entries {
-		if !all && strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		visible = append(visible, e)
-	}
-	if len(visible) == 0 {
-		r.Content = fmt.Sprintf("empty directory: %s", abs)
-		r.Attrs["path_kind"] = "directory"
-		r.set("rows", 0)
-		r.set("truncated", false)
-		return r, nil
-	}
-	if byTime {
-		// mtime 降序（对齐真实 ls -t）；同 mtime 按名称升序（稳定，§5.4）
-		sort.SliceStable(visible, func(i, j int) bool {
-			fi, _ := visible[i].Info()
-			fj, _ := visible[j].Info()
-			var ti, tj int64
-			if fi != nil {
-				ti = fi.ModTime().UnixNano()
-			}
-			if fj != nil {
-				tj = fj.ModTime().UnixNano()
-			}
-			if ti != tj {
-				return ti > tj
-			}
-			return visible[i].Name() < visible[j].Name()
-		})
-	} else {
-		// UTF-8 字节序排序（禁止 locale 相关排序，§5.4）
-		sort.SliceStable(visible, func(i, j int) bool { return visible[i].Name() < visible[j].Name() })
-	}
-	lines := make([]string, 0, len(visible))
-	for _, e := range visible {
-		var size, mt int64
-		if long {
-			if fi, _ := e.Info(); fi != nil {
-				size, mt = fi.Size(), fi.ModTime().Unix()
-			}
-		}
-		lines = append(lines, formatLsLine(e.Name(), e.IsDir(), size, mt, long, human))
-	}
-	r.Content = strings.Join(lines, "\n")
-	r.Attrs["path_kind"] = "directory"
-	r.set("rows", len(lines))
-	r.set("truncated", false)
+
+	st := &lsState{}
+	items := buildLsDir(ctx, env, abs, depth, p.All, st)
+	sortLsEntries(items, byTime)
+	out := map[string]any{"dir": true, "cwd": abs, "truncated": st.truncated, "items": items}
+	b, _ := json.Marshal(out)
+	r.Content = string(b)
+	r.set("rows", st.count)
+	r.set("truncated", st.truncated)
 	return r, nil
 }
 
-// formatLsLine 格式化一行输出：name（目录加 / 后缀），long 时追加 size/mtime 列；
-// human 时 size 用人类可读格式（GNU ls -h 对齐）。
-func formatLsLine(name string, dir bool, size, mtimeUnix int64, long, human bool) string {
-	if dir {
-		name += "/"
+// buildLsDir 收集 dir 的直接子项；remain 为还需展开的层数（>1 时对未跳过子目录递归）。
+func buildLsDir(ctx context.Context, env *Env, dir string, remain int, all bool, st *lsState) []lsEntry {
+	if st.truncated {
+		return nil
 	}
-	if !long {
-		return name
+	entries, err := env.VFS.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
-	if human {
-		return fmt.Sprintf("%s\t%s\t%d", name, humanSize(size), mtimeUnix)
+	out := make([]lsEntry, 0, len(entries))
+	for _, e := range entries {
+		if st.count >= lsMaxNodes {
+			st.truncated = true
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		name := e.Name()
+		// 隐藏项（点开头）默认完全跳过：不显示不递归；all=true 收录
+		if !all && name[0] == '.' {
+			continue
+		}
+		full := dir + "/" + name
+		var size, mt int64
+		if fi, _ := e.Info(); fi != nil {
+			size, mt = fi.Size(), fi.ModTime().Unix()
+		}
+		ent := lsEntry{Name: name, Dir: e.IsDir(), Size: size, ModTime: mt}
+		st.count++
+		if e.IsDir() {
+			skipDescend := lsSkipDirs[name]
+			if remain > 1 && !skipDescend && !st.truncated {
+				sub := buildLsDir(ctx, env, full, remain-1, all, st)
+				ent.Items = &sub // 已展开（空目录为 []），与"未展开省略 items"区分
+			}
+		}
+		out = append(out, ent)
 	}
-	return fmt.Sprintf("%s\t%d\t%d", name, size, mtimeUnix)
+	return out
 }
 
-// humanSize 对齐 GNU ls -h：1024 进制单字母后缀（B/K/M/G/T/P/E），
-// 非整单位保留 1 位小数（36B、1.5K、2.3M）。
-func humanSize(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%dB", n)
+// sortLsEntries 逐级排序：name = UTF-8 字节序（禁止 locale 相关排序）；
+// time = mtime 降序（同值按名称升序，稳定）。
+func sortLsEntries(items []lsEntry, byTime bool) {
+	if byTime {
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].ModTime != items[j].ModTime {
+				return items[i].ModTime > items[j].ModTime
+			}
+			return items[i].Name < items[j].Name
+		})
+	} else {
+		sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
 	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
+	for _, it := range items {
+		if it.Items != nil {
+			sortLsEntries(*it.Items, byTime)
+		}
 	}
-	return fmt.Sprintf("%.1f%c", float64(n)/float64(div), "KMGTPE"[exp])
 }

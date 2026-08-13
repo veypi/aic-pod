@@ -2,8 +2,8 @@
 // NATS 连接与认证、caps v2 上报、心跳、req 分发（fs/exec）、bg 注册表、
 // granted_level 纵深检查（与 vcore 分级表同源）。
 //
-// 物理 host 命令空间 = 统一命令声明表（§5.1）：恒声明（核心 8 虚拟指令 +
-// commands + bg_*）+ 启动探测（shell/git/agent-browser CLI，exec.LookPath）。
+// 物理 host 命令空间 = 统一命令声明表（§5.1）：恒声明（exec 核心虚拟指令 +
+// json + commands + bg_*）+ 启动探测（shell/git/agent-browser CLI，exec.LookPath）。
 // 未声明的命令一律拒绝，不存在「未知命令透传」。
 package host
 
@@ -198,7 +198,8 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 // ---- caps v2 上报（§6.3） ----
 
 // buildCommandTable 构建物理 host 的统一命令声明表（§5.1）：
-//   - 恒声明：核心 8 虚拟指令 + commands + bg_list/bg_wait/bg_kill（vcore 元数据同源）
+//   - 恒声明：exec 核心虚拟指令（curl）+ json + commands + bg_list/bg_wait/bg_kill
+//     （vcore 元数据同源）；文件类指令属 fs 指令集（fs.actions 声明）
 //   - 启动探测（exec.LookPath，探测到才声明）：
 //     shell（bash/zsh/sh/fish；Windows: powershell/pwsh/cmd）→ level 3（逃生舱）；
 //     git → level 1（本地凭证天然可用）；browser → agent-browser CLI
@@ -217,7 +218,7 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 			add(d)
 		}
 	}
-	for _, name := range []string{"commands", "bg_list", "bg_wait", "bg_kill"} {
+	for _, name := range []string{"commands", "json", "bg_list", "bg_wait", "bg_kill"} {
 		if d, ok := vcore.Decl(name); ok {
 			add(d)
 		}
@@ -250,7 +251,7 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 }
 
 // buildCaps 构造物理 host 的 caps v2（§6.3）：
-// fs.actions=null（全部 3 个）；exec.commands = 统一命令声明表。
+// fs.actions=null（全部 8 个）；exec.commands = 统一命令声明表。
 func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
 	return &proto.Caps{
@@ -260,7 +261,7 @@ func (c *Client) buildCaps() *proto.Caps {
 		DeviceType:    c.opts.DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
-		FS:            proto.FSCaps{},                   // actions=null = 全部 3 个
+		FS:            proto.FSCaps{},                   // actions=null = 全部 8 个
 		Exec:          proto.ExecCaps{Commands: c.cmds}, // 统一命令声明表
 	}
 }

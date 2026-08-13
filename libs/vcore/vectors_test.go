@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/veypi/vigo/contrib/ufs"
 )
 
 // 一致性测试向量运行器（§2.6）：输入 = argv/params + 初始文件树，
@@ -99,6 +101,9 @@ func runVectorCase(t *testing.T, c vectorCase) {
 			return io.NopCloser(strings.NewReader(string(data))), int64(len(data)), nil
 		})
 	}
+	// 任务托管（curl 无 -o）：同步执行的内存实现
+	env.Tasks = testTaskRunner{}
+	env.TaskID = "vec"
 
 	var res *Result
 	var err error
@@ -136,6 +141,22 @@ func runVectorCase(t *testing.T, c vectorCase) {
 	}
 }
 
+// testTaskRunner 是向量测试的同步 TaskRunner：任务体输出直接作为结果返回。
+type testTaskRunner struct{}
+
+func (testTaskRunner) StartTask(ctx context.Context, opts TaskOptions) (*TaskResult, error) {
+	var buf strings.Builder
+	if err := opts.Run(ctx, &buf); err != nil {
+		return nil, err
+	}
+	return &TaskResult{
+		Content: buf.String(),
+		Lines:   strings.Count(buf.String(), "\n"),
+		ID:      opts.ID,
+		LogPath: "/.exec/" + opts.ID + ".log",
+	}, nil
+}
+
 // vectorBytes 解码向量内容指令：
 //   - "base64:..."  → 二进制内容（无效 UTF-8 等 JSON 表达不了的字节）
 //   - "repeat:{n}MB" → n MB 的 'x'（大文件/超限场景）
@@ -160,7 +181,7 @@ func vectorBytes(t *testing.T, s string) []byte {
 }
 
 // dumpTree 导出文件树：目录为 "path/"，文件为 path → 内容。
-func dumpTree(t *testing.T, vfs VFS) map[string]string {
+func dumpTree(t *testing.T, vfs ufs.FS) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	var walk func(dir string)

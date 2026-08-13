@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/libs/vcore"
+	"github.com/veypi/vigo/contrib/ufs"
 )
 
 // 阶段 8 门禁：vcore 一致性测试向量在 OS VFS 适配下通过（§2.6 零漂移）。
@@ -86,14 +87,14 @@ func runOSParity(t *testing.T, c osVectorCase) {
 	for p, content := range c.Files {
 		logical := strings.TrimSuffix(p, "/")
 		if strings.HasSuffix(p, "/") {
-			if err := osv.MkdirAll(logical); err != nil {
+			if err := osv.MkdirAll(logical, 0o755); err != nil {
 				t.Fatal(err)
 			}
 		} else {
-			if err := osv.MkdirAll(pathDirOf(logical)); err != nil {
+			if err := osv.MkdirAll(pathDirOf(logical), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := osv.WriteFile(logical, osVecBytes(t, content)); err != nil {
+			if err := osv.WriteFile(logical, osVecBytes(t, content), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -109,7 +110,7 @@ func runOSParity(t *testing.T, c osVectorCase) {
 		logical := strings.TrimSuffix(p, "/")
 		mt := time.Unix(sec, 0)
 		mem.SetDir(logical, mt)
-		if err := osv.MkdirAll(logical); err != nil {
+		if err := osv.MkdirAll(logical, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		_ = os.Chtimes(osv.mapPath(logical), mt, mt)
@@ -130,6 +131,11 @@ func runOSParity(t *testing.T, c osVectorCase) {
 	// 用 chroot 式子树适配（测试专用）：将逻辑路径重写到 t.TempDir() 下。
 	osEnv := &vcore.Env{VFS: osv, Workdir: c.Workdir, Vars: c.Vars, Fetcher: fetcher, ProtectRoots: c.ProtectRoots}
 	memEnv := &vcore.Env{VFS: mem, Workdir: c.Workdir, Vars: c.Vars, Fetcher: fetcher, ProtectRoots: c.ProtectRoots}
+	// 任务托管（curl 无 -o）：同步执行的内存实现
+	osEnv.Tasks = osTestTaskRunner{}
+	osEnv.TaskID = "vec"
+	memEnv.Tasks = osTestTaskRunner{}
+	memEnv.TaskID = "vec"
 
 	var memRes, osRes *vcore.Result
 	var memErr, osErr error
@@ -173,16 +179,37 @@ func (s *subVFS) ReadDir(name string) ([]fs.DirEntry, error) {
 }
 func (s *subVFS) ReadFile(name string) ([]byte, error) { return osvDelegate.ReadFile(s.mapPath(name)) }
 func (s *subVFS) Open(name string) (fs.File, error)    { return osvDelegate.Open(s.mapPath(name)) }
-func (s *subVFS) Create(name string) (io.WriteCloser, error) {
+func (s *subVFS) Create(name string) (ufs.File, error) {
 	return osvDelegate.Create(s.mapPath(name))
 }
-func (s *subVFS) WriteFile(name string, data []byte) error {
-	return osvDelegate.WriteFile(s.mapPath(name), data)
+func (s *subVFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
+	return osvDelegate.WriteFile(s.mapPath(name), data, perm)
 }
-func (s *subVFS) MkdirAll(name string) error  { return osvDelegate.MkdirAll(s.mapPath(name)) }
+func (s *subVFS) MkdirAll(name string, perm os.FileMode) error {
+	return osvDelegate.MkdirAll(s.mapPath(name), perm)
+}
 func (s *subVFS) RemoveAll(name string) error { return osvDelegate.RemoveAll(s.mapPath(name)) }
 func (s *subVFS) Rename(oldname, newname string) error {
 	return osvDelegate.Rename(s.mapPath(oldname), s.mapPath(newname))
+}
+func (s *subVFS) Search(searchPath, glob, pattern string, limit int, ignoreCase bool) ([]ufs.SearchMatch, error) {
+	return ufs.Search(&subVFS{root: s.root}, searchPath, glob, pattern, limit, ignoreCase)
+}
+
+// osTestTaskRunner 是向量一致性测试的同步 TaskRunner。
+type osTestTaskRunner struct{}
+
+func (osTestTaskRunner) StartTask(ctx context.Context, opts vcore.TaskOptions) (*vcore.TaskResult, error) {
+	var buf strings.Builder
+	if err := opts.Run(ctx, &buf); err != nil {
+		return nil, err
+	}
+	return &vcore.TaskResult{
+		Content: buf.String(),
+		Lines:   strings.Count(buf.String(), "\n"),
+		ID:      opts.ID,
+		LogPath: "/.exec/" + opts.ID + ".log",
+	}, nil
 }
 
 func pathDirOf(p string) string {

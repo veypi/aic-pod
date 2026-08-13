@@ -17,20 +17,23 @@ func SetSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// killEntry 终止后台进程：先对整个进程组发 SIGTERM，5s 未退出补 SIGKILL（§5.8）。
+// killEntry 终止后台条目：子进程先对整个进程组发 SIGTERM，5s 未退出补
+// SIGKILL（§5.8）；托管任务（pid=0）无进程，仅 cancel 中止任务体。
 func killEntry(e *Entry) {
-	// 进程组杀死（Setpgid 使 pgid == pid）
-	_ = syscall.Kill(-e.pid, syscall.SIGTERM)
-	go func() {
-		timer := time.NewTimer(5 * time.Second)
-		<-timer.C
-		select {
-		case <-e.done:
-		default:
-			_ = syscall.Kill(-e.pid, syscall.SIGKILL)
-		}
-	}()
-	// cancel 兜底（CommandContext 会 Kill 进程）
+	if e.pid > 0 {
+		// 进程组杀死（Setpgid 使 pgid == pid）
+		_ = syscall.Kill(-e.pid, syscall.SIGTERM)
+		go func() {
+			timer := time.NewTimer(5 * time.Second)
+			<-timer.C
+			select {
+			case <-e.done:
+			default:
+				_ = syscall.Kill(-e.pid, syscall.SIGKILL)
+			}
+		}()
+	}
+	// cancel 兜底（CommandContext 会 Kill 进程；任务体 ctx 中止）
 	if e.cancel != nil {
 		e.cancel()
 	}

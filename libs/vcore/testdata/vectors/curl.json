@@ -70,11 +70,31 @@
       "expectError": "curl: curl is not available on this host"
     },
     {
-      "name": "curl -o required",
+      "name": "curl no -o outputs text to content",
       "cmd": "curl",
-      "argv": ["https://example.com/x"],
+      "argv": ["https://example.com/x.txt"],
       "files": {},
-      "expectError": "curl: -o is required"
+      "fetch": {"https://example.com/x.txt": "hello world"},
+      "expect": {
+        "content": "hello world",
+        "attrs": {"action": "curl", "path": "/.exec/vec.log", "rows": "0", "truncated": "false"}
+      }
+    },
+    {
+      "name": "curl no -o rejects binary with -o hint",
+      "cmd": "curl",
+      "argv": ["https://example.com/f.bin"],
+      "files": {},
+      "fetch": {"https://example.com/f.bin": "base64:AMBmb28="},
+      "expectError": "curl: binary output (application/octet-stream) refused: not written to content; use -o <path> to save the file"
+    },
+    {
+      "name": "curl no -o max-size exceeded",
+      "cmd": "curl",
+      "argv": ["--max-size", "1", "https://example.com/big"],
+      "files": {},
+      "fetch": {"https://example.com/big": "repeat:3MB"},
+      "expectError": "curl: size limit exceeded (3MB > 1MB)"
     }
   ]
 }

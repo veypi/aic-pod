@@ -74,12 +74,12 @@ test("registerCommand 显式覆盖恒声明 commands（保留名）", () => {
 import { resolveNatsURL, platformURL } from "./client.js";
 
 test("resolveNatsURL: 协议推断与路径前缀", () => {
-  assert.equal(resolveNatsURL("https://ivec.ai"), "wss://ivec.ai/aic/api/nc");
-  assert.equal(resolveNatsURL("http://localhost:4000"), "ws://localhost:4000/aic/api/nc");
-  assert.equal(resolveNatsURL("http://localhost:4000/"), "ws://localhost:4000/aic/api/nc");
-  assert.equal(resolveNatsURL("ivec.ai"), "wss://ivec.ai/aic/api/nc");
-  assert.equal(resolveNatsURL("ws://localhost:4000"), "ws://localhost:4000/aic/api/nc");
-  assert.equal(resolveNatsURL("http://127.0.0.1:4000/rses/aiv"), "ws://127.0.0.1:4000/rses/aiv/aic/api/nc");
+  assert.equal(resolveNatsURL("https://ivec.ai"), "wss://ivec.ai/api/nc");
+  assert.equal(resolveNatsURL("http://localhost:4000"), "ws://localhost:4000/api/nc");
+  assert.equal(resolveNatsURL("http://localhost:4000/"), "ws://localhost:4000/api/nc");
+  assert.equal(resolveNatsURL("ivec.ai"), "wss://ivec.ai/api/nc");
+  assert.equal(resolveNatsURL("ws://localhost:4000"), "ws://localhost:4000/api/nc");
+  assert.equal(resolveNatsURL("http://127.0.0.1:4000/rses/aiv"), "ws://127.0.0.1:4000/rses/aiv/api/nc");
 });
 
 test("platformURL: http/https 页面入口，保留路径前缀", () => {

@@ -27,10 +27,13 @@ func newOutputWriter(w io.Writer) io.Writer {
 	return &windowsOutputWriter{w: w}
 }
 
-// killEntry 终止后台进程（§5.8：Windows 用 TerminateProcess）。
+// killEntry 终止后台条目（§5.8：Windows 用 TerminateProcess；
+// 托管任务 pid=0 无进程，仅 cancel 中止任务体）。
 func killEntry(e *Entry) {
-	if proc, err := os.FindProcess(e.pid); err == nil {
-		_ = proc.Kill()
+	if e.pid > 0 {
+		if proc, err := os.FindProcess(e.pid); err == nil {
+			_ = proc.Kill()
+		}
 	}
 	if e.cancel != nil {
 		e.cancel()

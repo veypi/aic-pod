@@ -1,195 +1,159 @@
 {
   "cases": [
     {
-      "name": "ls directory",
-      "cmd": "ls",
-      "argv": ["/docs"],
-      "files": {"/docs/a.txt": "a", "/docs/b.txt": "b", "/docs/sub/": ""},
+      "name": "ls directory flat (default depth 1)",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/docs"},
+      "files": {"/docs/a.txt": "a", "/docs/b.txt": "bb", "/docs/sub/": ""},
+      "mtimes": {"/docs/sub/": 0},
       "expect": {
-        "content": "a.txt\nb.txt\nsub/",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0},{\"name\":\"b.txt\",\"dir\":false,\"size\":2,\"mod_time\":0},{\"name\":\"sub\",\"dir\":true,\"size\":0,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/docs", "rows": "3", "truncated": "false"}
       }
     },
     {
       "name": "ls hides dotfiles by default",
-      "cmd": "ls",
-      "argv": ["/docs"],
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/docs"},
       "files": {"/docs/a.txt": "a", "/docs/.env": "x", "/docs/.git/": ""},
+      "mtimes": {"/docs/.git/": 0},
       "expect": {
-        "content": "a.txt",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/docs", "rows": "1", "truncated": "false"}
       }
     },
     {
-      "name": "ls -a shows dotfiles",
-      "cmd": "ls",
-      "argv": ["-a", "/docs"],
-      "files": {"/docs/a.txt": "a", "/docs/.env": "x", "/docs/.git/": ""},
+      "name": "ls all shows dotfiles",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/docs", "all": true},
+      "files": {"/docs/a.txt": "a", "/docs/.env": "xyz", "/docs/.git/": ""},
+      "mtimes": {"/docs/.git/": 0},
       "expect": {
-        "content": ".env\n.git/\na.txt",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[{\"name\":\".env\",\"dir\":false,\"size\":3,\"mod_time\":0},{\"name\":\".git\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/docs", "rows": "3", "truncated": "false"}
       }
     },
     {
-      "name": "ls -la combo with size and mtime",
-      "cmd": "ls",
-      "argv": ["-la", "/docs"],
-      "files": {"/docs/b.txt": "bb", "/docs/a.txt": "a", "/docs/.env": "xyz"},
-      "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000001, "/docs/.env": 1700000002},
-      "expect": {
-        "content": ".env\t3\t1700000002\na.txt\t1\t1700000000\nb.txt\t2\t1700000001",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -l long format",
-      "cmd": "ls",
-      "argv": ["-l", "/docs"],
-      "files": {"/docs/b.txt": "bb", "/docs/a.txt": "a"},
-      "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000001},
-      "expect": {
-        "content": "a.txt\t1\t1700000000\nb.txt\t2\t1700000001",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "2", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -l raw size (no -h)",
-      "cmd": "ls",
-      "argv": ["-l", "/docs"],
-      "files": {"/docs/big.bin": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"},
-      "mtimes": {"/docs/big.bin": 1700000000},
-      "expect": {
-        "content": "big.bin\t100\t1700000000",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -lh human readable size",
-      "cmd": "ls",
-      "argv": ["-lh", "/docs"],
-      "files": {"/docs/big.bin": "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"},
-      "mtimes": {"/docs/big.bin": 1700000000},
-      "expect": {
-        "content": "big.bin\t100B\t1700000000",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -lh human readable size k/m units",
-      "cmd": "ls",
-      "argv": ["-lh", "/docs"],
-      "files": {"/docs/k.bin": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-      "mtimes": {"/docs/k.bin": 1700000000},
-      "expect": {
-        "content": "k.bin\t1.0K\t1700000000",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -h alone has no effect (GNU alignment)",
-      "cmd": "ls",
-      "argv": ["-h", "/docs"],
-      "files": {"/docs/a.txt": "a"},
-      "expect": {
-        "content": "a.txt",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -t stable: same mtime sorts by name",
-      "cmd": "ls",
-      "argv": ["-t", "/docs"],
-      "files": {"/docs/b.txt": "b", "/docs/a.txt": "a", "/docs/c.txt": "c"},
-      "mtimes": {"/docs/a.txt": 1700000000, "/docs/b.txt": 1700000000, "/docs/c.txt": 1700000000},
-      "expect": {
-        "content": "a.txt\nb.txt\nc.txt",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
-      }
-    },
-    {
-      "name": "ls -t sorts by mtime desc",
-      "cmd": "ls",
-      "argv": ["-t", "/docs"],
+      "name": "ls sort time desc, ties by name",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/docs", "sort": "time"},
       "files": {"/docs/old.txt": "o", "/docs/new.txt": "n", "/docs/mid.txt": "m"},
       "mtimes": {"/docs/old.txt": 1700000000, "/docs/new.txt": 1700000002, "/docs/mid.txt": 1700000001},
       "expect": {
-        "content": "new.txt\nmid.txt\nold.txt",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "3", "truncated": "false"}
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[{\"name\":\"new.txt\",\"dir\":false,\"size\":1,\"mod_time\":1700000002},{\"name\":\"mid.txt\",\"dir\":false,\"size\":1,\"mod_time\":1700000001},{\"name\":\"old.txt\",\"dir\":false,\"size\":1,\"mod_time\":1700000000}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/docs", "rows": "3", "truncated": "false"}
       }
     },
     {
-      "name": "ls single file prints name",
-      "cmd": "ls",
-      "argv": ["/docs/a.txt"],
+      "name": "ls single file",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/docs/a.txt"},
       "files": {"/docs/a.txt": "a"},
       "expect": {
-        "content": "a.txt",
-        "attrs": {"action": "ls", "path": "/docs/a.txt", "path_kind": "file", "rows": "1", "truncated": "false"}
+        "content": "{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}",
+        "attrs": {"action": "ls", "path": "/docs/a.txt", "rows": "1", "truncated": "false"}
       }
     },
     {
       "name": "ls empty directory",
-      "cmd": "ls",
-      "argv": ["/docs"],
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/docs"},
       "files": {"/docs/": ""},
       "expect": {
-        "content": "empty directory: /docs",
-        "attrs": {"action": "ls", "path": "/docs", "path_kind": "directory", "rows": "0", "truncated": "false"}
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/docs", "rows": "0", "truncated": "false"}
       }
     },
     {
       "name": "ls default workdir",
-      "cmd": "ls",
-      "argv": [],
+      "cmd": "fs",
+      "params": {"action": "ls"},
       "workdir": "/wd",
       "files": {"/wd/x.txt": "x"},
       "expect": {
-        "content": "x.txt",
-        "attrs": {"action": "ls", "path": "/wd", "path_kind": "directory", "rows": "1", "truncated": "false"}
+        "content": "{\"cwd\":\"/wd\",\"dir\":true,\"items\":[{\"name\":\"x.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/wd", "rows": "1", "truncated": "false"}
       }
     },
     {
       "name": "ls relative path via workdir",
-      "cmd": "ls",
-      "argv": ["sub"],
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "sub"},
       "workdir": "/wd",
       "files": {"/wd/sub/y.txt": "y"},
       "expect": {
-        "content": "y.txt",
-        "attrs": {"action": "ls", "path": "/wd/sub", "path_kind": "directory", "rows": "1", "truncated": "false"}
+        "content": "{\"cwd\":\"/wd/sub\",\"dir\":true,\"items\":[{\"name\":\"y.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/wd/sub", "rows": "1", "truncated": "false"}
       }
     },
     {
       "name": "ls with root var",
-      "cmd": "ls",
-      "argv": ["$USER/docs"],
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "$USER/docs"},
       "vars": {"$USER": "/users/u1"},
       "files": {"/users/u1/docs/z.txt": "z"},
       "expect": {
-        "content": "z.txt",
-        "attrs": {"action": "ls", "path": "/users/u1/docs", "path_kind": "directory", "rows": "1", "truncated": "false"}
+        "content": "{\"cwd\":\"/users/u1/docs\",\"dir\":true,\"items\":[{\"name\":\"z.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/users/u1/docs", "rows": "1", "truncated": "false"}
       }
     },
     {
-      "name": "ls unknown flag restricted feedback",
-      "cmd": "ls",
-      "argv": ["-x"],
-      "files": {},
-      "expectError": "ls: flag \"-x\" is not supported on this environment (restricted)"
+      "name": "ls depth 2 nested",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d", "depth": 2},
+      "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b", "/d/sub/deep/c.txt": "c"},
+      "mtimes": {"/d/sub/": 0, "/d/sub/deep/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0},{\"name\":\"sub\",\"dir\":true,\"size\":0,\"mod_time\":0,\"items\":[{\"name\":\"b.txt\",\"dir\":false,\"size\":1,\"mod_time\":0},{\"name\":\"deep\",\"dir\":true,\"size\":0,\"mod_time\":0}]}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/d", "rows": "4", "truncated": "false"}
+      }
     },
     {
-      "name": "ls extra positional",
-      "cmd": "ls",
-      "argv": ["/a", "/b"],
-      "files": {},
-      "expectError": "ls: unexpected argument \"/b\""
+      "name": "ls depth 1 does not recurse",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d"},
+      "files": {"/d/a/b/c.txt": "c"},
+      "mtimes": {"/d/a/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a\",\"dir\":true,\"size\":0,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/d", "rows": "1", "truncated": "false"}
+      }
     },
     {
-      "name": "ls flag equals form restricted feedback",
-      "cmd": "ls",
-      "argv": ["--la=true"],
+      "name": "ls depth 3 expands 3 levels",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d", "depth": 3},
+      "files": {"/d/a/b/c.txt": "c"},
+      "mtimes": {"/d/a/": 0, "/d/a/b/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a\",\"dir\":true,\"size\":0,\"mod_time\":0,\"items\":[{\"name\":\"b\",\"dir\":true,\"size\":0,\"mod_time\":0,\"items\":[{\"name\":\"c.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}]}]}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/d", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls depth hides dot items and keeps skip dirs as leaves",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d", "depth": 2},
+      "files": {"/d/ok.txt": "o", "/d/.env": "e", "/d/.git/y.txt": "y", "/d/node_modules/x.txt": "x"},
+      "mtimes": {"/d/.git/": 0, "/d/node_modules/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"node_modules\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"ok.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/d", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls invalid depth",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d", "depth": 0},
       "files": {},
-      "expectError": "ls: flag \"--la=true\" is not supported on this environment (restricted; use \"--flag value\" two-element form)"
+      "expectError": "fs ls: depth must be >= 1, got 0"
+    },
+    {
+      "name": "ls invalid sort",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d", "sort": "size"},
+      "files": {},
+      "expectError": "fs ls: sort must be \"name\" or \"time\", got \"size\""
     }
   ]
 }

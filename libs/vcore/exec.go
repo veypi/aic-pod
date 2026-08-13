@@ -12,19 +12,13 @@ import (
 // CmdFunc 是虚拟指令实现：action + argv → Result。
 type CmdFunc func(ctx context.Context, env *Env, argv []string) (*Result, error)
 
-// coreCommands 是核心 8 虚拟指令（§5.4，三端统一基准）。
+// coreCommands 是 exec 核心虚拟指令（§5.4，三端统一基准）。
+// 文件类指令（ls/rg/cp/mv/rm）属 fs 指令集（fs.go），不在此表。
 var coreCommands = map[string]CmdFunc{
-	"ls":    cmdLs,
-	"rg":    cmdRg,
-	"tree":  cmdTree,
-	"curl":  cmdCurl,
-	"rm":    cmdRm,
-	"mkdir": cmdMkdir,
-	"cp":    cmdCp,
-	"mv":    cmdMv,
+	"curl": cmdCurl,
 }
 
-// CoreCommandNames 返回核心 8 指令名（排序，供 commands 聚合与报错提示）。
+// CoreCommandNames 返回核心虚拟指令名（排序，供 commands 聚合与报错提示）。
 func CoreCommandNames() []string {
 	names := make([]string, 0, len(coreCommands))
 	for n := range coreCommands {
