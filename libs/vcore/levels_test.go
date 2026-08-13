@@ -29,6 +29,19 @@ func TestGitRequired(t *testing.T) {
 		{[]string{"checkout", "--", "a.txt"}, proto.LevelDanger},
 		{[]string{"checkout", "--", "."}, proto.LevelDanger},
 		{[]string{"checkout", "HEAD~1", "--", "a.txt"}, proto.LevelDanger},
+		// 无 -- 但明显是路径形态（不可能是合法 refname）→ Danger
+		{[]string{"checkout", "."}, proto.LevelDanger},
+		{[]string{"checkout", ".."}, proto.LevelDanger},
+		{[]string{"checkout", "./src"}, proto.LevelDanger},
+		{[]string{"checkout", "../x"}, proto.LevelDanger},
+		{[]string{"checkout", "/abs"}, proto.LevelDanger},
+		{[]string{"checkout", "src/"}, proto.LevelDanger},
+		{[]string{"checkout", "a b"}, proto.LevelDanger},
+		{[]string{"checkout", `C:\x`}, proto.LevelDanger},
+		// 合法 refname/rev 形态保持 Write（~ 不在标记集：detached 安全）
+		{[]string{"checkout", "HEAD~1"}, proto.LevelWrite},
+		{[]string{"checkout", "-b", "feat/x"}, proto.LevelWrite},
+		{[]string{"checkout", "-"}, proto.LevelWrite},
 		// 带值 flag 跳过（-C/-c）：子命令判定不受其值干扰
 		{[]string{"-C", "/repo", "checkout", "--", "x"}, proto.LevelDanger},
 		{[]string{"-C", "/repo", "add", "."}, proto.LevelWrite},

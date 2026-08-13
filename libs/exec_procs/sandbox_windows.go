@@ -8,8 +8,9 @@
 //     进程初始化依赖 Everyone）+ 能力 SID（工作区/私有临时目录）
 //   - 能力 SID 是确定性派生（路径哈希）或随机（私有临时目录）的自定义 SID，
 //     对应目录的 DACL 上授予完全访问 ACE：
-//     - 工作区：standing（进程级缓存，跨调用复用；host 退出残留无害——
-//       下次精确跳过，同 dsh 语义）
+//     - 工作区：standing ACE，幂等授权——每次调用先检查 DACL 是否已有该
+//       能力 SID 的完全访问 ACE，有则跳过（不产生重复 ACE）；目录被删重建
+//       后 ACE 消失，下次调用自动重新授权（无进程级缓存，无陈旧状态）
 //     - 私有临时目录：per-call 随机创建 + 随机 SID，进程结束后删除目录
 //       （ACE 随目录消失，无需显式撤销）
 //   - 进程访问对象时 Windows 做两次检查：正常 SID 检查 + restricting SID
@@ -28,7 +29,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"unsafe"
 
@@ -53,6 +53,7 @@ var (
 	// advapi32 无无后缀导出——其余 API 均无后缀。
 	procCreateRestrictedToken     = findProcAny("CreateRestrictedToken", advapi32, kernel32, securityBaseDll)
 	procSetEntriesInAcl           = findProcAny("SetEntriesInAclW", advapi32, kernel32, securityProviderDll, securityBaseDll)
+	procGetExplicitEntriesFromAcl = findProcAny("GetExplicitEntriesFromAclW", advapi32, kernel32, securityProviderDll, securityBaseDll)
 	procGetSecurityDescriptorDacl = findProcAny("GetSecurityDescriptorDacl", advapi32, kernel32, securityBaseDll)
 	procSetTokenInformation       = findProcAny("SetTokenInformation", advapi32, kernel32, securityBaseDll)
 	procLocalFree                 = findProcAny("LocalFree", advapi32, kernel32)
@@ -226,7 +227,9 @@ func logonSidOf(token windows.Token) (*windows.SID, error) {
 	return groups.Groups[0].Sid, nil
 }
 
-// grantDirWrite 给目录的 DACL 追加一条能力 SID 完全访问 ACE（继承到子对象）。
+// grantDirWrite 保证目录的 DACL 上存在能力 SID 完全访问 ACE（继承到子对象）。
+// 幂等：已有该 SID 的完全访问允许 ACE 时跳过——既避免重复调用产生重复 ACE
+//（SetEntriesInAcl 不去重），也让目录被删重建后自动重新授权（无进程级缓存）。
 func grantDirWrite(dir string, sid *windows.SID) error {
 	if procGetSecurityDescriptorDacl == nil || procSetEntriesInAcl == nil || procLocalFree == nil {
 		return procMissing("GetSecurityDescriptorDacl/SetEntriesInAcl/LocalFree")
@@ -249,6 +252,17 @@ func grantDirWrite(dir string, sid *windows.SID) error {
 	}
 	if daclPresent == 0 {
 		dacl = nil // 无 DACL 对象：以空 ACL 追加（保持现有语义不变）
+	}
+
+	// 幂等检查：已有该能力 SID 的完全访问允许 ACE 则跳过
+	if dacl != nil {
+		granted, err := aclHasFullGrant(dacl, sid)
+		if err != nil {
+			return err
+		}
+		if granted {
+			return nil
+		}
 	}
 
 	ea := explicitAccess{
@@ -275,6 +289,38 @@ func grantDirWrite(dir string, sid *windows.SID) error {
 		windows.DACL_SECURITY_INFORMATION, nil, nil, newAcl, nil)
 }
 
+// aclHasFullGrant 检查 ACL 是否已有指定 SID 的完全访问允许 ACE。
+func aclHasFullGrant(acl *windows.ACL, sid *windows.SID) (bool, error) {
+	if procGetExplicitEntriesFromAcl == nil {
+		return false, procMissing("GetExplicitEntriesFromAcl")
+	}
+	var count uint32
+	var entries *explicitAccess
+	r1, _, e1 := procGetExplicitEntriesFromAcl.Call(
+		uintptr(unsafe.Pointer(acl)),
+		uintptr(unsafe.Pointer(&count)),
+		uintptr(unsafe.Pointer(&entries)),
+	)
+	if r1 == 0 {
+		return false, e1
+	}
+	if entries != nil {
+		defer procLocalFree.Call(uintptr(unsafe.Pointer(entries)))
+	}
+	for _, e := range unsafe.Slice(entries, count) {
+		if e.accessMode != windows.GRANT_ACCESS || e.trustee.trusteeForm != trusteeIsSid || e.trustee.trusteeName == nil {
+			continue
+		}
+		if e.accessPermissions&fileAllAccess != fileAllAccess {
+			continue
+		}
+		if sid.Equals((*windows.SID)(unsafe.Pointer(e.trustee.trusteeName))) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // capabilitySID 派生确定性能力 SID（S-1-4-<a>-<b>，自路径哈希）：
 // 同路径（同命名空间）恒得同一 SID，跨进程稳定。
 func capabilitySID(ns, path string) (*windows.SID, error) {
@@ -283,9 +329,6 @@ func capabilitySID(ns, path string) (*windows.SID, error) {
 	b := binary.BigEndian.Uint32(h[4:8]) & 0x7fffffff
 	return windows.StringToSid(fmt.Sprintf("S-1-4-%d-%d", a, b))
 }
-
-// wsGranted 是工作区 standing ACE 的进程级缓存（已材料化即跳过）。
-var wsGranted sync.Map // path → struct{}
 
 // probeBackend（windows）：创建空受限令牌探测——成功即可用
 // （不实际启动子进程，验证 CreateRestrictedToken 可用即可）。
@@ -322,11 +365,9 @@ func planConfined(level int, workdir string, argv []string) (launchPlan, error) 
 			if err != nil {
 				return launchPlan{}, fmt.Errorf("sandbox: workspace sid: %w", err)
 			}
-			if _, ok := wsGranted.Load(d); !ok {
-				if err := grantDirWrite(d, sid); err != nil {
-					return launchPlan{}, fmt.Errorf("sandbox: grant workspace %s: %w", d, err)
-				}
-				wsGranted.Store(d, struct{}{})
+			// 幂等授权：已有 ACE 跳过，目录重建后自动补授
+			if err := grantDirWrite(d, sid); err != nil {
+				return launchPlan{}, fmt.Errorf("sandbox: grant workspace %s: %w", d, err)
 			}
 			extraSids = append(extraSids, sid)
 		}

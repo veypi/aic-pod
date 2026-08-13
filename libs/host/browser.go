@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/proto"
@@ -19,6 +20,22 @@ func (c *Client) runBrowser(ctx context.Context, sid string, req *proto.ToolRequ
 	res, err := b.Handle(ctx, c.newEnv(""), req.MsgID, argv)
 	return resultToResponse(req.MsgID, res, err)
 }
+
+// browserStateDir 返回 browser 工具状态根目录：优先 UserConfigDir/aic（持久）。
+// 配置目录不可用（罕见）时回落进程级唯一临时目录（MkdirTemp 0700，路径不可
+// 预测——不用共享 /tmp 下的固定路径，防多用户机器上被同名预创建占位），进程
+// 生命周期内只建一次。
+var browserStateDir = sync.OnceValue(func() string {
+	if dir, err := cfg.StateDir(); err == nil {
+		return dir
+	} else {
+		logv.Warn().Msgf("browser: state dir unavailable: %v (fallback to unique temp dir)", err)
+	}
+	if d, err := os.MkdirTemp("", "aic-browser-state-"); err == nil {
+		return d
+	}
+	return os.TempDir()
+})
 
 // browserFor 返回 per-session browser 实例（懒建）：
 // Browser 的 curID/lastResult 为实例状态（§5.6 stateful 串行），
@@ -36,13 +53,7 @@ func (c *Client) browserFor(sid string) *vbrowser.Browser {
 	if b, ok := c.browsers[sid]; ok {
 		return b
 	}
-	stateDir, err := cfg.StateDir()
-	if err != nil {
-		// 配置目录不可用（罕见）：回落系统临时目录并告警，不阻断 browser
-		logv.Warn().Msgf("browser: state dir unavailable: %v (fallback to temp)", err)
-		stateDir = os.TempDir()
-	}
-	tempDir := filepath.Join(stateDir, "browser", sid)
+	tempDir := filepath.Join(browserStateDir(), "browser", sid)
 	// 交换目录预建（CLI 直接读写；0700 仅本用户）
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
 		logv.Warn().Msgf("browser: create state dir: %v", err)

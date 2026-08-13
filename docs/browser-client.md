@@ -43,7 +43,7 @@
 {
   "host_id": "<host_id>",
   "credential_ver": 1,
-  "agent_version": "v0.5.1",
+  "agent_version": "v0.5.4",
   "device_type": "browser",
   "device_info": { "os": "Chrome", "arch": "browser", "num_cpu": 18 },
   "fs": { "actions": ["read", "write", "edit"] },

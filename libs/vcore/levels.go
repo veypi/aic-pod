@@ -132,20 +132,46 @@ func gitRequired(argv []string) int {
 			continue
 		}
 		if lv, ok := gitSubLevels[a]; ok {
-			// checkout 的 pathspec 形态（checkout -- <path> / checkout <commit> -- <path>）
-			// 丢弃工作区未提交修改，不可恢复——与 reset 同级 Danger
-			if a == "checkout" {
-				for _, rest := range argv[i+1:] {
-					if rest == "--" {
-						return proto.LevelDanger
-					}
-				}
+			// checkout 的 pathspec 形态丢弃工作区未提交修改，不可恢复——
+			// 与 reset 同级 Danger
+			if a == "checkout" && checkoutPathspecLike(argv[i+1:]) {
+				return proto.LevelDanger
 			}
 			return lv
 		}
 		return proto.LevelDanger // 未知子命令按 Danger 兜底
 	}
 	return proto.LevelDanger
+}
+
+// checkoutPathspecLike 判定 checkout 参数是否呈 pathspec 形态（丢弃工作区
+// 未提交修改 → Danger）。两条触发路径：
+//   - 显式 `--` 分隔符（checkout -- <path> / checkout <commit> -- <path>）；
+//   - 无 `--` 但参数呈「不可能是合法 git refname」的形态——git check-ref-format
+//     规定 refname 组件不能以 . 开头、不能以 / 结尾、不能含 \ : * ? [ 空格，
+//     故此类参数出现即必为路径而非分支（`checkout .`/`checkout ./src` 等
+//     经典丢弃修改写法）。
+//
+// 已知残余缺口：`checkout <纯文件名>`（如 checkout README.md）与分支名静态
+// 不可区分（git 运行时先按分支解析、落空再按 pathspec），不提升——文档化缺口。
+// 注意 `~`/`^` 刻意不在标记集内：`checkout HEAD~1`（detached，git 自身拒绝
+// 覆盖未提交修改）保持 Write。
+func checkoutPathspecLike(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return true
+		}
+		if strings.HasPrefix(a, "-") {
+			continue // flag；-b/-B/--orphan 的值随后——其值为非法 refname 形态时误升 Danger 无害（git 同样拒绝）
+		}
+		if a == "." || a == ".." ||
+			strings.HasPrefix(a, "./") || strings.HasPrefix(a, "../") ||
+			strings.HasPrefix(a, "/") || strings.HasSuffix(a, "/") ||
+			strings.ContainsAny(a, "\\:*?[ ") {
+			return true
+		}
+	}
+	return false
 }
 
 // browserRequired 判定 browser 子命令等级：读类 Read(1)，upload Danger(3)，

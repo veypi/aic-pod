@@ -37,6 +37,10 @@ const probeTimeout = 5 * time.Second
 // protectedMetadataNames 是工作区可写时仍保持只读的敏感子路径名
 // （借鉴 codex：.git 防 AI 破坏仓库元数据/历史；可扩展 .agents 等）。
 // 沙箱内 git 写操作（add/commit）会失败——AI 可经审批 9 免沙箱执行。
+// linux 有效性实测（2026-08-14，bwrap / Debian 13）：沙箱内嵌套
+// `unshare -rm` 后 umount ro-bind 覆盖、re-bind 工作区两种逃逸均被内核
+// 挂载归属规则拒绝（挂载属于父 userns，嵌套 ns 内无 CAP_SYS_ADMIN 可操作）
+// ——ro-bind 覆盖是有效边界，非纸面加固。
 var protectedMetadataNames = []string{".git"}
 
 // sandboxBackend 是选中的平台后端。
@@ -134,11 +138,6 @@ func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly 
 
 // ---- darwin: Seatbelt (sandbox-exec) ----
 
-// seatbeltArgs 构建 sandbox-exec 包装 argv。SBPL 为 allow-default +
-// (deny file-write*) 白名单：read-only 仅放 /dev/null 字面量；
-// workspace-write 追加工作区 + 平台临时区（/private/tmp 与 $TMPDIR）+
-// 额外目录，全部 canonicalize——Seatbelt 匹配 resolved path
-// （/tmp 即 /private/tmp，必须消解后再匹配）。
 // macosSeatbeltExecutable 是 sandbox-exec 的固定路径（防 PATH 注入：
 // 若 /usr/bin/sandbox-exec 被篡改，攻击者已 root——codex 同策略）。
 const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
