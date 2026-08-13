@@ -1,0 +1,19 @@
+{
+  "name": "aic-desktop",
+  "productName": "AIC Desktop",
+  "version": "0.5.3-14-g275e0d4-dirty",
+  "description": "AIC Desktop — Electron shell + Go backend (host agent)",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

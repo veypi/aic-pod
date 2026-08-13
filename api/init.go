@@ -18,14 +18,9 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/utils"
 	"github.com/veypi/vigo"
 	"github.com/veypi/vigo/contrib/common"
 )
-
-// OpenPlatformURL 是 open_platform 的应用内打开方式：
-// 默认系统浏览器（cli）；desktop 启动时替换为平台窗口跳转。
-var OpenPlatformURL = utils.OpenExternal
 
 // Router 本地管理端点：security 中间件（CORS 白名单/PNA + code 校验）+
 // 统一 JSON 响应（common.JsonResponse/JsonErrorResponse）。
@@ -41,16 +36,7 @@ func init() {
 	Router.Get("/get_log", "Get Log", GetLog)
 	Router.Post("/start", "Start Host", StartHost)
 	Router.Post("/stop", "Stop Host", StopHost)
-	Router.Post("/open_url", "Open URL", OpenURL)
-	Router.Post("/open_platform", "Open Platform", OpenPlatform)
-	// 窗口控制（desktop：壳页面按钮；cli：WindowControl 为 nil，返回 desktop:false）
-	Router.Get("/window_state", "Window State", GetWindowState)
-	Router.Post("/window_minimise", "Window Minimise", WindowMinimise)
-	Router.Post("/window_maximise", "Window Maximise", WindowMaximise)
-	Router.Post("/window_close", "Window Close", WindowClose)
-	Router.Post("/window_fullscreen", "Window Fullscreen", WindowFullscreen)
-	Router.Post("/window_pet", "Window Pet", WindowPet)
-	Router.Post("/window_restore", "Window Restore", WindowRestore)
+	Router.Post("/check_host", "Check Host", CheckHost)
 	// 兜底：OPTIONS 预检由 security 统一短路（vigo 路由未命中不走 Use 链，
 	// 必须能 match 到路由）；其余未注册路径返回 JSON 404。
 	Router.Any("/**", "Catch All", CatchAll)
@@ -84,7 +70,7 @@ var (
 )
 
 // defaultOrigins 是默认允许跨域访问本地服务的平台源。
-// "null" 为本地设置窗口（wails SetHTML，origin 为 null）——受 code 校验保护。
+// "null" 为嵌入式设置窗口（旧 wails SetHTML 场景，origin 为 null）——受 code 校验保护。
 func defaultOrigins() []string {
 	return []string{
 		"https://ivec.ai",

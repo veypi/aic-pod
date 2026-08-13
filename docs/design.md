@@ -31,10 +31,11 @@ aic-pod/
 │                         #   bg_list/bg_wait/bg_kill、进程组终止
 │
 ├── cli/                  # 命令行入口：aic（vigo/flags 解析，主命令运行，无子指令）
-├── desktop/              # Wails v3 桌面壳（Go）：平台窗口 + 进程内 host 会话（Runner）
-│                         #   + 首页连接（local_code 通道复用 api LocalAPI）
+├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
+│                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
+│                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
 ├── browser/              # Chrome MV3 扩展（原生 JS ESM）：Service Worker 运行时、
-│                         #   browser 工具（agent-browser 签名对齐）、vcmd/page_fs（与 aic 前端双端同步）
+│                         #   browser 工具（agent-browser 签名对齐）、page_fs/fsops（与 aic 前端双端同步）
 ├── docs/                 # design.md（本文）、browser-client.md、host_sandbox.md（待实施规划）
 └── dist/                 # 构建产出（make 生成）
 ```
@@ -60,15 +61,16 @@ aic-pod/
 | **体积** | ~10 MB 单二进制 |
 | **参数** | `-host`（平台地址，NATS 端点由此推断）+ `-key`；配置链 flag > env（HOST/KEY/WORK_DIR/EXEC_TIMEOUT）> config.yaml > 默认 |
 
-### desktop — Wails v3 桌面壳
+### desktop — Electron 纯远程壳 + Go 后端子进程
 
 | 维度 | 说明 |
 |------|------|
-| **语言** | Go |
+| **语言** | Node（主进程）+ Go（后端二进制） |
 | **目标平台** | Windows / macOS / Linux |
-| **形态** | 主窗口加载平台页面（-host，URL 携带 ?local_code={port}.{code}），进程内托管 host 会话（libs/host Runner） |
-| **能力** | 窗口、host 生命周期（启动/停止/日志）、host + 凭据配置（平台 /hosts 页经 api LocalAPI） |
-| **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经进程内 host 注册 |
+| **形态** | 启动：loading → spawn 后端（AIC_PORT_FILE 握手）→ 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + ivec.ai），平台页经 window.aicDesktop 直调本地 API（端口/code 不出主进程，IPC handler 校验 senderFrame host） |
+| **本地页面** | 仅 /settings 配置页（系统边框设置窗口 / 未配置时主窗口），托盘「本地配置」入口；设置保存后探测并跳 {host}/hosts |
+| **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
+| **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 host 注册 |
 
 ### browser — Chrome 扩展
 
@@ -77,7 +79,7 @@ aic-pod/
 | **语言** | 原生 JS（ESM，MV3 Service Worker） |
 | **目标平台** | Chrome（Firefox 未做） |
 | **密钥派生** | Web Crypto API（SubtleCrypto，与 Go 端 HKDF 同语义） |
-| **能力** | browser 指令（DOM 操作、截图、标签页管理）+ vcmd 核心虚拟指令（ls/rg/tree/rm/curl，操作扩展 PageFS） |
+| **能力** | browser 指令（DOM 操作、截图、标签页管理）+ fs 8 action（read/write/edit/ls/rg/cp/mv/rm，操作扩展 PageFS） |
 | **限制** | 浏览器沙箱：无 shell、无系统文件系统 |
 
 ### embedded / mobile — 未来规划（未实现）
@@ -158,7 +160,7 @@ c.RegisterCommand(proto.CommandDecl{
 | `libs/host` | host agent 运行时：NATS 连接（TokenHandler 动态签发连接 token）/重连（republish caps）/认证失败处理、caps v2 发布、20s 心跳、请求分发（验签→deadline→nonce 去重→granted_level 纵深检查）、统一命令声明表构建、fs/exec/browser/bg_* 路由、配置模型（Config/解析链/原子持久化）、Runner（host 会话生命周期，cli/desktop 共用）。 |
 | `libs/vcore` | 虚拟指令引擎：命令声明表与分级表同包维护（meta.go/levels.go）、ls/rg/tree/curl/rm/mkdir/cp/mv/git 等内存实现、OS VFS 适配接口（OSVFS/memvfs）、argv 双层解析、图片尺寸/压缩。 |
 | `libs/exec_procs` | 子进程统一托管：stdout+stderr 合并落盘日志、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
-| `api` | 本地管理 API：包级 Router（security 中间件 + common.JsonResponse/JsonErrorResponse 统一响应），127.0.0.1 随机端口 + local_code 通道（端点 ping/get_config/set_config/bind/unbind/get_status/get_log/start/stop/open_url/open_platform + /settings 设置页静态资源）；host 会话生命周期自持（libs/host Runner，Init(deviceType, version) 创建，Start 时自动连接已绑定设备）；open_platform 经包级 OpenPlatformURL 变量分派（默认系统浏览器，desktop 启动时替换为窗口跳转）；有效配置读写 cfg.Global，get_log 读日志文件尾部。 |
+| `api` | 本地管理 API：包级 Router（security 中间件 + common.JsonResponse/JsonErrorResponse 统一响应），127.0.0.1 随机端口 + local_code 通道（端点 ping/get_config/set_config/bind/unbind/get_status/get_log/start/stop + /settings 设置页静态资源）；host 会话生命周期自持（libs/host Runner，Init(deviceType, version) 创建，Start 时自动连接已绑定设备）；外链由壳页面处理（Electron 系统浏览器 IPC / 浏览器壳新标签，平台页 local_handler 拦截后 postMessage 转交）；有效配置读写 cfg.Global，get_log 读日志文件尾部。 |
 | `cfg` | 配置中心：Options 结构体（flag/env/文件/default 四级解析，port/code 进程级隐私字段）+ Global 全局有效配置 + Load/LoadFile/Save（config.yaml 0600 原子写）+ LogPath/LogWriter（aic.log console 格式滚动写入，cli console+文件双写、desktop 仅文件）。 |
 
 **客户端只需做的：**
@@ -171,7 +173,7 @@ c, _ := host.Connect(opts)                  // 连接并阻塞
 
 ### TypeScript SDK / Dart SDK — 未来
 
-浏览器端逻辑现位于 `browser/src/sdk/`（JS ESM：client/proto/auth/crypto/vcmd/page_fs/history），与 Go libs 语义对齐（subject/信封/签名同源，vcmd.js 与 aic 前端逐字节同步）。独立 TS SDK 与 Dart SDK（Flutter mobile）为未来规划。
+浏览器端逻辑现位于 `browser/src/sdk/`（JS ESM：client/proto/auth/crypto/page_fs/fsops/history），与 Go libs 语义对齐（subject/信封/签名同源，page_fs.js/fsops.js 与 aic 前端逐字节同步）。独立 TS SDK 与 Dart SDK（Flutter mobile）为未来规划。
 
 ## 配置体系
 
@@ -182,7 +184,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 - flag：`-host` / `-key` / `-work_dir` / `-exec_timeout`（json tag 即 flag 名）
 - env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT`（字段名大写，无前缀）
 - 配置键：`host`（平台地址，默认 https://ivec.ai）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）
-- NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /aic/api/nc
+- NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /api/nc
 - 本地管理 API（api 包 Router）：cli 与 desktop 启动时在 127.0.0.1 随机端口监听，
   打印带 local_code 的引导链接（`{host}/hosts?local_code={port}.{code}`），浏览器访问即绑定/管理本机
 
@@ -195,7 +197,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 
 核心要点：
 
-- NATS over WebSocket（`/aic/api/nc`），连接 token 认证（HMAC-SHA256，K_connect）
+- NATS over WebSocket（`/api/nc`），连接 token 认证（HMAC-SHA256，K_connect）
 - HKDF 派生 K_connect / K_server / K_tool 三把用途隔离密钥
 - 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req.{sid}`（工具请求，§6.1 v4——sid 段定向，信封 SessionID 一致；run_tool 无会话直发用 manual 占位）
 - 即时发布 CAPS → 定时心跳（20s）→ 单订阅 inbox（`u.{uid}.h.host_{host_id}.>`）→ 验签执行 → req-reply 回复
@@ -223,5 +225,5 @@ c.Connect()
 |------|------|------|
 | **Phase 1** | `libs/` + `api` + `cli`/`desktop` — host agent 运行时、统一命令声明表（指令集 v2.5）、配置体系 | 完成 |
 | **Phase 2** | `embedded` — 适配 tinygo、命令白名单、限定目录 | 规划（未开始） |
-| **Phase 3** | `browser` — Chrome MV3 扩展（Web Crypto、browser 指令、vcmd/page_fs 双端同步） | 完成 |
+| **Phase 3** | `browser` — Chrome MV3 扩展（Web Crypto、browser 指令、page_fs/fsops 双端同步） | 完成 |
 | **Phase 4** | `mobile` — Dart/Flutter App | 规划（未开始） |

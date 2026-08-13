@@ -2,20 +2,20 @@
 # AIC 打包流程
 #
 # 产品：
-#   desktop（主产品，aic-*）     : Wails v3 桌面壳（win 托盘 / mac 菜单栏常驻）
+#   desktop（主产品，aic-*）     : Electron 壳 + Go 后端子进程（win 托盘 / mac 菜单栏常驻）
 #   cli（aic-cli-*）             : 命令行 host agent
 #   browser（aic-browser.zip）   : Chrome 扩展
 #   docker（veypi/aic-pod）      : 容器内运行 cli
 #
 # 构建产物（dist/）：
-#   aic-desktop-darwin-<arch>.dmg        desktop mac（.app 内嵌）
-#   aic-desktop-windows-amd64.exe        desktop windows（需 mingw-w64）
-#   aic-desktop-linux-<arch>             desktop linux（需容器/CI，GTK 依赖）
+#   aic-desktop-mac-<arch>.dmg          desktop mac（electron-builder，dmg）
+#   aic-desktop-win-<arch>.exe          desktop windows（NSIS）
+#   aic-desktop-linux-<arch>.AppImage   desktop linux
 #   aic-cli-<os>-<arch>          cli 全平台
 #   aic-browser.zip              Chrome 扩展
 #
-# 版本：desktop 二进制与 cli 同源 git 版本（ldflags -X cfg.Version），
-#       browser 版本 = manifest.json（发版时数字部分保持一致）。
+# 版本：desktop 版本 = desktop/package.json（Makefile desktop-version 自动同步 git 版本），
+#       cli 二进制注入 git 版本（ldflags -X cfg.Version），browser 版本 = manifest.json。
 # ==============================================================================
 
 APP_NAME    := aic
@@ -27,7 +27,7 @@ DOCKER_IMAGE ?= veypi/aic-pod
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
 GOHOSTARCH := $(shell go env GOHOSTARCH)
-# VERSION：git 版本（tag 优先，无 tag 时为短 commit hash），注入各产物
+# VERSION：git 版本（tag 优先，无 tag 时为短 commit hash），注入 cli 产物与 desktop/package.json
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 # Windows 资源版本号：纯数字点分（go-winres 不接受 dirty 后缀）
 WIN_VERSION := $(shell echo $(VERSION) | sed 's/^v//; s/-.*//')
@@ -36,11 +36,9 @@ LDFLAGS    := -s -w -X github.com/veypi/aic-pod/cfg.Version=$(VERSION)
 BROWSER_DIR := browser
 BROWSER_OUT := $(BIN_DIR)/aic-browser.zip
 
-DESKTOP_APP := "$(BIN_DIR)/AIC Desktop.app"
-
 .PHONY: build cli-all desktop-all release clean help build-browser \
         docker-build docker-build-arm64 docker-push run-docker-test \
-        cli-windows-amd64 desktop-resources
+        cli-windows-amd64
 # 注意：cli-<os>-<arch> / desktop-<os>-<arch> 等模式目标（cli-%/desktop-%/desktop-darwin-%/...）
 # 不能列入 .PHONY——make 3.81 对 phony 目标只认显式规则，模式规则匹配的 phony 目标
 # 会报 "Nothing to be done"（3.82 修复）。
@@ -51,7 +49,7 @@ DESKTOP_APP := "$(BIN_DIR)/AIC Desktop.app"
 
 build:
 	@mkdir -p $(BIN_DIR)
-	cd $(MAIN_DIR) && GOWORK=off CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)" .
+	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)" .
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)"
 
 cli-all: cli-linux-amd64 cli-linux-arm64 cli-darwin-amd64 cli-darwin-arm64 cli-windows-amd64
@@ -61,7 +59,7 @@ cli-%:
 	@mkdir -p $(BIN_DIR)
 	@os=$$(echo $* | cut -d- -f1); arch=$$(echo $* | cut -d- -f2-); \
 	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
-	cd $(MAIN_DIR) && GOWORK=off GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" .
+	cd $(MAIN_DIR) && GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" .
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$*"
 
 # windows 资源（icon + version info，go-winres）
@@ -70,76 +68,55 @@ cli-windows-amd64:
 	@echo "→ generating Windows resources (icon + version info)..."
 	cd $(MAIN_DIR) && go-winres make --in ../resources/winres.json --arch amd64 \
 		--product-version $(WIN_VERSION) --file-version $(WIN_VERSION) --out rsrc
-	cd $(MAIN_DIR) && GOWORK=off GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe" .
+	cd $(MAIN_DIR) && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe" .
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe"
 
 # ==============================================================================
-# desktop（aic-* 主产品，Wails v3）
+# desktop（aic-* 主产品，Electron 壳 + Go 后端子进程）
+#
+# 架构：Electron 主进程（main.js）spawn Go 后端二进制（bin/aic-backend，即 cli
+# 编译产物），经 AIC_PORT_FILE 握手后加载本地壳页面；窗口控制走 preload IPC。
+# 打包：electron-builder（须在目标平台构建，无法交叉），产物 dist/aic-desktop-*。
 # ==============================================================================
 
-# 桌面资源（icns/ico，幂等）：wails3 generate icons
-desktop-resources:
-	cd $(DESKTOP_DIR) && wails3 generate icons -input appicon.png \
-		-macfilename darwin/icons.icns \
-		-windowsfilename windows/icon.ico \
-		-iconcomposerinput appicon.icon \
-		-macassetdir darwin
+# Go 后端二进制：dev 运行（desktop/bin/aic-backend）与 electron-builder
+# extraResources（resources/backend/）共用
+backend-bin:
+	@mkdir -p $(DESKTOP_DIR)/bin
+	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(DESKTOP_DIR)/bin/aic-backend" .
+	@echo "→ $(DESKTOP_DIR)/bin/aic-backend"
+
+# electron-builder 依赖安装（node_modules）
+desktop-deps:
+	cd $(DESKTOP_DIR) && npm install
+
+# 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
+desktop-version:
+	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
+
+.PHONY: backend-bin desktop-deps desktop-version
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
-# macOS：.app bundle（Info.plist 注入版本 + icns）+ dmg
+# macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	@mkdir -p $(BIN_DIR)
-	$(MAKE) desktop-resources
-	@echo "→ assembling AIC Desktop.app (darwin/$*)..."
-	rm -rf $(DESKTOP_APP)
-	mkdir -p "$(BIN_DIR)/AIC Desktop.app/Contents/MacOS" "$(BIN_DIR)/AIC Desktop.app/Contents/Resources"
-	sed 's/{{VERSION}}/$(VERSION)/g' $(DESKTOP_DIR)/darwin/Info.plist > "$(BIN_DIR)/AIC Desktop.app/Contents/Info.plist"
-	cp $(DESKTOP_DIR)/darwin/icons.icns "$(BIN_DIR)/AIC Desktop.app/Contents/Resources/icons.icns"
-	cd $(DESKTOP_DIR) && GOWORK=off GOOS=darwin GOARCH=$* CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" \
-		-o "../$(BIN_DIR)/AIC Desktop.app/Contents/MacOS/aic-desktop" .
-	@echo "→ $(BIN_DIR)/AIC Desktop.app"
-	# 标准安装 dmg：.app + /Applications 链接（拖拽安装）
-	rm -rf "$(BIN_DIR)/dmg-staging"
-	mkdir -p "$(BIN_DIR)/dmg-staging"
-	cp -R $(DESKTOP_APP) "$(BIN_DIR)/dmg-staging/"
-	ln -s /Applications "$(BIN_DIR)/dmg-staging/Applications"
-	hdiutil create -volname "AIC Desktop" -srcfolder "$(BIN_DIR)/dmg-staging" \
-		-ov -format UDZO "$(BIN_DIR)/aic-desktop-darwin-$*.dmg" 2>&1 | tail -1
-	rm -rf "$(BIN_DIR)/dmg-staging"
-	@echo "→ $(BIN_DIR)/aic-desktop-darwin-$*.dmg"
+	$(MAKE) desktop-version backend-bin
+	@arch=$$(echo $* | sed 's/amd64/x64/'); \
+	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
+	@echo "→ $(BIN_DIR)/aic-desktop-mac-$*.dmg"
 
-# Windows：mingw-w64 交叉（brew install mingw-w64）→ exe（含图标/版本资源）
+# Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	@command -v x86_64-w64-mingw32-gcc >/dev/null || { echo "❌ need mingw-w64: brew install mingw-w64"; exit 1; }
-	@mkdir -p $(BIN_DIR)
-	$(MAKE) desktop-resources
-	@echo "→ building windows desktop (icon + version resources)..."
-	cd $(DESKTOP_DIR) && go-winres make --in ../resources/winres.json --arch $* \
-		--product-version $(WIN_VERSION) --file-version $(WIN_VERSION) --out rsrc
-	cd $(DESKTOP_DIR) && GOWORK=off GOOS=windows GOARCH=$* CGO_ENABLED=1 \
-		CC=x86_64-w64-mingw32-gcc go build -ldflags "$(LDFLAGS) -H windowsgui" \
-		-o "../$(BIN_DIR)/aic-desktop-windows-$*.exe" .
-	@echo "→ $(BIN_DIR)/aic-desktop-windows-$*.exe"
+	$(MAKE) desktop-version backend-bin
+	cd $(DESKTOP_DIR) && npx electron-builder --win
+	@echo "→ $(BIN_DIR)/aic-desktop-win-$*.exe"
 
-# Linux desktop：GTK/webkit2gtk 依赖，需在 linux 环境构建（CI/容器）；产物为 AppImage。
+# Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	@mkdir -p $(BIN_DIR)
-	$(MAKE) desktop-resources
-	cd $(DESKTOP_DIR) && GOWORK=off GOOS=linux GOARCH=$* CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" \
-		-o "../$(BIN_DIR)/aic-desktop-linux-$*" .
-	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*（打包 AppImage）"
-	rm -rf /tmp/aic-appimage
-	mkdir -p /tmp/aic-appimage/build
-	cp "$(BIN_DIR)/aic-desktop-linux-$*" /tmp/aic-appimage/aic-desktop
-	cp $(DESKTOP_DIR)/appicon.png /tmp/aic-appimage/aic-desktop.png
-	cp $(DESKTOP_DIR)/linux/aic-desktop.desktop /tmp/aic-appimage/aic-desktop.desktop
-	cd /tmp/aic-appimage && wails3 generate appimage \
-		-binary aic-desktop -icon aic-desktop.png -desktopfile aic-desktop.desktop \
-		-outputdir "$(abspath $(BIN_DIR))" -builddir /tmp/aic-appimage/build 2>&1 | tail -3
-	# 规范命名 aic-desktop-linux-<arch>.AppImage
-	@mv "$(BIN_DIR)"/*.AppImage "$(BIN_DIR)/aic-desktop-linux-$*.AppImage"
-	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage（linux/$*）"
+	$(MAKE) desktop-version backend-bin
+	cd $(DESKTOP_DIR) && npx electron-builder --linux
+	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"
+
 
 # ==============================================================================
 # Docker（容器内运行 cli）
@@ -196,7 +173,6 @@ release: cli-all desktop-all build-browser
 clean:
 	rm -rf $(BIN_DIR)
 	rm -f $(MAIN_DIR)/rsrc_windows_*.syso
-	rm -f $(DESKTOP_DIR)/rsrc_windows_*.syso
 	@echo "cleaned $(BIN_DIR)"
 
 help:
@@ -204,8 +180,10 @@ help:
 	@echo "  make                  build cli for current platform ($(GOHOSTOS)/$(GOHOSTARCH))"
 	@echo "  make cli-all          cross-compile cli (linux/darwin/windows × amd64/arm64)"
 	@echo "  make desktop-all      build desktop (darwin amd64/arm64 + windows amd64)"
-	@echo "  make desktop-darwin-amd64 / -arm64   macOS .app + dmg"
-	@echo "  make desktop-windows-amd64           Windows exe（需 mingw-w64: brew install mingw-w64）"
+	@echo "  make desktop-darwin-amd64 / -arm64   macOS dmg（electron-builder，须在 mac 构建）"
+	@echo "  make desktop-windows-amd64           Windows NSIS exe（须在 windows 构建）"
+	@echo "  make desktop-linux-amd64             Linux AppImage（须在 linux 构建）"
+	@echo "  make backend-bin      build Go 后端二进制 → desktop/bin/aic-backend（dev 运行）"
 	@echo "  make docker-build     build docker image ($(DOCKER_IMAGE):$(VERSION))"
 	@echo "  make docker-build-arm64 build linux/arm64 docker image"
 	@echo "  make docker-push      push docker image"

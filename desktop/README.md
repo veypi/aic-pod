@@ -1,59 +1,52 @@
-# Welcome to Your New Wails3 Project!
+# AIC Desktop（Electron）
 
-Congratulations on generating your Wails3 application! This README will guide you through the next steps to get your project up and running.
+替代旧 wails3 壳：**Chromium 渲染 + Go 后端子进程**。渲染的是 HTTP 页面（本地壳
+页面 + 平台页），渲染器零前端构建——Electron 只提供窗口/托盘/桌宠/窗口控制。
 
-## Getting Started
+## 架构
 
-1. Navigate to your project directory in the terminal.
+```
+Electron Main (Node, main.js)
+ ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：本地 vigo 服务 + NATS host 会话）
+ │    └─ 握手：AIC_PORT_FILE 环境变量 → 后端写 {port, code} JSON
+ ├─ BrowserWindow（frameless）加载 http://127.0.0.1:{port}/?code=xxx
+ │    └─ 壳页面（aic-pod/ui：header + iframe 平台页）
+ └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗 200×200）
+```
 
-2. To run your application in development mode, use the following command:
+窗口控制：壳页面经 preload（`window.aicDesktop`）调 IPC；`/api/window_*` 端点
+保留（cli 浏览器壳下返回 desktop:false）。
 
-   ```
-   wails3 dev
-   ```
+## 开发
 
-   This will start your application and enable hot-reloading for both frontend and backend changes.
+```bash
+# 1. 编译 Go 后端（desktop/bin/aic-backend）
+make desktop-backend
+# 2. 安装依赖 + 启动（需本机 electron 环境）
+cd desktop && npm install && npm start
+```
 
-3. To build your application for production, use:
+壳页面/平台页改动即时生效（HTTP 服务），main.js/preload.js 改动需重启 electron。
 
-   ```
-   wails3 build
-   ```
+## 打包（electron-builder，须在目标平台执行）
 
-   This will create a production-ready executable in the `build` directory.
+```bash
+make desktop-darwin-arm64    # macOS arm64 → dist/aic-desktop-mac-arm64.dmg
+make desktop-darwin-amd64    # macOS x64
+make desktop-windows-amd64   # Windows → dist/aic-desktop-win-x64.exe（NSIS）
+make desktop-linux-amd64     # Linux → dist/aic-desktop-linux-x64.AppImage
+```
 
-## Exploring Wails3 Features
+CI：`.github/workflows/build.yml` desktop job（tag v* 触发，五平台产物）。
 
-Now that you have your project set up, it's time to explore the features that Wails3 offers:
+## 发版
 
-1. **Check out the examples**: The best way to learn is by example. Visit the `examples` directory in the `v3/examples` directory to see various sample applications.
+版本号：`package.json` version 与 `cfg.Version`（cli 兜底）保持一致；electron-builder
+产物版本取自 package.json（Makefile desktop-version 目标自动同步 git 版本）。
 
-2. **Run an example**: To run any of the examples, navigate to the example's directory and use:
+## 已知差异（相对旧 wails3 壳）
 
-   ```
-   go run .
-   ```
-
-   Note: Some examples may be under development during the alpha phase.
-
-3. **Explore the documentation**: Visit the [Wails3 documentation](https://v3.wails.io/) for in-depth guides and API references.
-
-4. **Join the community**: Have questions or want to share your progress? Join the [Wails Discord](https://discord.gg/JDdSxwjhGf) or visit the [Wails discussions on GitHub](https://github.com/wailsapp/wails/discussions).
-
-## Project Structure
-
-Take a moment to familiarize yourself with your project structure:
-
-- `frontend/`: Contains your frontend code (HTML, CSS, JavaScript/TypeScript)
-- `main.go`: The entry point of your Go backend
-- `app.go`: Define your application structure and methods here
-- `wails.json`: Configuration file for your Wails project
-
-## Next Steps
-
-1. Modify the frontend in the `frontend/` directory to create your desired UI.
-2. Add backend functionality in `main.go`.
-3. Use `wails3 dev` to see your changes in real-time.
-4. When ready, build your application with `wails3 build`.
-
-Happy coding with Wails3! If you encounter any issues or have questions, don't hesitate to consult the documentation or reach out to the Wails community.
+- 渲染内核 WebKit → Chromium（首页/SPA 渲染性能对齐 Chrome）
+- 桌宠为独立透明窗口（主窗口保持不透明，避免透明合成性能损耗）
+- 拖动：CSS `-webkit-app-region: drag`（Chromium 原生），双击标题栏 mac 系统缩放
+- 后端身份：AIC_DEVICE_TYPE=desktop 上报设备类型

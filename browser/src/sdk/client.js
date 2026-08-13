@@ -38,10 +38,11 @@ const COMMANDS_DECL = {
 };
 
 // FS_REQUIRED 与 Go libs/vcore/levels.go FSRequired 同源（§2.4，禁止各自另写）：
-// read=Read(1)，write/edit=Write(2)，未声明 action 兜底 Danger(3)。
-const FS_REQUIRED = { read: Level.READ, write: Level.WRITE, edit: Level.WRITE };
+// read/ls/rg=Read(1)，write/edit/cp/mv/rm=Write(2)，未声明 action 兜底 Danger(3)；
+// rm recursive 删非空目录动态提升 Danger（_handleFsRequest 里按目录子项检查）。
+const FS_REQUIRED = { read: Level.READ, ls: Level.READ, rg: Level.READ, write: Level.WRITE, edit: Level.WRITE, cp: Level.WRITE, mv: Level.WRITE, rm: Level.WRITE };
 // FS_ACTIONS caps 声明（与 Go proto.AllFSActions 对齐：全集显式声明，非 null）。
-const FS_ACTIONS = ["read", "write", "edit"];
+const FS_ACTIONS = ["read", "write", "edit", "ls", "rg", "cp", "mv", "rm"];
 
 /**
  * Parse credential string: host_id.cred_ver.secret.uid
@@ -514,7 +515,19 @@ export class AICClient {
       return;
     }
     const action = String(params.action || "").toLowerCase();
-    const required = FS_REQUIRED[action] ?? Level.DANGER;
+    let required = FS_REQUIRED[action] ?? Level.DANGER;
+    // rm recursive 删非空目录动态提升 Danger（与 Go FSRequiredIn 同源）
+    if (action === "rm" && params.recursive && params.path) {
+      try {
+        const st = await this.fs.stat(params.path);
+        if (st && st.dir) {
+          const l = await this.fs.list(params.path);
+          if ((l.items || []).length > 0) required = Level.DANGER;
+        }
+      } catch (_) {
+        /* 判定失败按 Write，执行路径报真正的错误 */
+      }
+    }
     if (req.granted_level < required) {
       const reason = `fs ${action || "?"} requires level ${required} (granted ${req.granted_level})`;
       this.logf("fs request waiting approval: %s (msg=%s)", reason, req.msg_id);

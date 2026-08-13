@@ -26,6 +26,10 @@ import (
 )
 
 func main() {
+	// 客户端身份：Electron 壳以 env 指定 desktop（设备列表显示类型）；cli 默认不变
+	if dt := os.Getenv("AIC_DEVICE_TYPE"); dt != "" {
+		cfg.DeviceType = dt
+	}
 	// 日志：console（终端）+ 文件（cfg.LogPath，get_log 数据源）
 	if lw, err := cfg.LogWriter(); err != nil {
 		logv.Warn().Msgf("log file writer: %v", err)

@@ -30,15 +30,11 @@ go.work.sum
 # go-winres generated Windows resources (built by make windows-amd64)
 cli/rsrc_*.syso
 
-# Rust/Tauri
-desktop/src-tauri/target/
-desktop/src-tauri/binaries/
-
-# Wails desktop (v3，无本地前端：主窗口直接平台页面)
+# Electron desktop（Node 依赖 + Go 后端二进制，make backend-bin 产出）
+desktop/node_modules/
 desktop/bin/
-desktop/.task/
-desktop/build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
-desktop/build/linux/appimage/build/
+# 临时国内镜像配置（网络恢复后删除）
+desktop/.npmrc
 
 # Editor/IDE
 .idea/

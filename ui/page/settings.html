@@ -8,14 +8,15 @@
     body {
       margin: 0;
       width: 100%;
+      height: 100%;
       display: flex;
       align-items: center;
       justify-content: center;
+      background: var(--bg-color-secondary, #1e2128);
     }
 
     .card {
       width: 520px;
-      background: var(--bg-color-secondary, #1e2128);
       border: 1px solid var(--border-color, #2a2e37);
       border-radius: 12px;
       padding: 28px 32px
@@ -144,7 +145,7 @@
     <input id="host" ref="host" placeholder="https://ivec.ai">
     <label>凭证 (key)</label>
     <div class="row">
-      <input id="key" ref="key" placeholder="host_id.cred_ver.secret.uid">
+      <input id="key" ref="key" placeholder="host key">
       <button @click="updateKey()" style="white-space:nowrap">更新</button>
     </div>
     <label>工作目录 (work_dir)</label>
@@ -205,18 +206,48 @@
     try {
       if (key) await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
       await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout}});
-      setMsg('已保存', true);
+      setMsg('已保存，检测平台…', true);
+      await probeAndJump(host);
     } catch (e) {setMsg('保存失败: ' + e.message, false);}
     refreshStatus();
   };
 
+  // 归一平台地址（补 scheme + 去尾斜杠）
+  normalizeHost = (raw) => {
+    let h = (raw || 'https://ivec.ai').trim();
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(h)) h = 'https://' + h;
+    return h.replace(/\/+$/, '');
+  };
+
+  // 探测 {host}/root.html 可达后跳转平台（Electron：主进程 IPC；浏览器：新标签）
+  probeAndJump = async (rawHost) => {
+    const h = normalizeHost(rawHost);
+    let ok = false;
+    if (window.aicDesktop && window.aicDesktop.checkPlatform) {
+      const r = await window.aicDesktop.checkPlatform(h);
+      ok = !!(r && r.ok);
+    } else {
+      try {
+        const r = await $mod.$fetch('/api/check_host', {method: 'POST', body: {host: h}});
+        ok = !!(r && r.ok);
+      } catch (e) {ok = false;}
+    }
+    if (ok) {
+      const url = h + '/hosts';
+      if (window.aicDesktop && window.aicDesktop.openPlatform) {
+        window.aicDesktop.openPlatform(url);
+      } else {
+        window.open(url, '_blank');
+      }
+      return true;
+    }
+    setMsg('平台不可达，请检查地址', false);
+    return false;
+  };
+
   updateKey = () => {
-    // 切回首页 iframe，导航到 {host}/hosts 绑定（iframe 内平台页经壳 postMessage 通道绑定）
-    let host = $refs.host.value.trim() || 'https://ivec.ai';
-    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) host = 'https://' + host;
-    host = host.replace(/\/+$/, '');
-    $router.push('/');
-    $mod.$bus.emit('shell-nav', host + '/hosts');
+    // 跳转 {host}/hosts 绑定（平台设备管理页，桌面经主进程跳转 / 浏览器新标签）
+    probeAndJump($refs.host.value.trim());
   };
 
   reconnect = async () => {
@@ -231,7 +262,8 @@
   };
 
   backToPlatform = () => {
-    $router.push('/');
+    // 跳转当前配置的平台地址（主进程跳转 / 浏览器新标签）
+    probeAndJump($refs.host.value.trim());
   };
 </script>
 

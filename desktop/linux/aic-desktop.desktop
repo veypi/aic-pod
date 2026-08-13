@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=AIC Desktop
-Comment=AIC 平台桌面客户端
-Exec=aic-desktop
-Icon=aic-desktop
-Terminal=false
-Type=Application
-Categories=Utility;

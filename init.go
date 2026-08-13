@@ -11,7 +11,7 @@
 //	          vcore（虚拟指令）、exec_procs（进程托管）、utils（纯工具）
 //	ui/       静态资源（settings.html 本机设置页）
 //	cli/      命令行版本（aic）
-//	desktop/  桌面版本（Wails v3 壳，独立 go module）
+//	desktop/  Electron 壳（main.js + preload.js）：Chromium 窗口 + Go 后端子进程（cli 二进制）
 //	browser/  Chrome 扩展（纯 JS，MV3）
 package pod
 
@@ -19,7 +19,9 @@ import (
 	"context"
 	"embed"
 	_ "embed"
+	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -70,6 +72,14 @@ func Start() error {
 	mu.Unlock()
 	go func() { _ = s.Run() }()
 	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d (code=%s)", cfg.Global.Port(), cfg.Global.Code)
+	logv.WithNoCaller.Info().Msgf("working on: %s", cfg.Global.WorkDir)
+	// 端口上报（Electron 壳握手）：AIC_PORT_FILE 指定 JSON 文件路径时写入
+	// {port, code}，Electron 主进程据此加载壳页面（cli 正常使用不受影响）。
+	if pf := os.Getenv("AIC_PORT_FILE"); pf != "" {
+		if err := os.WriteFile(pf, []byte(fmt.Sprintf(`{"port":%d,"code":%q}`, cfg.Global.Port(), cfg.Global.Code)), 0o600); err != nil {
+			logv.Warn().Msgf("write port file %s: %v", pf, err)
+		}
+	}
 	// 已绑定 → 自动连接 host（失败仅记日志，不阻断本地服务）
 	if cfg.Global.Key != "" {
 		if err := host.Start(*cfg.Global); err != nil {

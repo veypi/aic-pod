@@ -1,0 +1,38 @@
+# electron-builder 打包配置（须在目标平台构建，无法交叉）
+appId: ai.ivec.desktop
+productName: AIC Desktop
+directories:
+  output: ../dist
+  buildResources: assets
+files:
+  - main.js
+  - loading.html
+  - remote-preload.js
+  - settings-preload.js
+  - package.json
+  - assets/**
+# Go 后端二进制（make desktop-backend 产出 desktop/bin/aic-backend）→ resources/backend/
+extraResources:
+  - from: bin
+    to: backend
+    filter:
+      - aic-backend*
+artifactName: aic-desktop-${os}-${arch}.${ext}
+mac:
+  target: dmg
+  icon: assets/icon.png
+  category: public.app-category.productivity
+  # 测试版未签名：跳过 codesign/notarize（用户右键打开）
+  identity: null
+win:
+  target: nsis
+  icon: assets/icon.png
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+linux:
+  target: AppImage
+  icon: assets/icon.png
+  category: Utility
+  maintainer: veypi <i@veypi.com>
+npmRebuild: false

@@ -114,7 +114,7 @@ make build-browser   # → dist/aic-browser.zip
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `key` | | 环境凭证，从 AIC 平台获取 |
-| `url` | `wss://ivec.ai/aic/api/nc` | 服务端地址 |
+| `url` | `wss://ivec.ai/api/nc` | 服务端地址 |
 | `deviceName` | 系统 hostname | 设备名 |
 | `autoConnect` | `true` | 启动后自动连接 |
 | `background` | `true` | 后台模式，新窗口不抢夺焦点 |
@@ -182,4 +182,4 @@ make release                    # cli-all + desktop-all + build-browser + GitHub
 make clean                      # 清理
 ```
 
-依赖：`wails3`（desktop 资源/打包：`go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.3`）、`go-winres`（windows 资源）、`mingw-w64`（windows desktop 交叉）。
+依赖：Node 22+（Electron/electron-builder）、Go（后端二进制 `make backend-bin`）、`go-winres`（windows cli 资源）。

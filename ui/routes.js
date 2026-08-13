@@ -5,12 +5,11 @@
  * Distributed under terms of the MIT license.
  */
 
+// 本地服务仅保留配置页 /settings（Electron 主窗口/设置窗口/浏览器壳入口）；
+// 平台 UI 全部由远端 aic 提供（桌面版 header / pet 等都在平台侧）。
 const routes = [
-  // ---- 壳页面：首页（iframe 平台页）与设置页共用 default 布局（header 常驻） ----
-  { path: "/settings", component: "/page/settings.html", layout: "default" },
-  { path: "/", component: "/page/index.html", layout: "default" },
-  // ---- 桌宠：无布局，全屏透明 + ai.svg（点击回首页） ----
-  { path: "/pet", component: "/page/pet.html" },
+  { path: "/settings", component: "/page/settings.html" },
+  { path: "/", redirect: "/settings" },
 ];
 
 export default ({ $mod }) => ({

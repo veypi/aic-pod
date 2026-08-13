@@ -315,7 +315,7 @@ ssh:     [lateral-movement]       psexec:             [lateral-movement]
 | 项 | 仓库/文件 | 内容 |
 |----|-----------|------|
 | A1 | aic-pod `libs/host/redact.go`（新）+ `client.go` | respond() 出口 redaction（ENV_KEY 全串 + secret 段） |
-| A2 | aic-pod `desktop/main.go` | `godotenv.Load()` → `godotenv.Read()`；新增 `-key-file` |
+| A2 | aic-pod `desktop/main.js`（Electron 主进程）/ `cli/main.go` | 后端 env 注入（AIC_PORT_FILE/AIC_DEVICE_TYPE）；新增 `-key-file` |
 | A3 | aic-pod `Dockerfile` + README | 非 root `USER`；`ENV_KEY_FILE` 文档 |
 | A4 | aic server 等级设置 API | granted ≤ 3 钳制校验 |
 | A5 | aic server `tools/fs/fs.go` | host target 收到 `$USER/$AGENT/$SESSION` 前缀路径时提前报错（明确提示 host 不支持路径变量） |
