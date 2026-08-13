@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,13 +81,74 @@ func Start() error {
 			logv.Warn().Msgf("write port file %s: %v", pf, err)
 		}
 	}
-	// 已绑定 → 自动连接 host（失败仅记日志，不阻断本地服务）
+	// 已绑定 → 自动连接 host（失败按指数退避后台重试，不阻断本地服务）
 	if cfg.Global.Key != "" {
 		if err := host.Start(*cfg.Global); err != nil {
-			logv.Warn().Msgf("auto start host failed: %v", err)
+			logv.Warn().Msgf("auto start host failed: %v (retrying with backoff)", err)
+			go retryHostStart(cfg.Global)
 		}
 	}
 	return nil
+}
+
+// ---- auto-start 退避重试 ----
+//
+// 初次连接失败多为暂时性错误（平台重启间隙、NATS 槽位未及时释放、网络未就绪），
+// 应退避重试而非只尝试一次：host 是常驻服务，平台随时可能恢复。
+// 初始 5s，指数翻倍，上限 5min，无限重试直到成功或遇到永久错误。
+
+const (
+	hostRetryInitial = 5 * time.Second
+	hostRetryMax     = 5 * time.Minute
+)
+
+// hostStartFn 可注入（测试替身），生产实现为 host.Start。
+var hostStartFn = host.Start
+
+// retryHostStart 在后台按指数退避重试 host 启动。
+func retryHostStart(o *cfg.Options) {
+	retryHostStartWith(o, hostStartFn, time.Sleep, hostRetryInitial, hostRetryMax)
+}
+
+func retryHostStartWith(o *cfg.Options, start func(cfg.Options) error, sleep func(time.Duration), initial, max time.Duration) {
+	delay := initial
+	for {
+		sleep(delay)
+		if err := start(*o); err != nil {
+			if isPermanentStartErr(err) {
+				logv.Warn().Msgf("auto start host aborted: %v", err)
+				return
+			}
+			logv.Warn().Msgf("auto start host failed: %v (retry in %v)", err, delay)
+			delay = nextRetryDelay(delay, max)
+			continue
+		}
+		logv.Info().Msg("auto start host connected after retry")
+		return
+	}
+}
+
+// isPermanentStartErr 判定无需重试的启动错误：凭证缺失/格式非法（key 解析在
+// Client.Connect 内，格式错不会因重试而变好）、已被其他路径启动。
+// 注意：Authorization Violation 不在此列——槽位未释放也会报该错（暂时性），
+// 与凭证被吊销无法在初次连接阶段区分，只能退避重试。
+func isPermanentStartErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "key is empty") ||
+		strings.Contains(s, "invalid credential key") || // 含 "invalid credential key version"
+		strings.Contains(s, "already running")
+}
+
+// nextRetryDelay 指数退避：翻倍，封顶 max。
+func nextRetryDelay(delay, max time.Duration) time.Duration {
+	delay *= 2
+	if delay > max {
+		return max
+	}
+	return delay
 }
 
 // Stop 关闭服务并停止 host 会话（应用退出时调用）。
