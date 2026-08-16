@@ -112,9 +112,16 @@ func fsReadLarge(env *Env, abs string, offset, limit int) (*Result, error) {
 			line = strings.TrimSuffix(line, "\n")
 			if total >= offset && kept < limit {
 				row := fmt.Sprintf("%d\t%s\n", total, line)
-				if kept == 0 || b.Len()+len(row) <= MaxContentBytes {
+				// 512KB 预算：首行超限截断写入（与 fsRead 整读路径
+				// truncateContent 语义一致），后续行超限跳过（§2.5）
+				if b.Len()+len(row) <= MaxContentBytes {
 					b.WriteString(row)
 					kept++
+				} else if kept == 0 {
+					if cut, _ := truncateContent(row, MaxContentBytes); cut != "" {
+						b.WriteString(cut)
+						kept++
+					}
 				}
 			}
 		}

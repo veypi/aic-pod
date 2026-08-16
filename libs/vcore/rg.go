@@ -38,6 +38,22 @@ const rgUnsupportedHint = `pattern is not supported on this environment (restric
 // rgDefaultLimit 是全局输出行数平台上限（查越限标记 truncated）。
 const rgDefaultLimit = 100
 
+// rgMaxLineBytes 是匹配行内容的单行字节上限（§2.5：minified/单行超长文件
+// 命中时防止单行输出撑爆总预算；超限 rune 安全截断并追加标记）。
+const rgMaxLineBytes = 8 << 10 // 8KB
+
+// clipRgText 按字节截断超长匹配行内容（rune 边界收刀），超限追加标记。
+func clipRgText(text string) string {
+	if len(text) <= rgMaxLineBytes {
+		return text
+	}
+	cut := rgMaxLineBytes
+	for cut > 0 && !utf8.ValidString(text[:cut]) {
+		cut--
+	}
+	return text[:cut] + "...[truncated]"
+}
+
 // skipDirs 是 rg 递归不进入的目录（§5.4：node_modules/vendor 与 . 开头目录）。
 var skipDirs = map[string]bool{"node_modules": true, "vendor": true}
 
@@ -197,8 +213,8 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	rows := 0
 	for _, f := range files {
 		line := f + "\n"
-		// 512KB 字节预算只留完整行（§2.5）
-		if rows > 0 && b.Len()+len(line) > MaxContentBytes {
+		// 512KB 字节预算只留完整行（§2.5；首行同样受检）
+		if b.Len()+len(line) > MaxContentBytes {
 			truncated = true
 			break
 		}
@@ -222,6 +238,7 @@ type rgMatch struct {
 func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Regexp, maxPerFile int, filesOnly, countOnly bool) (*Result, error) {
 	var rows []string
 	truncated := false
+	clipped := false
 	for _, f := range candidates {
 		if len(rows) >= rgDefaultLimit {
 			truncated = true
@@ -251,8 +268,16 @@ func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Reg
 			continue
 		}
 		for _, m := range ms {
-			rows = append(rows, fmt.Sprintf("%s:%d:%s", m.path, m.line, m.text))
+			text := m.text
+			if len(text) > rgMaxLineBytes {
+				text = clipRgText(text)
+				clipped = true
+			}
+			rows = append(rows, fmt.Sprintf("%s:%d:%s", m.path, m.line, text))
 		}
+	}
+	if clipped {
+		truncated = true
 	}
 
 	r := newResult("rg", abs)
@@ -266,7 +291,9 @@ func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Reg
 	out := 0
 	for _, row := range rows {
 		line := row + "\n"
-		if out > 0 && b.Len()+len(line) > MaxContentBytes {
+		// 512KB 字节预算只留完整行（§2.5；首行同样受检——超长单行
+		// minified 文件命中不再整行灌入突破预算）
+		if b.Len()+len(line) > MaxContentBytes {
 			truncated = true
 			break
 		}

@@ -229,6 +229,16 @@ for (const file of readdirSync(VECTORS_DIR)) {
 
 // ---- 单元补充 ----
 
+test("rg: long single line clipped within byte budget", async () => {
+  const fs = new MemFS({ "/big.min.js": "A".repeat(700 * 1024) + "foo" + "B".repeat(100) });
+  const res = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/big.min.js" }, { workdir: "/" });
+  const bytes = Buffer.byteLength(res.content);
+  assert.ok(bytes <= 512 * 1024, `content ${bytes} bytes exceeds budget`);
+  assert.ok(res.content.endsWith("...[truncated]"), res.content.slice(-100));
+  assert.equal(res.attrs.rows, "1");
+  assert.equal(res.attrs.truncated, "true");
+});
+
 test("globMatch: * and ?", () => {
   assert.ok(globMatch("*.go", "a.go"));
   assert.ok(!globMatch("*.go", "a.gox"));

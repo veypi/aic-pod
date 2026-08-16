@@ -68,6 +68,10 @@ const LS_DEFAULT_DEPTH = 1;
 const LS_MAX_DEPTH = 5;
 const LS_MAX_NODES = 2000;
 const RG_DEFAULT_LIMIT = 100;
+// RG_MAX_LINE_BYTES 匹配行内容单行字节上限 / RG_MAX_CONTENT_BYTES 总预算
+// （对齐 vcore rg.go §2.5：minified 单行超长命中不撑爆上下文）。
+const RG_MAX_LINE_BYTES = 8 << 10;
+const RG_MAX_CONTENT_BYTES = 512 << 10;
 
 function isHidden(name) {
   return name.startsWith(".");
@@ -250,12 +254,46 @@ async function rgFiles(fs, ctx, target, globs, hidden) {
     const msg = globs.length ? `no files matched globs ${globs.join(", ")} in ${abs}` : `no files found in ${abs}`;
     return { content: msg, attrs: { action: "rg", path: abs, rows: "0", truncated: "false" } };
   }
-  return { content: files.join("\n"), attrs: { action: "rg", path: abs, rows: String(files.length), truncated: String(truncated) } };
+  let content = "";
+  let bytes = 0;
+  let out = 0;
+  const enc = new TextEncoder();
+  for (const f of files) {
+    const line = f + "\n";
+    const bl = enc.encode(line).length;
+    if (bytes + bl > RG_MAX_CONTENT_BYTES) break;
+    content += line;
+    bytes += bl;
+    out++;
+  }
+  content = content.replace(/\n$/, "");
+  if (out < files.length) truncated = true;
+  return { content, attrs: { action: "rg", path: abs, rows: String(out), truncated: String(truncated) } };
+}
+
+// clipRgText 按字节截断超长匹配行内容（UTF-8 边界收刀），超限追加标记
+// （与 vcore clipRgText 一致）。
+function clipRgText(text) {
+  const enc = new TextEncoder();
+  const bytes = enc.encode(text);
+  if (bytes.length <= RG_MAX_LINE_BYTES) return { text, clipped: false };
+  let cut = RG_MAX_LINE_BYTES;
+  const dec = new TextDecoder("utf-8", { fatal: true });
+  for (; cut > 0; cut--) {
+    try {
+      dec.decode(bytes.slice(0, cut));
+      break;
+    } catch (e) {
+      /* 截断点在多字节字符内，回退 */
+    }
+  }
+  return { text: new TextDecoder().decode(bytes.slice(0, cut)) + "...[truncated]", clipped: true };
 }
 
 async function rgSearch(fs, ctx, abs, pattern, candidates, re, maxPerFile, filesOnly, countOnly) {
   const rows = [];
   let truncated = false;
+  let clipped = false;
   for (const f of candidates) {
     if (rows.length >= RG_DEFAULT_LIMIT) {
       truncated = true;
@@ -276,12 +314,32 @@ async function rgSearch(fs, ctx, abs, pattern, candidates, re, maxPerFile, files
       rows.push(`${f}:${ms.length}`);
       continue;
     }
-    for (const m of ms) rows.push(`${m.path}:${m.line}:${m.text}`);
+    for (const m of ms) {
+      const { text, clipped: c } = clipRgText(m.text);
+      if (c) clipped = true;
+      rows.push(`${m.path}:${m.line}:${text}`);
+    }
   }
   if (rows.length === 0) {
     return { content: `no matches for pattern "${pattern}" in ${abs}`, attrs: { action: "rg", path: abs, rows: "0", truncated: "false" } };
   }
-  return { content: rows.join("\n"), attrs: { action: "rg", path: abs, rows: String(rows.length), truncated: String(truncated) } };
+  if (clipped) truncated = true;
+  // 512KB 字节预算只留完整行（§2.5；首行同样受检）
+  let content = "";
+  let bytes = 0;
+  let out = 0;
+  const enc = new TextEncoder();
+  for (const row of rows) {
+    const line = row + "\n";
+    const bl = enc.encode(line).length;
+    if (bytes + bl > RG_MAX_CONTENT_BYTES) break;
+    content += line;
+    bytes += bl;
+    out++;
+  }
+  content = content.replace(/\n$/, "");
+  if (out < rows.length) truncated = true;
+  return { content, attrs: { action: "rg", path: abs, rows: String(out), truncated: String(truncated) } };
 }
 
 async function rgFile(fs, ctx, path, re, max) {

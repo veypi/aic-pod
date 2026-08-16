@@ -39,6 +39,33 @@ func TestRgFilesLimit(t *testing.T) {
 	}
 }
 
+// rg 超长单行（minified 文件）命中：内容 rune 安全截断 + truncated 标记，
+// 单行输出不超过 rgMaxLineBytes，总 Content 不突破 MaxContentBytes（§2.5）。
+func TestRgLongLineClip(t *testing.T) {
+	vfs := NewMemVFS()
+	long := strings.Repeat("A", 700<<10) + "foo" + strings.Repeat("B", 100) // ~700KB 单行
+	vfs.SetFile("/big.min.js", []byte(long), testTime)
+	env := &Env{VFS: vfs, Workdir: "/"}
+
+	res, err := RunFS(context.Background(), env, []byte(`{"action":"rg","pattern":"foo","path":"/big.min.js"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Content) > MaxContentBytes {
+		t.Fatalf("content %d bytes exceeds budget %d", len(res.Content), MaxContentBytes)
+	}
+	if !strings.HasSuffix(res.Content, "...[truncated]") {
+		t.Errorf("content not clipped: %.100q...", res.Content)
+	}
+	if res.Attrs["rows"] != "1" || res.Attrs["truncated"] != "true" {
+		t.Errorf("attrs = %v, want rows=1 truncated=true", res.Attrs)
+	}
+	// 单行内容 ≤ rgMaxLineBytes + 路径/行号/标记余量
+	if len(res.Content) > rgMaxLineBytes+64 {
+		t.Errorf("single row %d bytes exceeds line cap", len(res.Content))
+	}
+}
+
 // read 大文件（>8MB）流式路径：总行数精确、窗口截取、truncated 标记（§4.2）。
 func TestReadLargeFile(t *testing.T) {
 	vfs := NewMemVFS()
