@@ -18,11 +18,12 @@ contextBridge.exposeInMainWorld('aicDesktop', {
   maximise: () => ipcRenderer.invoke('window:maximise'),
   close: () => ipcRenderer.invoke('window:close'),
   fullscreen: () => ipcRenderer.invoke('window:fullscreen'),
-  pet: (x, y) => ipcRenderer.invoke('window:pet', x, y),
+  pet: (page) => ipcRenderer.invoke('window:pet', page),
   restore: () => ipcRenderer.invoke('window:restore'),
   // 外链 → 系统默认浏览器（仅 http/https，主进程校验）
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
-  // 桌宠拖动（pet 页 mousedown/mousemove 屏幕坐标）
+  // 桌宠拖动（pet 页 mousedown/mousemove 屏幕坐标）与右键菜单
   petDragStart: (x, y) => ipcRenderer.send('pet:drag-start', { x, y }),
   petDragMove: (x, y) => ipcRenderer.send('pet:drag-move', { x, y }),
+  petMenu: () => ipcRenderer.send('pet:menu'),
 })

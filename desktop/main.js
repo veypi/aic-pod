@@ -20,23 +20,25 @@ const path = require('path')
 
 // ---- 常量 ----
 const isDev = !app.isPackaged
+// kiosk/展示场景：AIC_FULLSCREEN=1 或 --fullscreen 参数 → 启动即全屏（大屏展示用）
+const startFullscreen =
+  process.env.AIC_FULLSCREEN === '1' || process.argv.includes('--fullscreen')
 const backendBin = isDev
   ? path.join(__dirname, 'bin', 'aic-backend' + (process.platform === 'win32' ? '.exe' : ''))
   : path.join(process.resourcesPath, 'backend', 'aic-backend' + (process.platform === 'win32' ? '.exe' : ''))
 const trayIcon = process.platform === 'darwin'
   ? path.join(__dirname, 'assets', 'trayTemplate.png')
   : path.join(__dirname, 'assets', 'tray.png')
-const petSize = 100 // 桌宠窗口边长
+let petSize = 100 // 桌宠窗口边长（右键菜单缩放 50–400，随 pet-pos.json 持久化）
 const probeTimeout = 5000 // {host}/root.html 探测超时
 const DEFAULT_HOST = 'https://ivec.ai'
 
 let mainWin = null // 主窗口（loading → 平台页 / 本地设置页）
-let petWin = null // 桌宠窗口（透明小窗，加载 {host}/pet）
+let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
 let settingsWin = null // 本地设置窗口（系统边框，独立 partition）
 let tray = null
 let backend = null
 let quitting = false
-let petOrig = null // 进入桌宠前主窗口 {w, h, x, y}
 let petDragOff = null // 桌宠拖动：鼠标相对窗口偏移
 let petPos = null // 桌宠当前位置 {x, y}（内存缓存，创建/拖动时更新）
 let petPosTimer = null // 桌宠位置写盘防抖 timer
@@ -254,7 +256,7 @@ function registerIpc() {
     if (isPlatformFrame(e) && mainWin) mainWin.setFullScreen(!mainWin.isFullScreen())
     return state()
   })
-  ipcMain.handle('window:pet', (e, x, y) => (isPlatformFrame(e) ? enterPet(x, y) : state()))
+  ipcMain.handle('window:pet', (e, page) => (isPlatformFrame(e) ? enterPet(page) : state()))
   ipcMain.handle('window:restore', (e) => (isPlatformFrame(e) ? leavePet() : state()))
 
   // 外链 → 系统默认浏览器（平台页拦截普通外链）
@@ -264,6 +266,17 @@ function registerIpc() {
     if (!/^https?:\/\//.test(u)) return false
     shell.openExternal(u)
     return true
+  })
+
+  // 桌宠右键菜单：缩小 / 放大 / 关闭
+  ipcMain.on('pet:menu', (e) => {
+    if (!petWin || e.sender !== petWin.webContents) return
+    Menu.buildFromTemplate([
+      { label: '缩小', click: () => resizePet(-1) },
+      { label: '放大', click: () => resizePet(1) },
+      { type: 'separator' },
+      { label: '关闭', click: () => leavePet() },
+    ]).popup({ window: petWin })
   })
 
   // 桌宠拖动（pet 页）
@@ -304,6 +317,7 @@ function createMainWindow(init) {
     minHeight: 600,
     frame: false,
     show: false,
+    fullscreen: startFullscreen,
     backgroundColor: '#ffffff',
     webPreferences: {
       contextIsolation: true,
@@ -311,7 +325,10 @@ function createMainWindow(init) {
       sandbox: true,
     },
   })
-  mainWin.once('ready-to-show', () => mainWin.show())
+  mainWin.once('ready-to-show', () => {
+    if (startFullscreen) mainWin.setFullScreen(true)
+    mainWin.show()
+  })
   mainWin.on('close', (e) => {
     if (!quitting) {
       e.preventDefault()
@@ -382,24 +399,24 @@ function createTray() {
   tray.on('click', () => focusMain())
 }
 
-// ---- 桌宠位置缓存：userData/pet-pos.json（进入恢复上次位置，拖动防抖落盘） ----
+// ---- 桌宠位置/尺寸缓存：userData/pet-pos.json {x,y,size}（进入恢复上次，拖动/缩放防抖落盘） ----
 function petPosFile() {
   return path.join(app.getPath('userData'), 'pet-pos.json')
 }
 
-function loadPetPos() {
+function loadPetState() {
   try {
     const p = JSON.parse(fs.readFileSync(petPosFile(), 'utf-8'))
-    if (Number.isFinite(p?.x) && Number.isFinite(p?.y)) return { x: p.x, y: p.y }
+    if (p && typeof p === 'object') return p
   } catch (_) { /* 首次/损坏 → 无缓存 */ }
-  return null
+  return {}
 }
 
 function savePetPosNow() {
   clearTimeout(petPosTimer)
   petPosTimer = null
   if (!petPos) return
-  try { fs.writeFileSync(petPosFile(), JSON.stringify(petPos)) } catch (_) { /* 忽略 */ }
+  try { fs.writeFileSync(petPosFile(), JSON.stringify({ ...petPos, size: petSize })) } catch (_) { /* 忽略 */ }
 }
 
 function savePetPosDebounced() {
@@ -415,16 +432,27 @@ function petPosOnScreen(x, y) {
   })
 }
 
-// ---- 桌宠：独立透明小窗（主窗口保持不透明） ----
-function enterPet(x, y) {
+// 缩放桌宠：×1.25 / ×0.8 步进，50–400，以窗口中心为锚点
+function resizePet(dir) {
+  if (!petWin) return
+  const next = Math.min(400, Math.max(50, Math.round(petSize * (dir > 0 ? 1.25 : 0.8))))
+  if (next === petSize) return
+  const [x, y] = petWin.getPosition()
+  const d = next - petSize
+  petSize = next
+  petWin.setSize(petSize, petSize)
+  petWin.setPosition(Math.round(x - d / 2), Math.round(y - d / 2))
+  petPos = petWin.getPosition()
+  savePetPosDebounced()
+}
+
+// ---- 桌宠：独立透明小窗，与主窗口共存（主窗口不动），加载 /pet 或 /a/{aid}/pet ----
+function enterPet(page) {
   if (!mainWin) return state()
   if (petWin) return state()
-  petOrig = {
-    w: mainWin.getSize()[0],
-    h: mainWin.getSize()[1],
-    x: mainWin.getPosition()[0],
-    y: mainWin.getPosition()[1],
-  }
+  // 恢复上次尺寸（默认 100）
+  const st = loadPetState()
+  petSize = Number.isFinite(st.size) ? Math.min(400, Math.max(50, Math.round(st.size))) : 100
   petWin = new BrowserWindow({
     width: petSize,
     height: petSize,
@@ -440,29 +468,26 @@ function enterPet(x, y) {
       sandbox: true,
     },
   })
-  // 平台桌宠页（{host}/pet）；remote-preload 注入（host 白名单）
-  petWin.loadURL(host.replace(/\/+$/, '') + '/pet')
-  // 位置：优先恢复上次缓存（仍在显示器内），无缓存/失效才用鼠标位置（首次打开居中于鼠标）
-  const cached = loadPetPos()
-  if (cached && petPosOnScreen(cached.x, cached.y)) {
-    petWin.setPosition(cached.x, cached.y)
-  } else if (Number.isFinite(x) && Number.isFinite(y)) {
-    petWin.setPosition(Math.round(x - petSize / 2), Math.round(y - petSize / 2))
+  // 平台桌宠页（仅放行 /pet 与 /a/{aid}/pet，query 透传）；remote-preload 注入（host 白名单）
+  const raw = String(page || '')
+  const p = /^\/pet($|\?)|^\/a\/[^/]+\/pet($|\?)/.test(raw) ? raw : '/pet'
+  petWin.loadURL(host.replace(/\/+$/, '') + p)
+  // 位置：优先恢复上次缓存（仍在显示器内），无缓存/失效居中于鼠标
+  if (Number.isFinite(st.x) && Number.isFinite(st.y) && petPosOnScreen(st.x, st.y)) {
+    petWin.setPosition(st.x, st.y)
+  } else {
+    const c = screen.getCursorScreenPoint()
+    petWin.setPosition(Math.round(c.x - petSize / 2), Math.round(c.y - petSize / 2))
   }
   petPos = petWin.getPosition()
-  mainWin.hide()
   return state()
 }
 
+// 双击桌宠：仅销毁小窗，主窗口不动
 function leavePet() {
   if (petWin) { petWin.destroy(); petWin = null }
   petDragOff = null
   savePetPosNow() // 防抖未落盘时兜底写盘
-  if (mainWin && petOrig) {
-    mainWin.setSize(petOrig.w, petOrig.h)
-    mainWin.setPosition(petOrig.x, petOrig.y)
-  }
-  focusMain()
   return state()
 }
 
