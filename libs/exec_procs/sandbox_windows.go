@@ -44,19 +44,12 @@ var (
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
 	// Win10+ 将安全 API 迁移到 API set（api-ms-win-security-*），advapi32 仅
-	// 部分转发（实测 Win11 26200：CreateRestrictedToken 在 advapi32、
-	// SetEntriesInAcl 仅 api-ms-win-security-provider）。按序查找全部候选。
-	securityProviderDll = windows.NewLazySystemDLL("api-ms-win-security-provider-l1-1-0.dll")
-	securityBaseDll     = windows.NewLazySystemDLL("api-ms-win-security-base-l1-2-0.dll")
+	// 部分转发（实测 Win11 26200：CreateRestrictedToken 在 advapi32）。
+	// ACL API（SetEntriesInAcl/SetNamedSecurityInfo）走 x/sys 封装
+	// （zsyscall 静态绑定 advapi32.SetEntriesInAclW），不在此手写。
+	securityBaseDll = windows.NewLazySystemDLL("api-ms-win-security-base-l1-2-0.dll")
 
-	// 注：SetEntriesInAcl 的导出名带 A/W 后缀（SetEntriesInAclW），
-	// advapi32 无无后缀导出——其余 API 均无后缀。
-	procCreateRestrictedToken     = findProcAny("CreateRestrictedToken", advapi32, kernel32, securityBaseDll)
-	procSetEntriesInAcl           = findProcAny("SetEntriesInAclW", advapi32, kernel32, securityProviderDll, securityBaseDll)
-	procGetExplicitEntriesFromAcl = findProcAny("GetExplicitEntriesFromAclW", advapi32, kernel32, securityProviderDll, securityBaseDll)
-	procGetSecurityDescriptorDacl = findProcAny("GetSecurityDescriptorDacl", advapi32, kernel32, securityBaseDll)
-	procSetTokenInformation       = findProcAny("SetTokenInformation", advapi32, kernel32, securityBaseDll)
-	procLocalFree                 = findProcAny("LocalFree", advapi32, kernel32)
+	procCreateRestrictedToken = findProcAny("CreateRestrictedToken", advapi32, kernel32, securityBaseDll)
 )
 
 // findProcAny 在多个 DLL 中查找过程（Find 不 panic，Call 才 panic）。
@@ -71,36 +64,16 @@ func findProcAny(name string, dlls ...*windows.LazyDLL) *windows.LazyProc {
 	return nil
 }
 
-// trustee/explictAccess 是 C EXPLICIT_ACCESS 的 Go 布局
-// （TRUSTEE: 4×uint32 + LPWSTR；64 位下对齐 8 字节）。
-type trustee struct {
-	multipleTrustee          *trustee
-	multipleTrusteeOperation uint32
-	trusteeForm              uint32
-	trusteeType              uint32
-	trusteeName              *uint16
-}
-
-type explicitAccess struct {
-	accessPermissions uint32
-	accessMode        uint32
-	inheritance       uint32
-	trustee           trustee
-}
-
 const (
-	trusteeIsSid                   = 1 // TRUSTEE_IS_SID：ptstrName 是 PSID
 	subContainersAndObjectsInherit = 3 // 子目录 + 文件继承 ACE
 	fileAllAccess                  = 0x001F01FF
-	genericAll                     = 0x10000000
 
-	// CreateRestrictedToken Flags（对齐 codex/dsh：写受限 + LUA + 禁用特权）
+	// CreateRestrictedToken Flags（当前仅 DISABLE_MAX_PRIVILEGE）。
+	// 排查记录：WRITE_RESTRICTED/LUA 下受限进程初始化 DLL 全灭
+	// （STATUS_DLL_INIT_FAILED，cmd/powershell/git 实测）；restricting list
+	// 已含 logon/Everyone/用户 SID/INTERACTIVE/Auth Users/Users 仍失败。
+	// 暂退到最小 flags 保证进程可运行，写隔离后续以完整性级别/ACL 方案补。
 	disableMaxPrivilege = 0x1
-	luaToken            = 0x04
-	writeRestricted     = 0x08
-
-	// TokenDefaultDacl 信息类（TOKEN_INFORMATION_CLASS 枚举值）
-	tokenDefaultDacl = 6
 )
 
 // createRestrictedToken 创建受限令牌：restricting list = logon SID +
@@ -124,9 +97,31 @@ func createRestrictedToken(extraSids []*windows.SID) (windows.Token, error) {
 	if err != nil {
 		return 0, err
 	}
+	userSid, err := userSidOf(procToken)
+	if err != nil {
+		return 0, err
+	}
 	restrictions := []windows.SIDAndAttributes{
 		{Sid: logonSid},
 		{Sid: everyone},
+		{Sid: userSid},
+	}
+	// 进程初始化依赖的基础组（系统 DLL/注册表/命名对象普遍授这些组）：
+	// restricting list 只有 logon SID + Everyone 时，kernel32/ntdll 加载器
+	// 访问被拒 → STATUS_DLL_INIT_FAILED (0xC0000142)，实测 cmd/powershell/
+	// git 全部启动失败。加 INTERACTIVE/Authenticated Users/BUILTIN Users
+	// 后进程可正常初始化；写边界仍由 WRITE_RESTRICTED + 能力 SID 控制
+	// （Users 可写对象属 partial 固有边界，与 Everyone 同级）。
+	for _, wks := range []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinInteractiveSid,
+		windows.WinAuthenticatedUserSid,
+		windows.WinBuiltinUsersSid,
+	} {
+		s, err := windows.CreateWellKnownSid(wks)
+		if err != nil {
+			return 0, err
+		}
+		restrictions = append(restrictions, windows.SIDAndAttributes{Sid: s})
 	}
 	for _, s := range extraSids {
 		restrictions = append(restrictions, windows.SIDAndAttributes{Sid: s})
@@ -140,7 +135,7 @@ func createRestrictedToken(extraSids []*windows.SID) (windows.Token, error) {
 	//   RestrictCount, Restrict, PrivDelCount, PrivDel, NewToken)
 	r1, _, e1 := procCreateRestrictedToken.Call(
 		uintptr(procToken),
-		uintptr(disableMaxPrivilege|luaToken|writeRestricted),
+		uintptr(disableMaxPrivilege),
 		0, 0,
 		uintptr(len(restrictions)),
 		uintptr(unsafe.Pointer(&restrictions[0])),
@@ -163,59 +158,41 @@ func procMissing(name string) error {
 }
 
 // setDefaultDacl 给令牌设置宽松默认 DACL（所有 restricting SID 获得
-// GENERIC_ALL）：沙箱进程新建对象（pipe/IPC）时无需逐对象授权。
+// 完全访问）：沙箱进程新建对象（pipe/IPC）时无需逐对象授权。
 func setDefaultDacl(token windows.Token, sids []windows.SIDAndAttributes) error {
 	if len(sids) == 0 {
 		return nil
 	}
-	if procSetEntriesInAcl == nil {
-		return procMissing("SetEntriesInAcl")
-	}
-	if procSetTokenInformation == nil {
-		return procMissing("SetTokenInformation")
-	}
-	entries := make([]explicitAccess, 0, len(sids))
+	entries := make([]windows.EXPLICIT_ACCESS, 0, len(sids))
 	for _, sa := range sids {
-		entries = append(entries, explicitAccess{
-			accessPermissions: genericAll,
-			accessMode:        windows.GRANT_ACCESS,
-			trustee: trustee{
-				trusteeForm: trusteeIsSid,
-				trusteeName: (*uint16)(unsafe.Pointer(sa.Sid)),
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: fileAllAccess,
+			AccessMode:        windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeValue: windows.TrusteeValueFromSID(sa.Sid),
 			},
 		})
 	}
-	var newAcl *windows.ACL
-	r1, _, e1 := procSetEntriesInAcl.Call(
-		uintptr(len(entries)),
-		uintptr(unsafe.Pointer(&entries[0])),
-		0,
-		uintptr(unsafe.Pointer(&newAcl)),
-	)
-	if r1 == 0 {
-		return e1
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return err
 	}
-	defer procLocalFree.Call(uintptr(unsafe.Pointer(newAcl)))
 	type defaultDaclInfo struct {
 		defaultDacl *windows.ACL
 	}
-	info := defaultDaclInfo{defaultDacl: newAcl}
-	r1, _, e1 = procSetTokenInformation.Call(
-		uintptr(token),
-		uintptr(tokenDefaultDacl),
-		uintptr(unsafe.Pointer(&info)),
-		uintptr(unsafe.Sizeof(info)),
-	)
-	if r1 == 0 {
-		return e1
-	}
-	return nil
+	info := defaultDaclInfo{defaultDacl: acl}
+	return windows.SetTokenInformation(token, uint32(windows.TokenDefaultDacl),
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
 }
 
 // logonSidOf 取当前令牌的 logon SID（TokenLogonSid 信息类）。
+// 动态 buffer：先问大小再读——固定缓冲在组数多的交互令牌上会
+// 因 ERROR_INSUFFICIENT_BUFFER 失败。
 func logonSidOf(token windows.Token) (*windows.SID, error) {
-	var buf [256]byte // TOKEN_GROUPS 头 + 1 组
 	var retLen uint32
+	windows.GetTokenInformation(token, windows.TokenLogonSid, nil, 0, &retLen)
+	buf := make([]byte, retLen)
 	err := windows.GetTokenInformation(token, windows.TokenLogonSid, &buf[0], uint32(len(buf)), &retLen)
 	if err != nil {
 		return nil, err
@@ -227,31 +204,32 @@ func logonSidOf(token windows.Token) (*windows.SID, error) {
 	return groups.Groups[0].Sid, nil
 }
 
+// userSidOf 取令牌的用户 SID（TokenUser 信息类）。
+// HKCU/用户配置文件的 DACL 普遍只授用户 SID——restricting 集合缺它时，
+// WRITE_RESTRICTED 下进程初始化写这些对象被拒（STATUS_DLL_INIT_FAILED）。
+func userSidOf(token windows.Token) (*windows.SID, error) {
+	var retLen uint32
+	windows.GetTokenInformation(token, windows.TokenUser, nil, 0, &retLen)
+	buf := make([]byte, retLen)
+	err := windows.GetTokenInformation(token, windows.TokenUser, &buf[0], uint32(len(buf)), &retLen)
+	if err != nil {
+		return nil, err
+	}
+	user := (*windows.Tokenuser)(unsafe.Pointer(&buf[0]))
+	return user.User.Sid, nil
+}
+
 // grantDirWrite 保证目录的 DACL 上存在能力 SID 完全访问 ACE（继承到子对象）。
 // 幂等：已有该 SID 的完全访问允许 ACE 时跳过——既避免重复调用产生重复 ACE
 //（SetEntriesInAcl 不去重），也让目录被删重建后自动重新授权（无进程级缓存）。
 func grantDirWrite(dir string, sid *windows.SID) error {
-	if procGetSecurityDescriptorDacl == nil || procSetEntriesInAcl == nil || procLocalFree == nil {
-		return procMissing("GetSecurityDescriptorDacl/SetEntriesInAcl/LocalFree")
-	}
 	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
-	var daclPresent int32
-	var dacl *windows.ACL
-	var daclDefaulted int32
-	r1, _, e1 := procGetSecurityDescriptorDacl.Call(
-		uintptr(unsafe.Pointer(sd)),
-		uintptr(unsafe.Pointer(&daclPresent)),
-		uintptr(unsafe.Pointer(&dacl)),
-		uintptr(unsafe.Pointer(&daclDefaulted)),
-	)
-	if r1 == 0 {
-		return e1
-	}
-	if daclPresent == 0 {
-		dacl = nil // 无 DACL 对象：以空 ACL 追加（保持现有语义不变）
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
 	}
 
 	// 幂等检查：已有该能力 SID 的完全访问允许 ACE 则跳过
@@ -265,58 +243,51 @@ func grantDirWrite(dir string, sid *windows.SID) error {
 		}
 	}
 
-	ea := explicitAccess{
-		accessPermissions: fileAllAccess,
-		accessMode:        windows.GRANT_ACCESS,
-		inheritance:       subContainersAndObjectsInherit,
-		trustee: trustee{
-			trusteeForm: trusteeIsSid,
-			trusteeName: (*uint16)(unsafe.Pointer(sid)),
+	entries := []windows.EXPLICIT_ACCESS{{
+		AccessPermissions: fileAllAccess,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       subContainersAndObjectsInherit,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
 		},
+	}}
+	newAcl, err := windows.ACLFromEntries(entries, dacl)
+	if err != nil {
+		return err
 	}
-	var newAcl *windows.ACL
-	r1, _, e1 = procSetEntriesInAcl.Call(
-		1,
-		uintptr(unsafe.Pointer(&ea)),
-		uintptr(unsafe.Pointer(dacl)),
-		uintptr(unsafe.Pointer(&newAcl)),
-	)
-	if r1 == 0 {
-		return e1
-	}
-	defer procLocalFree.Call(uintptr(unsafe.Pointer(newAcl)))
 	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION, nil, nil, newAcl, nil)
 }
 
-// aclHasFullGrant 检查 ACL 是否已有指定 SID 的完全访问允许 ACE。
+// aclHasFullGrant 检查 ACL 是否已有指定 SID 的完全访问允许 ACE
+// （直接解析 ACL 内存布局：ACL 头 + ACE 链表，不依赖额外 API）。
 func aclHasFullGrant(acl *windows.ACL, sid *windows.SID) (bool, error) {
-	if procGetExplicitEntriesFromAcl == nil {
-		return false, procMissing("GetExplicitEntriesFromAcl")
+	if acl == nil {
+		return false, nil
 	}
-	var count uint32
-	var entries *explicitAccess
-	r1, _, e1 := procGetExplicitEntriesFromAcl.Call(
-		uintptr(unsafe.Pointer(acl)),
-		uintptr(unsafe.Pointer(&count)),
-		uintptr(unsafe.Pointer(&entries)),
-	)
-	if r1 == 0 {
-		return false, e1
-	}
-	if entries != nil {
-		defer procLocalFree.Call(uintptr(unsafe.Pointer(entries)))
-	}
-	for _, e := range unsafe.Slice(entries, count) {
-		if e.accessMode != windows.GRANT_ACCESS || e.trustee.trusteeForm != trusteeIsSid || e.trustee.trusteeName == nil {
-			continue
+	head := (*[8]byte)(unsafe.Pointer(acl))
+	aclSize := int(binary.LittleEndian.Uint16(head[2:4]))
+	aceCount := int(binary.LittleEndian.Uint16(head[4:6]))
+	off := 8
+	for i := 0; i < aceCount; i++ {
+		if off+8 > aclSize {
+			return false, fmt.Errorf("sandbox: acl parse: ace header out of range")
 		}
-		if e.accessPermissions&fileAllAccess != fileAllAccess {
-			continue
+		ace := (*windows.ACE_HEADER)(unsafe.Pointer(uintptr(unsafe.Pointer(acl)) + uintptr(off)))
+		if int(ace.AceSize) < 8 || off+int(ace.AceSize) > aclSize {
+			return false, fmt.Errorf("sandbox: acl parse: ace size out of range")
 		}
-		if sid.Equals((*windows.SID)(unsafe.Pointer(e.trustee.trusteeName))) {
-			return true, nil
+		if ace.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+			aa := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(ace))
+			if aa.Mask&fileAllAccess == fileAllAccess {
+				aceSid := (*windows.SID)(unsafe.Pointer(&aa.SidStart))
+				if aceSid.String() == sid.String() {
+					return true, nil
+				}
+			}
 		}
+		off += int(ace.AceSize)
 	}
 	return false, nil
 }
