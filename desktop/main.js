@@ -26,7 +26,7 @@ const backendBin = isDev
 const trayIcon = process.platform === 'darwin'
   ? path.join(__dirname, 'assets', 'trayTemplate.png')
   : path.join(__dirname, 'assets', 'tray.png')
-const petSize = 200 // 桌宠窗口边长
+const petSize = 100 // 桌宠窗口边长
 const probeTimeout = 5000 // {host}/root.html 探测超时
 const DEFAULT_HOST = 'https://ivec.ai'
 
