@@ -190,7 +190,11 @@ func (b *Browser) execCLI(ctx context.Context, globalFlags []string, args ...str
 	if b.cfg.Session != "" {
 		cmdArgs = append(cmdArgs, "--session", b.cfg.Session)
 	}
-	if b.cfg.UserAgent != "" {
+	// 仅隔离环境（cloud，Namespace 非空）附加 UA：本机 pod 环境不传，
+	// 避免与用户本机 agent-browser daemon 的 launch 配置不一致——
+	// launch_hash 含 user_agent，不一致会触发 daemon 关闭并重launch 浏览器，
+	// 把当前页面重置为 about:blank（kiosk/本机浏览器被白屏）。
+	if b.cfg.UserAgent != "" && b.cfg.Namespace != "" {
 		cmdArgs = append(cmdArgs, "--user-agent", b.cfg.UserAgent)
 	}
 	cmdArgs = append(cmdArgs, globalFlags...)
