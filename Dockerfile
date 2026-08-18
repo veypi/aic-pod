@@ -67,6 +67,7 @@ RUN mkdir -p /workspace
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   SHELL=/bin/bash \
   HOST=https://ivec.ai \
+  NO_SANDBOX=true \
   WORK_DIR=/workspace \
   EXEC_TIMEOUT=30m
 ENTRYPOINT ["aic"]

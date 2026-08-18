@@ -55,11 +55,6 @@
       border-color: #4b83f6
     }
 
-    input[type=checkbox] {
-      width: auto;
-      accent-color: #3b6ef6
-    }
-
     .row {
       display: flex;
       gap: 8px
@@ -159,11 +154,6 @@
     <input id="exec_timeout" ref="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
     <label>默认打开地址 (home_path)</label>
     <input id="home_path" ref="home_path" placeholder="留空 = /（如 /、/a）">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:16px">
-      <input type="checkbox" id="no_sandbox" ref="no_sandbox">
-      关闭进程沙箱 (no_sandbox)
-    </label>
-    <div class="sub" style="margin-top:4px">勾选后所有 exec 调用跳过沙箱包装（等同放弃进程级隔离，仅建议本机可信环境）</div>
     <div class="btns">
       <button @click="save()">保存</button>
       <button id="btnReconnect" ref="btnReconnect" @click="reconnect()">重连</button>
@@ -203,7 +193,6 @@
       $refs.work_dir.value = cfg.work_dir || '';
       $refs.exec_timeout.value = cfg.exec_timeout || '';
       $refs.home_path.value = cfg.home_path || '/';
-      $refs.no_sandbox.checked = !!cfg.no_sandbox;
     } catch (e) {setMsg('加载失败: ' + e.message, false);}
     refreshStatus();
   };
@@ -218,10 +207,9 @@
     const work_dir = $refs.work_dir.value.trim();
     const exec_timeout = $refs.exec_timeout.value.trim();
     const home_path = $refs.home_path.value.trim();
-    const no_sandbox = $refs.no_sandbox.checked;
     try {
       if (key) await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
-      await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout, home_path, no_sandbox}});
+      await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout, home_path}});
       setMsg('已保存，检测平台…', true);
       await probeAndJump(host);
     } catch (e) {setMsg('保存失败: ' + e.message, false);}
