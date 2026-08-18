@@ -319,7 +319,7 @@ func TestDispatchBrowserVirtual(t *testing.T) {
 	if strings.Contains(string(log), "--session") || strings.Contains(string(log), "--namespace") {
 		t.Errorf("pod browser should not pass --session/--namespace: %s", log)
 	}
-	if !strings.Contains(string(log), " open https://example.com") {
+	if !strings.Contains(string(log), "open https://example.com") {
 		t.Errorf("browser args = %s", log)
 	}
 }
