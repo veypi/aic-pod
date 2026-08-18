@@ -24,7 +24,7 @@ const DefaultHost = "https://ivec.ai"
 
 // Version 客户端版本：Makefile -X github.com/veypi/aic-pod/cfg.Version 注入 git
 // 版本，未注入时以此兑底。发版只改本变量与 browser/manifest.json（无 v 前缀）。
-var Version = "v0.5.4"
+var Version = "v0.5.5"
 
 // DeviceType 客户端类型（cli/desktop），启动时固定（desktop main 覆盖为 "desktop"）。
 var DeviceType = "cli"
@@ -32,8 +32,8 @@ var DeviceType = "cli"
 // Options 是 cli 与 desktop 共享的唯一配置模型（配置参数就是一个结构体，
 // vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：
 //
-//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-code）与 env 键
-//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/CODE）的来源，也是配置文件的键
+//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path/-code）与 env 键
+//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH/CODE）的来源，也是配置文件的键
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
 //
@@ -46,6 +46,9 @@ type Options struct {
 	Key         string `json:"key" desc:"binding credential key (from platform device page)"`
 	WorkDir     string `json:"work_dir" desc:"working directory for exec (default: system temp dir)"`
 	ExecTimeout string `json:"exec_timeout" default:"30m" desc:"exec background timeout"`
+	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
+	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
+	HomePath string `json:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
 	// Code 本地 API 校验码（x-aic-code 头，纯随机秘钥，与端口无关）：
 	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
 	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
@@ -78,14 +81,28 @@ var Global = NewOptions()
 
 // NewOptions 返回带默认值的配置实例（Code 留空，由 Load/LoadFile 生成）。
 func NewOptions() *Options {
-	return &Options{Host: DefaultHost, ExecTimeout: "30m"}
+	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/"}
 }
 
-// Normalize 填充缺省值（Host 空 → DefaultHost）。
+// Normalize 填充缺省值（Host 空 → DefaultHost；HomePath 空/非法 → "/"）。
 func (o *Options) Normalize() {
 	if strings.TrimSpace(o.Host) == "" {
 		o.Host = DefaultHost
 	}
+	o.HomePath = o.NormalizedHomePath()
+}
+
+// NormalizedHomePath 返回规范化默认首页路径：空 → "/"；非 / 开头补 "/"；
+// "//" 开头（协议相对 URL 形态，拼接后会被浏览器解析到别的站点）→ "/"。
+func (o *Options) NormalizedHomePath() string {
+	p := strings.TrimSpace(o.HomePath)
+	if p == "" || strings.HasPrefix(p, "//") {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "/" + p
+	}
+	return p
 }
 
 // HostsURL 由平台地址推导设备管理页入口 {host}/hosts（host 可带产品壳路径前缀，
@@ -108,6 +125,26 @@ func (o *Options) HostsURL() string {
 		p += "/hosts"
 	}
 	u.Path = p
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// HomeURL 返回默认打开地址 {host}{home_path}（host 可带产品壳路径前缀，
+// 如 http://127.0.0.1:4000/rses/aiv + /a → http://127.0.0.1:4000/rses/aiv/a）。
+func (o *Options) HomeURL() string {
+	h := strings.TrimSpace(o.Host)
+	if h == "" {
+		h = DefaultHost
+	}
+	if !strings.Contains(h, "://") {
+		h = "https://" + h
+	}
+	u, err := url.Parse(h)
+	if err != nil || u.Host == "" {
+		return h + o.NormalizedHomePath()
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + o.NormalizedHomePath()
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()

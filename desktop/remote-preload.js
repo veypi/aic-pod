@@ -25,5 +25,18 @@ contextBridge.exposeInMainWorld('aicDesktop', {
   // 桌宠拖动（pet 页 mousedown/mousemove 屏幕坐标）与右键菜单
   petDragStart: (x, y) => ipcRenderer.send('pet:drag-start', { x, y }),
   petDragMove: (x, y) => ipcRenderer.send('pet:drag-move', { x, y }),
-  petMenu: () => ipcRenderer.send('pet:menu'),
+  // 右键菜单：携带页面状态（hasAgent/dialogVisible），主进程据此构建菜单项
+  petMenu: (opts) => ipcRenderer.send('pet:menu', opts || {}),
+  // 主进程菜单「打开/隐藏对话框」回投；返回取消函数
+  onPetToggleDialog: (fn) => {
+    const h = () => fn()
+    ipcRenderer.on('pet:toggle-dialog', h)
+    return () => ipcRenderer.removeListener('pet:toggle-dialog', h)
+  },
+  // CLI 指令回投（aic wake → 主进程 pet:cmd → pet 页）；返回取消函数
+  onPetCmd: (fn) => {
+    const h = (e, cmd) => fn(cmd)
+    ipcRenderer.on('pet:cmd', h)
+    return () => ipcRenderer.removeListener('pet:cmd', h)
+  },
 })

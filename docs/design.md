@@ -181,9 +181,9 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 
 - 解析由 vigo/flags 承担（`AutoRegister` 自动注册 flag + env，只需配置结构体）：
   **显式 flag > 环境变量 > 配置文件（LoadConfig 填充默认值）> 结构体默认**
-- flag：`-host` / `-key` / `-work_dir` / `-exec_timeout`（json tag 即 flag 名）
-- env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT`（字段名大写，无前缀）
-- 配置键：`host`（平台地址，默认 https://ivec.ai）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）
+- flag：`-host` / `-key` / `-work_dir` / `-exec_timeout` / `-home_path`（json tag 即 flag 名）
+- env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT` / `HOME_PATH`（字段名大写，无前缀）
+- 配置键：`host`（平台地址，默认 https://ivec.ai）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）
 - NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /api/nc
 - 本地管理 API（api 包 Router）：cli 与 desktop 启动时在 127.0.0.1 随机端口监听，
   打印带 local_code 的引导链接（`{host}/hosts?local_code={port}.{code}`），浏览器访问即绑定/管理本机

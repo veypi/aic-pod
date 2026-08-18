@@ -184,14 +184,15 @@ func TestCodeFormat(t *testing.T) {
 	}
 }
 
-// set-config 白名单：host / work_dir / exec_timeout 可写（host 变更会重启会话）；
+// set-config 白名单：host / work_dir / exec_timeout / home_path 可写（host 变更会重启会话）；
 // key 不走 set_config（只走 bind），body 中的 credential 不得被持久化。
-// work_dir 保存时校验有效性并展开为真实绝对路径（~ 展开、不存在 400）。
+// work_dir 保存时校验有效性并展开为真实绝对路径（~ 展开、不存在 400）；
+// home_path 必须 / 开头（// 开头是协议相对 URL，拒绝），空 = 恢复默认 /。
 func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // 隔离配置文件（darwin UserConfigDir 用 HOME）
 	initTestAPI(t)
 	wd := t.TempDir()
-	body := fmt.Sprintf(`{"work_dir":%q,"credential":"leak","exec_timeout":"5m","host":"http://x:1"}`, wd)
+	body := fmt.Sprintf(`{"work_dir":%q,"credential":"leak","exec_timeout":"5m","host":"http://x:1","home_path":"/a"}`, wd)
 	status, resp := req(t, "POST", "/api/set_config", cfg.Global.Code, body)
 	if status != http.StatusOK {
 		t.Fatalf("set-config = %d %q", status, resp)
@@ -200,7 +201,7 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.WorkDir != wd || o.ExecTimeout != "5m" || o.Host != "http://x:1" {
+	if o.WorkDir != wd || o.ExecTimeout != "5m" || o.Host != "http://x:1" || o.HomePath != "/a" {
 		t.Fatalf("whitelist fields not saved: %+v", o)
 	}
 	if o.Key != "" {
@@ -215,6 +216,28 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"work_dir":"/definitely-not-exist-xyz"}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad work_dir = %d %q, want 400", status, resp)
+	}
+	// home_path 非 / 开头 → 400
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"home_path":"a"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad home_path (no slash) = %d %q, want 400", status, resp)
+	}
+	// home_path // 开头（协议相对 URL）→ 400
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"home_path":"//evil.com/x"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad home_path (protocol-relative) = %d %q, want 400", status, resp)
+	}
+	// 空 home_path → 恢复默认 /
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"home_path":""}`)
+	if status != http.StatusOK {
+		t.Fatalf("empty home_path = %d %q, want 200", status, resp)
+	}
+	o, err = cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.HomePath != "/" {
+		t.Fatalf("empty home_path not reset: %q, want /", o.HomePath)
 	}
 	// ~ 展开：~/subdir → $HOME/subdir（绝对路径落盘）
 	sub := filepath.Join(os.Getenv("HOME"), "subdir")

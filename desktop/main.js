@@ -16,6 +16,7 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog, session, screen } = require('electron')
 const { spawn } = require('child_process')
 const fs = require('fs')
+const net = require('net')
 const path = require('path')
 
 // ---- 常量 ----
@@ -86,6 +87,7 @@ async function start() {
   session.defaultSession.setPreloads([path.join(__dirname, 'remote-preload.js')])
 
   registerIpc()
+  startCmdServer()
 
   // 2. 异步链：spawn 后端 → 握手 → 读配置 → 探测平台 → 跳转
   setStep('正在启动本地服务…')
@@ -102,13 +104,16 @@ async function start() {
   const cfg = await getLocalConfig()
   if (cfg && cfg.host) host = cfg.host
   allowedHostsCache = computeAllowedHosts(host)
+  // 默认打开地址：host + home_path（默认 /；非法值回退 /）
+  let homePath = (cfg && cfg.home_path) || '/'
+  if (typeof homePath !== 'string' || !homePath.startsWith('/') || homePath.startsWith('//')) homePath = '/'
 
   setStep('正在检测平台 ' + host + ' …')
   const reachable = await probeRoot(host)
 
-  // 3. 跳转：平台可达 → {host}/；否则本地 /settings 配置
+  // 3. 跳转：平台可达 → host + homePath；否则本地 /settings 配置
   if (reachable) {
-    loadMain(host + '/')
+    loadMain(host.replace(/\/+$/, '') + homePath)
   } else {
     loadMainLocal('/settings')
     openSettings() // 配置窗口提示用户填 host
@@ -218,6 +223,56 @@ function isLocalFrame(event) {
   }
 }
 
+// ---- 本地指令通道（aic wake 子指令 → pet 组件事件）----
+// unix socket：{appData}/aic/desktop.sock（0600，仅本机同用户进程可连；
+// 路径与 Go 端 os.UserConfigDir()/aic 同位置）。协议 = 换行分隔 JSON 请求/应答。
+// windows 下 Node 走命名管道、与 Go 端拨号不兼容，暂不开启。
+let cmdServer = null
+
+function cmdSockPath() {
+  return path.join(app.getPath('appData'), 'aic', 'desktop.sock')
+}
+
+function startCmdServer() {
+  if (process.platform === 'win32') return
+  const p = cmdSockPath()
+  try { fs.mkdirSync(path.dirname(p), { recursive: true }) } catch (_) { /* 忽略 */ }
+  try { fs.unlinkSync(p) } catch (_) { /* 忽略 */ }
+  cmdServer = net.createServer((conn) => {
+    let buf = ''
+    conn.on('data', (d) => {
+      buf += d
+      let i
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim()
+        buf = buf.slice(i + 1)
+        if (line) handleCmd(line, conn)
+      }
+    })
+    conn.on('error', () => { })
+  })
+  cmdServer.on('error', (e) => console.error('[cmd] server:', e.message))
+  cmdServer.listen(p, () => { try { fs.chmodSync(p, 0o600) } catch (_) { /* 忽略 */ } })
+  app.on('will-quit', () => {
+    try { cmdServer && cmdServer.close() } catch (_) { /* 忽略 */ }
+    try { fs.unlinkSync(p) } catch (_) { /* 忽略 */ }
+  })
+}
+
+// 指令分发：wake = 唤醒 pet 录音（与 pet 页左键单击同效）。转发桌宠窗与主窗口
+// （非 pet 页无监听器自动丢弃）；无任何窗口存活时返回错误供 CLI 退出码反馈
+function handleCmd(line, conn) {
+  const reply = (o) => { try { conn.end(JSON.stringify(o) + '\n') } catch (_) { /* 忽略 */ } }
+  let cmd = null
+  try { cmd = JSON.parse(line) } catch (_) { return reply({ ok: false, error: 'invalid json' }) }
+  if (!cmd || cmd.action !== 'wake') return reply({ ok: false, error: 'unknown action' })
+  let delivered = false
+  for (const w of [petWin, mainWin]) {
+    if (w && !w.isDestroyed()) { w.webContents.send('pet:cmd', { action: 'wake' }); delivered = true }
+  }
+  reply(delivered ? { ok: true } : { ok: false, error: 'no window alive' })
+}
+
 // ---- IPC ----
 function registerIpc() {
   // 白名单下发（remote-preload 顶层 sendSync）
@@ -268,15 +323,22 @@ function registerIpc() {
     return true
   })
 
-  // 桌宠右键菜单：缩小 / 放大 / 关闭
-  ipcMain.on('pet:menu', (e) => {
+  // 桌宠右键菜单：打开/隐藏对话框（有 agent 时，由渲染进程携带状态）/ 缩小 / 放大 / 关闭
+  ipcMain.on('pet:menu', (e, opts) => {
     if (!petWin || e.sender !== petWin.webContents) return
-    Menu.buildFromTemplate([
+    const o = opts || {}
+    const items = []
+    if (o.hasAgent) {
+      items.push({ label: o.dialogVisible ? '隐藏对话框' : '打开对话框', click: () => petWin?.webContents.send('pet:toggle-dialog') })
+      items.push({ type: 'separator' })
+    }
+    items.push(
       { label: '缩小', click: () => resizePet(-1) },
       { label: '放大', click: () => resizePet(1) },
       { type: 'separator' },
       { label: '关闭', click: () => leavePet() },
-    ]).popup({ window: petWin })
+    )
+    Menu.buildFromTemplate(items).popup({ window: petWin })
   })
 
   // 桌宠拖动（pet 页）

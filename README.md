@@ -17,6 +17,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 | `HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
 | `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
+| `HOME_PATH` | `-home_path` | `home_path` | `/` | 桌面端默认打开地址（host 后的路径，如 `/`、`/a`） |
 
 本地管理 API（LocalAPI）由 api 包提供（cli/desktop 共用，vigo 框架实现）：
 `aic run` 启动时在 127.0.0.1 随机端口监听并**打印带 local_code 的引导链接**，
@@ -36,7 +37,7 @@ aic -key "<key>"               # 临时参数覆盖
 # 查看全部参数：aic -h
 ```
 
-临时参数（-host / -key / -work_dir / -exec_timeout，或对应环境变量）只影响本次运行；
+临时参数（-host / -key / -work_dir / -exec_timeout / -home_path，或对应环境变量）只影响本次运行；
 **永久生效请直接编辑 `UserConfigDir/aic/config.yaml`**（或浏览器打开 management page 绑定/设置，
 页面写操作会自动持久化）。
 

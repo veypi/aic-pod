@@ -1,12 +1,14 @@
 // AIC CLI — 部署在 PC (Windows/macOS/Linux) 上的 host agent，通过 NATS 连接 AIC 平台。
 //
-// 主命令即运行（`aic`），无子指令；临时参数走 flag（AutoRegister），
-// 永久生效用户直接改配置文件（UserConfigDir/aic/config.yaml，cli/desktop 共享，cfg 包）。
+// 主命令即运行（`aic`）；唯一子指令 `wake`：唤醒桌宠/pet 页录音（仅 desktop 形态，
+// 经 Electron 本地指令通道转发 pet:cmd 事件，效果等同 pet 页左键单击）。
+// 临时参数走 flag（AutoRegister），永久生效用户直接改配置文件
+//（UserConfigDir/aic/config.yaml，cli/desktop 共享，cfg 包）。
 //
 // 配置解析由 vigo/flags 承担（AutoRegister 自动注册 flag + env，只需配置结构体）：
 //
-//	flag：-host / -key / -work_dir / -exec_timeout
-//	env ：HOST / KEY / WORK_DIR / EXEC_TIMEOUT
+//	flag：-host / -key / -work_dir / -exec_timeout / -home_path
+//	env ：HOST / KEY / WORK_DIR / EXEC_TIMEOUT / HOME_PATH
 //
 // 解析链：显式 flag > env > 配置文件（config.yaml）> 结构体 default tag
 // 日志统一 vigo/logv（cli：console + 文件双写，get_log 读日志文件尾部）。
@@ -26,6 +28,15 @@ import (
 )
 
 func main() {
+	// 子指令：wake = 唤醒桌宠录音（仅 desktop 形态；socket 由 Electron 主进程创建）
+	if len(os.Args) > 1 && os.Args[1] == "wake" {
+		if err := pod.Wake(); err != nil {
+			fmt.Fprintln(os.Stderr, "wake:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// 客户端身份：Electron 壳以 env 指定 desktop（设备列表显示类型）；cli 默认不变
 	if dt := os.Getenv("AIC_DEVICE_TYPE"); dt != "" {
 		cfg.DeviceType = dt

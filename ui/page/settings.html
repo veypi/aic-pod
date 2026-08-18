@@ -152,6 +152,8 @@
     <input id="work_dir" ref="work_dir" placeholder="留空 = 系统临时目录">
     <label>后台超时 (exec_timeout)</label>
     <input id="exec_timeout" ref="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
+    <label>默认打开地址 (home_path)</label>
+    <input id="home_path" ref="home_path" placeholder="留空 = /（如 /、/a）">
     <div class="btns">
       <button @click="save()">保存</button>
       <button id="btnReconnect" ref="btnReconnect" @click="reconnect()">重连</button>
@@ -190,6 +192,7 @@
       $refs.key.value = cfg.key || '';
       $refs.work_dir.value = cfg.work_dir || '';
       $refs.exec_timeout.value = cfg.exec_timeout || '';
+      $refs.home_path.value = cfg.home_path || '/';
     } catch (e) {setMsg('加载失败: ' + e.message, false);}
     refreshStatus();
   };
@@ -203,9 +206,10 @@
     const key = $refs.key.value.trim();
     const work_dir = $refs.work_dir.value.trim();
     const exec_timeout = $refs.exec_timeout.value.trim();
+    const home_path = $refs.home_path.value.trim();
     try {
       if (key) await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
-      await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout}});
+      await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout, home_path}});
       setMsg('已保存，检测平台…', true);
       await probeAndJump(host);
     } catch (e) {setMsg('保存失败: ' + e.message, false);}

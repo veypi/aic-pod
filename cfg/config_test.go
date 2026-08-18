@@ -28,6 +28,9 @@ func TestConfigLoadDefault(t *testing.T) {
 	if o.Key != "" {
 		t.Fatalf("default credential = %q, want empty", o.Key)
 	}
+	if o.HomePath != "/" {
+		t.Fatalf("default home_path = %q, want /", o.HomePath)
+	}
 	if Global != o {
 		t.Fatal("Load should set Global")
 	}
@@ -40,6 +43,7 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 		Key:         "h1.2.secret.u1",
 		WorkDir:     "/workspace",
 		ExecTimeout: "5m",
+		HomePath:    "/a",
 	}
 	if err := Save(&want); err != nil {
 		t.Fatal(err)
@@ -49,7 +53,7 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 导出字段逐项比较（port 为进程级隐私字段；code 随机生成不落盘，不参与比较）
-	if got.Host != want.Host || got.Key != want.Key || got.WorkDir != want.WorkDir || got.ExecTimeout != want.ExecTimeout {
+	if got.Host != want.Host || got.Key != want.Key || got.WorkDir != want.WorkDir || got.ExecTimeout != want.ExecTimeout || got.HomePath != want.HomePath {
 		t.Fatalf("round trip = %+v, want %+v", *got, want)
 	}
 	if got.Code == "" {
@@ -103,6 +107,43 @@ func TestHostsURL(t *testing.T) {
 		o := &Options{Host: c.in}
 		if got := o.HostsURL(); got != c.want {
 			t.Errorf("HostsURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestHomeURL(t *testing.T) {
+	cases := []struct{ host, home, want string }{
+		{"", "", "https://ivec.ai/"},
+		{"https://ivec.ai", "", "https://ivec.ai/"},
+		{"https://ivec.ai", "/a", "https://ivec.ai/a"},
+		{"http://localhost:4000/", "/", "http://localhost:4000/"},
+		{"http://127.0.0.1:4000/rses/aiv", "/agents", "http://127.0.0.1:4000/rses/aiv/agents"},
+		{"ivec.ai", "/a", "https://ivec.ai/a"},
+		{"http://x:1/?q=1", "/a", "http://x:1/a"},
+	}
+	for _, c := range cases {
+		o := &Options{Host: c.host, HomePath: c.home}
+		if got := o.HomeURL(); got != c.want {
+			t.Errorf("HomeURL(%q, %q) = %q, want %q", c.host, c.home, got, c.want)
+		}
+	}
+}
+
+func TestNormalizedHomePath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "/"},
+		{"  ", "/"},
+		{"/", "/"},
+		{"/a", "/a"},
+		{"/agents/chat", "/agents/chat"},
+		{"a", "/a"},     // 缺斜杠自动补
+		{"//evil.com", "/"}, // 协议相对 URL 形态 → 拒绝回退
+		{" /a ", "/a"},  // 去空白
+	}
+	for _, c := range cases {
+		o := &Options{HomePath: c.in}
+		if got := o.NormalizedHomePath(); got != c.want {
+			t.Errorf("NormalizedHomePath(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
