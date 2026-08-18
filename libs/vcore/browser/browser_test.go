@@ -238,6 +238,9 @@ func TestBrowserExecProcsManaged(t *testing.T) {
 		Session:   "s1",
 		TempDir:   t.TempDir(),
 		ExecProcs: m,
+		// 真实 host 路径即 NoSandbox（§5.6/§5.10），测试对齐；
+		// 该用例验证托管机制（落盘/path/不后台），与沙箱无关。
+		NoSandbox: true,
 		LogPathFn: func(msgID string) string { return filepath.Join(logDir, msgID+".log") },
 	})
 	defer b.Close()

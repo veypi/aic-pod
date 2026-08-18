@@ -33,6 +33,7 @@ type Options struct {
 	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
 	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
 	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
+	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
 	OnLog       func(format string, args ...any)
 }
 
@@ -75,10 +76,12 @@ func New(opts Options) *Client {
 			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		}
 	}
+	procs := exec_procs.NewManager(opts.ExecTimeout)
+	procs.NoSandbox = opts.NoSandbox
 	c := &Client{
 		opts:     opts,
 		replay:   &replayCache{store: map[string]time.Time{}},
-		procs:    exec_procs.NewManager(opts.ExecTimeout),
+		procs:    procs,
 		browsers: map[string]*vbrowser.Browser{},
 		logf:     logf,
 	}
@@ -184,6 +187,7 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	opts.DeviceName = c.opts.DeviceName
 	oldURL := ResolveNATSURL(c.opts.Host)
 	c.procs.SetExecTimeout(opts.ExecTimeout)
+	c.procs.NoSandbox = opts.NoSandbox
 	c.opts = opts
 	if ResolveNATSURL(opts.Host) != oldURL {
 		if c.nc != nil {

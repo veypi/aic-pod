@@ -96,6 +96,9 @@ type Manager struct {
 	mu          sync.Mutex
 	execTimeout time.Duration // 后台进程自有超时
 	tasks       map[string]*Entry
+	// NoSandbox 全局免沙箱（§5.10）：置 true 后所有 Start 调用跳过沙箱包装
+	// （与 StartOptions.NoSandbox 同效）。配置源：cfg.Options.NoSandbox。
+	NoSandbox bool
 }
 
 // NewManager 创建管理器。execTimeout 为后台进程自有超时（0 = DefaultExecTimeout）。
@@ -137,12 +140,13 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		return nil, fmt.Errorf("exec: create log file: %v", err)
 	}
 
-	// 沙箱包装（§5.10）：未显式免沙箱（NoSandbox）的进程调用一律进沙箱——
-	// 审批通过（9）也不例外，免沙箱只能由显式 nosandbox 请求 + 审批获得；
+	// 沙箱包装（§5.10）：未显式免沙箱（NoSandbox）且全局未禁用（m.NoSandbox）
+	// 的进程调用一律进沙箱——审批通过（9）也不例外，免沙箱只能由显式
+	// nosandbox 请求 + 审批或全局 no_sandbox 配置获得；
 	// 无可用后端时 fail-closed 返回错误（命令不执行，绝不静默裸跑）。
 	execArgv := opts.Exec
 	var plan launchPlan
-	if !opts.NoSandbox && len(opts.Exec) > 0 {
+	if !opts.NoSandbox && !m.NoSandbox && len(opts.Exec) > 0 {
 		var err error
 		plan, err = planConfined(opts.Level, opts.Workdir, opts.Exec)
 		if err != nil {

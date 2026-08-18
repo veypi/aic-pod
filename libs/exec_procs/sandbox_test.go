@@ -1,9 +1,12 @@
 package exec_procs
 
 import (
+	"context"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/veypi/aic-pod/libs/proto"
 )
@@ -43,6 +46,25 @@ func TestConfineConfined(t *testing.T) {
 		if len(got) == 0 || got[0] == argv[0] {
 			t.Fatalf("Confine(%d) = %v, want wrapped argv", level, got)
 		}
+	}
+}
+
+// Manager.NoSandbox 全局免沙箱：置 true 后 Start 跳过沙箱包装（与
+// StartOptions.NoSandbox 同效）——无沙箱后端的环境亦正常执行（§5.10）。
+func TestManagerNoSandboxGlobal(t *testing.T) {
+	m := NewManager(time.Minute)
+	m.NoSandbox = true
+	res, err := m.Start(context.Background(), StartOptions{
+		ID:      "t-global-nosb",
+		Command: "echo hi",
+		LogPath: filepath.Join(t.TempDir(), "out.log"),
+		Exec:    []string{"sh", "-c", "echo hi"},
+	})
+	if err != nil {
+		t.Fatalf("start with global NoSandbox: %v", err)
+	}
+	if res.ExitCode != 0 || !strings.Contains(res.Content, "hi") {
+		t.Fatalf("result = %+v, want exit 0 with hi", res)
 	}
 }
 

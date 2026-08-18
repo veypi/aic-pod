@@ -192,7 +192,7 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // 隔离配置文件（darwin UserConfigDir 用 HOME）
 	initTestAPI(t)
 	wd := t.TempDir()
-	body := fmt.Sprintf(`{"work_dir":%q,"credential":"leak","exec_timeout":"5m","host":"http://x:1","home_path":"/a"}`, wd)
+	body := fmt.Sprintf(`{"work_dir":%q,"credential":"leak","exec_timeout":"5m","host":"http://x:1","home_path":"/a","no_sandbox":true}`, wd)
 	status, resp := req(t, "POST", "/api/set_config", cfg.Global.Code, body)
 	if status != http.StatusOK {
 		t.Fatalf("set-config = %d %q", status, resp)
@@ -201,11 +201,23 @@ func TestLocalAPISetConfigWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.WorkDir != wd || o.ExecTimeout != "5m" || o.Host != "http://x:1" || o.HomePath != "/a" {
+	if o.WorkDir != wd || o.ExecTimeout != "5m" || o.Host != "http://x:1" || o.HomePath != "/a" || !o.NoSandbox {
 		t.Fatalf("whitelist fields not saved: %+v", o)
 	}
 	if o.Key != "" {
 		t.Fatalf("credential persisted via set_config: %+v", o)
+	}
+	// no_sandbox 回落 false
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"no_sandbox":false}`)
+	if status != http.StatusOK {
+		t.Fatalf("set-config no_sandbox=false = %d %q", status, resp)
+	}
+	o, err = cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.NoSandbox {
+		t.Fatalf("no_sandbox not reset: %+v", o)
 	}
 	// 非法 exec_timeout → 400
 	status, _ = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"exec_timeout":"bogus"}`)

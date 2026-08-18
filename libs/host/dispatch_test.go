@@ -89,6 +89,9 @@ func TestDispatchVerifyChain(t *testing.T) {
 
 func TestDispatchGrantedDepthCheck(t *testing.T) {
 	c, _ := testClient(t)
+	// 该用例验证授权深度检查（granted 与 required 的匹配），与沙箱无关：
+	// 全局免沙箱隔离环境差异（§5.10），使「放行」分支聚焦授权语义。
+	c.procs.NoSandbox = true
 
 	// granted=0 显式禁用 → rejected（不可审批，§2.4 level 0 语义）
 	resp := c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
@@ -327,7 +330,8 @@ func TestDispatchBrowserVirtual(t *testing.T) {
 // 本地命令 workdir 缺省回落：请求未携带 workdir 时使用 host 端配置工作区（§2.1.1）。
 func TestExecCmdWorkdirFallback(t *testing.T) {
 	wd := t.TempDir()
-	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute})
+	// 该用例验证 workdir 缺省回落机制，与沙箱无关：全局免沙箱隔离环境差异（§5.10）
+	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute, NoSandbox: true})
 	c.hostID = "host_test01"
 
 	// 不带 workdir → bash -c pwd 应返回配置工作区

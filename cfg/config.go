@@ -49,6 +49,10 @@ type Options struct {
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
+	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
+	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
+	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
+	NoSandbox bool `json:"no_sandbox" desc:"disable process sandbox for exec calls (default: sandbox enabled)"`
 	// Code 本地 API 校验码（x-aic-code 头，纯随机秘钥，与端口无关）：
 	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
 	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。

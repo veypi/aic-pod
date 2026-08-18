@@ -363,6 +363,7 @@ ssh:     [lateral-movement]       psexec:             [lateral-movement]
 §7.5 的 OS 级硬隔离已落地为 exec_procs 统一沙箱层（`libs/exec_procs/sandbox*.go`）：
 
 - **判定**：未显式 `NoSandbox` 的进程调用一律进沙箱——**审批通过（LevelApproved 9）也不例外**：9 只是「审批通过」的等级语义，免沙箱唯一通道是显式 nosandbox 标记。level 0（未设置/异常）按 read-only 兜底（fail-closed）。无可用后端拒绝执行，绝不静默裸跑。
+- **全局开关 `no_sandbox`**（2026-08-19）：`cfg.Options.NoSandbox`（配置文件 `no_sandbox: true` / flag `-no_sandbox` / env `NO_SANDBOX`，desktop 本地设置页 checkbox）置 true 后**所有** exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）——等同放弃进程级隔离，仅建议本机可信环境。注入链：cfg → optionsOf → `Manager.NoSandbox` → Start 判定（`!opts.NoSandbox && !m.NoSandbox`）；本地 API `set_config` 可写并即时 `Reconfigure` 生效（无需重启）。
 - **exec `nosandbox` 参数**（仅物理 host）：AI 可显式请求免沙箱执行——required 提升 Critical(4) 必转人工审批（两端各自独立判定：server procs CheckLevel + host checkGranted 纵深）；审批通过后 granted 9 + nosandbox 标记随请求下发，exec_procs 仅据标记免沙箱。sudo 等提权需求统一走此通道（不引入独立命令）。
 - **后端**：linux = bubblewrap（功能性 probe 后缓存）；darwin = sandbox-exec（Seatbelt，固定 /usr/bin 路径）；windows = 受限令牌（CreateRestrictedToken，WRITE_RESTRICTED|LUA|禁用最大特权）+ 能力 SID ACL 写授权（幂等：已有该 SID 完全访问 ACE 则跳过，目录被删重建后自动补授，无进程级缓存状态）；其他平台 fail-closed。
 - **workspace-write 可写根**：工作区 + 平台临时区 + 常见工具链缓存目录（`cacheRoots()`，存在性过滤）：darwin `~/Library/Caches`+`~/.npm`；linux `$XDG_CACHE_HOME`（缺省 `~/.cache`）+`~/.npm`；windows 精确子目录 `%LOCALAPPDATA%\{go-build,npm-cache,pip\Cache}`（**不放行整个 LOCALAPPDATA**——其下含大量应用数据）；`$GOCACHE`/`$XDG_CACHE_HOME` 显式设置时并入。缓存投毒风险属可接受边界（沙箱防灾难性破坏，不防持续控制构建链的定向攻击）。
