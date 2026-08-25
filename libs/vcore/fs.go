@@ -11,9 +11,9 @@ import (
 
 // fsParams 是 fs 指令集的原生 JSON 参数（§4：8 action，三端 schema 完全一致）。
 // fs 是文件服务工具：read/write/edit/ls/rg/cp/mv/rm，全部经此分发。
+// 无 workdir 参数：路径一律绝对（ls/rg 省略 path 时缺省 = env.Workdir）。
 type fsParams struct {
-	Action  string `json:"action"`
-	Workdir string `json:"workdir,omitempty"`
+	Action string `json:"action"`
 
 	// 目标路径：read/write/edit/ls/rg/rm
 	Path string `json:"path,omitempty"`
@@ -29,26 +29,18 @@ type fsParams struct {
 	Edits []editOp `json:"edits,omitempty"`
 
 	// ls（depth>1 即递归树，吸收原 tree 指令）
-	Depth *int   `json:"depth,omitempty"` // 默认 1，上限 5
-	All   bool   `json:"all,omitempty"`   // 收录点开头隐藏项（默认跳过）
-	Sort  string `json:"sort,omitempty"`  // "name"（默认，UTF-8 字节序）| "time"（mtime 降序，同值按名称）
+	Depth *int `json:"depth,omitempty"` // 默认 1，上限 5
+	All   bool `json:"all,omitempty"`   // 收录点开头隐藏项（默认跳过）；rg 同义
 
-	// rg
-	Pattern    string   `json:"pattern,omitempty"`      // 内容搜索模式（files=true 时禁用）
-	Glob       []string `json:"glob,omitempty"`         // 文件名 glob（basename，OR 语义；不支持 ! 与 **）
-	Files      bool     `json:"files,omitempty"`        // true = 纯文件列举（原 --files）
-	Hidden     bool     `json:"hidden,omitempty"`       // 收录隐藏文件/目录（原 --hidden）
-	Insensitive bool   `json:"insensitive,omitempty"`  // 大小写不敏感（原 -i）
-	Word       bool     `json:"word,omitempty"`         // 词边界匹配（原 -w）
-	FilesOnly  bool     `json:"files_only,omitempty"`   // 只输出命中文件路径（原 -l）
-	Count      bool     `json:"count,omitempty"`        // 只输出每文件命中数（原 -c）
-	MaxPerFile int      `json:"max_per_file,omitempty"` // 每文件命中上限（原 -m）
+	// rg：pattern 缺省 = 文件列举模式；smart case（pattern 全小写 → 不敏感）
+	Pattern string   `json:"pattern,omitempty"`
+	Glob    []string `json:"glob,omitempty"` // 文件名 glob（basename，OR 语义；不支持 ! 与 **）
 
 	// cp / mv
 	Src string `json:"src,omitempty"`
 	Dst string `json:"dst,omitempty"`
 
-	// cp（目录）/ rm（非空目录）
+	// rm（非空目录）；cp 目录自动递归，无需确认
 	Recursive bool `json:"recursive,omitempty"`
 }
 
@@ -75,27 +67,23 @@ func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) 
 	if env.VFS == nil {
 		return nil, fsErr(p.Action, "file service is not enabled")
 	}
-	env2 := *env
-	if p.Workdir != "" {
-		env2.Workdir = p.Workdir
-	}
 	switch p.Action {
 	case "read":
-		return fsRead(ctx, &env2, &p)
+		return fsRead(ctx, env, &p)
 	case "write":
-		return fsWrite(ctx, &env2, &p)
+		return fsWrite(ctx, env, &p)
 	case "edit":
-		return fsEdit(ctx, &env2, &p)
+		return fsEdit(ctx, env, &p)
 	case "ls":
-		return fsLs(ctx, &env2, &p)
+		return fsLs(ctx, env, &p)
 	case "rg":
-		return fsRg(ctx, &env2, &p)
+		return fsRg(ctx, env, &p)
 	case "cp":
-		return fsCp(ctx, &env2, &p)
+		return fsCp(ctx, env, &p)
 	case "mv":
-		return fsMv(ctx, &env2, &p)
+		return fsMv(ctx, env, &p)
 	case "rm":
-		return fsRm(ctx, &env2, &p)
+		return fsRm(ctx, env, &p)
 	}
 	return nil, &proto.ExecError{Tool: proto.ToolFS,
 		Reason: fmt.Sprintf("unknown action %q (supported: read, write, edit, ls, rg, cp, mv, rm)", p.Action)}

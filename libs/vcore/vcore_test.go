@@ -10,7 +10,7 @@ import (
 
 var testTime = time.Unix(1700000000, 0)
 
-// rg files 平台上限 100 条：超限标记 truncated，恰好 100 条不误标（§4.6）。
+// rg 列举模式（pattern 缺省）平台上限 100 条：超限标记 truncated，恰好 100 条不误标（§4.6）。
 func TestRgFilesLimit(t *testing.T) {
 	vfs := NewMemVFS()
 	for i := 0; i < 101; i++ {
@@ -18,7 +18,7 @@ func TestRgFilesLimit(t *testing.T) {
 	}
 	env := &Env{VFS: vfs, Workdir: "/d"}
 
-	res, err := RunFS(context.Background(), env, []byte(`{"action":"rg","files":true,"path":"/d"}`))
+	res, err := RunFS(context.Background(), env, []byte(`{"action":"rg","path":"/d"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestRgFilesLimit(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		vfs2.SetFile(fmt.Sprintf("/d/f%03d.txt", i), []byte("x"), testTime)
 	}
-	res2, err := RunFS(context.Background(), &Env{VFS: vfs2, Workdir: "/d"}, []byte(`{"action":"rg","files":true,"path":"/d"}`))
+	res2, err := RunFS(context.Background(), &Env{VFS: vfs2, Workdir: "/d"}, []byte(`{"action":"rg","path":"/d"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

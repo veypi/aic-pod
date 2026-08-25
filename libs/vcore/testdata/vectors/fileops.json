@@ -83,16 +83,20 @@
       "expectError": "fs cp: destination /b.txt already exists"
     },
     {
-      "name": "cp dir without recursive",
+      "name": "cp dir auto recursive",
       "cmd": "fs",
       "params": {"action": "cp", "src": "/d", "dst": "/e"},
       "files": {"/d/a.txt": "a"},
-      "expectError": "fs cp: /d is a directory (set recursive=true)"
+      "expect": {
+        "content": "copied /d to /e",
+        "attrs": {"action": "cp", "path": "/e", "source_path": "/d"}
+      },
+      "expectFiles": {"/d/": "", "/d/a.txt": "a", "/e/": "", "/e/a.txt": "a"}
     },
     {
-      "name": "cp recursive dir",
+      "name": "cp nested dir",
       "cmd": "fs",
-      "params": {"action": "cp", "src": "/d", "dst": "/e", "recursive": true},
+      "params": {"action": "cp", "src": "/d", "dst": "/e"},
       "files": {"/d/a.txt": "a", "/d/sub/b.txt": "b"},
       "expect": {
         "content": "copied /d to /e",
@@ -103,7 +107,7 @@
     {
       "name": "cp into itself",
       "cmd": "fs",
-      "params": {"action": "cp", "src": "/d", "dst": "/d/sub", "recursive": true},
+      "params": {"action": "cp", "src": "/d", "dst": "/d/sub"},
       "files": {"/d/a.txt": "a"},
       "expectError": "fs cp: cannot copy directory /d into itself: /d/sub"
     },

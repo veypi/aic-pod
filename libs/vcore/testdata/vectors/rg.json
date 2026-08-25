@@ -32,13 +32,23 @@
       }
     },
     {
-      "name": "rg insensitive",
+      "name": "rg smart case insensitive (lowercase pattern)",
       "cmd": "fs",
-      "params": {"action": "rg", "pattern": "todo", "path": "/a.txt", "insensitive": true},
+      "params": {"action": "rg", "pattern": "todo", "path": "/a.txt"},
       "files": {"/a.txt": "TODO: fix\nnothing\nTodo: ship\n"},
       "expect": {
         "content": "/a.txt:1:TODO: fix\n/a.txt:3:Todo: ship",
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg smart case sensitive (uppercase in pattern)",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "Todo", "path": "/a.txt"},
+      "files": {"/a.txt": "TODO: fix\nnothing\nTodo: ship\n"},
+      "expect": {
+        "content": "/a.txt:3:Todo: ship",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
       }
     },
     {
@@ -49,36 +59,6 @@
       "expect": {
         "content": "/a.txt:1:foo123 ok\n/a.txt:3:baz42",
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
-      }
-    },
-    {
-      "name": "rg max_per_file not global truncation",
-      "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "max_per_file": 1},
-      "files": {"/a.txt": "foo 1\nfoo 2\nfoo 3\n"},
-      "expect": {
-        "content": "/a.txt:1:foo 1",
-        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
-      "name": "rg max_per_file applies per file",
-      "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/d", "max_per_file": 1},
-      "files": {"/d/a.txt": "foo\nfoo\n", "/d/b.txt": "foo\nfoo\n"},
-      "expect": {
-        "content": "/d/a.txt:1:foo\n/d/b.txt:1:foo",
-        "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "false"}
-      }
-    },
-    {
-      "name": "rg files_only",
-      "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/docs", "files_only": true},
-      "files": {"/docs/a.txt": "foo\nbar\n", "/docs/b.txt": "nothing\n", "/docs/sub/c.txt": "foo\n"},
-      "expect": {
-        "content": "/docs/a.txt\n/docs/sub/c.txt",
-        "attrs": {"action": "rg", "path": "/docs", "rows": "2", "truncated": "false"}
       }
     },
     {
@@ -112,9 +92,9 @@
       }
     },
     {
-      "name": "rg hidden includes dotfiles and dot dirs",
+      "name": "rg all includes dotfiles and dot dirs",
       "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/p", "hidden": true},
+      "params": {"action": "rg", "pattern": "foo", "path": "/p", "all": true},
       "files": {"/p/a.txt": "foo\n", "/p/.env": "foo secret\n", "/p/.git/config": "foo\n"},
       "expect": {
         "content": "/p/.env:1:foo secret\n/p/.git/config:1:foo\n/p/a.txt:1:foo",
@@ -153,11 +133,14 @@
       "expectError": "fs rg: invalid pattern: error parsing regexp: missing closing ]: `[`"
     },
     {
-      "name": "rg missing pattern",
+      "name": "rg no pattern lists files (single file)",
       "cmd": "fs",
       "params": {"action": "rg", "path": "/a.txt"},
       "files": {"/a.txt": "x\n"},
-      "expectError": "fs rg: pattern is required (or set files=true to list files)"
+      "expect": {
+        "content": "/a.txt",
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
     },
     {
       "name": "rg unknown field rejected",
@@ -199,7 +182,7 @@
     {
       "name": "rg files byte order",
       "cmd": "fs",
-      "params": {"action": "rg", "files": true, "path": "/d"},
+      "params": {"action": "rg", "path": "/d"},
       "files": {"/d/c.txt": "c", "/d/a.txt": "a", "/d/sub/b.txt": "b"},
       "expect": {
         "content": "/d/a.txt\n/d/c.txt\n/d/sub/b.txt",
@@ -209,7 +192,7 @@
     {
       "name": "rg files glob filter",
       "cmd": "fs",
-      "params": {"action": "rg", "files": true, "path": "/d", "glob": ["*.go"]},
+      "params": {"action": "rg", "path": "/d", "glob": ["*.go"]},
       "files": {"/d/a.go": "a", "/d/b.txt": "b", "/d/sub/c.go": "c"},
       "expect": {
         "content": "/d/a.go\n/d/sub/c.go",
@@ -219,7 +202,7 @@
     {
       "name": "rg files defaults to workdir",
       "cmd": "fs",
-      "params": {"action": "rg", "files": true},
+      "params": {"action": "rg"},
       "workdir": "/d",
       "files": {"/d/x.txt": "x", "/d/y.txt": "y"},
       "expect": {
@@ -228,19 +211,9 @@
       }
     },
     {
-      "name": "rg files single file",
-      "cmd": "fs",
-      "params": {"action": "rg", "files": true, "path": "/a.txt"},
-      "files": {"/a.txt": "hello"},
-      "expect": {
-        "content": "/a.txt",
-        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
       "name": "rg files glob no match",
       "cmd": "fs",
-      "params": {"action": "rg", "files": true, "path": "/d", "glob": ["*.rs"]},
+      "params": {"action": "rg", "path": "/d", "glob": ["*.rs"]},
       "files": {"/d/a.txt": "a"},
       "expect": {
         "content": "no files matched globs *.rs in /d",
@@ -248,36 +221,9 @@
       }
     },
     {
-      "name": "rg files rejects search params",
+      "name": "rg word boundary via \\b in pattern",
       "cmd": "fs",
-      "params": {"action": "rg", "files": true, "path": "/d", "insensitive": true},
-      "files": {"/d/a.txt": "a"},
-      "expectError": "fs rg: files mode cannot be combined with search params (pattern, insensitive, files_only, count, word, max_per_file)"
-    },
-    {
-      "name": "rg count per file",
-      "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/docs", "count": true},
-      "files": {"/docs/a.txt": "foo one\nbar\nfoo two\n", "/docs/b.txt": "nothing\n", "/docs/c.txt": "foo\n"},
-      "expect": {
-        "content": "/docs/a.txt:2\n/docs/c.txt:1",
-        "attrs": {"action": "rg", "path": "/docs", "rows": "2", "truncated": "false"}
-      }
-    },
-    {
-      "name": "rg count with max_per_file still counts all",
-      "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "count": true, "max_per_file": 1},
-      "files": {"/a.txt": "foo one\nfoo two\nfoo three\n"},
-      "expect": {
-        "content": "/a.txt:3",
-        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
-      }
-    },
-    {
-      "name": "rg word boundary",
-      "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "word": true},
+      "params": {"action": "rg", "pattern": "\\bfoo\\b", "path": "/a.txt"},
       "files": {"/a.txt": "foo bar\nfoobar\na foo.\n"},
       "expect": {
         "content": "/a.txt:1:foo bar\n/a.txt:3:a foo.",

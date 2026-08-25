@@ -41,9 +41,10 @@
       "expectError": "fs write: content is required"
     },
     {
-      "name": "write with workdir",
+      "name": "write relative path via env workdir",
       "cmd": "fs",
-      "params": {"action": "write", "path": "notes.txt", "content": "hello", "workdir": "/wd"},
+      "params": {"action": "write", "path": "notes.txt", "content": "hello"},
+      "workdir": "/wd",
       "files": {"/wd/": ""},
       "expect": {
         "content": "wrote file: /wd/notes.txt (1 lines, 5 bytes)",

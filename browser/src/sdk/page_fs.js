@@ -33,23 +33,14 @@ const ALLOWED_FIELDS = new Set([
   "msg_id",
   "action",
   "path",
-  "workdir",
   "offset",
   "limit",
   "content",
   "edits",
   "depth",
   "all",
-  "sort",
   "pattern",
   "glob",
-  "files",
-  "hidden",
-  "insensitive",
-  "word",
-  "files_only",
-  "count",
-  "max_per_file",
   "src",
   "dst",
   "recursive",
@@ -355,11 +346,10 @@ export class PageFS {
     return this._db;
   }
 
-  // _env 构造路径环境：本地单根，workdir 缺省 /（无 $ 变量、无会话绑定）
-  _env(workdirRaw) {
-    return {
-      workdir: workdirRaw ? resolvePath(String(workdirRaw), "/") : "/",
-    };
+  // _env 构造路径环境：本地单根，workdir 恒 /（无 $ 变量、无会话绑定；
+  // fs 参数无 workdir——路径一律绝对，相对路径由 resolvePath 落到 /）
+  _env() {
+    return { workdir: "/" };
   }
 
   // run 执行一条 fs 请求（§6.1 body = {msg_id, action, ...fs JSON 参数}）。
@@ -375,7 +365,7 @@ export class PageFS {
     if (!action)
       throw fsErr("", "action is required (supported: read, write, edit, ls, rg, cp, mv, rm)");
 
-    const env = this._env(params.workdir);
+    const env = this._env();
 
     switch (action) {
       case "read":

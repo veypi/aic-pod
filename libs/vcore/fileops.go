@@ -86,8 +86,8 @@ func countEntries(vfs ufs.FS, dir string) int {
 
 // ---- cp / mv（§4.8）----
 
-// fsCp 实现 cp：{src, dst, recursive}。目标已存在报错（不覆盖）；目录需
-// recursive=true；dst 为 src 自身或子路径报错；dst 父目录自动创建。
+// fsCp 实现 cp：{src, dst}。目录自动递归复制；目标已存在报错（不覆盖）；
+// dst 为 src 自身或子路径报错；dst 父目录自动创建。
 func fsCp(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if p.Src == "" || p.Dst == "" {
 		return nil, fsErr("cp", "src and dst are required")
@@ -101,9 +101,6 @@ func fsCp(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsErr("cp", "cannot stat source %s: %s", src, err)
 	}
 	if info.IsDir() {
-		if !p.Recursive {
-			return nil, fsErr("cp", "%s is a directory (set recursive=true)", src)
-		}
 		if dst == src || strings.HasPrefix(dst, src+"/") {
 			return nil, fsErr("cp", "cannot copy directory %s into itself: %s", src, dst)
 		}

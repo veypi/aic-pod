@@ -52,9 +52,10 @@
       "expectError": "fs read: limit must be >= 1, got 0"
     },
     {
-      "name": "read with workdir",
+      "name": "read relative path via env workdir",
       "cmd": "fs",
-      "params": {"action": "read", "path": "notes.txt", "workdir": "/wd"},
+      "params": {"action": "read", "path": "notes.txt"},
+      "workdir": "/wd",
       "files": {"/wd/notes.txt": "hello\n"},
       "expect": {
         "content": "1\thello\n",

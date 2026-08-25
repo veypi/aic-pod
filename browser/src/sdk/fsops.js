@@ -95,10 +95,6 @@ async function fsLs(fs, ctx, p) {
     if (!Number.isInteger(depth) || depth < 1) throw fsErr("ls", `depth must be >= 1, got ${p.depth}`);
   }
   if (depth > LS_MAX_DEPTH) depth = LS_MAX_DEPTH;
-  const byTime = p.sort === "time";
-  if (p.sort !== undefined && p.sort !== "" && p.sort !== "name" && p.sort !== "time") {
-    throw fsErr("ls", `sort must be "name" or "time", got "${p.sort}"`);
-  }
   const all = !!p.all;
 
   const target = p.path || defaultTarget(ctx);
@@ -114,7 +110,7 @@ async function fsLs(fs, ctx, p) {
 
   const state = { count: 0, truncated: false };
   const items = await buildLsDir(fs, ctx, target, depth, all, state);
-  sortLsEntries(items, byTime);
+  sortLsEntries(items);
   const out = { cwd: abs, dir: true, items, truncated: state.truncated };
   return { content: JSON.stringify(out), attrs: { action: "ls", path: abs, rows: String(state.count), truncated: String(state.truncated) } };
 }
@@ -143,22 +139,18 @@ async function buildLsDir(fs, ctx, dir, remain, all, state) {
   return out;
 }
 
-// sortLsEntries 逐级排序：name = UTF-8 字节序；time = mtime 降序（同值按名称升序，稳定）。
-function sortLsEntries(items, byTime) {
-  if (byTime) {
-    items
-      .map((it, i) => ({ it, i }))
-      .sort((a, b) => {
-        const d = (b.it.mod_time || 0) - (a.it.mod_time || 0);
-        if (d !== 0) return d;
-        return cmpBytes(a.it.name, b.it.name);
-      })
-      .forEach((x, i) => (items[i] = x.it));
-  } else {
-    items.sort((a, b) => cmpBytes(a.name, b.name));
-  }
+// sortLsEntries 逐级排序：mtime 降序（最近修改在前），同值按名称 UTF-8 字节序（稳定）。
+function sortLsEntries(items) {
+  items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => {
+      const d = (b.it.mod_time || 0) - (a.it.mod_time || 0);
+      if (d !== 0) return d;
+      return cmpBytes(a.it.name, b.it.name);
+    })
+    .forEach((x, i) => (items[i] = x.it));
   for (const it of items) {
-    if (it.items) sortLsEntries(it.items, byTime);
+    if (it.items) sortLsEntries(it.items);
   }
 }
 
@@ -177,35 +169,22 @@ async function fsRg(fs, ctx, p) {
     }
   }
 
-  // files 模式：纯文件列举，不接受搜索参数
-  if (p.files) {
-    if (p.pattern || p.insensitive || p.files_only || p.count || p.word || (p.max_per_file ?? 0) > 0) {
-      throw fsErr("rg", "files mode cannot be combined with search params (pattern, insensitive, files_only, count, word, max_per_file)");
-    }
-    return rgFiles(fs, ctx, p.path || defaultTarget(ctx), globs, !!p.hidden);
-  }
+  const target = p.path || defaultTarget(ctx);
 
-  // 搜索模式：pattern 必填，path 缺省 = workdir
-  if (!p.pattern) throw fsErr("rg", "pattern is required (or set files=true to list files)");
+  // pattern 缺省 = 列举模式：纯文件列举（不接受搜索语义）
+  if (!p.pattern) return rgFiles(fs, ctx, target, globs, !!p.all);
+
   const pattern = String(p.pattern);
   if (RG_UNSUPPORTED_RE.test(pattern)) throw fsErr("rg", RG_UNSUPPORTED_HINT);
-  let src = pattern;
-  if (p.word) src = `\\b(?:${src})\\b`;
+  // smart case：pattern 不含大写字母 → 大小写不敏感（ripgrep 惯例，与 Go 端一致）
+  const flags = /\p{Lu}/u.test(pattern) ? "" : "i";
   let re;
   try {
-    re = new RegExp(src, p.insensitive ? "i" : "");
+    re = new RegExp(pattern, flags);
   } catch (e) {
     throw fsErr("rg", `invalid pattern: ${e.message}`);
   }
-  let maxPerFile = 0;
-  if (p.max_per_file !== undefined && p.max_per_file !== null) {
-    maxPerFile = Number(p.max_per_file);
-    if (!Number.isInteger(maxPerFile) || maxPerFile < 1) {
-      throw fsErr("rg", `max_per_file must be >= 1, got ${p.max_per_file}`);
-    }
-  }
 
-  const target = p.path || defaultTarget(ctx);
   const abs = await absOf(fs, target, ctx);
   const st = await fs.stat(target, ctx);
   if (st === null) throw fsErr("rg", `${abs}: no such file or directory`);
@@ -213,9 +192,9 @@ async function fsRg(fs, ctx, p) {
   if (!st.dir) {
     candidates = [target];
   } else {
-    candidates = await rgWalk(fs, ctx, target, globs, !!p.hidden);
+    candidates = await rgWalk(fs, ctx, target, globs, !!p.all);
   }
-  return rgSearch(fs, ctx, abs, pattern, candidates, re, maxPerFile, !!p.files_only, !!p.count);
+  return rgSearch(fs, ctx, abs, pattern, candidates, re);
 }
 
 // rgWalk 递归收集文件：目标前缀下任一路径段命中隐藏（hidden 收录）或
@@ -290,7 +269,7 @@ function clipRgText(text) {
   return { text: new TextDecoder().decode(bytes.slice(0, cut)) + "...[truncated]", clipped: true };
 }
 
-async function rgSearch(fs, ctx, abs, pattern, candidates, re, maxPerFile, filesOnly, countOnly) {
+async function rgSearch(fs, ctx, abs, pattern, candidates, re) {
   const rows = [];
   let truncated = false;
   let clipped = false;
@@ -300,20 +279,8 @@ async function rgSearch(fs, ctx, abs, pattern, candidates, re, maxPerFile, files
       break;
     }
     const quota = RG_DEFAULT_LIMIT - rows.length;
-    let perFile = maxPerFile;
-    if (filesOnly) perFile = 1;
-    else if (countOnly) perFile = Infinity;
-    if (!countOnly && (perFile <= 0 || perFile > quota)) perFile = quota;
-    const ms = await rgFile(fs, ctx, f, re, perFile);
+    const ms = await rgFile(fs, ctx, f, re, quota);
     if (!ms || ms.length === 0) continue;
-    if (filesOnly) {
-      rows.push(f);
-      continue;
-    }
-    if (countOnly) {
-      rows.push(`${f}:${ms.length}`);
-      continue;
-    }
     for (const m of ms) {
       const { text, clipped: c } = clipRgText(m.text);
       if (c) clipped = true;
@@ -390,7 +357,6 @@ async function fsCp(fs, ctx, p) {
   const st = await fs.stat(p.src, ctx);
   if (st === null) throw fsErr("cp", `cannot stat source ${srcAbs}: no such file or directory`);
   if (st.dir) {
-    if (!p.recursive) throw fsErr("cp", `${srcAbs} is a directory (set recursive=true)`);
     if (dstAbs.startsWith(srcAbs + "/")) throw fsErr("cp", `cannot copy directory ${srcAbs} into itself: ${dstAbs}`);
   }
   if ((await fs.stat(p.dst, ctx)) !== null) throw fsErr("cp", `destination ${dstAbs} already exists`);

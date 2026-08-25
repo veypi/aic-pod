@@ -34,9 +34,9 @@
       }
     },
     {
-      "name": "ls sort time desc, ties by name",
+      "name": "ls default sort: time desc, ties by name",
       "cmd": "fs",
-      "params": {"action": "ls", "path": "/docs", "sort": "time"},
+      "params": {"action": "ls", "path": "/docs"},
       "files": {"/docs/old.txt": "o", "/docs/new.txt": "n", "/docs/mid.txt": "m"},
       "mtimes": {"/docs/old.txt": 1700000000, "/docs/new.txt": 1700000002, "/docs/mid.txt": 1700000001},
       "expect": {
@@ -147,13 +147,6 @@
       "params": {"action": "ls", "path": "/d", "depth": 0},
       "files": {},
       "expectError": "fs ls: depth must be >= 1, got 0"
-    },
-    {
-      "name": "ls invalid sort",
-      "cmd": "fs",
-      "params": {"action": "ls", "path": "/d", "sort": "size"},
-      "files": {},
-      "expectError": "fs ls: sort must be \"name\" or \"time\", got \"size\""
     }
   ]
 }

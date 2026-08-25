@@ -7,20 +7,22 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 // fsRg 实现 rg（§4.6）：内容搜索与文件列举。JSON 参数：
 //
-//	{files:true, glob?, hidden?, path?}                       递归列出文件（字节序）
-//	{pattern, path?, glob?, hidden?, insensitive?, word?,      内容搜索
-//	 files_only?, count?, max_per_file?}
+//	{pattern, path?, glob?, all?}    内容搜索
+//	{path?, glob?, all?}             pattern 缺省 = 递归列出文件（字节序）
 //
 // 输出为 rg 管道格式：内容搜索 {path}:{line}:{content}（行尾 \r 剥除）；
-// files_only 每命中文件输出路径一行；count 每命中文件输出 {path}:{count}；
-// files 模式每行一个文件路径。
+// 列举模式每行一个文件路径。
 //
-// 对齐真实 rg：默认跳过隐藏文件与隐藏目录（点开头），hidden 收录；
+// smart case（ripgrep 惯例）：pattern 不含大写字母 → 大小写不敏感；
+// 含大写 → 敏感。词边界直接在 pattern 里写 \b。
+//
+// 对齐真实 rg：默认跳过隐藏文件与隐藏目录（点开头），all 收录；
 // 平台行为（文档明示）：全局 100 行上限 + truncated 标记、512KB 输出预算、
 // skipDirs 与点目录跳过、二进制文件跳过。
 // glob 按文件名匹配（basename，* 任意序列 / ? 单字符，完整匹配），
@@ -64,47 +66,31 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		}
 	}
 
-	// files 模式：纯文件列举，不接受搜索参数
-	if p.Files {
-		if p.Pattern != "" || p.Insensitive || p.FilesOnly || p.Count || p.Word || p.MaxPerFile > 0 {
-			return nil, fsErr("rg", "files mode cannot be combined with search params (pattern, insensitive, files_only, count, word, max_per_file)")
-		}
-		target := env.Workdir
-		if p.Path != "" {
-			target = p.Path
-		}
-		return rgFiles(ctx, env, target, p.Glob, p.Hidden)
+	target := env.Workdir
+	if p.Path != "" {
+		target = p.Path
 	}
 
-	// 搜索模式：pattern 必填，path 缺省 = workdir
+	// pattern 缺省 = 列举模式：纯文件列举（字节序，平台上限 rgDefaultLimit）
 	if p.Pattern == "" {
-		return nil, fsErr("rg", "pattern is required (or set files=true to list files)")
+		return rgFiles(ctx, env, target, p.Glob, p.All)
 	}
+
 	for _, re := range rgUnsupportedPatterns {
 		if re.MatchString(p.Pattern) {
 			return nil, fsErr("rg", "%s", rgUnsupportedHint)
 		}
 	}
+	// smart case：pattern 不含大写字母 → 大小写不敏感（ripgrep --smart-case 惯例）
 	pattern := p.Pattern
-	if p.Word {
-		// 词边界：pattern 包裹 \b...\b（真 rg -w 语义）
-		pattern = `\b(?:` + pattern + `)\b`
-	}
-	if p.Insensitive {
+	if !hasUpper(pattern) {
 		pattern = "(?i)" + pattern
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, fsErr("rg", "invalid pattern: %s", err)
 	}
-	if p.MaxPerFile < 0 {
-		return nil, fsErr("rg", "max_per_file must be >= 0, got %d", p.MaxPerFile)
-	}
 
-	target := env.Workdir
-	if p.Path != "" {
-		target = p.Path
-	}
 	abs, err := env.Resolve(target)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
@@ -120,10 +106,20 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	var candidates []string
 	if !info.IsDir() {
 		candidates = []string{abs}
-	} else if err := rgWalk(ctx, env, abs, p.Glob, p.Hidden, func(p string) { candidates = append(candidates, p) }); err != nil {
+	} else if err := rgWalk(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }); err != nil {
 		return nil, fsErr("rg", "%s", err)
 	}
-	return rgSearch(env, abs, p.Pattern, candidates, re, p.MaxPerFile, p.FilesOnly, p.Count)
+	return rgSearch(env, abs, p.Pattern, candidates, re)
+}
+
+// hasUpper 报告 pattern 是否含大写字母（smart case 判定）。
+func hasUpper(s string) bool {
+	for _, r := range s {
+		if unicode.IsUpper(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // rgWalk 递归收集目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
@@ -233,9 +229,8 @@ type rgMatch struct {
 	text string
 }
 
-// rgSearch 实现内容搜索：逐文件匹配（-m 为每文件上限），全局 rgDefaultLimit 截断。
-// filesOnly（-l）：每命中文件仅输出路径一行；countOnly（-c）：每命中文件输出 {path}:{count}。
-func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Regexp, maxPerFile int, filesOnly, countOnly bool) (*Result, error) {
+// rgSearch 实现内容搜索：逐文件匹配（每文件上限 = 剩余全局配额），全局 rgDefaultLimit 截断。
+func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Regexp) (*Result, error) {
 	var rows []string
 	truncated := false
 	clipped := false
@@ -245,27 +240,9 @@ func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Reg
 			break
 		}
 		quota := rgDefaultLimit - len(rows)
-		perFile := maxPerFile
-		switch {
-		case filesOnly:
-			perFile = 1
-		case countOnly:
-			perFile = 1 << 30 // -c 计数需全量匹配
-		}
-		if !countOnly && (perFile <= 0 || perFile > quota) {
-			perFile = quota
-		}
-		ms, err := rgFile(env, f, re, perFile)
+		ms, err := rgFile(env, f, re, quota)
 		if err != nil || len(ms) == 0 {
 			continue // 读不了的文件/二进制文件跳过
-		}
-		if filesOnly {
-			rows = append(rows, f)
-			continue
-		}
-		if countOnly {
-			rows = append(rows, fmt.Sprintf("%s:%d", f, len(ms)))
-			continue
 		}
 		for _, m := range ms {
 			text := m.text
