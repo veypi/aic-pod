@@ -1,24 +1,30 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/veypi/aic-pod/libs/vcore"
 )
 
 // httpFetcher 是物理 host 的 curl fetcher（§5.4：不限制 SSRF——
 // 用户本机网络属其自身边界）。
 type httpFetcher struct{}
 
-// Get 实现 vcore.Fetcher。
-func (httpFetcher) Get(ctx context.Context, rawurl string) (io.ReadCloser, int64, error) {
+// Fetch 实现 vcore.Fetcher。
+func (httpFetcher) Fetch(ctx context.Context, req vcore.HTTPReq) (io.ReadCloser, int64, error) {
 	client := &http.Client{Timeout: 10 * time.Minute}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawurl, nil)
+	hreq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
 	if err != nil {
 		return nil, 0, err
 	}
-	resp, err := client.Do(req)
+	for k, v := range req.Headers {
+		hreq.Header.Set(k, v)
+	}
+	resp, err := client.Do(hreq)
 	if err != nil {
 		return nil, 0, err
 	}

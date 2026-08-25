@@ -92,8 +92,8 @@ func runVectorCase(t *testing.T, c vectorCase) {
 		ProtectRoots: c.ProtectRoots,
 	}
 	if c.Fetch != nil {
-		env.Fetcher = FetchFunc(func(ctx context.Context, rawurl string) (io.ReadCloser, int64, error) {
-			body, ok := c.Fetch[rawurl]
+		env.Fetcher = FetchFunc(func(ctx context.Context, req HTTPReq) (io.ReadCloser, int64, error) {
+			body, ok := c.Fetch[req.URL]
 			if !ok {
 				return nil, 0, fmt.Errorf("404 not found")
 			}

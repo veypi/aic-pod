@@ -67,17 +67,26 @@ func (e *Env) CheckPath(action, abs string) error {
 	return &proto.ExecError{Action: action, Reason: fmt.Sprintf("path outside allowed roots: %s", abs)}
 }
 
+// HTTPReq 描述一次 curl 请求（方法/URL/头/体；GET 默认，无体方法 Body 为空）。
+// 头键已归一为 HTTP 规范形态（如 Content-Type）。
+type HTTPReq struct {
+	Method  string
+	URL     string
+	Headers map[string]string // nil=无自定义头
+	Body    []byte            // GET/HEAD 等无体方法为空
+}
+
 // Fetcher 是 curl 的 HTTP 获取接口。实现方负责重定向与 SSRF 等策略
 // （cloud 严格 / 物理 host 不限制，§5.4）。
 // 返回 size 为响应总字节数（http Content-Length），未知返回 -1（超限报错消息用）。
 type Fetcher interface {
-	Get(ctx context.Context, rawurl string) (body io.ReadCloser, size int64, err error)
+	Fetch(ctx context.Context, req HTTPReq) (body io.ReadCloser, size int64, err error)
 }
 
 // FetchFunc 适配函数为 Fetcher。
-type FetchFunc func(ctx context.Context, rawurl string) (io.ReadCloser, int64, error)
+type FetchFunc func(ctx context.Context, req HTTPReq) (io.ReadCloser, int64, error)
 
-// Get 实现 Fetcher。
-func (f FetchFunc) Get(ctx context.Context, rawurl string) (io.ReadCloser, int64, error) {
-	return f(ctx, rawurl)
+// Fetch 实现 Fetcher。
+func (f FetchFunc) Fetch(ctx context.Context, req HTTPReq) (io.ReadCloser, int64, error) {
+	return f(ctx, req)
 }

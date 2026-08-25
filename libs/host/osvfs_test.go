@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -118,8 +119,8 @@ func runOSParity(t *testing.T, c osVectorCase) {
 
 	fetcher := vcore.Fetcher(nil)
 	if c.Fetch != nil {
-		fetcher = vcore.FetchFunc(func(ctx context.Context, rawurl string) (io.ReadCloser, int64, error) {
-			body, ok := c.Fetch[rawurl]
+		fetcher = vcore.FetchFunc(func(ctx context.Context, req vcore.HTTPReq) (io.ReadCloser, int64, error) {
+			body, ok := c.Fetch[req.URL]
 			if !ok {
 				return nil, 0, fmt.Errorf("404 not found")
 			}
@@ -154,6 +155,12 @@ func runOSParity(t *testing.T, c osVectorCase) {
 		t.Fatalf("error text mismatch:\nmem=%q\nos=%q", memErr, osErr)
 	}
 	if memRes != nil && osRes != nil {
+		// ls JSON：排序按 mtime 而 OS 端目录 mtime 为真实时间（与 MemVFS 的 0
+		// 不可比），归一为按 name 排序后比较（条目集合一致性仍逐项校验）。
+		if strings.Contains(string(c.Params), "\"ls\"") {
+			memRes.Content = normLsJSON(memRes.Content)
+			osRes.Content = normLsJSON(osRes.Content)
+		}
 		if normContent(memRes.Content) != normContent(osRes.Content) {
 			t.Errorf("content mismatch:\nmem=%q\nos=%q", memRes.Content, osRes.Content)
 		}
@@ -161,6 +168,42 @@ func runOSParity(t *testing.T, c osVectorCase) {
 			t.Errorf("attrs mismatch:\nmem=%v\nos=%v", memRes.Attrs, osRes.Attrs)
 		}
 	}
+}
+
+// normLsJSON 归一 ls JSON 输出：递归按 name 排序 items 并删除 size/mod_time
+// （环境数据差异；排序正确性由 MemVFS 向量期望锁定，本门禁只校验双端一致）。
+func normLsJSON(s string) string {
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return s
+	}
+	normLsNode(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return s
+	}
+	return string(b)
+}
+
+func normLsNode(v any) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	delete(m, "size")
+	delete(m, "mod_time")
+	items, ok := m["items"].([]any)
+	if !ok {
+		return
+	}
+	for _, it := range items {
+		normLsNode(it)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		ni, _ := items[i].(map[string]any)["name"].(string)
+		nj, _ := items[j].(map[string]any)["name"].(string)
+		return ni < nj
+	})
 }
 
 // subVFS 将逻辑绝对路径重写到子树下的测试适配（避免污染真实文件系统）。
