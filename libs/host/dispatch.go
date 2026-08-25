@@ -192,7 +192,7 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	}
 
 	env := c.newEnv(p.Workdir)
-	// 任务托管（curl 无 -o）：输出落盘 {tmp}/aic/{sid}/{msg_id}.log，
+	// 任务托管（curl 无 -o）：输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log，
 	// 超时自动后台化（与本地命令同一 exec_procs 机制，§5.9）。
 	env.Tasks = &hostTaskRunner{c: c, sid: sid}
 	env.TaskID = req.MsgID
@@ -246,7 +246,7 @@ func isCoreCommand(action string) bool {
 }
 
 // hostTaskRunner 实现 vcore.TaskRunner：托管任务（curl 无 -o）经 exec_procs
-// 统一托管，输出落盘 {tmp}/aic/{sid}/{msg_id}.log（与本地命令同一机制，§5.9）。
+// 统一托管，输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log（与本地命令同一机制，§5.9）。
 type hostTaskRunner struct {
 	c   *Client
 	sid string
@@ -254,7 +254,7 @@ type hostTaskRunner struct {
 
 func (r *hostTaskRunner) StartTask(ctx context.Context, opts vcore.TaskOptions) (*vcore.TaskResult, error) {
 	id := fmt.Sprintf("%s:%s:%s", r.c.hostID, r.sid, opts.ID)
-	logPath := filepath.Join(os.TempDir(), "aic", r.sid, opts.ID+".log")
+	logPath := filepath.Join(os.TempDir(), "aic", r.sid, ".exec", opts.ID+".log")
 	res, err := r.c.procs.StartTask(ctx, exec_procs.TaskOptions{
 		ID:      id,
 		Command: opts.Command,

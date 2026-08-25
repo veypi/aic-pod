@@ -64,10 +64,10 @@ func (c *Client) browserFor(sid string) *vbrowser.Browser {
 		ScreenshotDir: filepath.ToSlash(filepath.Join(os.TempDir(), "aic", "screenshot")),
 		// §5.10/§5.6：pod 模式不隔离，免沙箱（沙箱下 Chrome 冷启动必挂）
 		NoSandbox: true,
-		// §5.9：CLI 子进程经 exec_procs 统一托管，输出落盘 {tmp}/aic/{sid}/{msg_id}.log
+		// §5.9：CLI 子进程经 exec_procs 统一托管，输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log
 		ExecProcs: c.procs,
 		LogPathFn: func(msgID string) string {
-			return filepath.Join(os.TempDir(), "aic", sid, msgID+".log")
+			return filepath.Join(os.TempDir(), "aic", sid, ".exec", msgID+".log")
 		},
 	})
 	c.browsers[sid] = b

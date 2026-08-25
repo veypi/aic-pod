@@ -16,7 +16,7 @@ import (
 )
 
 // 本地命令执行（§5.9：探测声明的 shell/git）：stdout+stderr 合并写入
-// {tmp}/aic/{session_id}/{msg_id}.log；请求 deadline 内完成 → 返回日志前 1000 行；
+// {tmp}/aic/{session_id}/.exec/{msg_id}.log（与 cloud 端会话空间 .exec/ 同构）；请求 deadline 内完成 → 返回日志前 1000 行；
 // 到期未完成 → 自动转后台（host 端自有超时，默认 30m），
 // 返回当前前 1000 行 + background=true + bg id（{host}:{sid}:{op_id}）。
 // argv 数组直传，禁止拼接 shell 字符串（§5.5：用户输入不经 shell 解释，杜绝注入）。
@@ -30,7 +30,7 @@ const (
 // level 为本次调用的授予等级（沙箱 profile 选择，§5.10）；
 // noSandbox 为请求显式携带的免沙箱标记（已过 checkGranted 的 Critical(4) 必审批门）。
 func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv []string, workdir string, level int, noSandbox bool) *proto.ToolResponse {
-	logPath := filepath.Join(os.TempDir(), "aic", sid, msgID+".log")
+	logPath := filepath.Join(os.TempDir(), "aic", sid, ".exec", msgID+".log")
 	res, err := c.procs.Start(ctx, exec_procs.StartOptions{
 		ID:        fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
 		Command:   strings.TrimSpace(action + " " + strings.Join(argv, " ")),

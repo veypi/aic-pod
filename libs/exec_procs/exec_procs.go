@@ -1,8 +1,8 @@
 // Package exec_procs 是 exec 子进程统一托管（§5.8/§5.9）。
 //
 // 凡是 exec 命令创建的子进程（host 程序执行、agent-browser CLI）都经此管理：
-//   - 创建子进程，stdout+stderr 合并重定向到日志文件（路径由调用方指定：
-//     host = {tmp}/aic/{sid}/{msg_id}.log，cloud browser = $SESSION/.exec/{msg_id}.log）
+//   - 创建子进程，stdout+stderr 合并重定向到日志文件（路径由调用方指定，双端同构
+//     {会话根}/.exec/{msg_id}.log：host = {tmp}/aic/{sid}/.exec/，cloud = 会话空间 .exec/）
 //   - 请求超时 → 自动后台化（进程继续运行），返回 background=true + id
 //   - 输出超限 → 返回前 MaxLines 行 + truncated + path（AI 可续读完整输出）
 //   - bg_list / bg_wait / bg_kill 统一管理
