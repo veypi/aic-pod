@@ -6,7 +6,7 @@
       "params": {"action": "rg", "pattern": "foo", "path": "/docs/a.txt"},
       "files": {"/docs/a.txt": "foo one\nbar\nfoo two\n"},
       "expect": {
-        "content": "/docs/a.txt:1:foo one\n/docs/a.txt:3:foo two",
+        "contentJson": {"files": [{"path": "/docs/a.txt", "matches": [{"line": 1, "text": "foo one"}, {"line": 3, "text": "foo two"}]}]},
         "attrs": {"action": "rg", "path": "/docs/a.txt", "rows": "2", "truncated": "false"}
       }
     },
@@ -16,7 +16,7 @@
       "params": {"action": "rg", "pattern": "foo", "path": "/docs"},
       "files": {"/docs/b.txt": "foo b\n", "/docs/a.txt": "foo a\n", "/docs/sub/c.txt": "foo c\n"},
       "expect": {
-        "content": "/docs/a.txt:1:foo a\n/docs/b.txt:1:foo b\n/docs/sub/c.txt:1:foo c",
+        "contentJson": {"files": [{"path": "/docs/a.txt", "matches": [{"line": 1, "text": "foo a"}]}, {"path": "/docs/b.txt", "matches": [{"line": 1, "text": "foo b"}]}, {"path": "/docs/sub/c.txt", "matches": [{"line": 1, "text": "foo c"}]}]},
         "attrs": {"action": "rg", "path": "/docs", "rows": "3", "truncated": "false"}
       }
     },
@@ -27,7 +27,7 @@
       "workdir": "/d",
       "files": {"/d/a.txt": "foo a\n"},
       "expect": {
-        "content": "/d/a.txt:1:foo a",
+        "contentJson": {"files": [{"path": "/d/a.txt", "matches": [{"line": 1, "text": "foo a"}]}]},
         "attrs": {"action": "rg", "path": "/d", "rows": "1", "truncated": "false"}
       }
     },
@@ -37,7 +37,7 @@
       "params": {"action": "rg", "pattern": "todo", "path": "/a.txt"},
       "files": {"/a.txt": "TODO: fix\nnothing\nTodo: ship\n"},
       "expect": {
-        "content": "/a.txt:1:TODO: fix\n/a.txt:3:Todo: ship",
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "TODO: fix"}, {"line": 3, "text": "Todo: ship"}]}]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
       }
     },
@@ -47,7 +47,7 @@
       "params": {"action": "rg", "pattern": "Todo", "path": "/a.txt"},
       "files": {"/a.txt": "TODO: fix\nnothing\nTodo: ship\n"},
       "expect": {
-        "content": "/a.txt:3:Todo: ship",
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 3, "text": "Todo: ship"}]}]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
       }
     },
@@ -57,7 +57,7 @@
       "params": {"action": "rg", "pattern": "^(foo|baz)\\d+", "path": "/a.txt"},
       "files": {"/a.txt": "foo123 ok\nbar baz9\nbaz42\nxfoo1\n"},
       "expect": {
-        "content": "/a.txt:1:foo123 ok\n/a.txt:3:baz42",
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "foo123 ok"}, {"line": 3, "text": "baz42"}]}]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
       }
     },
@@ -67,7 +67,7 @@
       "params": {"action": "rg", "pattern": "foo$", "path": "/a.txt"},
       "files": {"/a.txt": "foo\r\nbar\r\n"},
       "expect": {
-        "content": "/a.txt:1:foo",
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
       }
     },
@@ -77,7 +77,7 @@
       "params": {"action": "rg", "pattern": "foo", "path": "/docs"},
       "files": {"/docs/bin.dat": "base64:AMBmb28=", "/docs/a.txt": "foo\n"},
       "expect": {
-        "content": "/docs/a.txt:1:foo",
+        "contentJson": {"files": [{"path": "/docs/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
         "attrs": {"action": "rg", "path": "/docs", "rows": "1", "truncated": "false"}
       }
     },
@@ -87,7 +87,7 @@
       "params": {"action": "rg", "pattern": "foo", "path": "/p"},
       "files": {"/p/a.txt": "foo\n", "/p/.env": "foo secret\n", "/p/node_modules/pkg/index.js": "foo\n", "/p/vendor/lib/v.go": "foo\n", "/p/.git/config": "foo\n"},
       "expect": {
-        "content": "/p/a.txt:1:foo",
+        "contentJson": {"files": [{"path": "/p/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
         "attrs": {"action": "rg", "path": "/p", "rows": "1", "truncated": "false"}
       }
     },
@@ -97,7 +97,7 @@
       "params": {"action": "rg", "pattern": "foo", "path": "/p", "all": true},
       "files": {"/p/a.txt": "foo\n", "/p/.env": "foo secret\n", "/p/.git/config": "foo\n"},
       "expect": {
-        "content": "/p/.env:1:foo secret\n/p/.git/config:1:foo\n/p/a.txt:1:foo",
+        "contentJson": {"files": [{"path": "/p/.env", "matches": [{"line": 1, "text": "foo secret"}]}, {"path": "/p/.git/config", "matches": [{"line": 1, "text": "foo"}]}, {"path": "/p/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
         "attrs": {"action": "rg", "path": "/p", "rows": "3", "truncated": "false"}
       }
     },
@@ -107,7 +107,7 @@
       "params": {"action": "rg", "pattern": "todo", "path": "/src", "glob": ["*.go"]},
       "files": {"/src/a.go": "todo a\n", "/src/b.md": "todo b\n", "/src/sub/c.go": "todo c\n"},
       "expect": {
-        "content": "/src/a.go:1:todo a\n/src/sub/c.go:1:todo c",
+        "contentJson": {"files": [{"path": "/src/a.go", "matches": [{"line": 1, "text": "todo a"}]}, {"path": "/src/sub/c.go", "matches": [{"line": 1, "text": "todo c"}]}]},
         "attrs": {"action": "rg", "path": "/src", "rows": "2", "truncated": "false"}
       }
     },
@@ -138,7 +138,7 @@
       "params": {"action": "rg", "path": "/a.txt"},
       "files": {"/a.txt": "x\n"},
       "expect": {
-        "content": "/a.txt",
+        "contentJson": {"files": ["/a.txt"]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
       }
     },
@@ -155,7 +155,7 @@
       "params": {"action": "rg", "pattern": "zzz", "path": "/a.txt"},
       "files": {"/a.txt": "foo\n"},
       "expect": {
-        "content": "no matches for pattern \"zzz\" in /a.txt",
+        "contentJson": {"files": []},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "0", "truncated": "false"}
       }
     },
@@ -165,7 +165,7 @@
       "params": {"action": "rg", "pattern": "^$", "path": "/a.txt"},
       "files": {"/a.txt": "foo\nbar\n"},
       "expect": {
-        "content": "no matches for pattern \"^$\" in /a.txt",
+        "contentJson": {"files": []},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "0", "truncated": "false"}
       }
     },
@@ -175,7 +175,7 @@
       "params": {"action": "rg", "pattern": "^$", "path": "/a.txt"},
       "files": {"/a.txt": "foo\n\nbar\n"},
       "expect": {
-        "content": "/a.txt:2:",
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 2, "text": ""}]}]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
       }
     },
@@ -185,7 +185,7 @@
       "params": {"action": "rg", "path": "/d"},
       "files": {"/d/c.txt": "c", "/d/a.txt": "a", "/d/sub/b.txt": "b"},
       "expect": {
-        "content": "/d/a.txt\n/d/c.txt\n/d/sub/b.txt",
+        "contentJson": {"files": ["/d/a.txt", "/d/c.txt", "/d/sub/b.txt"]},
         "attrs": {"action": "rg", "path": "/d", "rows": "3", "truncated": "false"}
       }
     },
@@ -195,7 +195,7 @@
       "params": {"action": "rg", "path": "/d", "glob": ["*.go"]},
       "files": {"/d/a.go": "a", "/d/b.txt": "b", "/d/sub/c.go": "c"},
       "expect": {
-        "content": "/d/a.go\n/d/sub/c.go",
+        "contentJson": {"files": ["/d/a.go", "/d/sub/c.go"]},
         "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "false"}
       }
     },
@@ -206,7 +206,7 @@
       "workdir": "/d",
       "files": {"/d/x.txt": "x", "/d/y.txt": "y"},
       "expect": {
-        "content": "/d/x.txt\n/d/y.txt",
+        "contentJson": {"files": ["/d/x.txt", "/d/y.txt"]},
         "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "false"}
       }
     },
@@ -216,7 +216,7 @@
       "params": {"action": "rg", "path": "/d", "glob": ["*.rs"]},
       "files": {"/d/a.txt": "a"},
       "expect": {
-        "content": "no files matched globs *.rs in /d",
+        "contentJson": {"files": []},
         "attrs": {"action": "rg", "path": "/d", "rows": "0", "truncated": "false"}
       }
     },
@@ -226,23 +226,117 @@
       "params": {"action": "rg", "pattern": "\\bfoo\\b", "path": "/a.txt"},
       "files": {"/a.txt": "foo bar\nfoobar\na foo.\n"},
       "expect": {
-        "content": "/a.txt:1:foo bar\n/a.txt:3:a foo.",
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "foo bar"}, {"line": 3, "text": "a foo."}]}]},
         "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "false"}
       }
     },
     {
-      "name": "rg glob negation restricted",
+      "name": "rg glob exclusion",
       "cmd": "fs",
       "params": {"action": "rg", "pattern": "foo", "path": "/docs", "glob": ["!*.go"]},
-      "files": {"/docs/a.txt": "foo\n"},
-      "expectError": "fs rg: glob \"!*.go\" is not supported on this environment (restricted: no '!' negation or '**')"
+      "files": {"/docs/a.txt": "foo\n", "/docs/b.go": "foo\n", "/docs/c": "foo\n"},
+      "expect": {
+        "contentJson": {"files": [{"path": "/docs/a.txt", "matches": [{"line": 1, "text": "foo"}]}, {"path": "/docs/c", "matches": [{"line": 1, "text": "foo"}]}]},
+        "attrs": {"action": "rg", "path": "/docs", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg glob include with exclusion",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "foo", "path": "/src", "glob": ["*.go", "!*_test.go"]},
+      "files": {"/src/a.go": "foo\n", "/src/b_test.go": "foo\n", "/src/c.js": "foo\n"},
+      "expect": {
+        "contentJson": {"files": [{"path": "/src/a.go", "matches": [{"line": 1, "text": "foo"}]}]},
+        "attrs": {"action": "rg", "path": "/src", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg context basic with group separator",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "context": 1},
+      "files": {"/a.txt": "one\ntwo\nfoo\nbar\nbaz\nqux\nfoo2\n"},
+      "expect": {
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 2, "text": "two", "ctx": true}, {"line": 3, "text": "foo"}, {"line": 4, "text": "bar", "ctx": true}, {"line": 6, "text": "qux", "ctx": true}, {"line": 7, "text": "foo2"}]}]},
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "5", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg context merges adjacent windows",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "context": 1},
+      "files": {"/a.txt": "a\nfoo\nb\nfoo\nc\n"},
+      "expect": {
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "a", "ctx": true}, {"line": 2, "text": "foo"}, {"line": 3, "text": "b", "ctx": true}, {"line": 4, "text": "foo"}, {"line": 5, "text": "c", "ctx": true}]}]},
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "5", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg limit overrides default",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "m", "path": "/a.txt", "limit": 2},
+      "files": {"/a.txt": "m1\nm2\nm3\n"},
+      "expect": {
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "m1"}, {"line": 2, "text": "m2"}]}]},
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "2", "truncated": "true"}
+      }
+    },
+    {
+      "name": "rg limit counts context rows and truncates",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "context": 1, "limit": 3},
+      "files": {"/a.txt": "x1\nx2\nfoo\ny1\nfoo\n"},
+      "expect": {
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 2, "text": "x2", "ctx": true}, {"line": 3, "text": "foo"}, {"line": 4, "text": "y1", "ctx": true}]}]},
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "3", "truncated": "true"}
+      }
+    },
+    {
+      "name": "rg files limit override",
+      "cmd": "fs",
+      "params": {"action": "rg", "path": "/d", "limit": 2},
+      "files": {"/d/a.txt": "a", "/d/b.txt": "b", "/d/c.txt": "c"},
+      "expect": {
+        "contentJson": {"files": ["/d/a.txt", "/d/b.txt"]},
+        "attrs": {"action": "rg", "path": "/d", "rows": "2", "truncated": "true"}
+      }
+    },
+    {
+      "name": "rg exclusion-only glob in files listing",
+      "cmd": "fs",
+      "params": {"action": "rg", "path": "/d", "glob": ["!*.go"]},
+      "files": {"/d/a.go": "x", "/d/b.txt": "x", "/d/.h": "x"},
+      "expect": {
+        "contentJson": {"files": ["/d/b.txt"]},
+        "attrs": {"action": "rg", "path": "/d", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "rg context without pattern rejected",
+      "cmd": "fs",
+      "params": {"action": "rg", "path": "/d", "context": 2},
+      "files": {"/d/a.txt": "x"},
+      "expectError": "fs rg: context is only valid for content search (pattern is required)"
+    },
+    {
+      "name": "rg limit out of range",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "x", "path": "/a.txt", "limit": 500},
+      "files": {"/a.txt": "x\n"},
+      "expectError": "fs rg: limit must be between 1 and 200, got 500"
+    },
+    {
+      "name": "rg context out of range",
+      "cmd": "fs",
+      "params": {"action": "rg", "pattern": "x", "path": "/a.txt", "context": 11},
+      "files": {"/a.txt": "x\n"},
+      "expectError": "fs rg: context must be between 0 and 10, got 11"
     },
     {
       "name": "rg glob doublestar restricted",
       "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/docs", "glob": ["**/*.go"]},
+      "params": {"action": "rg", "pattern": "foo", "path": "/docs", "glob": ["!**/*.go"]},
       "files": {"/docs/a.txt": "foo\n"},
-      "expectError": "fs rg: glob \"**/*.go\" is not supported on this environment (restricted: no '!' negation or '**')"
+      "expectError": "fs rg: glob \"!**/*.go\" is not supported on this environment (restricted: no '**')"
     }
   ]
 }

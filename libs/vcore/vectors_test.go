@@ -42,8 +42,18 @@ type vectorCase struct {
 }
 
 type vectorExpect struct {
-	Content string            `json:"content"`
-	Attrs   map[string]string `json:"attrs"`
+	Content     string            `json:"content"`
+	ContentJSON json.RawMessage   `json:"contentJson,omitempty"` // 结构化期望：Marshal 后与 Content 比较（§4.6 rg JSON 输出）
+	Attrs       map[string]string `json:"attrs"`
+}
+
+// rgExpect 是 rg 结构化输出的期望形态（外层字段顺序 files → note 由 struct
+// 保证；files 用 RawMessage 原样保留向量中手写的键序——必须与 rg.go 手拼
+// 输出一致：path → matches、line → text → ctx）。Files 可为对象数组
+// （内容搜索）或字符串数组（列举模式）。
+type rgExpect struct {
+	Files json.RawMessage `json:"files"`
+	Note  string          `json:"note,omitempty"`
 }
 
 func TestVectors(t *testing.T) {
@@ -125,8 +135,20 @@ func runVectorCase(t *testing.T, c vectorCase) {
 	}
 
 	if c.Expect != nil {
-		if res.Content != c.Expect.Content {
-			t.Errorf("content = %q, want %q", res.Content, c.Expect.Content)
+		want := c.Expect.Content
+		if len(c.Expect.ContentJSON) > 0 {
+			var re rgExpect
+			if err := json.Unmarshal(c.Expect.ContentJSON, &re); err != nil {
+				t.Fatalf("unmarshal contentJson: %v", err)
+			}
+			jb, err := json.Marshal(re)
+			if err != nil {
+				t.Fatalf("marshal contentJson: %v", err)
+			}
+			want = string(jb)
+		}
+		if res.Content != want {
+			t.Errorf("content = %q, want %q", res.Content, want)
 		}
 		if !reflect.DeepEqual(res.Attrs, c.Expect.Attrs) {
 			t.Errorf("attrs = %v, want %v", res.Attrs, c.Expect.Attrs)

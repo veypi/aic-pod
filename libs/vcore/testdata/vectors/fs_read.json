@@ -17,7 +17,7 @@
       "files": {"/a.txt": "l1\nl2\nl3\nl4\n"},
       "expect": {
         "content": "2\tl2\n3\tl3\n",
-        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "4", "rows": "2", "range": "2-3", "truncated": "true"}
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "4", "rows": "2", "range": "2-3", "truncated": "true", "hint": "file has 4 lines; this call returned 2-3; pass offset=4 to continue reading"}
       }
     },
     {

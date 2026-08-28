@@ -82,7 +82,15 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	r.set("rows", end-(offset-1))
 	r.set("range", fmt.Sprintf("%d-%d", offset, end))
 	r.set("truncated", truncated)
+	if truncated {
+		r.set("hint", readHint(total, offset, end))
+	}
 	return r, nil
+}
+
+// readHint 截断时的翻页提示（放 attrs 而非 content，避免被当作正文，§4.2）。
+func readHint(total, offset, end int) string {
+	return fmt.Sprintf("file has %d lines; this call returned %d-%d; pass offset=%d to continue reading", total, offset, end, end+1)
 }
 
 // fsReadLarge 流式读取大文件（>8MB）：单次按行扫描，总行数精确统计，
@@ -139,7 +147,11 @@ func fsReadLarge(env *Env, abs string, offset, limit int) (*Result, error) {
 	r2.set("total_lines", total)
 	r2.set("rows", kept)
 	r2.set("range", fmt.Sprintf("%d-%d", offset, end))
-	r2.set("truncated", end < total)
+	truncated := end < total
+	r2.set("truncated", truncated)
+	if truncated {
+		r2.set("hint", readHint(total, offset, end))
+	}
 	return r2, nil
 }
 

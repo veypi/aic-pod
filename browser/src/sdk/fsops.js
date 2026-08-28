@@ -61,17 +61,22 @@ const LS_SKIP_DIRS = new Set([
   "node_modules", "vendor", "__pycache__", "bower_components", "dist", "build",
   "target", ".next", ".nuxt", "coverage", ".turbo", ".output",
 ]);
-// RG_SKIP_DIRS 是 rg 恒跳过集（与 vcore skipDirs 一致）。
-const RG_SKIP_DIRS = new Set(["node_modules", "vendor"]);
+// RG_SKIP_DIRS 是 rg 恒跳过集（与 vcore skipDirs 一致；与 LS_SKIP_DIRS 同一集合）。
+const RG_SKIP_DIRS = new Set([
+  "node_modules", "vendor", "__pycache__", "bower_components", "dist", "build",
+  "target", ".next", ".nuxt", "coverage", ".turbo", ".output",
+]);
 
 const LS_DEFAULT_DEPTH = 1;
 const LS_MAX_DEPTH = 5;
 const LS_MAX_NODES = 2000;
-const RG_DEFAULT_LIMIT = 100;
+const RG_DEFAULT_LIMIT = 50;
+const RG_MAX_LIMIT = 200;
+const RG_MAX_CONTEXT = 10;
 // RG_MAX_LINE_BYTES 匹配行内容单行字节上限 / RG_MAX_CONTENT_BYTES 总预算
 // （对齐 vcore rg.go §2.5：minified 单行超长命中不撑爆上下文）。
-const RG_MAX_LINE_BYTES = 8 << 10;
-const RG_MAX_CONTENT_BYTES = 512 << 10;
+const RG_MAX_LINE_BYTES = 4 << 10;
+const RG_MAX_CONTENT_BYTES = 128 << 10;
 
 function isHidden(name) {
   return name.startsWith(".");
@@ -161,18 +166,75 @@ function sortLsEntries(items) {
 const RG_UNSUPPORTED_RE = /(\(\?<?[=!])|(\\[1-9])/;
 const RG_UNSUPPORTED_HINT = "pattern is not supported on this environment (restricted: no lookaround/backreference), use bash -c \"grep -P ...\" on a physical host";
 
+// MINIFIED 判定（§4.6，与 vcore 一致）：三级判定。①命名约定快路径：
+// *.min.js/*.min.css/*.min.mjs 后缀即压缩语义（零 I/O）；②采样快路径：size ≥
+// MINIFIED_MIN_BYTES 且采样前 MINIFIED_HEAD_BYTES 字节内换行 < MINIFIED_MIN_LINES
+// → 压缩/单行文件，默认跳过（all 收录，显式单文件路径不跳过）；③可疑区间兜底：
+// 头部含长 license 注释等使采样内换行 ≥32 的压缩库（如 echarts.min.js：1MB/45
+// 行）且采样换行 < MINIFIED_SUSPECT_LINES 时，用全文件平均行长判定——
+// size/行数 > MINIFIED_AVG_LINE_BYTES 仍判 minified。采样换行 ≥ 可疑区间上界必
+// 为正常文件（真实分布：正常 ≥1250、压缩 ≤34），不做全文件统计。
+const MINIFIED_HEAD_BYTES = 64 << 10;
+const MINIFIED_MIN_LINES = 32;
+const MINIFIED_MIN_BYTES = 32 << 10;
+const MINIFIED_SUSPECT_LINES = 256; // 可疑区间上界：≥ 此值必为正常文件
+const MINIFIED_AVG_LINE_BYTES = 1 << 10; // 1KB/行：正常格式化代码平均行长远低于此
+const MINIFIED_NAME_RE = /\.min\.(js|css|mjs)$/;
+
+// isMinifiedRaw 判定 raw 是否为 minified/单行超长（与 vcore isMinified 一致）。
+// ①命名约定（raw.path 后缀 .min.js 等，零额外 I/O）；②采样快路径：前 64KB 字节
+// 内换行 < 32；③可疑区间（采样换行 < 256）平均行长兜底 > 1KB/行（readRaw 已
+// 整读，indexOf 循环数换行无额外内存）。二进制 Blob/读失败按非 minified 处理。
+function isMinifiedRaw(raw) {
+  if (!raw) return false;
+  if (MINIFIED_NAME_RE.test(raw.path ?? "")) return true; // 命名约定快路径（零 I/O，优先于 size，与 Go 一致）
+  if (typeof raw.size !== "number" || raw.size < MINIFIED_MIN_BYTES) return false;
+  if (typeof raw.content !== "string") return false; // 二进制 Blob 不判
+  const enc = new TextEncoder();
+  const bytes = enc.encode(raw.content.slice(0, MINIFIED_HEAD_BYTES));
+  // 采样收紧到 64KB 字节（slice 是 code unit 索引，多字节内容可能超采样窗口）
+  const sample = bytes.length > MINIFIED_HEAD_BYTES ? bytes.subarray(0, MINIFIED_HEAD_BYTES) : bytes;
+  let nl = 0;
+  for (const b of sample) if (b === 10) nl++;
+  if (nl < MINIFIED_MIN_LINES) return true;
+  if (nl >= MINIFIED_SUSPECT_LINES) return false; // 正常格式化文件，跳过全文件统计
+  // 可疑区间：全文件平均行长兜底（\n 计数与 Go bytes.Count 一致；
+  // Math.floor 对齐 Go int64 整除，双端边界判定一致）
+  let totalNl = 0;
+  let idx = -1;
+  while ((idx = raw.content.indexOf("\n", idx + 1)) !== -1) totalNl++;
+  return totalNl > 0 && Math.floor(raw.size / totalNl) > MINIFIED_AVG_LINE_BYTES;
+}
+
 async function fsRg(fs, ctx, p) {
   const globs = Array.isArray(p.glob) ? p.glob.map(String) : [];
   for (const g of globs) {
-    if (g.includes("!") || g.includes("**")) {
-      throw fsErr("rg", `glob "${g}" is not supported on this environment (restricted: no '!' negation or '**')`);
+    if (g.replace(/^!/, "").includes("**")) {
+      throw fsErr("rg", `glob "${g}" is not supported on this environment (restricted: no '**')`);
+    }
+  }
+  let limit = RG_DEFAULT_LIMIT;
+  if (p.limit !== undefined && p.limit !== null) {
+    limit = Number(p.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > RG_MAX_LIMIT) {
+      throw fsErr("rg", `limit must be between 1 and ${RG_MAX_LIMIT}, got ${p.limit}`);
+    }
+  }
+  let rgCtx = 0;
+  if (p.context !== undefined && p.context !== null) {
+    rgCtx = Number(p.context);
+    if (!Number.isInteger(rgCtx) || rgCtx < 0 || rgCtx > RG_MAX_CONTEXT) {
+      throw fsErr("rg", `context must be between 0 and ${RG_MAX_CONTEXT}, got ${p.context}`);
     }
   }
 
   const target = p.path || defaultTarget(ctx);
 
   // pattern 缺省 = 列举模式：纯文件列举（不接受搜索语义）
-  if (!p.pattern) return rgFiles(fs, ctx, target, globs, !!p.all);
+  if (!p.pattern) {
+    if (rgCtx > 0) throw fsErr("rg", "context is only valid for content search (pattern is required)");
+    return rgFiles(fs, ctx, target, globs, !!p.all, limit);
+  }
 
   const pattern = String(p.pattern);
   if (RG_UNSUPPORTED_RE.test(pattern)) throw fsErr("rg", RG_UNSUPPORTED_HINT);
@@ -190,15 +252,17 @@ async function fsRg(fs, ctx, p) {
   if (st === null) throw fsErr("rg", `${abs}: no such file or directory`);
   let candidates;
   if (!st.dir) {
+    // 显式单文件路径：不做 minified 跳过（用户显式指定即明确意图）
     candidates = [target];
-  } else {
-    candidates = await rgWalk(fs, ctx, target, globs, !!p.all);
+    return rgSearch(fs, ctx, abs, pattern, candidates, re, limit, rgCtx, true);
   }
-  return rgSearch(fs, ctx, abs, pattern, candidates, re);
+  candidates = await rgWalk(fs, ctx, target, globs, !!p.all);
+  return rgSearch(fs, ctx, abs, pattern, candidates, re, limit, rgCtx, !!p.all);
 }
 
 // rgWalk 递归收集文件：目标前缀下任一路径段命中隐藏（hidden 收录）或
-// RG_SKIP_DIRS 即跳过（与 Go rgWalk 的递归跳过语义一致）；glob 按文件名 OR 过滤。
+// RG_SKIP_DIRS 即跳过（与 Go rgWalk 的递归跳过语义一致）；glob 按文件名过滤
+// （include OR + ! 排除，与 Go globOK 一致）。
 async function rgWalk(fs, ctx, target, globs, hidden) {
   const w = await fs.walk(target, ctx);
   const prefix = target.endsWith("/") ? target : target + "/";
@@ -210,14 +274,29 @@ async function rgWalk(fs, ctx, target, globs, hidden) {
     if (segs.some((s) => RG_SKIP_DIRS.has(s))) continue;
     if (!hidden && segs.some((s) => isHidden(s))) continue;
     const name = segs[segs.length - 1] || "";
-    if (globs.length && !globs.some((g) => globMatch(g, name))) continue;
+    if (globs.length && !rgGlobOK(globs, name)) continue;
     out.push(it.path);
   }
   out.sort(cmpBytes);
   return out;
 }
 
-async function rgFiles(fs, ctx, target, globs, hidden) {
+// rgGlobOK：include glob OR 任一命中即通过；! 前缀 = 排除 glob（命中任一
+// 排除即不通过）；无 include = 全通过（与 Go globOK 一致）。
+function rgGlobOK(globs, name) {
+  const inc = [];
+  for (const g of globs) {
+    if (g.startsWith("!")) {
+      if (globMatch(g.slice(1), name)) return false;
+      continue;
+    }
+    inc.push(g);
+  }
+  if (!inc.length) return true;
+  return inc.some((g) => globMatch(g, name));
+}
+
+async function rgFiles(fs, ctx, target, globs, hidden, limit) {
   const abs = await absOf(fs, target, ctx);
   const st = await fs.stat(target, ctx);
   if (st === null) throw fsErr("rg", `${abs}: no such file or directory`);
@@ -227,27 +306,65 @@ async function rgFiles(fs, ctx, target, globs, hidden) {
   } else {
     files = await rgWalk(fs, ctx, target, globs, hidden);
   }
-  let truncated = files.length > RG_DEFAULT_LIMIT;
-  if (truncated) files = files.slice(0, RG_DEFAULT_LIMIT);
-  if (files.length === 0) {
-    const msg = globs.length ? `no files matched globs ${globs.join(", ")} in ${abs}` : `no files found in ${abs}`;
-    return { content: msg, attrs: { action: "rg", path: abs, rows: "0", truncated: "false" } };
+  let truncated = files.length > limit;
+  if (truncated) files = files.slice(0, limit);
+  const jb = makeRGJSONBuf(`]}`); // 预留数组+顶层闭合（2 字节）
+  jb.write(`{"files":[`);
+  let rows = 0;
+  for (let i = 0; i < files.length; i++) {
+    let s = jsonStr(files[i]);
+    if (i > 0) s = "," + s; // 逗号与元素原子写入，防悬空逗号
+    if (!jb.write(s)) {
+      truncated = true;
+      break;
+    }
+    rows++;
   }
-  let content = "";
-  let bytes = 0;
-  let out = 0;
+  jb.close(`]}`);
+  return { content: jb.done(), attrs: { action: "rg", path: abs, rows: String(rows), truncated: String(truncated) } };
+}
+
+// rgNoteMax 是 note 尾部的最坏情况长度（skipped 为 int64 最大值），用于
+// rgSearch 的 makeRGJSONBuf 预留收尾空间（与 vcore rgNoteMax 一致）。
+const RG_NOTE_MAX = `],"note":"9223372036854775807 minified files skipped, use all=true to include"}`;
+
+// makeRGJSONBuf 预算感知增量 JSON 构建（与 vcore rgJSONBuf 一致）：构建时
+// 预留尾部闭合（含可选 note）空间，内容写满即截断（write 返回 false）但
+// close 恒成功——输出恒为合法 JSON 且 UTF-8 字节 ≤ RG_MAX_CONTENT_BYTES。
+function makeRGJSONBuf(tailMax) {
   const enc = new TextEncoder();
-  for (const f of files) {
-    const line = f + "\n";
-    const bl = enc.encode(line).length;
-    if (bytes + bl > RG_MAX_CONTENT_BYTES) break;
-    content += line;
-    bytes += bl;
-    out++;
-  }
-  content = content.replace(/\n$/, "");
-  if (out < files.length) truncated = true;
-  return { content, attrs: { action: "rg", path: abs, rows: String(out), truncated: String(truncated) } };
+  let buf = "";
+  let bytes = 0;
+  let truncated = false;
+  const limit = RG_MAX_CONTENT_BYTES - enc.encode(tailMax).length;
+  return {
+    // write 追加内容；超预算返回 false 并置 truncated（此后 write 全部拒绝）
+    write(s) {
+      if (truncated) return false;
+      const bl = enc.encode(s).length;
+      if (bytes + bl > limit) {
+        truncated = true;
+        return false;
+      }
+      buf += s;
+      bytes += bl;
+      return true;
+    },
+    // close 强制写入收尾（调用方保证 end 长度 ≤ 预留 tailMax）
+    close(end) {
+      buf += end;
+    },
+    done() {
+      return buf;
+    },
+  };
+}
+
+// jsonStr 输出 JSON 字符串字面量，并模拟 Go json.Marshal 的 HTML 转义
+// （< > & → \u003c 等），保证双端字节一致。
+function jsonStr(s) {
+  return JSON.stringify(s).replace(/[<>&]/g, (c) =>
+    c === "<" ? "\\u003c" : c === ">" ? "\\u003e" : "\\u0026");
 }
 
 // clipRgText 按字节截断超长匹配行内容（UTF-8 边界收刀），超限追加标记
@@ -269,62 +386,136 @@ function clipRgText(text) {
   return { text: new TextDecoder().decode(bytes.slice(0, cut)) + "...[truncated]", clipped: true };
 }
 
-async function rgSearch(fs, ctx, abs, pattern, candidates, re) {
-  const rows = [];
+async function rgSearch(fs, ctx, abs, pattern, candidates, re, limit, rgCtx, includeMinified) {
+  // 预留最大 note 空间：内容写满即截断，收尾（数组闭合+可选 note）恒可写
+  const jb = makeRGJSONBuf(RG_NOTE_MAX);
+  jb.write(`{"files":[`);
+  let contentRows = 0;
   let truncated = false;
   let clipped = false;
+  let skipped = 0;
+  let firstFile = true;
   for (const f of candidates) {
-    if (rows.length >= RG_DEFAULT_LIMIT) {
+    if (contentRows >= limit) {
       truncated = true;
       break;
     }
-    const quota = RG_DEFAULT_LIMIT - rows.length;
-    const ms = await rgFile(fs, ctx, f, re, quota);
-    if (!ms || ms.length === 0) continue;
-    for (const m of ms) {
-      const { text, clipped: c } = clipRgText(m.text);
-      if (c) clipped = true;
-      rows.push(`${m.path}:${m.line}:${text}`);
+    // 一次 readRaw 同时服务 minified 判定与行扫描（避免每文件两遍全量读）
+    const raw = await fs.readRaw(f, ctx);
+    if (!raw) continue; // 读失败跳过
+    if (!includeMinified && isMinifiedRaw(raw)) {
+      skipped++;
+      continue;
     }
+    const lines = linesOfRaw(raw);
+    if (!lines) continue; // 二进制跳过
+    const res = rgEmitRows(lines, re, rgCtx, limit - contentRows);
+    if (res.truncated) truncated = true;
+    // 文件级原子 chunk：逗号+整文件整体写入预算检查，超限丢弃（JSON 恒闭合）
+    let fb = `{"path":${jsonStr(f)},"matches":[`;
+    let fRows = 0;
+    let firstRow = true;
+    for (const r of res.rows) {
+      if (r.sep) continue; // 结构化后组间分隔无意义（行序即上下文序）
+      const { text, clipped: c } = clipRgText(r.text);
+      if (c) clipped = true;
+      if (!firstRow) fb += ",";
+      firstRow = false;
+      fb += `{"line":${r.line},"text":${jsonStr(text)}`;
+      if (!r.match) fb += `,"ctx":true`;
+      fb += `}`;
+      fRows++;
+    }
+    if (!fRows) continue;
+    let chunk = fb + `]}`;
+    if (!firstFile) chunk = "," + chunk;
+    if (!jb.write(chunk)) {
+      truncated = true;
+      break;
+    }
+    firstFile = false;
+    contentRows += fRows;
   }
-  if (rows.length === 0) {
-    return { content: `no matches for pattern "${pattern}" in ${abs}`, attrs: { action: "rg", path: abs, rows: "0", truncated: "false" } };
-  }
+  if (skipped > 0) jb.close(`],"note":"${skipped} minified files skipped, use all=true to include"}`);
+  else jb.close(`]}`);
   if (clipped) truncated = true;
-  // 512KB 字节预算只留完整行（§2.5；首行同样受检）
-  let content = "";
-  let bytes = 0;
-  let out = 0;
-  const enc = new TextEncoder();
-  for (const row of rows) {
-    const line = row + "\n";
-    const bl = enc.encode(line).length;
-    if (bytes + bl > RG_MAX_CONTENT_BYTES) break;
-    content += line;
-    bytes += bl;
-    out++;
-  }
-  content = content.replace(/\n$/, "");
-  if (out < rows.length) truncated = true;
-  return { content, attrs: { action: "rg", path: abs, rows: String(out), truncated: String(truncated) } };
+  const attrs = { action: "rg", path: abs, rows: String(contentRows), truncated: String(!!(truncated || clipped)) };
+  if (skipped > 0) attrs.skipped = String(skipped);
+  return { content: jb.done(), attrs };
 }
 
-async function rgFile(fs, ctx, path, re, max) {
-  const raw = await fs.readRaw(path, ctx);
-  if (!raw || (raw.mime && raw.mime !== "text/plain")) return null; // 二进制跳过
-  const text = String(raw.content ?? "");
-  // 剥除尾随换行产生的空元素，避免 ^$ 等空串模式幻影报出文件末尾一行
-  const lines = text.split("\n");
-  if (lines.length && lines[lines.length - 1] === "") lines.pop();
-  const out = [];
+// rgEmitRows 单遍扫描+上下文展开（GNU grep -C 语义，与 Go rgEmit 一致）：
+// 命中行前 rgCtx 行缓冲补发、后 rgCtx 行计数直发；上下文区相邻或重叠
+// （两命中间无未选行）合并为一个组，组间插入 --；内容行数（不含 --）达到
+// maxRows 后仅探测剩余命中决定 truncated。
+function rgEmitRows(lines, re, rgCtx, maxRows) {
+  const rows = [];
+  let pending = []; // before-context 缓冲（至多 rgCtx 行）
+  let lastEmitted = 0; // 最近已输出内容行号（0 = 组未开）
+  let after = 0;
+  let n = 0;
+  let truncated = false;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].replace(/\r$/, ""); // CRLF 统一剥除
-    if (re.test(line)) {
-      out.push({ path, line: i + 1, text: line });
-      if (out.length >= max) break;
+    const isMatch = re.test(lines[i]);
+    if (n >= maxRows) {
+      // 预算已满：只探测剩余行是否还有命中（决定 truncated）
+      if (isMatch) {
+        truncated = true;
+        break;
+      }
+      continue;
+    }
+    if (isMatch) {
+      // 组间断判定：新命中（或其 before 缓冲首行）与上一输出行不衔接 → --
+      const start = pending.length ? pending[0].line : i + 1;
+      if (rgCtx > 0 && lastEmitted > 0 && start !== lastEmitted + 1) {
+        rows.push({ sep: true });
+      }
+      let stop = false;
+      for (const pr of pending) {
+        if (n >= maxRows) {
+          truncated = true;
+          stop = true;
+          break;
+        }
+        rows.push(pr);
+        n++;
+        lastEmitted = pr.line;
+      }
+      pending = [];
+      if (stop) break;
+      if (n >= maxRows) {
+        // 命中行自身放不下：截断（存在被压制的命中）
+        truncated = true;
+        break;
+      }
+      rows.push({ line: i + 1, text: lines[i], match: true });
+      n++;
+      lastEmitted = i + 1;
+      after = rgCtx;
+      continue;
+    }
+    if (after > 0) {
+      rows.push({ line: i + 1, text: lines[i] });
+      n++;
+      lastEmitted = i + 1;
+      after--;
+    } else if (rgCtx > 0) {
+      pending.push({ line: i + 1, text: lines[i] });
+      if (pending.length > rgCtx) pending.shift();
     }
   }
-  return out;
+  return { rows, truncated };
+}
+
+// linesOfRaw 将 raw 拆为行数组（剥尾随空元素与行尾 \r）；二进制/非文本 → null。
+function linesOfRaw(raw) {
+  if (!raw || (raw.mime && raw.mime !== "text/plain")) return null;
+  if (typeof raw.content !== "string") return null;
+  const lines = raw.content.split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  for (let i = 0; i < lines.length; i++) lines[i] = lines[i].replace(/\r$/, "");
+  return lines;
 }
 
 // ---- cp / mv / rm（对齐 vcore fileops.go）----

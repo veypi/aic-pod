@@ -18,7 +18,8 @@ type fsParams struct {
 	// 目标路径：read/write/edit/ls/rg/rm
 	Path string `json:"path,omitempty"`
 
-	// read
+	// read（offset/limit，limit 上限 1000）；rg 复用 limit = 全局输出行数上限
+	// （命中+上下文行同池计数，默认 50 上限 200）
 	Offset *int `json:"offset,omitempty"`
 	Limit  *int `json:"limit,omitempty"`
 
@@ -33,8 +34,13 @@ type fsParams struct {
 	All   bool `json:"all,omitempty"`   // 收录点开头隐藏项（默认跳过）；rg 同义
 
 	// rg：pattern 缺省 = 文件列举模式；smart case（pattern 全小写 → 不敏感）
-	Pattern string   `json:"pattern,omitempty"`
-	Glob    []string `json:"glob,omitempty"` // 文件名 glob（basename，OR 语义；不支持 ! 与 **）
+	Pattern string `json:"pattern,omitempty"`
+	// 文件名 glob（basename，include OR 语义；! 前缀 = 排除 glob；不支持 **）
+	Glob []string `json:"glob,omitempty"`
+	// rg：context = 命中行上下各 N 行上下文（grep -C 语义，0-10 默认 0）。
+	// 上下文行输出为 JSON 中 ctx:true 的 match（见 rg.go 头注释），与命中行同池
+	// 计入 limit；不连续命中组之间无分隔符（行序即上下文序）。
+	Context *int `json:"context,omitempty"`
 
 	// cp / mv
 	Src string `json:"src,omitempty"`

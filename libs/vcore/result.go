@@ -32,7 +32,7 @@ func (r *Result) set(k string, v any) {
 
 const (
 	// MaxContentBytes 是 content 响应上限（上下文体积控制的有意取舍，双端一致）。
-	MaxContentBytes = 512 << 10 // 512KB
+	MaxContentBytes = 128 << 10 // 128KB
 	// streamThreshold 是 read/grep 整读的大小上限：超过则嗅探前 512 字节
 	// 判定文本并流式按行扫描（§4.2 大文件流式化，三端一致）。
 	streamThreshold = 8 << 20 // 8MB

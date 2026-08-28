@@ -217,7 +217,12 @@ for (const file of readdirSync(VECTORS_DIR)) {
       }
       assert.ifError(err);
       if (c.expect) {
-        assert.equal(res.content, c.expect.content);
+        if (c.expect.contentJson) {
+          // 结构化期望：语义比较（JSON.parse 后 deepEqual，容键序/HTML 转义差异）
+          assert.deepEqual(JSON.parse(res.content), c.expect.contentJson);
+        } else {
+          assert.equal(res.content, c.expect.content);
+        }
         assert.deepEqual(res.attrs, c.expect.attrs);
       }
       if (c.expectFiles) {
@@ -233,10 +238,100 @@ test("rg: long single line clipped within byte budget", async () => {
   const fs = new MemFS({ "/big.min.js": "A".repeat(700 * 1024) + "foo" + "B".repeat(100) });
   const res = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/big.min.js" }, { workdir: "/" });
   const bytes = Buffer.byteLength(res.content);
-  assert.ok(bytes <= 512 * 1024, `content ${bytes} bytes exceeds budget`);
-  assert.ok(res.content.endsWith("...[truncated]"), res.content.slice(-100));
+  assert.ok(bytes <= 128 * 1024, `content ${bytes} bytes exceeds budget`);
+  // content 为结构化 JSON：命中行 text 被 4KB 截断
+  const obj = JSON.parse(res.content);
+  const m = obj.files[0].matches[0];
+  assert.ok(m.text.endsWith("...[truncated]"), m.text.slice(-100));
   assert.equal(res.attrs.rows, "1");
   assert.equal(res.attrs.truncated, "true");
+});
+
+test("rg: minified files skipped by default, all=true includes", async () => {
+  // ~40KB 单行（≥ MINIFIED_MIN_BYTES，采样内换行 0 < 32）→ minified
+  const bundle = "A".repeat(40000) + "foo" + "B".repeat(100); // ~40KB 单行（≥ MINIFIED_MIN_BYTES）
+  const fs = new MemFS({ "/d/a.txt": "foo\n", "/d/bundle.js": bundle });
+
+  // 默认：跳过 + attrs.skipped 计数 + content note
+  const res = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d" }, { workdir: "/" });
+  assert.equal(res.content, `{"files":[{"path":"/d/a.txt","matches":[{"line":1,"text":"foo"}]}],"note":"1 minified files skipped, use all=true to include"}`);
+  assert.equal(res.attrs.skipped, "1");
+  assert.equal(res.attrs.rows, "1");
+
+  // all=true：收录（命中行 4KB 截断）
+  const res2 = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d", all: true }, { workdir: "/" });
+  assert.ok(res2.content.includes("/d/bundle.js"), res2.content.slice(0, 60));
+  const m2 = JSON.parse(res2.content).files.find((f) => f.path.endsWith("bundle.js")).matches[0];
+  assert.ok(m2.text.endsWith("...[truncated]"));
+  assert.equal(res2.attrs.rows, "2");
+  assert.equal(res2.attrs.skipped, undefined);
+
+  // 显式单文件路径：不跳过
+  const res3 = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d/bundle.js" }, { workdir: "/" });
+  assert.ok(res3.content.startsWith(`{"files":[{"path":"/d/bundle.js","matches":[{"line":1,"text":"AAAA`), res3.content.slice(0, 60));
+  assert.equal(res3.attrs.skipped, undefined);
+
+  // 无匹配 + 有跳过：空数组 + note 提示逃生通道
+  const res4 = await runFsOps(fs, { action: "rg", pattern: "zzz", path: "/d" }, { workdir: "/" });
+  assert.equal(res4.content, `{"files":[],"note":"1 minified files skipped, use all=true to include"}`);
+  assert.equal(res4.attrs.skipped, "1");
+});
+
+test("rg: minified judged by bytes not code units (multibyte)", async () => {
+  // ~40KB 字节的中文单行（code unit ~13K < 32K，旧 length 判定会漏判）
+  const bundle = "中".repeat(13333) + "foo" + "B".repeat(100);
+  const fs = new MemFS({ "/d/a.txt": "foo\n", "/d/zh.json": bundle });
+  const res = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d" }, { workdir: "/" });
+  assert.equal(
+    res.content,
+    `{"files":[{"path":"/d/a.txt","matches":[{"line":1,"text":"foo"}]}],"note":"1 minified files skipped, use all=true to include"}`,
+  );
+  assert.equal(res.attrs.skipped, "1");
+  assert.equal(res.attrs.rows, "1");
+});
+
+test("rg: minified avg-line fallback (long license head)", async () => {
+  // ~96.7KB：前 64KB 内 40+ 个换行（≥32，采样快路径不命中），全文件 ~46 行
+  // → 平均 ~2.1KB/行 > 1KB → 兜底判 minified（echarts.min.js 形态）
+  let s = "";
+  for (let i = 0; i < 40; i++) s += `// license line ${i}\n`;
+  for (let i = 0; i < 10; i++) s += "ABCDEFGH".repeat(1200) + "\n";
+  const fs = new MemFS({ "/d/a.txt": "foo\n", "/d/echarts-like.js": s });
+  const res = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d" }, { workdir: "/" });
+  assert.equal(
+    res.content,
+    `{"files":[{"path":"/d/a.txt","matches":[{"line":1,"text":"foo"}]}],"note":"1 minified files skipped, use all=true to include"}`,
+  );
+  assert.equal(res.attrs.skipped, "1");
+  assert.equal(res.attrs.rows, "1");
+
+  // 对照：同样头部但正常密度（平均行长 < 1KB）不跳过
+  let ok = "";
+  for (let i = 0; i < 40; i++) ok += `// license line ${i}\n`;
+  for (let i = 0; i < 4000; i++) ok += `const v${i} = ${i};\n`;
+  const fs2 = new MemFS({ "/d/ok.js": ok });
+  const res2 = await runFsOps(fs2, { action: "rg", pattern: "const v0", path: "/d" }, { workdir: "/" });
+  assert.equal(res2.attrs.skipped, undefined);
+  assert.equal(res2.attrs.rows, "1");
+});
+
+test("rg: minified by name suffix (*.min.js/css/mjs)", async () => {
+  // .min.* 后缀即压缩语义：<32KB 也跳过（命名优先于 size），显式路径不跳过
+  const fs = new MemFS({
+    "/d/a.txt": "foo\n",
+    "/d/vendor.min.js": "small normal-ish content\nfoo\n",
+    "/d/theme.min.css": ".a{color:red}\n",
+  });
+  const res = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d" }, { workdir: "/" });
+  assert.equal(
+    res.content,
+    `{"files":[{"path":"/d/a.txt","matches":[{"line":1,"text":"foo"}]}],"note":"2 minified files skipped, use all=true to include"}`,
+  );
+  assert.equal(res.attrs.skipped, "2");
+  assert.equal(res.attrs.rows, "1");
+
+  const res2 = await runFsOps(fs, { action: "rg", pattern: "foo", path: "/d/vendor.min.js" }, { workdir: "/" });
+  assert.ok(res2.content.includes("vendor.min.js"), res2.content.slice(0, 80));
 });
 
 test("globMatch: * and ?", () => {

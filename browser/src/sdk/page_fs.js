@@ -17,7 +17,7 @@
 // 容器前缀（$SESSION/$USER/$AGENT、/sessions/{x}/、/home/{x}/）——resolve 一律剥离
 // 映射到本地根下（如 $SESSION/foo → /foo）。
 //
-// 行为对齐 vcore（§2.6 三端一致）：offset/limit 1 基、行号前缀、512KB 预算、
+// 行为对齐 vcore（§2.6 三端一致）：offset/limit 1 基、行号前缀、128KB 预算、
 // 二进制分支（page 无 UFS 概念 → 图片走 image_data data URI，超 600KB 阶梯压缩）、
 // edit 唯一匹配/重叠校验。错误文案与 vcore 保持一致。
 // 实现取舍：>8MB 大文件不整读是 Go 端的内存优化，输出语义相同；
@@ -25,7 +25,7 @@
 
 import { runFsOps } from "./fsops.js";
 
-const MAX_CONTENT_BYTES = 512 << 10; // 512KB（§2.5，三端一致）
+const MAX_CONTENT_BYTES = 128 << 10; // 128KB（§2.5，三端一致）
 const IMAGE_DATA_MAX_BYTES = 600 * 1024; // image_data 投递标准（§2.2，三端一致）
 
 // fs JSON 参数的合法字段（§2.1：未知字段报错）
@@ -440,7 +440,7 @@ export class PageFS {
 
     let body = "";
     for (let i = offset - 1; i < end; i++) body += `${i + 1}\t${lines[i]}\n`;
-    // 512KB 内容上限先于 limit 触发：只保留完整行，rows/range 同步收紧（§4.2）
+    // 128KB 内容上限先于 limit 触发：只保留完整行，rows/range 同步收紧（§4.2）
     const [cut, wasCut] = truncateContent(body, MAX_CONTENT_BYTES);
     if (wasCut) {
       body = cut;
@@ -450,18 +450,18 @@ export class PageFS {
       truncated = true;
     }
 
-    return {
-      content: body,
-      attrs: {
-        action: "read",
-        path: abs,
-        mime: "text/plain",
-        total_lines: String(total),
-        rows: String(end - (offset - 1)),
-        range: `${offset}-${end}`,
-        truncated: String(truncated),
-      },
+    const attrs = {
+      action: "read",
+      path: abs,
+      mime: "text/plain",
+      total_lines: String(total),
+      rows: String(end - (offset - 1)),
+      range: `${offset}-${end}`,
+      truncated: String(truncated),
     };
+    if (truncated)
+      attrs.hint = `file has ${total} lines; this call returned ${offset}-${end}; pass offset=${end + 1} to continue reading`;
+    return { content: body, attrs };
   }
 
   // 二进制分支（§4.2）：mime + size；可展示图片走 image_data（page 无 UFS，§2.2）
