@@ -70,18 +70,19 @@ func TestManagerNoSandboxGlobal(t *testing.T) {
 
 // bwrap 包装：read-only 无任何可写挂载；workspace-write 有 tmpfs /tmp +
 // 工作区 bind + 缓存目录 bind + 敏感子路径只读覆盖；命令在 -- 之后原样。
+// 两种 profile 均携带资源限制段（rlimitArgs，与文件隔离正交）。
 func TestBwrapArgs(t *testing.T) {
 	argv := []string{"bash", "-c", "echo hi"}
 
 	ro := bwrapArgs(proto.LevelRead, "/ws", nil, nil, argv)
-	want := []string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent", "--", "bash", "-c", "echo hi"}
+	want := append([]string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"},
+		append(rlimitArgs(), "--", "bash", "-c", "echo hi")...)
 	assertEqual(t, "read-only", ro, want)
 
 	ww := bwrapArgs(proto.LevelWrite, "/ws", []string{"/home/u/.cache"}, []string{"/ws/.git"}, argv)
-	want = []string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent",
-		"--tmpfs", "/tmp", "--bind", "/ws", "/ws", "--bind", "/home/u/.cache", "/home/u/.cache",
-		"--ro-bind", "/ws/.git", "/ws/.git",
-		"--", "bash", "-c", "echo hi"}
+	want = append([]string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"},
+		append(rlimitArgs(), "--tmpfs", "/tmp", "--bind", "/ws", "/ws", "--bind", "/home/u/.cache", "/home/u/.cache",
+			"--ro-bind", "/ws/.git", "/ws/.git", "--", "bash", "-c", "echo hi")...)
 	assertEqual(t, "workspace-write", ww, want)
 
 	// level 3/4/9 与 2 同语义（审批通过不豁免沙箱）
@@ -165,6 +166,48 @@ func TestWritableRoots(t *testing.T) {
 	}
 	if len(roots) < 2 { // /private/tmp + os.TempDir()
 		t.Fatalf("unexpected roots: %v", roots)
+	}
+}
+
+// rlimitArgs 三端同一组上限：AS 4GiB / NPROC 256 / NOFILE 1024 / CPU 600 /
+// FSIZE 1GiB / CORE 0（与 resourceLimit* 常量一致，防硬编码漂移）。
+func TestRlimitArgs(t *testing.T) {
+	got := rlimitArgs()
+	want := []string{
+		"--rlimit", "AS", "4294967296",
+		"--rlimit", "NPROC", "256",
+		"--rlimit", "NOFILE", "1024",
+		"--rlimit", "CPU", "600",
+		"--rlimit", "FSIZE", "1073741824",
+		"--rlimit", "CORE", "0",
+	}
+	assertEqual(t, "rlimits", got, want)
+}
+
+// confineRlimits（darwin）：sh ulimit 包装——脚本含资源上限 + exec "$@"
+// 透传；argv 尾部原样保留（/bin/sh -c <script> sh <argv...>）。
+func TestConfineRlimits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows uses job object, covered by TestWindowsJobLimits")
+	}
+	got := confineRlimits([]string{"bash", "-c", "echo hi"})
+	if len(got) != 7 || got[0] != "/bin/sh" || got[1] != "-c" || got[3] != "sh" {
+		t.Fatalf("confineRlimits head: %v", got)
+	}
+	script := got[2]
+	for _, want := range []string{"ulimit -u 256", "-n 1024", "-t 600", "-f 2097152", "-c 0", `exec "$@"`} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q: %s", want, script)
+		}
+	}
+	// macOS 内核不支持 RLIMIT_AS：-v 不得出现在脚本中（RSS 监控兜底）
+	if strings.Contains(script, "-v") {
+		t.Fatalf("script must not set -v (RLIMIT_AS unsupported on darwin): %s", script)
+	}
+	for i, a := range []string{"bash", "-c", "echo hi"} {
+		if got[4+i] != a {
+			t.Fatalf("argv tail %d: %v", i, got[4:])
+		}
 	}
 }
 

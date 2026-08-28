@@ -17,12 +17,20 @@
 //   - windows: 受限令牌（CreateRestrictedToken）+ ACL 写授权（路径 A：
 //     host 进程内创建令牌，SysProcAttr.Token 注入，无独立 runner）；
 //   - 其他: 无后端，fail-closed（confined 模式拒绝执行）。
+//
+// 资源限制（2026-08-28 补齐，与文件隔离正交）：
+//   - linux: bwrap --rlimit（bwrap 原生，零额外进程）；
+//   - darwin: sh ulimit 包装（Seatbelt 不支持资源限制；RLIMIT 跨 exec 继承）；
+//   - windows: Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256）。
+// 三端同一组上限（resourceLimit* 常量），read-only 与 workspace-write 同限——
+// 此前只有文件隔离，沙箱内命令可无限分配内存/派生进程，实测打爆系统内存死机。
 package exec_procs
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +41,23 @@ import (
 // probeTimeout 是每个后端功能性 probe 的超时（真跑一次最小命令验证；
 // 0 会被视为无超时，故必须为正数）。
 const probeTimeout = 5 * time.Second
+
+// 沙箱资源上限（三端统一语义，与文件隔离正交；read-only 与 workspace-write 同限）：
+//   - AS 4GiB：防大 malloc 吃满物理内存 + swap 导致系统假死（死机事故根因）
+//   - job 内存 8GiB：windows Job Object 整个 job（含全部子孙）合计上限
+//   - NPROC 256：防 fork 炸弹（正常工具链远低于此）
+//   - NOFILE 1024：防 fd 耗尽
+//   - CPU 600s：与 30m wall-clock 超时双保险
+//   - FSIZE 1GiB：防单文件写爆磁盘（write 级沙箱）
+//   - CORE 0：禁 core dump 落盘
+const (
+	resourceLimitAS        = 4 << 30
+	resourceLimitJobMemory = 8 << 30
+	resourceLimitNProc     = 256
+	resourceLimitNoFile    = 1024
+	resourceLimitCPU       = 600
+	resourceLimitFSize     = 1 << 30
+)
 
 // protectedMetadataNames 是工作区可写时仍保持只读的敏感子路径名
 // （借鉴 codex：.git 防 AI 破坏仓库元数据/历史；可扩展 .agents 等）。
@@ -57,12 +82,15 @@ const (
 //   - argv：替换启动参数（bwrap/seatbelt 包装；windows 原样）
 //   - token：windows 受限令牌句柄（其他平台恒 0；spawn 成功后由
 //     exec_procs 关闭——子进程持有令牌副本）
+//   - job：windows Job Object 句柄（资源限制：内存/进程数；其他平台恒 0；
+//     spawn 成功后由 exec_procs assign 子进程，进程结束后随 cleanup 关闭）
 //   - env：附加环境变量（windows：TMP/TEMP 指向私有临时目录）
-//   - cleanup：进程结束后调用（windows：撤销私有临时目录 ACE 并删除；
-//     其他平台 nil）
+//   - cleanup：进程结束后调用（windows：撤销私有临时目录 ACE 并删除 +
+//     关闭 Job Object；其他平台 nil）
 type launchPlan struct {
 	argv    []string
 	token   uintptr
+	job     uintptr
 	env     []string
 	cleanup func()
 }
@@ -115,8 +143,37 @@ func sandboxUnavailable(level int) error {
 //   - protectedReadonly：可写根下的敏感子路径（.git 等）以 --ro-bind 覆盖
 //     为只读（bwrap 后绑定覆盖前绑定）
 //   - read-only（level 1）：无任何可写挂载（/dev/null 由 --dev 提供）
+// rlimitArgs 构建 bwrap 资源限制参数段（--rlimit TYPE VALUE ...）。
+// bwrap 在 exec 前对子进程 setrlimit（soft=hard），与文件隔离正交、
+// read-only 与 workspace-write 同限（resourceLimit* 常量统一语义）。
+func rlimitArgs() []string {
+	return []string{
+		"--rlimit", "AS", strconv.FormatUint(uint64(resourceLimitAS), 10),
+		"--rlimit", "NPROC", strconv.Itoa(resourceLimitNProc),
+		"--rlimit", "NOFILE", strconv.Itoa(resourceLimitNoFile),
+		"--rlimit", "CPU", strconv.Itoa(resourceLimitCPU),
+		"--rlimit", "FSIZE", strconv.FormatUint(uint64(resourceLimitFSize), 10),
+		"--rlimit", "CORE", "0",
+	}
+}
+
+// confineRlimits 构造 sh ulimit 包装 argv（darwin planConfined 使用，
+// 测试跨平台直接引用）。Seatbelt 不支持资源限制，包一层 /bin/sh：
+// ulimit 设置的 RLIMIT 跨 exec 继承（sandbox-exec 与其最终命令同受约束），
+// 且子进程只能降低不能提高；ulimit 失败即退出（fail-closed，命令不执行）。
+// 注意：macOS 内核不支持 RLIMIT_AS（-v）/RLIMIT_DATA（-d），setrlimit 恒
+// EINVAL（实测 2026-08-28）——大内存分配由 exec_procs 进程组 RSS 监控
+// 兜底（rss_darwin.go）。单位：-u 进程数、-n fd、-t CPU 秒、-f 512B 块、-c core。
+func confineRlimits(argv []string) []string {
+	script := fmt.Sprintf(
+		"ulimit -u %d -n %d -t %d -f %d -c 0 2>/dev/null || exit 1; exec \"$@\"",
+		resourceLimitNProc, resourceLimitNoFile, resourceLimitCPU, resourceLimitFSize>>9)
+	return append([]string{"/bin/sh", "-c", script, "sh"}, argv...)
+}
+
 func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly []string, argv []string) []string {
 	args := []string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"}
+	args = append(args, rlimitArgs()...)
 	if level >= proto.LevelWrite {
 		args = append(args, "--tmpfs", "/tmp")
 		if workdir != "" {

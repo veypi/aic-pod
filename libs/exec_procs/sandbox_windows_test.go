@@ -8,6 +8,7 @@
 package exec_procs
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,8 @@ import (
 )
 
 // runWithPlan 以 launchPlan 启动命令并等待，返回输出与退出码。
-// spawn 后关闭令牌句柄、执行 cleanup（与 exec_procs.Start 同生命周期）。
+// 三段式 Start → assignJob（Job Object 资源限制生效）→ Wait，
+// 与 exec_procs.Start 同生命周期（spawn 后关闭令牌、进程结束后 cleanup）。
 func runWithPlan(t *testing.T, plan launchPlan, argv []string, workdir string) (string, int) {
 	t.Helper()
 	if plan.token == 0 {
@@ -34,7 +36,20 @@ func runWithPlan(t *testing.T, plan launchPlan, argv []string, workdir string) (
 		cmd.Env = append(os.Environ(), plan.env...)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(plan.token)}
-	out, err := cmd.CombinedOutput()
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return "", -1
+	}
+	if plan.job != 0 {
+		if err := assignJob(cmd.Process.Pid, plan.job); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return "", -1
+		}
+	}
+	err := cmd.Wait()
 	exit := 0
 	if ee, ok := err.(*exec.ExitError); ok {
 		exit = ee.ExitCode()
@@ -45,7 +60,7 @@ func runWithPlan(t *testing.T, plan launchPlan, argv []string, workdir string) (
 	if plan.cleanup != nil {
 		plan.cleanup()
 	}
-	return string(out), exit
+	return buf.String(), exit
 }
 
 // writeCmd 构造 cmd /c 写文件命令（> 重定向）。
@@ -231,5 +246,55 @@ func TestWindowsSandboxCleanupRemovesTemp(t *testing.T) {
 	runWithPlan(t, plan, plan.argv, ws)
 	if _, err := os.Stat(tmpDir); err == nil {
 		t.Fatal("private temp should be removed after run")
+	}
+}
+
+// Job Object 资源限制：创建成功、限制 flags 正确（进程内存 4GiB / job 内存
+// 8GiB / 活动进程 256），受限令牌子进程 assign 后正常运行（集成路径）。
+func TestWindowsJobLimits(t *testing.T) {
+	job, err := newJobWithLimits()
+	if err != nil {
+		t.Fatalf("newJobWithLimits: %v", err)
+	}
+	defer windows.CloseHandle(job)
+
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	var retLen uint32
+	if err := windows.QueryInformationJobObject(job, int32(windows.JobObjectExtendedLimitInformation),
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), &retLen); err != nil {
+		t.Fatalf("QueryInformationJobObject: %v", err)
+	}
+	flags := info.BasicLimitInformation.LimitFlags
+	for _, f := range []uint32{
+		windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+		windows.JOB_OBJECT_LIMIT_JOB_MEMORY,
+		windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+	} {
+		if flags&f == 0 {
+			t.Fatalf("job flags 0x%x missing 0x%x", flags, f)
+		}
+	}
+	if info.ProcessMemoryLimit != uintptr(resourceLimitAS) {
+		t.Fatalf("ProcessMemoryLimit = %d, want %d", info.ProcessMemoryLimit, resourceLimitAS)
+	}
+	if info.JobMemoryLimit != uintptr(resourceLimitJobMemory) {
+		t.Fatalf("JobMemoryLimit = %d, want %d", info.JobMemoryLimit, resourceLimitJobMemory)
+	}
+	if info.BasicLimitInformation.ActiveProcessLimit != resourceLimitNProc {
+		t.Fatalf("ActiveProcessLimit = %d, want %d", info.BasicLimitInformation.ActiveProcessLimit, resourceLimitNProc)
+	}
+
+	// planConfined 集成：job 句柄随 plan 返回，子进程 assign 后正常执行
+	ws := t.TempDir()
+	plan, err := planConfined(proto.LevelWrite, ws, []string{"cmd", "/c", "echo ok"})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	if plan.job == 0 {
+		t.Fatal("planConfined should attach a job object")
+	}
+	out, exit := runWithPlan(t, plan, plan.argv, ws)
+	if exit != 0 || !strings.Contains(out, "ok") {
+		t.Fatalf("job-attached run failed: exit=%d out=%q", exit, out)
 	}
 }

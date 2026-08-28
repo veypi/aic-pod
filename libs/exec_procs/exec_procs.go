@@ -195,6 +195,22 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	// spawn 成功后令牌句柄可释放（子进程持有副本）
 	closeToken(plan.token)
 
+	// 资源限制（§5.10）：windows 立即把子进程关联进 Job Object（内存/进程数
+	// 上限生效）。关联失败必须 fail-closed——杀掉已启动进程并返回错误，
+	// 绝不裸跑（linux bwrap --rlimit / darwin sh ulimit 在 argv 包装内已生效）。
+	if plan.job != 0 {
+		if err := assignJob(cmd.Process.Pid, plan.job); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			f.Close()
+			bgCancel()
+			if plan.cleanup != nil {
+				plan.cleanup()
+			}
+			return nil, fmt.Errorf("exec: assign job object: %v", err)
+		}
+	}
+
 	e := &Entry{
 		ID:      opts.ID,
 		Command: opts.Command,
@@ -208,6 +224,13 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	m.mu.Lock()
 	m.tasks[opts.ID] = e
 	m.mu.Unlock()
+
+	// 进程组 RSS 监控（§5.10，darwin 专属：macOS 无 RLIMIT_AS，大内存分配
+	// 只能事后 kill 兑底；linux bwrap --rlimit / windows Job Object 是强限制
+	// 不需要监控）。超限按 killEntry 语义终止，监控随 e.done 退出。
+	if limit := rssLimitBytes(); limit > 0 {
+		go monitorGroupRSS(e, limit)
+	}
 
 	go func() {
 		runErr := cmd.Wait()

@@ -23,6 +23,13 @@ func applyToken(cmd *exec.Cmd, token uintptr) error { return nil }
 // closeToken 无句柄可关（非 windows 平台恒 0，no-op）。
 func closeToken(token uintptr) {}
 
+// assignJob 无 Job Object（非 windows 平台恒 no-op；资源限制由 bwrap
+// --rlimit / sh ulimit 承担）。
+func assignJob(pid int, job uintptr) error { return nil }
+
+// closeJob 无句柄可关（非 windows 平台恒 no-op）。
+func closeJob(job uintptr) {}
+
 // killEntry 终止后台条目：子进程先对整个进程组发 SIGTERM，5s 未退出补
 // SIGKILL（§5.8）；托管任务（pid=0）无进程，仅 cancel 中止任务体。
 func killEntry(e *Entry) {

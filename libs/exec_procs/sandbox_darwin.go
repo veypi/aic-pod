@@ -28,12 +28,14 @@ func probeBackend() sandboxBackend {
 	return backendSeatbelt
 }
 
-// planConfined（darwin）：sandbox-exec argv 包装，无令牌。
+// planConfined（darwin）：sandbox-exec argv 包装 + sh ulimit 资源限制，无令牌。
+// Seatbelt（SBPL）不支持资源限制，用 confineRlimits 包一层 /bin/sh（
+// RLIMIT 跨 exec 继承，子进程只能降低不能提高；ulimit 失败即 fail-closed）。
 func planConfined(level int, workdir string, argv []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
 	}
-	return launchPlan{argv: seatbeltArgs(level, workdir, argv)}, nil
+	return launchPlan{argv: confineRlimits(seatbeltArgs(level, workdir, argv))}, nil
 }
 
 // cacheRoots（darwin）：常见工具链缓存目录（go-build/pip/pnpm/uv/Homebrew 均在

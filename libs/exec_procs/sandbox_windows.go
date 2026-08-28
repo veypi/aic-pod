@@ -312,11 +312,13 @@ func probeBackend() sandboxBackend {
 	return backendWindowsAcl
 }
 
-// planConfined（windows）：受限令牌 + ACL 写授权。
+// planConfined（windows）：受限令牌 + ACL 写授权 + Job Object 资源限制。
 //   - read-only：restricting list 无能力 SID → 除 Everyone 可写对象外全拒
 //   - workspace-write：工作区/缓存目录（cacheRoots）standing ACE + per-call 私有
 //     临时目录（TMP/TEMP 指向它），进程结束后清理
-//   - 返回原样 argv + 令牌句柄（spawn 后由 exec_procs 关闭）
+//   - 资源限制：Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256），
+//     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
+//   - 返回原样 argv + 令牌句柄 + job 句柄（spawn 后由 exec_procs 使用/关闭）
 func planConfined(level int, workdir string, argv []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
@@ -367,11 +369,73 @@ func planConfined(level int, workdir string, argv []string) (launchPlan, error) 
 		cleanup()
 		return launchPlan{}, fmt.Errorf("sandbox: restricted token: %w", err)
 	}
+
+	// Job Object 资源限制（与令牌/ACL 正交，read-only 与 workspace-write 同限）
+	job, err := newJobWithLimits()
+	if err != nil {
+		tok.Close()
+		cleanup()
+		return launchPlan{}, fmt.Errorf("sandbox: job object: %w", err)
+	}
+	cleanup = func() {
+		os.RemoveAll(tmpDir)
+		closeJob(uintptr(job))
+	}
+
 	env := []string{}
 	if tmpDir != "" {
 		env = append(env, "TMP="+tmpDir, "TEMP="+tmpDir)
 	}
-	return launchPlan{argv: argv, token: uintptr(tok), env: env, cleanup: cleanup}, nil
+	return launchPlan{argv: argv, token: uintptr(tok), job: uintptr(job), env: env, cleanup: cleanup}, nil
+}
+
+// newJobWithLimits 创建 Job Object 并施加资源限制：
+//   - JOB_OBJECT_LIMIT_PROCESS_MEMORY：job 内单进程内存上限（4GiB）
+//   - JOB_OBJECT_LIMIT_JOB_MEMORY：job 内全部进程合计内存上限（8GiB）
+//   - JOB_OBJECT_LIMIT_ACTIVE_PROCESS：job 内活动进程数上限（防 fork 炸弹）
+// 限制对 job 内所有子孙进程强制（超限即创建失败/分配失败，不会打爆系统）。
+func newJobWithLimits() (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
+			LimitFlags: windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY |
+				windows.JOB_OBJECT_LIMIT_JOB_MEMORY |
+				windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+			ActiveProcessLimit: resourceLimitNProc,
+		},
+		ProcessMemoryLimit: uintptr(resourceLimitAS),
+		JobMemoryLimit:     uintptr(resourceLimitJobMemory),
+	}
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		windows.CloseHandle(job)
+		return 0, err
+	}
+	return job, nil
+}
+
+// assignJob 把已启动的进程关联进 Job Object（spawn 后立即调用，限制即生效）。
+// 失败必须 fail-closed：调用方负责终止进程并返回错误（不裸跑）。
+func assignJob(pid int, job uintptr) error {
+	if job == 0 {
+		return nil
+	}
+	proc, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(proc)
+	return windows.AssignProcessToJobObject(windows.Handle(job), proc)
+}
+
+// closeJob 关闭 Job Object 句柄（进程结束后调用；job 内进程已全部退出）。
+func closeJob(job uintptr) {
+	if job != 0 {
+		_ = windows.CloseHandle(windows.Handle(job))
+	}
 }
 
 // cacheRoots（windows）：常见工具链缓存目录，精确到子目录（不放行整个
