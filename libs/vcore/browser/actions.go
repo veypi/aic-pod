@@ -173,6 +173,10 @@ func (b *Browser) exportFile(ctx context.Context, env *vcore.Env, cliCmd, rawPat
 	if err := env.CheckPath("browser", abs); err != nil {
 		return nil, err
 	}
+	// 落盘过策略门（防经导出绕开文件权限模型直写任意路径，同 download）
+	if err := env.CheckPolicy("browser "+cliCmd, abs, true); err != nil {
+		return nil, err
+	}
 	// 云环境（Vars 非空）：导出产物限 $SESSION 根内（与 download 同语义，§5.6）
 	if sess := env.Vars["$SESSION"]; sess != "" {
 		if abs != sess && !strings.HasPrefix(abs, sess+"/") {

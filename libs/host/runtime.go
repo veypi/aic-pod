@@ -12,7 +12,7 @@ import (
 // host 会话生命周期（进程单例，cli/desktop 同一套）。
 // 日志统一走 vigo/logv（不建自有日志系统），get_log 读 logv 落盘的日志文件。
 var (
-	rtMu   sync.Mutex
+	rtMu     sync.Mutex
 	rtClient *Client
 )
 

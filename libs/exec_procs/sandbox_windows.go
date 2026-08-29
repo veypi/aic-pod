@@ -8,11 +8,11 @@
 //     进程初始化依赖 Everyone）+ 能力 SID（工作区/私有临时目录）
 //   - 能力 SID 是确定性派生（路径哈希）或随机（私有临时目录）的自定义 SID，
 //     对应目录的 DACL 上授予完全访问 ACE：
-//     - 工作区：standing ACE，幂等授权——每次调用先检查 DACL 是否已有该
-//       能力 SID 的完全访问 ACE，有则跳过（不产生重复 ACE）；目录被删重建
-//       后 ACE 消失，下次调用自动重新授权（无进程级缓存，无陈旧状态）
-//     - 私有临时目录：per-call 随机创建 + 随机 SID，进程结束后删除目录
-//       （ACE 随目录消失，无需显式撤销）
+//   - 工作区：standing ACE，幂等授权——每次调用先检查 DACL 是否已有该
+//     能力 SID 的完全访问 ACE，有则跳过（不产生重复 ACE）；目录被删重建
+//     后 ACE 消失，下次调用自动重新授权（无进程级缓存，无陈旧状态）
+//   - 私有临时目录：per-call 随机创建 + 随机 SID，进程结束后删除目录
+//     （ACE 随目录消失，无需显式撤销）
 //   - 进程访问对象时 Windows 做两次检查：正常 SID 检查 + restricting SID
 //     检查（restricting SID 视为唯一 SID 集合）。能力 SID 只对授权目录有
 //     权限，因此受限进程只能写工作区与私有临时目录；其余对象写被拒
@@ -34,6 +34,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -221,7 +222,7 @@ func userSidOf(token windows.Token) (*windows.SID, error) {
 
 // grantDirWrite 保证目录的 DACL 上存在能力 SID 完全访问 ACE（继承到子对象）。
 // 幂等：已有该 SID 的完全访问允许 ACE 时跳过——既避免重复调用产生重复 ACE
-//（SetEntriesInAcl 不去重），也让目录被删重建后自动重新授权（无进程级缓存）。
+// （SetEntriesInAcl 不去重），也让目录被删重建后自动重新授权（无进程级缓存）。
 func grantDirWrite(dir string, sid *windows.SID) error {
 	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -314,12 +315,13 @@ func probeBackend() sandboxBackend {
 
 // planConfined（windows）：受限令牌 + ACL 写授权 + Job Object 资源限制。
 //   - read-only：restricting list 无能力 SID → 除 Everyone 可写对象外全拒
-//   - workspace-write：工作区/缓存目录（cacheRoots）standing ACE + per-call 私有
-//     临时目录（TMP/TEMP 指向它），进程结束后清理
+//   - workspace-write：工作区/缓存目录（fsauth.CacheRoots）/追加根（extra，
+//     v0.14.5 统一名单）standing ACE + per-call 私有临时目录（TMP/TEMP 指向它），
+//     进程结束后清理
 //   - 资源限制：Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256），
 //     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
 //   - 返回原样 argv + 令牌句柄 + job 句柄（spawn 后由 exec_procs 使用/关闭）
-func planConfined(level int, workdir string, argv []string) (launchPlan, error) {
+func planConfined(level int, workdir string, extra []string, argv []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
 	}
@@ -332,7 +334,9 @@ func planConfined(level int, workdir string, argv []string) (launchPlan, error) 
 		if workdir != "" {
 			dirs = append(dirs, workdir)
 		}
-		dirs = append(dirs, cacheRoots()...)
+		dirs = append(dirs, fsauth.CacheRoots()...)
+		dirs = append(dirs, publicRoots()...)
+		dirs = append(dirs, extra...)
 		for _, d := range dirs {
 			sid, err := capabilitySID("ws", d)
 			if err != nil {
@@ -393,6 +397,7 @@ func planConfined(level int, workdir string, argv []string) (launchPlan, error) 
 //   - JOB_OBJECT_LIMIT_PROCESS_MEMORY：job 内单进程内存上限（4GiB）
 //   - JOB_OBJECT_LIMIT_JOB_MEMORY：job 内全部进程合计内存上限（8GiB）
 //   - JOB_OBJECT_LIMIT_ACTIVE_PROCESS：job 内活动进程数上限（防 fork 炸弹）
+//
 // 限制对 job 内所有子孙进程强制（超限即创建失败/分配失败，不会打爆系统）。
 func newJobWithLimits() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
@@ -436,21 +441,6 @@ func closeJob(job uintptr) {
 	if job != 0 {
 		_ = windows.CloseHandle(windows.Handle(job))
 	}
-}
-
-// cacheRoots（windows）：常见工具链缓存目录，精确到子目录（不放行整个
-// %LOCALAPPDATA%——其下还有大量应用数据/凭证存储）。存在性过滤。
-func cacheRoots() []string {
-	var dirs []string
-	if lad := os.Getenv("LOCALAPPDATA"); lad != "" {
-		dirs = append(dirs,
-			filepath.Join(lad, "go-build"),
-			filepath.Join(lad, "npm-cache"),
-			filepath.Join(lad, "pip", "Cache"),
-		)
-	}
-	dirs = append(dirs, os.Getenv("GOCACHE"), os.Getenv("XDG_CACHE_HOME"))
-	return existingDirs(dirs...)
 }
 
 // applyToken 把受限令牌注入子进程启动属性（windows）。

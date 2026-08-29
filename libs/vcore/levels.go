@@ -55,6 +55,11 @@ var execCoreLevels = map[string]int{
 	"bg_wait":  proto.LevelRead,
 	"commands": proto.LevelRead,
 	"bg_kill":  proto.LevelDanger,
+
+	// grant_apply（v0.14.5 §3）：文件权限白名单申请——必人工审批
+	//（Critical 4 = 用户不可直接授予 ⇒ 必转审批；批准后 granted 9 生效）。
+	// 实现为 host 特化（写 host 配置/内存授权表），vcore 只声明元数据与等级。
+	"grant_apply": proto.LevelCritical,
 }
 
 // gitSubLevels 是 git 子命令分级（§2.4）。

@@ -24,6 +24,9 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPath("fs", abs); err != nil {
 		return nil, err
 	}
+	if err := env.CheckPolicy("fs write", abs, true); err != nil {
+		return nil, err
+	}
 	content := *p.Content
 	if err := env.VFS.MkdirAll(path.Dir(abs), 0o755); err != nil {
 		return nil, fsErr("write", "%s", err)
@@ -96,6 +99,9 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsErr("edit", "%s", err)
 	}
 	if err := env.CheckPath("fs", abs); err != nil {
+		return nil, err
+	}
+	if err := env.CheckPolicy("fs edit", abs, true); err != nil {
 		return nil, err
 	}
 	data, err := env.VFS.ReadFile(abs)

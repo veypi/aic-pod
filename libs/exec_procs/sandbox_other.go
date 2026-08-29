@@ -8,9 +8,6 @@ func probeBackend() sandboxBackend {
 }
 
 // planConfined（其他平台）：fail-closed——confined 模式拒绝执行。
-func planConfined(level int, workdir string, argv []string) (launchPlan, error) {
+func planConfined(level int, workdir string, extra []string, argv []string) (launchPlan, error) {
 	return launchPlan{}, sandboxUnavailable(level)
 }
-
-// cacheRoots（其他平台）：无。
-func cacheRoots() []string { return nil }

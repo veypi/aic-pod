@@ -12,11 +12,12 @@ import (
 	"github.com/veypi/aic-pod/libs/vcore"
 )
 
-// 文件交换（§5.6 cloud 约束，走 VFS 接口不新增适配点）：
-//   - upload：源文件限 VFS 路径空间内（路径展开 + 越界拒绝由调用方鉴权策略保证），
-//     读内容暂存临时目录后上传；
-//   - download / screenshot：CLI 落临时目录，字节经 VFS 写入目标路径
-//     （cloud = 会话空间约束由 env.Roots 与 chroot 保证）。
+// 文件交换（§5.6 约束，走 VFS 接口不新增适配点）：
+//   - upload：源文件限 VFS 路径空间内，读内容暂存临时目录后上传；
+//   - download / screenshot：CLI 落临时目录，字节经 VFS 写入目标路径。
+// 一切经 VFS 的文件读写必过 env.CheckPolicy（v0.14.5 评审二轮：修复前四通道均漏检，
+// host 端可绕开文件权限模型直读/直写任意路径，含 deny 名单）；cloud 端 Policy=nil 不受影响
+//（信任域，收容由 env.Roots 承担）。
 
 // upload <sel> <file...>：源文件经 VFS 读（§5.6），Danger(3) 由分级表控制。
 // 源路径展开后必须位于 Roots 内（cloud 会话空间根 /；物理 host Roots=nil 不限制）。
@@ -38,6 +39,10 @@ func (b *Browser) upload(ctx context.Context, env *vcore.Env, args []string) (*v
 			return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("upload: %s", err)}
 		}
 		if err := env.CheckPath("browser", abs); err != nil {
+			return nil, err
+		}
+		// 读源文件过策略门（防经 upload 绕过 deny 名单外泄）
+		if err := env.CheckPolicy("browser upload", abs, false); err != nil {
 			return nil, err
 		}
 		data, err := env.VFS.ReadFile(abs)
@@ -72,6 +77,10 @@ func (b *Browser) download(ctx context.Context, env *vcore.Env, args []string) (
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("download: %s", err)}
 	}
 	if err := env.CheckPath("browser", abs); err != nil {
+		return nil, err
+	}
+	// 落盘过策略门（防经 download 绕开文件权限模型直写任意路径）
+	if err := env.CheckPolicy("browser download", abs, true); err != nil {
 		return nil, err
 	}
 	tmpDir, err := os.MkdirTemp(b.cfg.TempDir, "download-*")
@@ -159,6 +168,10 @@ func (b *Browser) screenshot(ctx context.Context, env *vcore.Env, args []string)
 		return nil, &proto.ExecError{Action: "browser", Reason: fmt.Sprintf("screenshot: %s", err)}
 	}
 	if err := env.CheckPath("browser", abs); err != nil {
+		return nil, err
+	}
+	// 落盘过策略门（同 download）
+	if err := env.CheckPolicy("browser screenshot", abs, true); err != nil {
 		return nil, err
 	}
 

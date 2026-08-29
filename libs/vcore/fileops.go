@@ -41,6 +41,9 @@ func fsRm(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPath("rm", abs); err != nil {
 		return nil, err
 	}
+	if err := env.CheckPolicy("fs rm", abs, true); err != nil {
+		return nil, err
+	}
 	if err := checkRootProtect(env, "rm", abs); err != nil {
 		return nil, err
 	}
@@ -208,6 +211,19 @@ func resolveSrcDst(env *Env, cmd, rawSrc, rawDst string) (string, string, error)
 		return "", "", err
 	}
 	if err := env.CheckPath(cmd, dst); err != nil {
+		return "", "", err
+	}
+	// 路径策略（v0.14.5）：cp 读 src 写 dst；mv 两端皆写（src 被移除）
+	if cmd == "cp" {
+		if err := env.CheckPolicy("fs cp src", src, false); err != nil {
+			return "", "", err
+		}
+	} else {
+		if err := env.CheckPolicy("fs mv src", src, true); err != nil {
+			return "", "", err
+		}
+	}
+	if err := env.CheckPolicy("fs "+cmd+" dst", dst, true); err != nil {
 		return "", "", err
 	}
 	return src, dst, nil

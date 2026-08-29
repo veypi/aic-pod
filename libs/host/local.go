@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,15 +29,16 @@ const (
 // level 为本次调用的授予等级（沙箱 profile 选择，§5.10）；
 // noSandbox 为请求显式携带的免沙箱标记（已过 checkGranted 的 Critical(4) 必审批门）。
 func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv []string, workdir string, level int, noSandbox bool) *proto.ToolResponse {
-	logPath := filepath.Join(os.TempDir(), "aic", sid, ".exec", msgID+".log")
+	logPath := filepath.Join(sessionWorkDir(sid), ".exec", msgID+".log")
 	res, err := c.procs.Start(ctx, exec_procs.StartOptions{
-		ID:        fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
-		Command:   strings.TrimSpace(action + " " + strings.Join(argv, " ")),
-		LogPath:   logPath,
-		Workdir:   workdir, // 缺省 = host 端配置工作区（调用方已填充）
-		Exec:      append([]string{action}, argv...),
-		Level:     level,
-		NoSandbox: noSandbox,
+		ID:         fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
+		Command:    strings.TrimSpace(action + " " + strings.Join(argv, " ")),
+		LogPath:    logPath,
+		Workdir:    workdir, // 缺省 = host 端配置工作区（调用方已填充）
+		Exec:       append([]string{action}, argv...),
+		Level:      level,
+		NoSandbox:  noSandbox,
+		WriteRoots: c.policy.WriteRootsFor(sid), // 统一名单：配置白名单 + 临时 grant（v0.14.5 §2）
 	})
 	if err != nil {
 		return errResp(msgID, err.Error())

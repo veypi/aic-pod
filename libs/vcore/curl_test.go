@@ -44,9 +44,9 @@ func TestCurlLenientFlags(t *testing.T) {
 		Fetcher: FetchFunc(func(ctx context.Context, req HTTPReq) (io.ReadCloser, int64, error) {
 			return io.NopCloser(strings.NewReader("hello")), 5, nil
 		}),
-		Tasks:    testTaskRunner{},
-		TaskID:   "t1",
-		Roots:    []string{"/"},
+		Tasks:        testTaskRunner{},
+		TaskID:       "t1",
+		Roots:        []string{"/"},
 		ProtectRoots: []string{"/"},
 	}
 	cases := [][]string{

@@ -17,8 +17,8 @@ type TaskRunner interface {
 // TaskOptions 是 StartTask 的入参。Run 为任务体：输出写 out（日志文件），
 // 返回 error 表示任务失败（同步路径原样返回；后台路径错误写入日志）。
 type TaskOptions struct {
-	ID      string                                 // 任务 ID（工具调用 msg_id）
-	Command string                                 // 展示名（bg_list）
+	ID      string // 任务 ID（工具调用 msg_id）
+	Command string // 展示名（bg_list）
 	Run     func(ctx context.Context, out io.Writer) error
 }
 

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/rs/zerolog"
 	"github.com/veypi/vigo/flags"
@@ -57,6 +58,13 @@ type Options struct {
 	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
 	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
 	Code string `json:"code" desc:"local api secret code (empty = random per process)"`
+
+	// 统一文件权限模型配置（v0.14.5 §2，aic todo.md）：fs_write_roots 追加可写白名单
+	// （2 级写区，grant_apply --permanent 的落点）；fs_deny_paths 追加拒绝名单
+	// （0 级不可读写，恒有默认表之上叠加）。两者均内存即时生效（沙箱每次 Start、
+	// fs 每次判定读当前值），set_config / desktop UI 动态改。
+	FsWriteRoots []string `json:"fs_write_roots" desc:"extra writable roots (file policy whitelist, level 2 writes)"`
+	FsDenyPaths  []string `json:"fs_deny_paths" desc:"extra denied paths (file policy denylist, no read/write)"`
 
 	// 进程级运行时态（unexported，不参与序列化/落盘）：
 	port     int  // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
@@ -174,6 +182,22 @@ func StateDir() (string, error) {
 	return filepath.Join(dir, "aic"), nil
 }
 
+// PublicDir 返回公共可写区根目录：$HOME/.aic（用户家目录下，首次调用时创建，
+// 0700）。两类使用方共享同一事实源：
+//   - exec 进程沙箱 workspace-write 白名单（§5.10）：沙箱内命令可写公共区；
+//   - 工具状态保存（browser state save 等）：AI 与工具共享的跨会话保存区。
+func PublicDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(home, ".aic")
+	if err := os.MkdirAll(p, 0o700); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
 // LogPath 返回日志文件路径：UserConfigDir/aic/aic.log（get_log 的数据源）。
 func LogPath() (string, error) {
 	dir, err := os.UserConfigDir()
@@ -223,6 +247,26 @@ func Load() (*Options, error) {
 	o, err := LoadFile()
 	Global = o
 	return o, err
+}
+
+// fsMu 守护 FsWriteRoots/FsDenyPaths 的并发读写：api.SetConfig（用户操作）与
+// host grant_apply --permanent（AI 经审批）两条写入路径共用（v0.14.5 §2/§3）。
+var fsMu sync.RWMutex
+
+// FsRoots 返回当前 fs 权限配置（fs_write_roots / fs_deny_paths）。
+func FsRoots() (write, deny []string) {
+	fsMu.RLock()
+	defer fsMu.RUnlock()
+	return Global.FsWriteRoots, Global.FsDenyPaths
+}
+
+// SetFsRoots 更新 fs 权限配置（内存即时生效；落盘由调用方负责——
+// api.SetConfig 走 Save，grant_apply --permanent 亦同）。
+func SetFsRoots(write, deny []string) {
+	fsMu.Lock()
+	defer fsMu.Unlock()
+	Global.FsWriteRoots = write
+	Global.FsDenyPaths = deny
 }
 
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。

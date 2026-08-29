@@ -24,12 +24,12 @@ import (
 // 策略与 aic 侧 UFS 门禁相同：同一用例在 OSVFS 与 MemVFS 上分别播种、执行，
 // Content/Attrs/错误必须一致（目录 size 环境差异归一）。
 type osVectorCase struct {
-	Name    string            `json:"name"`
-	Cmd     string            `json:"cmd"`
-	Argv    []string          `json:"argv"`
-	Params  json.RawMessage   `json:"params"`
-	Workdir string            `json:"workdir"`
-	Vars    map[string]string `json:"vars"`
+	Name         string            `json:"name"`
+	Cmd          string            `json:"cmd"`
+	Argv         []string          `json:"argv"`
+	Params       json.RawMessage   `json:"params"`
+	Workdir      string            `json:"workdir"`
+	Vars         map[string]string `json:"vars"`
 	Files        map[string]string `json:"files"`
 	Mtimes       map[string]int64  `json:"mtimes"`
 	Fetch        map[string]string `json:"fetch"`

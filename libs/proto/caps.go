@@ -64,6 +64,7 @@ type ExecCaps struct {
 //   - help：完整帮助文档（procs 拦截 `-h` 时内部返回，不下发到执行端）
 //   - level：基础权限等级（仅供 procs 内部审批判断，不暴露给 AI；
 //     风险操作的动态提升由判断端内部表处理，如 git push/reset → Danger）
+//
 // stateful/backgroundable/实现形态（虚拟指令/本地命令）是内部实现细节，不进协议。
 type CommandDecl struct {
 	Name          string `json:"name"`

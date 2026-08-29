@@ -1,0 +1,373 @@
+package fsauth
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	"github.com/veypi/aic-pod/cfg"
+)
+
+// mkBase 在 os.TempDir() 之外建测试根（t.TempDir() 落在临时区白名单内，
+// 分级向量会被污染）：优先 /var/tmp（unix），不可写时回落 t.TempDir()。
+// 两侧（模式/路径）都经 canonical 归一，/var → /private/var 类 symlink 安全。
+func mkBase(t *testing.T) string {
+	t.Helper()
+	for _, parent := range []string{"/var/tmp", "/tmp"} {
+		if base, err := os.MkdirTemp(parent, "fsauth-"); err == nil {
+			t.Cleanup(func() { os.RemoveAll(base) })
+			return base
+		}
+	}
+	return t.TempDir()
+}
+
+// newTestPolicy 构造隔离 Policy（公共区/会话区指向测试根，不碰真实 $HOME/.aic）。
+// 直接设字段后必须 rebuildBaseRootsLocked（预计算基底，同 New/SetWorkDir 语义）。
+func newTestPolicy(t *testing.T, workDir string) *Policy {
+	t.Helper()
+	base := mkBase(t)
+	p := &Policy{
+		workDir:    canonical(workDir),
+		publicDir:  canonical(filepath.Join(base, ".aic")),
+		sessionDir: canonical(filepath.Join(base, ".aic", "sessions")),
+		grants:     map[string][]string{},
+	}
+	mkdir(t, p.sessionDir)
+	p.deny = compileDeny(defaultDenyPaths())
+	p.mu.Lock()
+	p.rebuildBaseRootsLocked()
+	p.mu.Unlock()
+	return p
+}
+
+// setDeny 重设预展开 deny 表（包内测试 helper；默认表 + extra 叠加，同 compileDeny 语义）。
+func setDeny(t *testing.T, p *Policy, extra ...string) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deny = compileDeny(append(defaultDenyPaths(), extra...))
+}
+
+// TestDecideGrading：deny → 0/0；白名单 → 1/2；其余 → 1/3。
+func TestDecideGrading(t *testing.T) {
+	base := mkBase(t)
+	ws := filepath.Join(base, "ws")
+	mkdir(t, ws)
+	p := newTestPolicy(t, ws)
+
+	// 白名单：work_dir
+	assertGrades(t, p, ws+"/code/x.go", 1, 2)
+	// 白名单：会话区（per-sid）；注意公共区白名单 = 整个 .aic（含 sessions/），
+	// 其他 sid 的会话目录同为 2 级（host 上 per-session 仅是组织约定，非权限边界）
+	assertGradesSid(t, p, "s1", p.sessionDir+"/s1/out.txt", 1, 2)
+	assertGradesSid(t, p, "s1", p.sessionDir+"/s2/out.txt", 1, 2)
+	// 白名单：公共区
+	assertGrades(t, p, p.publicDir+"/x.txt", 1, 2)
+	// 其余：1/3
+	assertGrades(t, p, base+"/elsewhere/f.txt", 1, 3)
+	// deny：/** 语义含根自身——连 ls 目录一并拒
+	setDeny(t, p, base+"/secrets/**")
+	assertGrades(t, p, base+"/secrets/key.pem", 0, 0)
+	assertGrades(t, p, base+"/secrets", 0, 0)
+	assertGrades(t, p, base+"/secrets-sub/x", 1, 3) // 前缀不同名不命中
+}
+
+// TestDenyDefaults：平台初始表字面形态自洽（逐条遍历本平台生效表：
+// expandVars + canonicalPattern 后自匹配，且不误伤兄弟路径）。
+func TestDenyDefaults(t *testing.T) {
+	self := func(pat string) bool {
+		e, ok := expandVars(pat)
+		if !ok {
+			return false
+		}
+		return matchPattern(canonicalPattern(e), canonical(e))
+	}
+	for _, pat := range defaultDenyPaths() {
+		if !self(pat) {
+			t.Errorf("deny entry %q should match its own expansion", pat)
+		}
+	}
+	// browser state 目录口径：json 与保存流程临时文件（含同等全量 cookie）一并命中，
+	p := newTestPolicy(t, "")
+	browserDir := mustExpand(t, "$HOME/.aic/.cache/browser")
+	for _, path := range []string{
+		browserDir + "/browser.json",
+		browserDir + "/browser.json.inst3.cli-tmp",
+		browserDir + "/browser.json.merge-tmp",
+	} {
+		if !p.DenyHit(path) {
+			t.Errorf("DenyHit(%q) = false, want true (browser state dir scope)", path)
+		}
+	}
+	// browser state deny 不得罩住会话区兄弟路径（目录口径向量）
+	p2 := newTestPolicy(t, "")
+	if !p2.DenyHit(browserDir + "/x.json") {
+		t.Fatal("sanity: browser state dir deny must hit its own subtree")
+	}
+	if e, _ := expandVars("$HOME/.aic/.cache/browser/**"); matchPattern(canonicalPattern(e),
+		canonical(mustExpand(t, "$HOME/.aic/sessions/s1/x.txt"))) {
+		t.Error("browser state dir deny must not shadow session files")
+	}
+}
+
+// TestDenyTildeEntries：~ 条目预展开后命中真实家目录下的凭证路径——
+// 修复前 expandVars 不展开 ~，~/.aws/** 等条目全部死模式（由 **/.ssh/** 掩盖未暴露）。
+func TestDenyTildeEntries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("home layout 向量以 unix 为主")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	p := newTestPolicy(t, "")
+	for _, path := range []string{
+		home + "/.aws/credentials",
+		home + "/.aws/config",
+		home + "/.config/gcloud/access_tokens.db",
+		home + "/.azure/msal_token_cache.json",
+		home + "/.netrc",
+		home + "/.npmrc",
+		home + "/.docker/config.json",
+		home + "/.claude/.credentials.json",
+		home + "/.config/gh/hosts.yml",
+		home + "/.gnupg/private-keys-v1.d/x.key",
+	} {
+		if !p.DenyHit(path) {
+			t.Errorf("DenyHit(%q) = false, want true (tilde entry must hit real home path)", path)
+		}
+	}
+	// 兄弟路径不误伤
+	for _, path := range []string{
+		home + "/.aws-backup/credentials", // 前缀不同名
+		home + "/work/.env.sample",        // 段内 * 不跨后缀？**.env 命中 .env 本身——.env.sample 不命中
+	} {
+		if p.DenyHit(path) {
+			t.Errorf("DenyHit(%q) = true, want false (sibling path must not be denied)", path)
+		}
+	}
+}
+
+// TestDenyUndefinedVarEntrySkipped：未定义变量的条目整条跳过——初始名单已按平台分表，
+// 此规则只防御用户 cfg 条目（修复背景：单张跨平台表时代，unix 上 %LOCALAPPDATA% 为空，
+// 模式退化成 /Google/Chrome/User Data/** 匹配任意位置的同名路径）。
+func TestDenyUndefinedVarEntrySkipped(t *testing.T) {
+	got := compileDeny([]string{"%LOCALAPPDATA%/Google/Chrome/User Data/**"})
+	if runtime.GOOS == "windows" {
+		if len(got) != 1 {
+			t.Errorf("windows: compiled %v, want 1 entry", got)
+		}
+		return
+	}
+	if len(got) != 0 {
+		t.Errorf("non-windows: dangling %%LOCALAPPDATA%% entry must be skipped, got %v", got)
+	}
+	// 端到端：任意位置的 Google/Chrome/User Data 路径不得被 deny
+	p := newTestPolicy(t, "")
+	if p.DenyHit("/home/someone/Google/Chrome/User Data/Default/Cookies") {
+		t.Error("dangling windows pattern must not deny arbitrary unix path")
+	}
+}
+
+// TestGrantTemp：临时 grant（canonical 前缀、幂等、跨 session 失效、deny 校验）。
+func TestGrantTemp(t *testing.T) {
+	base := mkBase(t)
+	ext := filepath.Join(base, "ext")
+	mkdir(t, ext)
+	p := newTestPolicy(t, "")
+
+	assertGradesSid(t, p, "s1", ext+"/a.txt", 1, 3)
+	p.Grant("s1", ext)
+	p.Grant("s1", ext) // 幂等
+	assertGradesSid(t, p, "s1", ext+"/a.txt", 1, 2)
+	// 跨 session 失效
+	assertGradesSid(t, p, "s2", ext+"/a.txt", 1, 3)
+
+	// DenyHit：extraDeny 命中 / 界外失配
+	setDeny(t, p, base+"/secrets/**")
+	if !p.DenyHit(base + "/secrets/x") {
+		t.Error("DenyHit should hit extraDeny")
+	}
+	if p.DenyHit(ext + "/x") {
+		t.Error("DenyHit should miss outside deny")
+	}
+	// grant 与 deny 重叠时 deny 优先（Decide 先查 deny）
+	p.Grant("s3", base+"/secrets")
+	assertGradesSid(t, p, "s3", base+"/secrets/x", 0, 0)
+}
+
+// TestCanonicalSymlinkBypass：canonical 判定防 symlink 绕过（评审必修项向量）。
+func TestCanonicalSymlinkBypass(t *testing.T) {
+	base := mkBase(t)
+	ws := filepath.Join(base, "ws")
+	outside := filepath.Join(base, "outside")
+	mkdir(t, ws, outside)
+	p := newTestPolicy(t, ws)
+
+	link := filepath.Join(ws, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skip("symlink unavailable:", err)
+	}
+	// 经 link 访问 outside 下的文件 → canonical 后落在 outside（非白名单）→ 1/3
+	assertGrades(t, p, link+"/f.txt", 1, 3)
+	// link 自身的 canonical 身份 = outside（EvalSymlinks 成功）→ 同样 1/3：
+	// 写 link 即写 outside，权限随真实目标
+	assertGrades(t, p, link, 1, 3)
+	// 白名单内普通文件不受影响
+	assertGrades(t, p, ws+"/f.txt", 1, 2)
+}
+
+// TestCanonicalMissingTopLevel：顶层组件不存在的路径保持绝对形态。
+// 修复前递归到根基后 TrimSuffix 得空串/盘符，canonical("") 退化为 "."，
+// 产出 "./x" 相对形态（安全敏感 helper 的确定性错误）。
+func TestCanonicalMissingTopLevel(t *testing.T) {
+	vol := filepath.VolumeName(os.TempDir()) // unix ""；windows "C:"
+	missing := vol + string(filepath.Separator) + "aic-nonexistent-xyz"
+	if _, err := os.Stat(missing); err == nil {
+		t.Skip("unexpectedly exists:", missing)
+	}
+	want := filepath.ToSlash(missing + string(filepath.Separator) + "x")
+	if got := Canonical(missing + string(filepath.Separator) + "x"); got != want {
+		t.Errorf("Canonical = %q, want %q", got, want)
+	}
+	// glob 模式同口径（字面前缀经同一 canonical）
+	pat := filepath.ToSlash(missing) + "/**"
+	if got := canonicalPattern(pat); got != pat {
+		t.Errorf("canonicalPattern = %q, want %q", got, pat)
+	}
+}
+
+// TestDecideMissingTopLevelConsistency：顶层组件不存在时 deny/白名单判定仍成立——
+// 模式与路径共用同一 canonical，退化形态下两端不得失配（判定向量钉死修复语义）。
+func TestDecideMissingTopLevelConsistency(t *testing.T) {
+	vol := filepath.VolumeName(os.TempDir())
+	missing := filepath.ToSlash(vol + string(filepath.Separator) + "aic-nonexistent-xyz")
+	p := newTestPolicy(t, "")
+	setDeny(t, p, missing+"/secrets/**")
+	assertGrades(t, p, missing+"/secrets/key.pem", 0, 0)
+	p.mu.Lock()
+	p.extraWrite = canonicalList([]string{missing + "/work"})
+	p.rebuildBaseRootsLocked()
+	p.mu.Unlock()
+	assertGrades(t, p, missing+"/work/f.txt", 1, 2)
+}
+
+// TestWriteRootsFor：沙箱白名单 = 基础 + 配置 + grant，canonical 去重，跨 session 隔离。
+func TestWriteRootsFor(t *testing.T) {
+	base := mkBase(t)
+	ws := filepath.Join(base, "ws")
+	mkdir(t, ws)
+	p := newTestPolicy(t, ws)
+	p.mu.Lock()
+	p.extraWrite = canonicalList([]string{base + "/custom"})
+	p.rebuildBaseRootsLocked()
+	p.mu.Unlock()
+	p.Grant("s1", base+"/granted")
+
+	roots := p.WriteRootsFor("s1")
+	has := func(want string) bool {
+		for _, r := range roots {
+			if r == canonical(want) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{ws, base + "/custom", base + "/granted", p.sessionDir + "/s1", p.publicDir} {
+		if !has(want) {
+			t.Errorf("WriteRootsFor missing %s: %v", want, roots)
+		}
+	}
+	for _, r := range p.WriteRootsFor("s2") {
+		if r == canonical(base+"/granted") {
+			t.Error("grant leaked across sessions")
+		}
+	}
+}
+
+// TestReconcile：cfg.Global 变更经 Reconcile 重载（set_config 动态生效向量，
+// write roots 与 deny 双侧）。
+func TestReconcile(t *testing.T) {
+	base := mkBase(t)
+	custom := filepath.Join(base, "custom")
+	secrets := filepath.Join(base, "secrets")
+	mkdir(t, custom, secrets)
+	p := newTestPolicy(t, "")
+
+	assertGrades(t, p, custom+"/x", 1, 3)
+	saved := cfg.Global
+	defer func() { cfg.Global = saved }()
+	o := cfg.NewOptions()
+	o.FsWriteRoots = []string{custom}
+	o.FsDenyPaths = []string{secrets + "/**"}
+	cfg.Global = o
+	p.Reconcile()
+	assertGrades(t, p, custom+"/x", 1, 2)
+	assertGrades(t, p, secrets+"/x", 0, 0)
+	// Reconcile 后 deny 表重建：cfg 清空即恢复默认表
+	o2 := cfg.NewOptions()
+	cfg.Global = o2
+	p.Reconcile()
+	assertGrades(t, p, secrets+"/x", 1, 3)
+}
+
+func mkdir(t *testing.T, dirs ...string) {
+	t.Helper()
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func mustExpand(t *testing.T, s string) string {
+	t.Helper()
+	e, ok := expandVars(s)
+	if !ok {
+		t.Fatalf("expandVars(%q) failed", s)
+	}
+	return e
+}
+
+func assertGrades(t *testing.T, p *Policy, path string, wantR, wantW int) {
+	t.Helper()
+	assertGradesSid(t, p, "", path, wantR, wantW)
+}
+
+func assertGradesSid(t *testing.T, p *Policy, sid, path string, wantR, wantW int) {
+	t.Helper()
+	r, w := p.View(sid).Decide(path)
+	if r != wantR || w != wantW {
+		t.Errorf("Decide(%q, sid=%q) = (%d,%d), want (%d,%d)", path, sid, r, w, wantR, wantW)
+	}
+}
+
+// TestDecideCachesWithoutStat：Decide 与 bind 对不存在缓存目录的语义分茠——
+// 判定側无存在性探测（白名单意图跟目录身份：未装 rust 时写 ~/.cargo 也是 2 级），
+// bind 侧要求源存在（WriteRootsFor 不含不存在目录）。
+func TestDecideCachesWithoutStat(t *testing.T) {
+	var missing string
+	for _, d := range cacheRootDirs() {
+		if d == "" {
+			continue
+		}
+		if _, err := os.Stat(d); err != nil {
+			missing = d
+			break
+		}
+	}
+	if missing == "" {
+		t.Skip("all cache candidate dirs exist; no missing dir to lock semantics")
+	}
+	p := newTestPolicy(t, "")
+	// Decide：不存在的缓存目录仍 2 级（预计算候选，无 stat）
+	assertGrades(t, p, filepath.Join(missing, "pkg"), 1, 2)
+	// bind：不存在则不进白名单
+	for _, r := range p.WriteRootsFor("s1") {
+		if r == missing {
+			t.Errorf("WriteRootsFor should exclude missing cache dir %s", missing)
+		}
+	}
+}

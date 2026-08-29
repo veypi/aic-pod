@@ -143,6 +143,14 @@ Behavior:
 			"  capability discovery: list declared commands (name + desc) of the target;\n" +
 			"  use `action --help` for the full help of any command",
 	},
+	"grant_apply": {
+		Desc: "grant write access to a path outside the file whitelist (approval required)",
+		Help: "grant_apply <path> [--temp|--permanent]\n" +
+			"  whitelist a directory for fs writes and sandbox write access\n" +
+			"  --temp (default): this session only, lost on host restart\n" +
+			"  --permanent: persisted to fs_write_roots config (all sessions, survives restart)\n" +
+			"  paths inside the deny list cannot be granted; always requires approval (level 4)",
+	},
 	"json": {
 		Desc: "view and edit JSON files",
 		Help: "json <view|set|del|append|merge> ... — JSON file tool (no external deps)\n" +

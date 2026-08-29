@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/veypi/aic-pod/libs/exec_procs"
@@ -63,9 +64,13 @@ type Browser struct {
 	mu        sync.Mutex
 	saveTimer *time.Timer
 	dirty     bool
+	instID    int64 // 实例唯一号（state 导出临时文件名专用，防同用户多实例并发互踩）
+
+	stateLoaded bool         // 首次 Handle 时自动 state load（v0.14.5 §4，只尝试一次）
+	lastSave    *SaveSummary // 最近一次 merge-save 的摘要（随下一次响应返回）
 
 	// 当前调用上下文（§5.6 stateful：同 (session, host) 串行，单调用安全）：
-	curID      string            // 本次调用的 msgID（后台条目 ID / 落盘文件名）
+	curID      string             // 本次调用的 msgID（后台条目 ID / 落盘文件名）
 	lastResult *exec_procs.Result // 最近一次 CLI 调用的托管结果（path/background 等）
 }
 
@@ -78,6 +83,9 @@ var Subcommands = []string{
 
 const defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+// instSeq 实例唯一号发号器（saveState 临时文件名防并发碰撞用）。
+var instSeq int64
+
 // New 创建 browser 实例。
 func New(cfg Config) *Browser {
 	if cfg.ExecPath == "" {
@@ -89,7 +97,7 @@ func New(cfg Config) *Browser {
 	if cfg.TempDir == "" {
 		cfg.TempDir = filepath.Join(os.TempDir(), "aic-browser-"+cfg.Session)
 	}
-	return &Browser{cfg: cfg}
+	return &Browser{cfg: cfg, instID: atomic.AddInt64(&instSeq, 1)}
 }
 
 // Close 冲刷 state 自动保存、关闭隔离会话（cloud）并清理临时目录。
@@ -131,7 +139,7 @@ func (b *Browser) closeSession(ctx context.Context) {
 	cmdArgs = append(cmdArgs, "close")
 	cmd := exec.CommandContext(ctx, b.cfg.ExecPath, cmdArgs...)
 	exec_procs.SetSysProcAttr(cmd) // Windows 抑制控制台窗口闪动
-	_ = cmd.Run() // 失败（daemon 不在/会话已关）忽略，Close 不因清理失败报错
+	_ = cmd.Run()                  // 失败（daemon 不在/会话已关）忽略，Close 不因清理失败报错
 }
 
 // Handle 是 vcore 虚拟指令入口：exec browser <subcommand> [args...]。
@@ -144,7 +152,32 @@ func (b *Browser) Handle(ctx context.Context, env *vcore.Env, msgID string, argv
 	}
 	b.curID = msgID
 	b.lastResult = nil
-	return b.run(ctx, env, argv[0], argv[1:])
+	b.ensureStateLoaded(ctx)
+	res, err := b.run(ctx, env, argv[0], argv[1:])
+	if err == nil && b.lastSave != nil {
+		// save 摘要随响应返回（§4：防抖 save 在动作后 1s 触发，摘要落在
+		// 完成 save 后的下一条响应上）
+		res.Attrs["state_sites"] = strconv.Itoa(b.lastSave.Sites)
+		res.Attrs["state_updated"] = strconv.Itoa(b.lastSave.Updated)
+		res.Attrs["state_kept"] = strconv.Itoa(b.lastSave.Kept)
+		b.lastSave = nil
+	}
+	return res, err
+}
+
+// ensureStateLoaded 首次 Handle 时自动 state load（修复只 save 不 load，v0.14.5 §4）：
+// 档案文件存在才 load；失败 best-effort（不阻断浏览——新实例按全新状态继续）。
+func (b *Browser) ensureStateLoaded(ctx context.Context) {
+	if b.stateLoaded || b.cfg.StatePath == "" {
+		return
+	}
+	b.stateLoaded = true
+	if _, err := os.Stat(b.cfg.StatePath); err != nil {
+		return // 无档案 = 全新实例
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = b.execCLI(ctx, nil, "state", "load", b.cfg.StatePath)
 }
 
 // markDirty 在成功动作后调度 state 自动保存（防抖 1s；close 时同步冲刷）。
@@ -166,15 +199,29 @@ func (b *Browser) markDirty() {
 	})
 }
 
-// saveState 执行 state 自动落盘（cookies/storage → 会话数据目录，§5.6）。
+// saveState 执行 state 自动落盘（v0.14.5 §4 生命周期）：CLI 导出到临时文件 →
+// 与既有 browser.json 按站点 merge（新覆盖旧、旧未涉保留、清理过期 cookie）→
+// 原子写回 StatePath → 记录摘要（随下一次响应返回）。失败 best-effort。
+// 临时文件名带实例唯一号：同用户多会话共享同一 StatePath，固定名会让两实例的
+// 「CLI 导出」在 merge 锁外互踩（读到对方数据 / tmp 被对方删除丢保存，
+// v0.14.5 评审二轮修复）；merge 阶段仍由 mergeLocks 按目标路径串行。
 func (b *Browser) saveState(ctx context.Context) {
 	if b.cfg.StatePath == "" {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(b.cfg.StatePath), 0o700)
+	if err := os.MkdirAll(filepath.Dir(b.cfg.StatePath), 0o700); err != nil {
+		return
+	}
+	tmp := fmt.Sprintf("%s.inst%d.cli-tmp", b.cfg.StatePath, b.instID)
+	defer os.Remove(tmp)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, _ = b.execCLI(ctx, nil, "state", "save", b.cfg.StatePath)
+	if _, err := b.execCLI(ctx, nil, "state", "save", tmp); err != nil {
+		return
+	}
+	if sum := mergeStateFile(b.cfg.StatePath, tmp, time.Now()); sum != nil {
+		b.lastSave = sum
+	}
 }
 
 // execCLI 调用 agent-browser CLI（§5.9）：

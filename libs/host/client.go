@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/vcore"
 	vbrowser "github.com/veypi/aic-pod/libs/vcore/browser"
@@ -49,6 +50,7 @@ type Client struct {
 	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测）
 	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
 	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
+	policy    *fsauth.Policy               // 统一文件权限模型（v0.14.5 §2：fs 判定 + 沙箱白名单同实例）
 	browserMu sync.Mutex
 	browsers  map[string]*vbrowser.Browser // per-session browser 实例（pod 模式不隔离，§5.6）
 	logf      func(string, ...any)
@@ -78,10 +80,13 @@ func New(opts Options) *Client {
 	}
 	procs := exec_procs.NewManager(opts.ExecTimeout)
 	procs.NoSandbox = opts.NoSandbox
+	policy := fsauth.New()
+	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{
 		opts:     opts,
 		replay:   &replayCache{store: map[string]time.Time{}},
 		procs:    procs,
+		policy:   policy,
 		browsers: map[string]*vbrowser.Browser{},
 		logf:     logf,
 	}
@@ -188,6 +193,10 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	oldURL := ResolveNATSURL(c.opts.Host)
 	c.procs.SetExecTimeout(opts.ExecTimeout)
 	c.procs.NoSandbox = opts.NoSandbox
+	// 统一文件权限模型同步（v0.14.5 §2）：work_dir 变更 + 配置重载
+	//（fs_write_roots/fs_deny_paths 经 cfg.Global 由 api.SetConfig 先行更新）。
+	c.policy.SetWorkDir(opts.WorkDir)
+	c.policy.Reconcile()
 	c.opts = opts
 	if ResolveNATSURL(opts.Host) != oldURL {
 		if c.nc != nil {
@@ -222,7 +231,7 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 			add(d)
 		}
 	}
-	for _, name := range []string{"commands", "json", "bg_list", "bg_wait", "bg_kill"} {
+	for _, name := range []string{"commands", "json", "bg_list", "bg_wait", "bg_kill", "grant_apply"} {
 		if d, ok := vcore.Decl(name); ok {
 			add(d)
 		}

@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/veypi/aic-pod/libs/fsauth"
 )
 
 // MaxLines 是返回内容的最大行数（与 exec 统一截断语义一致）。
@@ -89,6 +91,12 @@ type StartOptions struct {
 	//   - 外部请求显式携带 nosandbox 且经人工审批（required Critical(4)
 	//     ⇒ 必审批；审批本身不免沙箱，仅放行该标记）。
 	NoSandbox bool
+	// WriteRoots 是追加可写根（v0.14.5 统一文件权限模型）：workspace-write
+	//（level>=2）沙箱 bind 白名单成员，与 fsauth 基础白名单（工作区/临时区/
+	// 会话区/公共区/缓存）并集。来源 = Policy.WriteRootsFor(sid)（cfg
+	// fs_write_roots + grant_apply 临时授权）——fs 与 exec 共用同一份名单。
+	// 每次 Start 读当次值（配置动态生效）；nil = 仅基础白名单。
+	WriteRoots []string
 }
 
 // Manager 是 exec 子进程托管管理器（每 session 一个）。
@@ -146,9 +154,10 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	// 无可用后端时 fail-closed 返回错误（命令不执行，绝不静默裸跑）。
 	execArgv := opts.Exec
 	var plan launchPlan
-	if !opts.NoSandbox && !m.NoSandbox && len(opts.Exec) > 0 {
+	confined := !opts.NoSandbox && !m.NoSandbox
+	if confined {
 		var err error
-		plan, err = planConfined(opts.Level, opts.Workdir, opts.Exec)
+		plan, err = planConfined(opts.Level, opts.Workdir, opts.WriteRoots, opts.Exec)
 		if err != nil {
 			f.Close()
 			return nil, err
@@ -163,8 +172,15 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	bgCtx, bgCancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(bgCtx, execArgv[0], execArgv[1:]...)
 	cmd.Dir = opts.Workdir
-	if plan.env != nil {
-		cmd.Env = mergeEnv(plan.env)
+	cmd.Env = mergeEnv(plan.env)
+	if confined {
+		// env 清洗（v0.14.5 §2）：沙箱进程继承 host 全部环境变量，敏感变量
+		//（KEY/SECRET/TOKEN/PASS/CRED 等整词标记）在此剥离——nosandbox 不清洗
+		//（语义自洽：免沙箱 = 用户显式信任本次执行）。
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		cmd.Env = fsauth.ScrubEnv(cmd.Env)
 	}
 	// Windows 上经逐行转码（GBK→UTF-8）后落盘，其余平台原样直写
 	out := newOutputWriter(f)

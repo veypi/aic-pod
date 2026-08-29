@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ case " $* " in
   *" download "*) echo "file-bytes" > "$last" ;;
   *" screenshot "*) echo "jpeg-bytes" > "$last" ;;
   *" pdf "*) echo "pdf-bytes" > "$last" ;;
-  *" state save "*) echo "state-json" > "$last" ;;
+  *" state save "*) printf '{"cookies":[{"domain":"a.com","path":"/","name":"sid","value":"v","expires":0}],"origins":[]}' > "$last" ;;
   *" open "*) printf '✓ Example Domain\n  https://example.com/\n' ;;
   *" snapshot "*) printf -- '- heading "T" [level=1, ref=e1]\n- link "L" [ref=e2]\n' ;;
   *" session list "*) exit 1 ;; # 会话不存活 → open 触发 state 自动加载
@@ -73,13 +74,19 @@ func TestBrowserOpenAndStateFlow(t *testing.T) {
 		t.Errorf("isolation flags missing, log = %q", log)
 	}
 
-	// state 自动保存：Close 时冲刷（dirty 由 open 标记）
+	// state 自动保存：Close 时冲刷（dirty 由 open 标记）——merge 写回
+	//（v0.14.5：CLI 导出 → 按站点 merge → 原子写回；损坏的旧档视为无旧档）
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(statePath)
-	if strings.TrimSpace(string(data)) != "state-json" {
-		t.Errorf("state not auto-saved on close, = %q", data)
+	doc := map[string]any{}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("state file should be merged JSON: %v (%q)", err, data)
+	}
+	cookies, _ := doc["cookies"].([]any)
+	if len(cookies) != 1 {
+		t.Errorf("merged cookies = %v, want 1 entry from CLI export", doc["cookies"])
 	}
 }
 

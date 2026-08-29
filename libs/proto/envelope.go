@@ -25,9 +25,9 @@ const (
 // 若 Data 非 canonical（如手工拼装含未转义 <>& 的字节），线上字节与签名
 // 输入不一致，host 端验签必然失败（"invalid request signature"）。
 type ToolRequest struct {
-	MsgID        string `json:"msg_id"`
-	SessionID    string `json:"session_id"`
-	Tool         string `json:"tool"` // fs | exec
+	MsgID     string `json:"msg_id"`
+	SessionID string `json:"session_id"`
+	Tool      string `json:"tool"` // fs | exec
 	// Data 必须是 canonical JSON（json.Marshal 产出，见类型注释）。
 	Data         json.RawMessage `json:"data"`
 	GrantedLevel int             `json:"granted_level"`

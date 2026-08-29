@@ -4,7 +4,7 @@
 // 审批通过（LevelApproved 9）也不例外：9 只是等级语义，免沙箱唯一通道是
 // 显式 nosandbox（外部请求须经人工审批，required Critical(4) ⇒ 必审批）。
 // level 1 = read-only（除 /dev/null 外不可写）；level 2/3/4/9 = workspace-write
-// （仅工作区 + 常见工具链缓存目录 cacheRoots + 平台临时区可写）；
+// （仅工作区 + 常见工具链缓存目录 cacheRoots + 平台临时区 + 公共区 $HOME/.aic 可写）；
 // 0 = 未设置/异常值，按 read-only 兜底。
 // 无可用后端时 fail-closed：拒绝执行，绝不静默裸跑。
 //
@@ -22,6 +22,7 @@
 //   - linux: bwrap --rlimit（bwrap 原生，零额外进程）；
 //   - darwin: sh ulimit 包装（Seatbelt 不支持资源限制；RLIMIT 跨 exec 继承）；
 //   - windows: Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256）。
+//
 // 三端同一组上限（resourceLimit* 常量），read-only 与 workspace-write 同限——
 // 此前只有文件隔离，沙箱内命令可无限分配内存/派生进程，实测打爆系统内存死机。
 package exec_procs
@@ -35,6 +36,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -67,6 +70,18 @@ const (
 // 挂载归属规则拒绝（挂载属于父 userns，嵌套 ns 内无 CAP_SYS_ADMIN 可操作）
 // ——ro-bind 覆盖是有效边界，非纸面加固。
 var protectedMetadataNames = []string{".git"}
+
+// publicRoots 返回公共可写区（$HOME/.aic，cfg.PublicDir）：workspace-write
+// 白名单成员之一，与工作区/缓存/临时区并列——AI 跨会话保存产物与工具状态
+// 落盘（browser state save 等）共用；目录首次调用时创建；获取失败返回 nil
+// （白名单宁缺毋滥，不可写比错误可写安全）。
+func publicRoots() []string {
+	p, err := cfg.PublicDir()
+	if err != nil {
+		return nil
+	}
+	return []string{p}
+}
 
 // sandboxBackend 是选中的平台后端。
 type sandboxBackend int
@@ -102,13 +117,13 @@ var (
 
 // Confine 将 argv 包装为沙箱执行形态（返回替换 argv；windows 的实际
 // confined 路径走 planConfined 的令牌注入，本函数仅供非 windows 调用与
-// 统一测试）。
+// 统一测试）。extraWrite 为追加可写根（nil = 仅基础白名单）。
 // level 为本次调用的授予等级（仅选择沙箱 profile）：1 = read-only；
 // 2/3/4/9 = workspace-write；0 = 未设置/异常值，按 read-only 处理（fail-closed）。
 // 审批通过（9）不豁免沙箱——免沙箱不经本函数表达（StartOptions.NoSandbox）。
 // 无可用后端返回错误（fail-closed），绝不返回未包装 argv。
 func Confine(level int, workdir string, argv []string) ([]string, error) {
-	plan, err := planConfined(level, workdir, argv)
+	plan, err := planConfined(level, workdir, nil, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -143,6 +158,7 @@ func sandboxUnavailable(level int) error {
 //   - protectedReadonly：可写根下的敏感子路径（.git 等）以 --ro-bind 覆盖
 //     为只读（bwrap 后绑定覆盖前绑定）
 //   - read-only（level 1）：无任何可写挂载（/dev/null 由 --dev 提供）
+//
 // rlimitArgs 构建 bwrap 资源限制参数段（--rlimit TYPE VALUE ...）。
 // bwrap 在 exec 前对子进程 setrlimit（soft=hard），与文件隔离正交、
 // read-only 与 workspace-write 同限（resourceLimit* 常量统一语义）。
@@ -201,13 +217,13 @@ const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 
 // seatbeltArgs 构建 sandbox-exec 包装 argv。SBPL 为 allow-default +
 // (deny file-write*) 白名单：read-only 仅放 /dev/null 字面量；
-// workspace-write 追加工作区 + 缓存目录（cacheRoots）+ 平台临时区
-// （/private/tmp 与 $TMPDIR），全部 canonicalize——Seatbelt 匹配 resolved path
-// （/tmp 即 /private/tmp，必须消解后再匹配）；随后对可写根下的敏感
-// 子路径（.git 等）追加 deny 规则（SBPL deny 优先于 allow，覆盖写白名单）。
+// workspace-write 追加工作区 + 缓存目录（fsauth.CacheRoots）+ 平台临时区
+// （/private/tmp 与 $TMPDIR）+ 追加根（extra），全部 canonicalize——Seatbelt
+// 匹配 resolved path（/tmp 即 /private/tmp，必须消解后再匹配）；随后对可写根下
+// 的敏感子路径（.git 等）追加 deny 规则（SBPL deny 优先于 allow，覆盖写白名单）。
 // .git 覆盖的保护对象是 bash/rm 等通用命令——git 自身（isGitArgv）豁免，
 // git 写操作的等级由 vcore 子命令分级表承担（§2.4）。
-func seatbeltArgs(level int, workdir string, argv []string) []string {
+func seatbeltArgs(level int, workdir string, extra []string, argv []string) []string {
 	forms := []string{
 		"(version 1)",
 		"(allow default)",
@@ -215,7 +231,7 @@ func seatbeltArgs(level int, workdir string, argv []string) []string {
 		`(allow file-write* (literal "/dev/null"))`,
 	}
 	if level >= proto.LevelWrite {
-		for _, root := range writableRoots(workdir) {
+		for _, root := range writableRoots(workdir, extra) {
 			forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
 		}
 		if workdir != "" && !isGitArgv(argv) {
@@ -233,15 +249,18 @@ func stringsJoin(forms []string) string {
 }
 
 // writableRoots 收集 workspace-write 的全部可写根：平台临时区 + 工作区 +
-// 常见工具链缓存目录（cacheRoots，go/npm/pip 等构建缓存——沙箱下不可写会
-// 导致构建工具链不可用；投毒风险属可接受边界，见 host_sandbox.md）。
-// canonicalize + 去重。
-func writableRoots(workdir string) []string {
+// 常见工具链缓存目录（fsauth.CacheRoots，go/npm/pip 等构建缓存——沙箱下不可写会
+// 导致构建工具链不可用；投毒风险属可接受边界，见 host_sandbox.md）+ 公共区
+// $HOME/.aic（publicRoots，AI 与工具状态共享保存区）+ 追加根（fsauth 配置
+// 白名单/临时 grant，v0.14.5 统一名单）。canonicalize + 去重。
+func writableRoots(workdir string, extra []string) []string {
 	roots := []string{"/private/tmp", os.TempDir()}
 	if workdir != "" {
 		roots = append(roots, workdir)
 	}
-	roots = append(roots, cacheRoots()...)
+	roots = append(roots, fsauth.CacheRoots()...)
+	roots = append(roots, publicRoots()...)
+	roots = append(roots, extra...)
 	seen := map[string]bool{}
 	out := make([]string, 0, len(roots))
 	for _, r := range roots {

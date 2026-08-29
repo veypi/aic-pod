@@ -68,6 +68,22 @@ func TestManagerNoSandboxGlobal(t *testing.T) {
 	}
 }
 
+// writableRoots（workspace-write 可写根，§5.10）恒含：平台临时区 + 工作区 +
+// 缓存目录 + 公共区 $HOME/.aic（publicRoots，创建后加入）；canonicalize + 去重。
+func TestWritableRootsIncludesPublicDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	roots := writableRoots("/ws", nil)
+	want := canonicalRoot(filepath.Join(home, ".aic")) // canonicalize：darwin /var → /private/var
+	for _, r := range roots {
+		if r == want {
+			return
+		}
+	}
+	t.Fatalf("writableRoots missing public dir %q: %v", want, roots)
+}
+
 // bwrap 包装：read-only 无任何可写挂载；workspace-write 有 tmpfs /tmp +
 // 工作区 bind + 缓存目录 bind + 敏感子路径只读覆盖；命令在 -- 之后原样。
 // 两种 profile 均携带资源限制段（rlimitArgs，与文件隔离正交）。
@@ -109,7 +125,7 @@ func TestSeatbeltArgs(t *testing.T) {
 	}
 	argv := []string{"bash", "-c", "echo hi"}
 
-	ro := seatbeltArgs(proto.LevelRead, "/ws", argv)
+	ro := seatbeltArgs(proto.LevelRead, "/ws", nil, argv)
 	profile := ro[2]
 	if !strings.Contains(profile, "(deny file-write*)") {
 		t.Fatalf("read-only profile missing deny: %s", profile)
@@ -121,7 +137,7 @@ func TestSeatbeltArgs(t *testing.T) {
 		t.Fatalf("unexpected seatbelt argv head: %v", ro[:4])
 	}
 
-	ww := seatbeltArgs(proto.LevelWrite, "/ws", argv)
+	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv)
 	profile = ww[2]
 	for _, want := range []string{"/private/tmp", "/ws"} {
 		if !strings.Contains(profile, `(subpath "`+want+`")`) {
@@ -133,7 +149,7 @@ func TestSeatbeltArgs(t *testing.T) {
 		t.Fatalf("workspace-write profile missing .git deny: %s", profile)
 	}
 	// git 自身豁免 .git 覆盖（保护对象是 bash/rm 等通用命令）
-	gw := seatbeltArgs(proto.LevelWrite, "/ws", []string{"git", "commit", "-m", "x"})
+	gw := seatbeltArgs(proto.LevelWrite, "/ws", nil, []string{"git", "commit", "-m", "x"})
 	if strings.Contains(gw[2], "deny file-write* (subpath") {
 		t.Fatalf("git invocation should be exempt from .git deny: %s", gw[2])
 	}
@@ -149,7 +165,7 @@ func TestWritableRoots(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix path semantics")
 	}
-	roots := writableRoots("")
+	roots := writableRoots("", nil)
 	seen := map[string]bool{}
 	for _, r := range roots {
 		if r == "" {

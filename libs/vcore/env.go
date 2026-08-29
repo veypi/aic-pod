@@ -17,7 +17,7 @@ type Env struct {
 	// server 端适配 UFS（chroot 到会话空间 + 授权等级包装），pod 端适配 OS
 	// 本地路径，测试使用 MemVFS。路径为斜杠分隔的绝对路径。nil 表示文件
 	// 服务未开启——需要文件能力的指令必须先经引入方的 fs 门控判定。
-	VFS ufs.FS
+	VFS     ufs.FS
 	Workdir string            // 当次调用显式携带的基准目录（缺省值由调用方先行填充，§2.1.1）
 	Vars    map[string]string // 根变量映射（预留；三端当前均无变量）；nil = 物理 host
 	// Roots 是可访问根列表（§2.1.1 执行层收容）：展开后的路径必须位于某个 root 内
@@ -37,6 +37,47 @@ type Env struct {
 	// ImageData 为 true（host/page）时图片 read 经 image_data（data URI）返回；
 	// false（cloud）时返回 image_path（§2.2 图片标准）。
 	ImageData bool
+	// Policy 是统一文件权限模型（aic todo v0.14.5 §2；fsauth.Policy 的会话视图）：
+	// 文件类指令按 canonical 路径动态升级 required——deny → DeniedError（0 级，
+	// 不可审批绕过）；白名单外写 → ApprovalError（3 级，审批/grant_apply 后放行）。
+	// nil = 无路径策略（cloud 信任域 GatedFS 独立分级 / page）。
+	Policy PathPolicy
+	// Granted 是当次调用的授予等级（host = req.GrantedLevel；审批通过 = 9）。
+	// Policy 升级判定用：granted >= need 直接放行。
+	Granted int
+}
+
+// PathPolicy 是 Env 的文件路径策略接口（v0.14.5 §2 注入式：实现由 fsauth 提供，
+// vcore 只依赖签名——fsauth 侧 canonical 判定，注入侧保证 fs 与 exec 同实例）。
+type PathPolicy interface {
+	// Decide 返回路径的 (read, write) 所需等级：deny → 0/0；白名单 → 1/2；其余 → 1/3。
+	// 入参为 Resolve/CheckPath 之后的绝对路径；实现内部做 canonical 展开。
+	Decide(path string) (read, write int)
+}
+
+// CheckPolicy 文件类指令的路径策略门（Policy 非 nil 时）：write=false 查 read 级。
+// deny（0）→ DeniedError；granted >= need → 放行；否则 ApprovalError（waiting，
+// 审批通过 granted=9 重发放行——与 GatedFS/host checkGranted 同语义）。
+// 导出供 vcore 子包（browser 文件交换）使用——文件字节经 VFS 落盘的一切通道都必须过此门。
+func (e *Env) CheckPolicy(op, abs string, write bool) error {
+	if e.Policy == nil {
+		return nil
+	}
+	rd, wr := e.Policy.Decide(abs)
+	need := rd
+	if write {
+		need = wr
+	}
+	if need == 0 {
+		return &proto.DeniedError{Reason: fmt.Sprintf(
+			"%s: %s is denied by file policy (deny list, not approval-able)", op, abs)}
+	}
+	if e.Granted >= need {
+		return nil
+	}
+	return &proto.ApprovalError{Reason: fmt.Sprintf(
+		"%s %s requires level %d by file policy (granted %d): approve once, or whitelist via exec grant_apply %s --permanent",
+		op, abs, need, e.Granted, abs)}
 }
 
 // Resolve 按 §2.1.1 可解析层展开指令路径参数（proto.ResolvePath 唯一实现）。

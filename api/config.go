@@ -15,28 +15,37 @@ import (
 // configView 是 get_config 的返回视图（含 key——设置窗口需显示当前凭证；
 // 本地 API 受 code 校验保护）。
 type configView struct {
-	Host        string `json:"host"`
-	Key         string `json:"key"`
-	WorkDir     string `json:"work_dir"`
-	ExecTimeout string `json:"exec_timeout"`
-	HomePath    string `json:"home_path"`
+	Host         string   `json:"host"`
+	Key          string   `json:"key"`
+	WorkDir      string   `json:"work_dir"`
+	ExecTimeout  string   `json:"exec_timeout"`
+	HomePath     string   `json:"home_path"`
+	FsWriteRoots []string `json:"fs_write_roots"`
+	FsDenyPaths  []string `json:"fs_deny_paths"`
 }
 
 // GetConfig 返回当前有效配置（cfg.Global：启动解析值 + 页面写操作同步）。
 // 注：隐藏配置（no_sandbox 等）不在此视图暴露——仅配置文件/flag/env 可配。
 func GetConfig(x *vigo.X) (*configView, error) {
 	o := effective()
-	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout, HomePath: o.NormalizedHomePath()}, nil
+	w, d := cfg.FsRoots()
+	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
+		HomePath: o.NormalizedHomePath(), FsWriteRoots: w, FsDenyPaths: d}, nil
 }
 
 // SetConfigReq 是 set_config 的白名单参数（host/work_dir/exec_timeout/home_path 可写；
 // key 不走 set_config——只走 Bind，body 中的 credential 不得被持久化）。
 // 隐藏配置（no_sandbox 等）不可经 set_config 修改，只能改配置文件。
+// fs_write_roots/fs_deny_paths（v0.14.5 §2，评审修复）：nil = 不改（保持现状），
+// 非 nil（含空数组）= 整体替换——空数组即清空，是 grant_apply --permanent 的
+// 唯一回撤出口。
 type SetConfigReq struct {
-	Host        string `json:"host" src:"json"`
-	WorkDir     string `json:"work_dir" src:"json"`
-	ExecTimeout string `json:"exec_timeout" src:"json"`
-	HomePath    string `json:"home_path" src:"json"`
+	Host         string    `json:"host" src:"json"`
+	WorkDir      string    `json:"work_dir" src:"json"`
+	ExecTimeout  string    `json:"exec_timeout" src:"json"`
+	HomePath     string    `json:"home_path" src:"json"`
+	FsWriteRoots *[]string `json:"fs_write_roots" src:"json"`
+	FsDenyPaths  *[]string `json:"fs_deny_paths" src:"json"`
 }
 
 // SetConfig 持久化运行参数并应用：基于文件配置落盘（flag/env 覆盖不落盘），
@@ -73,6 +82,16 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	}
 	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
+	// fs 权限配置（v0.14.5 §2）：nil = 不改；非 nil（含空数组）= 整体替换。
+	fsChanged := false
+	if req.FsWriteRoots != nil {
+		fileCfg.FsWriteRoots = *req.FsWriteRoots
+		fsChanged = true
+	}
+	if req.FsDenyPaths != nil {
+		fileCfg.FsDenyPaths = *req.FsDenyPaths
+		fsChanged = true
+	}
 	// home_path：必须以单个 / 开头（// 开头是协议相对 URL，拼接后会跳转到别的站点，拒绝）
 	if hp := strings.TrimSpace(req.HomePath); hp != "" {
 		if !strings.HasPrefix(hp, "/") || strings.HasPrefix(hp, "//") {
@@ -95,9 +114,11 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	cfg.Global.HomePath = fileCfg.HomePath
 	o := *cfg.Global
 	mu.Unlock()
-	// 运行参数变更（host/work_dir/exec_timeout）：应用新配置——保留会话与
-	// bg 任务，仅更新参数；NATS 地址变化时重连（Client.Reconfigure）
-	if host.Running() && (hostChanged || workDirChanged || execTimeoutChanged) {
+	cfg.SetFsRoots(fileCfg.FsWriteRoots, fileCfg.FsDenyPaths)
+	// 运行参数变更（host/work_dir/exec_timeout/fs 权限）：应用新配置——保留会话与
+	// bg 任务，仅更新参数；NATS 地址变化时重连（Client.Reconfigure，内部同步
+	// fsauth Policy：work_dir 重设 + fs 名单重载，内存即时生效）。
+	if host.Running() && (hostChanged || workDirChanged || execTimeoutChanged || fsChanged) {
 		if err := host.ApplyConfig(o); err != nil {
 			logv.Warn().Msgf("apply config failed: %v", err)
 		}

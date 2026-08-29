@@ -263,6 +263,9 @@ func curlToFile(ctx context.Context, env *Env, req HTTPReq, dst string, maxSizeM
 	if err := env.CheckPath("curl", abs); err != nil {
 		return nil, err
 	}
+	if err := env.CheckPolicy("curl -o", abs, true); err != nil {
+		return nil, err
+	}
 	if _, err := env.VFS.Stat(abs); err == nil {
 		return nil, execErr("curl", "destination %s already exists", abs)
 	}

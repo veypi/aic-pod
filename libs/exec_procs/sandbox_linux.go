@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -30,7 +31,7 @@ func probeBackend() sandboxBackend {
 // planConfined（linux）：bwrap argv 包装，无令牌。
 // 可写根下的敏感子路径（.git 等）存在时收集为只读覆盖；git 自身豁免
 // （保护对象是 bash/rm 等通用命令，git 等级由 vcore 子命令表承担）。
-func planConfined(level int, workdir string, argv []string) (launchPlan, error) {
+func planConfined(level int, workdir string, extra []string, argv []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
 	}
@@ -43,21 +44,9 @@ func planConfined(level int, workdir string, argv []string) (launchPlan, error) 
 			}
 		}
 	}
-	return launchPlan{argv: bwrapArgs(level, workdir, cacheRoots(), protected, argv)}, nil
-}
-
-// cacheRoots（linux）：$XDG_CACHE_HOME（未设则 ~/.cache，go-build/pip/pnpm/uv
-// 均在其下）+ ~/.npm。$GOCACHE 显式设置时并入。存在性过滤。
-func cacheRoots() []string {
-	var dirs []string
-	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
-		dirs = append(dirs, xdg)
-	} else if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".cache"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".npm"))
-	}
-	dirs = append(dirs, os.Getenv("GOCACHE"))
-	return existingDirs(dirs...)
+	// 可写 bind 列表：工具链缓存（fsauth.CacheRoots）+ 公共区 $HOME/.aic（publicRoots）
+	// + 追加根（fsauth 配置白名单/临时 grant，v0.14.5 统一名单）
+	cacheDirs := append(fsauth.CacheRoots(), publicRoots()...)
+	cacheDirs = append(cacheDirs, extra...)
+	return launchPlan{argv: bwrapArgs(level, workdir, cacheDirs, protected, argv)}, nil
 }

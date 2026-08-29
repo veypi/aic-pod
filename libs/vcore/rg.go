@@ -234,6 +234,9 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPath("rg", abs); err != nil {
 		return nil, err
 	}
+	if err := env.CheckPolicy("fs rg", abs, false); err != nil {
+		return nil, err
+	}
 	info, err := env.VFS.Stat(abs)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
@@ -323,6 +326,9 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 		return nil, fsErr("rg", "%s", err)
 	}
 	if err := env.CheckPath("rg", abs); err != nil {
+		return nil, err
+	}
+	if err := env.CheckPolicy("fs rg", abs, false); err != nil {
 		return nil, err
 	}
 	info, err := env.VFS.Stat(abs)

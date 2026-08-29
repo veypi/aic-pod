@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
 )
 
 // probeBackend（darwin）：sandbox-exec（Seatbelt）功能性探测——真跑一次
@@ -31,21 +30,9 @@ func probeBackend() sandboxBackend {
 // planConfined（darwin）：sandbox-exec argv 包装 + sh ulimit 资源限制，无令牌。
 // Seatbelt（SBPL）不支持资源限制，用 confineRlimits 包一层 /bin/sh（
 // RLIMIT 跨 exec 继承，子进程只能降低不能提高；ulimit 失败即 fail-closed）。
-func planConfined(level int, workdir string, argv []string) (launchPlan, error) {
+func planConfined(level int, workdir string, extra []string, argv []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
 	}
-	return launchPlan{argv: confineRlimits(seatbeltArgs(level, workdir, argv))}, nil
-}
-
-// cacheRoots（darwin）：常见工具链缓存目录（go-build/pip/pnpm/uv/Homebrew 均在
-// ~/Library/Caches 下；npm 另用 ~/.npm）。$GOCACHE/$XDG_CACHE_HOME 显式设置时并入。
-// 存在性过滤（不存在的目录不产出）。
-func cacheRoots() []string {
-	var dirs []string
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, "Library", "Caches"), filepath.Join(home, ".npm"))
-	}
-	dirs = append(dirs, os.Getenv("GOCACHE"), os.Getenv("XDG_CACHE_HOME"))
-	return existingDirs(dirs...)
+	return launchPlan{argv: confineRlimits(seatbeltArgs(level, workdir, extra, argv))}, nil
 }

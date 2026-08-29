@@ -29,7 +29,6 @@ func TestIsAuthError(t *testing.T) {
 	}
 }
 
-
 // 正常关闭（nc.Close()）时 DisconnectErrHandler 的 err 为 nil，不得 panic。
 func TestIsAuthErrorNil(t *testing.T) {
 	if isAuthError(nil) {

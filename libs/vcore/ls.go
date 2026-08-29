@@ -34,10 +34,10 @@ var lsSkipDirs = map[string]bool{
 }
 
 type lsEntry struct {
-	Name    string    `json:"name"`
-	Dir     bool      `json:"dir"`
-	Size    int64     `json:"size"`
-	ModTime int64     `json:"mod_time"`
+	Name    string     `json:"name"`
+	Dir     bool       `json:"dir"`
+	Size    int64      `json:"size"`
+	ModTime int64      `json:"mod_time"`
 	Items   *[]lsEntry `json:"items,omitempty"`
 }
 
@@ -67,6 +67,9 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsErr("ls", "%s", err)
 	}
 	if err := env.CheckPath("ls", abs); err != nil {
+		return nil, err
+	}
+	if err := env.CheckPolicy("fs ls", abs, false); err != nil {
 		return nil, err
 	}
 	info, err := env.VFS.Stat(abs)

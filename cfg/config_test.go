@@ -92,6 +92,31 @@ func TestConfigPathIsolated(t *testing.T) {
 	}
 }
 
+// PublicDir 返回 $HOME/.aic 并创建（0700）。
+func TestPublicDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	p, err := PublicDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != filepath.Join(dir, ".aic") {
+		t.Fatalf("PublicDir = %q, want %q", p, filepath.Join(dir, ".aic"))
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("PublicDir not created: %v", err)
+	}
+	if !st.IsDir() || st.Mode().Perm() != 0o700 {
+		t.Fatalf("PublicDir perm = %v isdir=%v, want dir 0700", st.Mode().Perm(), st.IsDir())
+	}
+	// 幂等：再调不报错
+	if _, err := PublicDir(); err != nil {
+		t.Fatalf("PublicDir idempotent: %v", err)
+	}
+}
+
 func TestHostsURL(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", "https://ivec.ai/hosts"},
@@ -136,9 +161,9 @@ func TestNormalizedHomePath(t *testing.T) {
 		{"/", "/"},
 		{"/a", "/a"},
 		{"/agents/chat", "/agents/chat"},
-		{"a", "/a"},     // 缺斜杠自动补
+		{"a", "/a"},         // 缺斜杠自动补
 		{"//evil.com", "/"}, // 协议相对 URL 形态 → 拒绝回退
-		{" /a ", "/a"},  // 去空白
+		{" /a ", "/a"},      // 去空白
 	}
 	for _, c := range cases {
 		o := &Options{HomePath: c.in}

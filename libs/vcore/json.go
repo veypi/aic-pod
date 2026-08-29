@@ -82,6 +82,9 @@ func jsonRead(env *Env, path string) ([]byte, any, error) {
 	if err := env.CheckPath("json", abs); err != nil {
 		return nil, nil, err
 	}
+	if err := env.CheckPolicy("json view", abs, false); err != nil {
+		return nil, nil, err
+	}
 	raw, err := env.VFS.ReadFile(abs)
 	if err != nil {
 		return nil, nil, execErr("json", "%s: %v", path, err)
@@ -108,6 +111,9 @@ func jsonWrite(env *Env, path string, v any) (int, error) {
 		return 0, err
 	}
 	if err := env.CheckPath("json", abs); err != nil {
+		return 0, err
+	}
+	if err := env.CheckPolicy("json write", abs, true); err != nil {
 		return 0, err
 	}
 	if err := env.VFS.WriteFile(abs, data, 0o644); err != nil {

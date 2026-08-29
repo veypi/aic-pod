@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -110,7 +109,7 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 			Action string `json:"action"`
 		}
 		_ = json.Unmarshal(req.Data, &p)
-		required = vcore.FSRequiredIn(c.newEnv(""), p.Action, req.Data)
+		required = vcore.FSRequiredIn(c.newEnv("", ""), p.Action, req.Data)
 	case proto.ToolExec:
 		var p struct {
 			Action    string   `json:"action"`
@@ -147,15 +146,20 @@ func actionOf(req *proto.ToolRequest) string {
 	return p.Action
 }
 
-// execFS 执行 fs 请求（vcore + OS VFS 适配）。
+// execFS 执行 fs 请求（vcore + OS VFS 适配 + 文件权限模型判定）。
 func (c *Client) execFS(ctx context.Context, req *proto.ToolRequest) *proto.ToolResponse {
-	res, err := vcore.RunFS(ctx, c.newEnv(""), req.Data)
+	env := c.newEnv(req.SessionID, "")
+	env.Granted = req.GrantedLevel
+	res, err := vcore.RunFS(ctx, env, req.Data)
 	return resultToResponse(req.MsgID, res, err)
 }
 
 // newEnv 构建 OS 文件系统执行环境。
-// workdir 为空时使用 host 端配置工作区（§2.1.1 缺省值）。
-func (c *Client) newEnv(workdir string) *vcore.Env {
+// workdir 为空时使用 host 端配置工作区（§2.1.1 缺省值）；sid 绑定文件权限
+// 视图的会话上下文（临时 grant/会话区，v0.14.5 §2）——checkGranted 的
+// FSRequiredIn 探测传空 sid（仅 Resolve/VFS，不触发策略判定）；
+// browser 文件交换传真实 sid（deny/grant 判定需要会话上下文）。
+func (c *Client) newEnv(sid, workdir string) *vcore.Env {
 	if workdir == "" {
 		workdir = c.opts.WorkDir
 	}
@@ -165,6 +169,7 @@ func (c *Client) newEnv(workdir string) *vcore.Env {
 		ProtectRoots: filesystemRoots(),
 		Fetcher:      httpFetcher{}, // 物理 host 不限制 SSRF（用户本机网络属其自身边界，§5.4）
 		ImageData:    true,          // host 端图片经 image_data 返回（§2.2）
+		Policy:       c.policy.View(sid),
 	}
 }
 
@@ -191,7 +196,8 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 			Error: fmt.Sprintf("exec: unknown action %q (not declared by this host; run commands to discover available commands)", p.Action)}
 	}
 
-	env := c.newEnv(p.Workdir)
+	env := c.newEnv(sid, p.Workdir)
+	env.Granted = req.GrantedLevel // Policy 升级判定用（v0.14.5 §2）
 	// 任务托管（curl 无 -o）：输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log，
 	// 超时自动后台化（与本地命令同一 exec_procs 机制，§5.9）。
 	env.Tasks = &hostTaskRunner{c: c, sid: sid}
@@ -215,6 +221,9 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "bg_kill":
 		res, err := c.bgKill(sid, p.Argv)
 		return resultToResponse(req.MsgID, res, err)
+	case "grant_apply":
+		// v0.14.5 §3：文件权限白名单申请（required 4 必审批在 checkGranted 门控）。
+		return c.runGrantApply(sid, req.MsgID, p.Argv)
 	}
 
 	if isCoreCommand(p.Action) {
@@ -254,7 +263,7 @@ type hostTaskRunner struct {
 
 func (r *hostTaskRunner) StartTask(ctx context.Context, opts vcore.TaskOptions) (*vcore.TaskResult, error) {
 	id := fmt.Sprintf("%s:%s:%s", r.c.hostID, r.sid, opts.ID)
-	logPath := filepath.Join(os.TempDir(), "aic", r.sid, ".exec", opts.ID+".log")
+	logPath := filepath.Join(sessionWorkDir(r.sid), ".exec", opts.ID+".log")
 	res, err := r.c.procs.StartTask(ctx, exec_procs.TaskOptions{
 		ID:      id,
 		Command: opts.Command,
