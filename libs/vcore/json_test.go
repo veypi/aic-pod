@@ -352,6 +352,43 @@ func TestJSONUnknownSub(t *testing.T) {
 	}
 }
 
+func TestJSONUnknownFlagLenient(t *testing.T) {
+	// 未声明 flag：不拒绝，warning 上 attrs，按忽略该参数执行
+	vfs := newTestDoc(t)
+	res := runJSONNoErr(t, vfs, "view", "doc.json", "--pretty")
+	if res.Attrs["warning"] == "" || !strings.Contains(res.Attrs["warning"], "--pretty") {
+		t.Errorf("want warning for --pretty, got %q", res.Attrs["warning"])
+	}
+	if !strings.Contains(res.Content, "object (6 keys)") {
+		t.Errorf("view content mismatch with ignored flag: %s", res.Content)
+	}
+	// --flag=value 形态：剥除 + warning；残余位置参数不越界
+	res = runJSONNoErr(t, vfs, "view", "doc.json", "--depth=2")
+	if !strings.Contains(res.Attrs["warning"], "--depth=2") {
+		t.Errorf("want warning for --depth=2, got %q", res.Attrs["warning"])
+	}
+	// 短 flag（json 无短形）：剥除 + warning
+	res = runJSONNoErr(t, vfs, "view", "doc.json", "-c")
+	if !strings.Contains(res.Attrs["warning"], "-c") {
+		t.Errorf("want warning for -c, got %q", res.Attrs["warning"])
+	}
+	// 数字形单横线是位置参数值（如 set 的 -1）：保留，不误判为 flag
+	vfs2 := newTestDoc(t)
+	res = runJSONNoErr(t, vfs2, "set", "doc.json", "count", "-1")
+	if _, ok := res.Attrs["warning"]; ok {
+		t.Errorf("want no warning for negative value, got %q", res.Attrs["warning"])
+	}
+	res = runJSONNoErr(t, vfs2, "view", "doc.json", "--key", "count", "--compact")
+	if res.Content != "-1" {
+		t.Errorf("count after set -1 = %q, want -1", res.Content)
+	}
+	// 已知 flag 正常：无 warning
+	res = runJSONNoErr(t, vfs, "view", "doc.json", "--depth", "2")
+	if _, ok := res.Attrs["warning"]; ok {
+		t.Errorf("want no warning for known flag, got %q", res.Attrs["warning"])
+	}
+}
+
 func TestJSONLevels(t *testing.T) {
 	if got := ExecRequired("json", []string{"view", "x.json"}); got != 1 {
 		t.Errorf("json view level = %d, want 1", got)

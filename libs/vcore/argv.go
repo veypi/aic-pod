@@ -1,6 +1,10 @@
 package vcore
 
-import "strings"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // argvSpec 声明一个虚拟指令的最精简 flag 子集（§5.4：未列 flag 报错）。
 type argvSpec struct {
@@ -18,18 +22,37 @@ type parsedArgv struct {
 	pos    []string
 }
 
-// parseArgv 解析虚拟指令 argv（§5.4）：
+// parseArgv 解析虚拟指令 argv（§5.4，strict）：
 //   - 未列 flag → 受限反馈 `{cmd}: flag "{flag}" is not supported on this environment (restricted)`；
 //   - 单横线组合 flag（如 `-la`）：全部为已知无值 flag 时展开等价；
 //   - `--flag=value` 形态不解析，按受限反馈引导两元素形式；
 //   - 位置参数个数严格校验（多余报错，不得静默忽略）。
 func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
+	pa, _, err := parseArgvCore(cmd, spec, argv, false)
+	return pa, err
+}
+
+// parseArgvLenient 是 parseArgv 的宽容变体（§5.4：AI 高频命令按真实工具习惯传参
+// 不中断任务，同 curl dropUnknownFlags 语义——不支持就当不存在）：
+//   - 未列 flag（含 `--flag=value` 形态）：记入 warnings（attrs 上报，模型可见）并忽略；
+//   - 数字形单横线（-1/-0.5）：视为位置参数值（真实 CLI 语义，值不是 flag）；
+//   - 已知 flag、组合展开、位置参数 min/max 校验与 strict 完全一致。
+func parseArgvLenient(cmd string, spec argvSpec, argv []string) (*parsedArgv, []string, error) {
+	return parseArgvCore(cmd, spec, argv, true)
+}
+
+func parseArgvCore(cmd string, spec argvSpec, argv []string, lenient bool) (*parsedArgv, []string, error) {
 	out := &parsedArgv{bools: map[string]bool{}, values: map[string]string{}, lists: map[string][]string{}}
+	var warns []string
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		if strings.HasPrefix(a, "-") && a != "-" {
 			if strings.Contains(a, "=") {
-				return nil, execErr(cmd, "flag %q is not supported on this environment (restricted; use \"--flag value\" two-element form)", a)
+				if lenient {
+					warns = append(warns, fmt.Sprintf("flag %q is not supported on this environment (ignored; use \"--flag value\" two-element form)", a))
+					continue
+				}
+				return nil, nil, execErr(cmd, "flag %q is not supported on this environment (restricted; use \"--flag value\" two-element form)", a)
 			}
 			if spec.bools[a] {
 				out.bools[a] = true
@@ -37,7 +60,7 @@ func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 			}
 			if spec.values[a] {
 				if i+1 >= len(argv) {
-					return nil, execErr(cmd, "flag %q requires a value", a)
+					return nil, nil, execErr(cmd, "flag %q requires a value", a)
 				}
 				i++
 				out.values[a] = argv[i]
@@ -45,7 +68,7 @@ func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 			}
 			if spec.lists[a] {
 				if i+1 >= len(argv) {
-					return nil, execErr(cmd, "flag %q requires a value", a)
+					return nil, nil, execErr(cmd, "flag %q requires a value", a)
 				}
 				i++
 				out.lists[a] = append(out.lists[a], argv[i])
@@ -58,17 +81,25 @@ func parseArgv(cmd string, spec argvSpec, argv []string) (*parsedArgv, error) {
 				}
 				continue
 			}
-			return nil, execErr(cmd, "flag %q is not supported on this environment (restricted)", a)
+			if lenient {
+				if _, err := strconv.ParseFloat(a, 64); err == nil {
+					out.pos = append(out.pos, a)
+					continue
+				}
+				warns = append(warns, fmt.Sprintf("flag %q is not supported on this environment (ignored)", a))
+				continue
+			}
+			return nil, nil, execErr(cmd, "flag %q is not supported on this environment (restricted)", a)
 		}
 		out.pos = append(out.pos, a)
 	}
 	if len(out.pos) < spec.minPos {
-		return nil, execErr(cmd, "missing argument (expected at least %d, got %d)", spec.minPos, len(out.pos))
+		return nil, nil, execErr(cmd, "missing argument (expected at least %d, got %d)", spec.minPos, len(out.pos))
 	}
 	if spec.maxPos >= 0 && len(out.pos) > spec.maxPos {
-		return nil, execErr(cmd, "unexpected argument %q", out.pos[spec.maxPos])
+		return nil, nil, execErr(cmd, "unexpected argument %q", out.pos[spec.maxPos])
 	}
-	return out, nil
+	return out, warns, nil
 }
 
 // expandBoolCombo 展开单横线组合 flag（如 "-la" → "-l","-a"）：

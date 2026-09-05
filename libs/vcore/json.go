@@ -129,6 +129,17 @@ func jsonOK(path, op string, bytes int) *Result {
 	return &Result{Content: string(summary), Attrs: map[string]string{"action": "json", "path": path}}
 }
 
+// jsonWarn 注入 lenient 解析的 warning（attrs["warning"]，模型经 <tool_result> 属性可见）。
+func jsonWarn(res *Result, warns []string) *Result {
+	if len(warns) > 0 {
+		if res.Attrs == nil {
+			res.Attrs = map[string]string{}
+		}
+		res.Attrs["warning"] = strings.Join(warns, "; ")
+	}
+	return res
+}
+
 // ---- key 路径（点分 + [N] 下标）----
 
 type jsonKeySeg struct {
@@ -450,7 +461,7 @@ func jsonAppendAt(v any, segs []jsonKeySeg, val any) (any, error) {
 // ---- 子命令：view ----
 
 func jsonView(env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("json view", argvSpec{
+	pa, warns, err := parseArgvLenient("json view", argvSpec{
 		bools:  map[string]bool{"--raw": true, "--compact": true, "--values": true},
 		values: map[string]bool{"--key": true, "--depth": true},
 		minPos: 1, maxPos: 1,
@@ -468,7 +479,7 @@ func jsonView(env *Env, argv []string) (*Result, error) {
 	}
 	if pa.bools["--raw"] {
 		content, _ := truncateContent(string(raw), MaxContentBytes)
-		return &Result{Content: content, Attrs: map[string]string{"action": "json", "path": p}}, nil
+		return jsonWarn(&Result{Content: content, Attrs: map[string]string{"action": "json", "path": p}}, warns), nil
 	}
 	if k := pa.values["--key"]; k != "" {
 		segs, err := jsonParseKey(k)
@@ -489,7 +500,7 @@ func jsonView(env *Env, argv []string) (*Result, error) {
 			return nil, execErr("json view", "marshal: %v", err)
 		}
 		content, _ := truncateContent(string(data), MaxContentBytes)
-		return &Result{Content: content, Attrs: map[string]string{"action": "json", "path": p}}, nil
+		return jsonWarn(&Result{Content: content, Attrs: map[string]string{"action": "json", "path": p}}, warns), nil
 	}
 	depth := jsonViewDefaultDepth
 	if v := pa.values["--depth"]; v != "" {
@@ -507,7 +518,7 @@ func jsonView(env *Env, argv []string) (*Result, error) {
 		return nil, err
 	}
 	content := abs + ": " + jsonSkeletonLine(doc, 0, depth, pa.bools["--values"])
-	return &Result{Content: content, Attrs: map[string]string{"action": "json", "path": p}}, nil
+	return jsonWarn(&Result{Content: content, Attrs: map[string]string{"action": "json", "path": p}}, warns), nil
 }
 
 // jsonSkeletonLine 渲染结构骨架行（递归展开 object；array 只显示长度；
@@ -574,7 +585,7 @@ func truncateJSON(s string, maxBytes int) string {
 // ---- 子命令：set / del / append / merge ----
 
 func jsonSet(env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("json set", argvSpec{minPos: 3, maxPos: 3}, argv)
+	pa, warns, err := parseArgvLenient("json set", argvSpec{minPos: 3, maxPos: 3}, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -599,11 +610,11 @@ func jsonSet(env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return jsonOK(p, "set "+key, n), nil
+	return jsonWarn(jsonOK(p, "set "+key, n), warns), nil
 }
 
 func jsonDel(env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("json del", argvSpec{minPos: 2, maxPos: 2}, argv)
+	pa, warns, err := parseArgvLenient("json del", argvSpec{minPos: 2, maxPos: 2}, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -624,11 +635,11 @@ func jsonDel(env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return jsonOK(p, "del "+key, n), nil
+	return jsonWarn(jsonOK(p, "del "+key, n), warns), nil
 }
 
 func jsonAppend(env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("json append", argvSpec{minPos: 3, maxPos: 3}, argv)
+	pa, warns, err := parseArgvLenient("json append", argvSpec{minPos: 3, maxPos: 3}, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -653,11 +664,11 @@ func jsonAppend(env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return jsonOK(p, "append "+key, n), nil
+	return jsonWarn(jsonOK(p, "append "+key, n), warns), nil
 }
 
 func jsonMerge(env *Env, argv []string) (*Result, error) {
-	pa, err := parseArgv("json merge", argvSpec{minPos: 2, maxPos: 2}, argv)
+	pa, warns, err := parseArgvLenient("json merge", argvSpec{minPos: 2, maxPos: 2}, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +696,7 @@ func jsonMerge(env *Env, argv []string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return jsonOK(p, "merge", n), nil
+	return jsonWarn(jsonOK(p, "merge", n), warns), nil
 }
 
 // jsonParseLiteral 解析 set/append/merge 的值：JSON 字面量（true/false/null/
