@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -48,6 +49,35 @@ func setDeny(t *testing.T, p *Policy, extra ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.deny = compileDeny(append(defaultDenyPaths(), extra...))
+}
+
+// TestDenyPatterns：预展开 deny 模式快照（exec 沙箱读拒绝单源）——
+// 默认表含 `.ssh` 展开到 home 绝对路径（变量已展开、字面前缀 canonical），
+// 且与断言相同为同一份列表（快照语义，调用方修改不影响 Policy）。
+func TestDenyPatterns(t *testing.T) {
+	p := newTestPolicy(t, "")
+	pats := p.DenyPatterns()
+	if len(pats) == 0 {
+		t.Fatalf("default deny patterns must not be empty")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSSH := false
+	for _, pat := range pats {
+		if pat == "**/.ssh/**" || pat == home+"/.ssh/**" {
+			foundSSH = true
+		}
+	}
+	if !foundSSH {
+		t.Fatalf("deny patterns missing .ssh entry: %v", pats)
+	}
+	// 快照：修改返回切片不影响 Policy 内部表
+	pats[0] = "__mutated__"
+	if got := p.DenyPatterns()[0]; got == "__mutated__" {
+		t.Fatalf("DenyPatterns must return a copy")
+	}
 }
 
 // TestDecideGrading：deny → 0/0；白名单 → 1/2；其余 → 1/3。
@@ -123,7 +153,7 @@ func TestDenyTildeEntries(t *testing.T) {
 		t.Skip("no home dir")
 	}
 	p := newTestPolicy(t, "")
-	for _, path := range []string{
+	paths := []string{
 		home + "/.aws/credentials",
 		home + "/.aws/config",
 		home + "/.config/gcloud/access_tokens.db",
@@ -134,7 +164,31 @@ func TestDenyTildeEntries(t *testing.T) {
 		home + "/.claude/.credentials.json",
 		home + "/.config/gh/hosts.yml",
 		home + "/.gnupg/private-keys-v1.d/x.key",
-	} {
+		// shell 历史与容器 socket（通配形态跨平台命中）
+		home + "/.zsh_history",
+		home + "/.bash_history",
+		home + "/.python_history",
+		"/var/run/docker.sock",
+	}
+	if runtime.GOOS == "darwin" {
+		paths = append(paths,
+			home+"/Library/Keychains/login.keychain-db",
+			home+"/Library/Cookies/Cookies.binarycookies",
+			home+"/Library/Application Support/Firefox/Profiles/x/key4.db",
+			home+"/.orbstack/run/docker.sock",
+			home+"/.orbstack/run/sconssh.sock",
+			home+"/.local/share/containers/podman/machine/podman.sock",
+		)
+	}
+	if runtime.GOOS == "linux" {
+		paths = append(paths,
+			home+"/.mozilla/firefox/x.default/key4.db",
+			home+"/.config/chromium/Default/Cookies",
+			home+"/.local/share/keyrings/login.keyring",
+			home+"/.local/share/containers/podman/machine/podman.sock",
+		)
+	}
+	for _, path := range paths {
 		if !p.DenyHit(path) {
 			t.Errorf("DenyHit(%q) = false, want true (tilde entry must hit real home path)", path)
 		}
@@ -156,8 +210,8 @@ func TestDenyTildeEntries(t *testing.T) {
 func TestDenyUndefinedVarEntrySkipped(t *testing.T) {
 	got := compileDeny([]string{"%LOCALAPPDATA%/Google/Chrome/User Data/**"})
 	if runtime.GOOS == "windows" {
-		if len(got) != 1 {
-			t.Errorf("windows: compiled %v, want 1 entry", got)
+		if len(got) == 0 {
+			t.Errorf("windows: compiled %v, want >=1 entry (双形态可能 2 条)", got)
 		}
 		return
 	}
@@ -168,6 +222,54 @@ func TestDenyUndefinedVarEntrySkipped(t *testing.T) {
 	p := newTestPolicy(t, "")
 	if p.DenyHit("/home/someone/Google/Chrome/User Data/Default/Cookies") {
 		t.Error("dangling windows pattern must not deny arbitrary unix path")
+	}
+}
+
+// TestCompileDenyDualForm：纯字面条目输出双形态（canonical + 原始展开形）——
+// 模式自身是符号链接时（/var/run/docker.sock → 厂商 socket 形态）两形态是
+// 不同的路径串，沙箱按实际传入路径匹配，双形态都须在名单内（实测 2026-09-05）。
+// glob 条目仅输出 canonical 单形态。
+func TestCompileDenyDualForm(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	mkdir(t, real)
+	link := filepath.Join(base, "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlink unavailable:", err)
+	}
+	litPat := filepath.ToSlash(link) + "/x.txt"
+	globPat := filepath.ToSlash(link) + "/**"
+	got := compileDeny([]string{litPat, globPat})
+	wantLink := filepath.ToSlash(link) + "/x.txt"
+	wantReal := canonical(litPat)
+	if wantReal == wantLink {
+		t.Skip("symlink not resolved on this platform")
+	}
+	hasLink, hasReal := false, false
+	for _, g := range got {
+		if g == wantLink {
+			hasLink = true
+		}
+		if g == wantReal {
+			hasReal = true
+		}
+	}
+	if !hasLink || !hasReal {
+		t.Fatalf("dual form missing: got %v, want both %q and %q", got, wantLink, wantReal)
+	}
+	// glob 条目单形态（仅 canonical）
+	wantGlob := canonicalPattern(mustExpand(t, globPat))
+	globCount := 0
+	for _, g := range got {
+		if strings.Contains(g, "**") {
+			globCount++
+			if g != wantGlob {
+				t.Fatalf("glob entry must stay single canonical form: got %q want %q", g, wantGlob)
+			}
+		}
+	}
+	if globCount != 1 {
+		t.Fatalf("glob entry count = %d, want 1: %v", globCount, got)
 	}
 }
 

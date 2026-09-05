@@ -85,7 +85,7 @@
       "name": "rg skips hidden files and dirs by default",
       "cmd": "fs",
       "params": {"action": "rg", "pattern": "foo", "path": "/p"},
-      "files": {"/p/a.txt": "foo\n", "/p/.env": "foo secret\n", "/p/node_modules/pkg/index.js": "foo\n", "/p/vendor/lib/v.go": "foo\n", "/p/.git/config": "foo\n"},
+      "files": {"/p/a.txt": "foo\n", "/p/.secret": "foo secret\n", "/p/node_modules/pkg/index.js": "foo\n", "/p/vendor/lib/v.go": "foo\n", "/p/.git/config": "foo\n"},
       "expect": {
         "contentJson": {"files": [{"path": "/p/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
         "attrs": {"action": "rg", "path": "/p", "rows": "1", "truncated": "false"}
@@ -95,9 +95,9 @@
       "name": "rg all includes dotfiles and dot dirs",
       "cmd": "fs",
       "params": {"action": "rg", "pattern": "foo", "path": "/p", "all": true},
-      "files": {"/p/a.txt": "foo\n", "/p/.env": "foo secret\n", "/p/.git/config": "foo\n"},
+      "files": {"/p/a.txt": "foo\n", "/p/.secret": "foo secret\n", "/p/.git/config": "foo\n"},
       "expect": {
-        "contentJson": {"files": [{"path": "/p/.env", "matches": [{"line": 1, "text": "foo secret"}]}, {"path": "/p/.git/config", "matches": [{"line": 1, "text": "foo"}]}, {"path": "/p/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
+        "contentJson": {"files": [{"path": "/p/.git/config", "matches": [{"line": 1, "text": "foo"}]}, {"path": "/p/.secret", "matches": [{"line": 1, "text": "foo secret"}]}, {"path": "/p/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
         "attrs": {"action": "rg", "path": "/p", "rows": "3", "truncated": "false"}
       }
     },

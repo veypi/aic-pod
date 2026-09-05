@@ -130,6 +130,18 @@ func (p *Policy) Grant(sid, path string) {
 	p.grants[sid] = append(p.grants[sid], path)
 }
 
+// DenyPatterns 返回预展开的 deny 模式快照（compileDeny 产物：变量展开 +
+// canonical 字面前缀）——exec 沙箱拒绝规则（§5.10 deny 隔离）与 fs 判定共用
+// 同一份名单：cfg fs_deny_paths / set_config 变更经 Reconcile 重算后，
+// 本次调用的 Start 即取到新名单（沙箱每次 Start 构造 profile）。
+func (p *Policy) DenyPatterns() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]string, len(p.deny))
+	copy(out, p.deny)
+	return out
+}
+
 // DenyHit 报告 canonical 路径是否命中 deny 名单（grant_apply 校验用：
 // deny_paths 内拒绝申请）。
 func (p *Policy) DenyHit(path string) bool {
@@ -216,14 +228,30 @@ func (p *Policy) denyHit(cpath string) bool {
 // 的 symlink，用户写 /var/tmp/x/** 与 canonical 路径 /private/var/tmp/... 必须
 // 仍能匹配）。展开失败（未定义变量、无家目录）的条目整条跳过——初始名单已按平台
 // 分表，此规则只防御用户 cfg 条目（写了本平台不存在的变量时宁缺毋滥）。
+//
+// 双形态（2026-09-05）：纯字面条目同时输出 canonical 形与原始展开形——沙箱按系统调用
+// 实际传入的路径串匹配，模式自身是符号链接时（/var/run/docker.sock → 厂商 socket）
+// 两形态是不同的路径串，须都在名单内才能双命中（lstat 查字面形、open/connect 查解析形）。
+// glob 条目仅输出 canonical 形（通配形态天然覆盖两路）。
 func compileDeny(pats []string) []string {
-	out := make([]string, 0, len(pats))
+	out := make([]string, 0, len(pats)*2)
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
 	for _, pat := range pats {
 		e, ok := expandVars(pat)
 		if !ok {
 			continue
 		}
-		out = append(out, canonicalPattern(e))
+		add(canonicalPattern(e))
+		if !strings.ContainsAny(e, "*?") {
+			add(filepath.ToSlash(e))
+		}
 	}
 	return out
 }
