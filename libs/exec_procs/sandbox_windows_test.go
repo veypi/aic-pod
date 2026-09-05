@@ -280,8 +280,8 @@ func TestWindowsJobLimits(t *testing.T) {
 	if info.JobMemoryLimit != uintptr(resourceLimitJobMemory) {
 		t.Fatalf("JobMemoryLimit = %d, want %d", info.JobMemoryLimit, resourceLimitJobMemory)
 	}
-	if info.BasicLimitInformation.ActiveProcessLimit != resourceLimitNProc {
-		t.Fatalf("ActiveProcessLimit = %d, want %d", info.BasicLimitInformation.ActiveProcessLimit, resourceLimitNProc)
+	if info.BasicLimitInformation.ActiveProcessLimit != resourceLimitJobProcesses {
+		t.Fatalf("ActiveProcessLimit = %d, want %d", info.BasicLimitInformation.ActiveProcessLimit, resourceLimitJobProcesses)
 	}
 
 	// planConfined 集成：job 句柄随 plan 返回，子进程 assign 后正常执行

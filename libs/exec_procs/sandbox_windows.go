@@ -321,7 +321,13 @@ func probeBackend() sandboxBackend {
 //   - 资源限制：Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256），
 //     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
 //   - 返回原样 argv + 令牌句柄 + job 句柄（spawn 后由 exec_procs 使用/关闭）
-func planConfined(level int, workdir string, extra []string, argv []string) (launchPlan, error) {
+//
+// deny 拒绝（读/写）：**windows 侧不实现**（no-op，参数仅保持签名一致）。受限令牌的 restricting
+// list 必须保留 logon/Everyone/用户 SID（进程初始化依赖，见 createRestrictedToken
+// 注释），而文件读权限普遍授予这些组 → 读全开。per-call 隔离不能改全局
+// DACL（deny ACE 会影响宿主机全部进程）；文件级读拒绝需额外 per-call
+// 质询（能力 SID 只对白名单目录有权限），成本/工程比不适合当前阶段。
+func planConfined(level int, workdir string, extra []string, argv []string, deny []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
 	}
@@ -409,7 +415,7 @@ func newJobWithLimits() (windows.Handle, error) {
 			LimitFlags: windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY |
 				windows.JOB_OBJECT_LIMIT_JOB_MEMORY |
 				windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-			ActiveProcessLimit: resourceLimitNProc,
+			ActiveProcessLimit: resourceLimitJobProcesses,
 		},
 		ProcessMemoryLimit: uintptr(resourceLimitAS),
 		JobMemoryLimit:     uintptr(resourceLimitJobMemory),

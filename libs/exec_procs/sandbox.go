@@ -7,6 +7,13 @@
 // （仅工作区 + 常见工具链缓存目录 cacheRoots + 平台临时区 + 公共区 $HOME/.aic 可写）；
 // 0 = 未设置/异常值，按 read-only 兜底。
 // 无可用后端时 fail-closed：拒绝执行，绝不静默裸跑。
+// deny 隔离（2026-09-05）：默认读全开，fsauth deny 表（DenyPatterns）经
+// StartOptions.DenyPaths 生成拒绝规则——darwin seatbelt 文件读写双拒 + unix
+// connect 拒绝（deny file-read*/file-write* regex，另加 network-outbound
+// (remote unix (regex ...))——AF_UNIX connect 不走 file-* 判定，实测 docker.sock
+// 文件操作全被拒而 curl --unix-socket 直通）、linux bwrap 覆盖挂载（文件/
+// socket 读写双拒 / 目录读黑洞＋写入不落地）——fs 与 exec 共用同一份 deny 名单；
+// windows 侧不实现（restricting 集初始化依赖，见 sandbox_windows.go 注释）。
 //
 // 内部指令（fs/curl/json 等）走 vcore VFS + Roots/ProtectRoots 路径收容，
 // 不经过本包（文件效应由路径级权限控制）。
@@ -48,18 +55,24 @@ const probeTimeout = 5 * time.Second
 // 沙箱资源上限（三端统一语义，与文件隔离正交；read-only 与 workspace-write 同限）：
 //   - AS 4GiB：防大 malloc 吃满物理内存 + swap 导致系统假死（死机事故根因）
 //   - job 内存 8GiB：windows Job Object 整个 job（含全部子孙）合计上限
-//   - NPROC 256：防 fork 炸弹（正常工具链远低于此）
 //   - NOFILE 1024：防 fd 耗尽
 //   - CPU 600s：与 30m wall-clock 超时双保险
 //   - FSIZE 1GiB：防单文件写爆磁盘（write 级沙箱）
 //   - CORE 0：禁 core dump 落盘
+//
+// 不设 RLIMIT_NPROC（2026-08-31 事故修正）：unix 内核按 real-UID 全系统计数，
+// 计数 >= 上限即 fork EAGAIN——桌面开发机单 UID 常驻进程数百个（本机实测约
+// 600），设 256 等于禁掉沙箱内一切 fork，全部命令瘫痪。防 fork 炸弹由既有机制
+// 兜底：30m wall 超时 + 进程组 killEntry 全灭 + CPU 600s。windows Job Object
+// 的活动进程上限（resourceLimitJobProcesses）是 job 级计数（语义正确）不受影响，
+// 仍在 sandbox_windows.go。
 const (
-	resourceLimitAS        = 4 << 30
-	resourceLimitJobMemory = 8 << 30
-	resourceLimitNProc     = 256
-	resourceLimitNoFile    = 1024
-	resourceLimitCPU       = 600
-	resourceLimitFSize     = 1 << 30
+	resourceLimitAS           = 4 << 30
+	resourceLimitJobMemory    = 8 << 30
+	resourceLimitJobProcesses = 256
+	resourceLimitNoFile       = 1024
+	resourceLimitCPU          = 600
+	resourceLimitFSize        = 1 << 30
 )
 
 // protectedMetadataNames 是工作区可写时仍保持只读的敏感子路径名
@@ -122,8 +135,10 @@ var (
 // 2/3/4/9 = workspace-write；0 = 未设置/异常值，按 read-only 处理（fail-closed）。
 // 审批通过（9）不豁免沙箱——免沙箱不经本函数表达（StartOptions.NoSandbox）。
 // 无可用后端返回错误（fail-closed），绝不返回未包装 argv。
+// deny 模式恒 nil：现调用方仅测试；生产路径必须走 Start（StartOptions.DenyPaths），
+// 否则 deny 隔离静默缺失。
 func Confine(level int, workdir string, argv []string) ([]string, error) {
-	plan, err := planConfined(level, workdir, nil, argv)
+	plan, err := planConfined(level, workdir, nil, argv, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +180,6 @@ func sandboxUnavailable(level int) error {
 func rlimitArgs() []string {
 	return []string{
 		"--rlimit", "AS", strconv.FormatUint(uint64(resourceLimitAS), 10),
-		"--rlimit", "NPROC", strconv.Itoa(resourceLimitNProc),
 		"--rlimit", "NOFILE", strconv.Itoa(resourceLimitNoFile),
 		"--rlimit", "CPU", strconv.Itoa(resourceLimitCPU),
 		"--rlimit", "FSIZE", strconv.FormatUint(uint64(resourceLimitFSize), 10),
@@ -179,15 +193,16 @@ func rlimitArgs() []string {
 // 且子进程只能降低不能提高；ulimit 失败即退出（fail-closed，命令不执行）。
 // 注意：macOS 内核不支持 RLIMIT_AS（-v）/RLIMIT_DATA（-d），setrlimit 恒
 // EINVAL（实测 2026-08-28）——大内存分配由 exec_procs 进程组 RSS 监控
-// 兜底（rss_darwin.go）。单位：-u 进程数、-n fd、-t CPU 秒、-f 512B 块、-c core。
+// 兜底（rss_darwin.go）。不设 -u（RLIMIT_NPROC 按 UID 全系统计数，桌面
+// 常驻进程即超限，见常量块注释）。单位：-n fd、-t CPU 秒、-f 512B 块、-c core。
 func confineRlimits(argv []string) []string {
 	script := fmt.Sprintf(
-		"ulimit -u %d -n %d -t %d -f %d -c 0 2>/dev/null || exit 1; exec \"$@\"",
-		resourceLimitNProc, resourceLimitNoFile, resourceLimitCPU, resourceLimitFSize>>9)
+		"ulimit -n %d -t %d -f %d -c 0 2>/dev/null || exit 1; exec \"$@\"",
+		resourceLimitNoFile, resourceLimitCPU, resourceLimitFSize>>9)
 	return append([]string{"/bin/sh", "-c", script, "sh"}, argv...)
 }
 
-func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly []string, argv []string) []string {
+func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly []string, argv []string, deny []string) []string {
 	args := []string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"}
 	args = append(args, rlimitArgs()...)
 	if level >= proto.LevelWrite {
@@ -206,7 +221,152 @@ func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly 
 			}
 		}
 	}
+	// deny 隔离覆盖（§5.10）：后挂载优先（bwrap 后绑定覆盖前绑定），
+	// 追加在全部 bind 之后；read-only 与 workspace-write 同隔离。
+	args = append(args, bwrapDenyArgs(deny)...)
 	return append(append(args, "--"), argv...)
+}
+
+// bwrapDenyArgs 把 deny 模式实例化为 bwrap 覆盖挂载参数。
+// bwrap 无路径规则引擎，只能挂载覆盖已存在路径：
+//   - 目录 → --tmpfs 覆盖（原内容不可见；写入落入临时 tmpfs 不落地）
+//   - 文件 → --ro-bind /dev/null 覆盖（读得空文件，写被 EROFS 拒绝）
+//
+// 实例化粒度（存在性判定每次 Start 实时执行——新创建文件下次覆盖）：
+//   - 纯字面路径：stat 判定目录/文件；不存在跳过（不可读无害）
+//   - 尾 /**（或 /*）：剥尾段得目录，按目录处理（覆盖整树含未来创建）
+//   - 段内 glob（* ?，无 **）：字面前缀目录 readdir 逐项匹配（filepath.Match
+//     段语义）覆盖；无字面前缀（** 开头）→ $HOME 根级锚定：最后一个非 **
+//     段在 home 直接子级匹配（.ssh 类目录/id_ed25519* 文件/**.key）
+//   - 无法实例化（中间 **、含 [ 字符类语法）→ 跳过：exec 通道无兜底（fsauth
+//     判定层仅约束 fs 工具/VFS，拦不住进程内 cat）；bwrap deny 隔离是近似层，
+//     完整 glob 语义仅 seatbelt。
+func bwrapDenyArgs(deny []string) []string {
+	var args []string
+	for _, pat := range deny {
+		if pat == "" {
+			continue
+		}
+		for _, p := range denyCoverTargets(pat) {
+			args = append(args, overlayArgs(p)...)
+		}
+	}
+	return args
+}
+
+// overlayArgs 返回单目标路径的覆盖挂载参数（目录 tmpfs / 普通文件与 unix
+// socket 以 /dev/null ro-bind 覆盖；其余（设备/不存在）跳过）。socket 覆盖 =
+// linux 侧 AF_UNIX connect 隔离：覆盖后 connect 只见到 /dev/null 直接失败
+// （对齐 darwin seatbelt 的 network-outbound 规则；修复前 socket 被跳过，
+// docker.sock 可直通，实测 2026-09-05）。
+func overlayArgs(p string) []string {
+	if p == "" {
+		return nil
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return nil
+	}
+	if st.IsDir() {
+		return []string{"--tmpfs", p}
+	}
+	if st.Mode().IsRegular() || st.Mode()&os.ModeSocket != 0 {
+		return []string{"--ro-bind", "/dev/null", p}
+	}
+	return nil
+}
+
+// denyCoverTargets 把一条 deny 模式实例化为目标路径列表。
+func denyCoverTargets(pat string) []string {
+	pat = filepath.ToSlash(pat)
+	if !strings.ContainsAny(pat, "*?") {
+		return []string{pat}
+	}
+	// ** 开头（无字面前缀）：home 根级锚定——此形态的字面前缀为空，
+	// 必须优先于尾段剥离（**/.ssh/** 剥尾会得到伪目录 **/.ssh）
+	if strings.HasPrefix(pat, "**/") {
+		return homeAnchorTargets(pat)
+	}
+	// 尾 /** 或 /*：剥尾段得目录（前缀必须无 glob——否则仍是跨段形态）
+	if idx := strings.LastIndex(pat, "/"); idx >= 0 && !strings.Contains(pat[idx+1:], "/") && strings.Contains(pat[idx+1:], "*") {
+		// 尾段整段是 * 或 **（无其它字符）且前缀无通配 → 目录级
+		tail := pat[idx+1:]
+		if (tail == "*" || tail == "**") && !strings.ContainsAny(pat[:idx], "*?") {
+			return []string{pat[:idx]}
+		}
+	}
+	// 段内 glob（含 ** 但非尾整段 **）→ 检查是否有 `**` 或 `[`：无法实例化
+	if strings.Contains(pat, "**") || strings.ContainsAny(pat, "[]") {
+		return nil
+	}
+	// 无 ** 的单 glob：字面前缀 readdir 枚举
+	segs := strings.Split(pat, "/")
+	lit := 0
+	for _, s := range segs {
+		if strings.ContainsAny(s, "*?") {
+			break
+		}
+		lit++
+	}
+	if lit == 0 || lit >= len(segs) {
+		return nil
+	}
+	prefix := strings.Join(segs[:lit], "/")
+	if strings.HasPrefix(pat, "/") {
+		prefix = "/" + prefix
+	}
+	st, err := os.Stat(prefix)
+	if err != nil || !st.IsDir() {
+		return nil
+	}
+	want := segs[lit] // 仅支持单 glob 段（其余段须字面）
+	for _, rest := range segs[lit+1:] {
+		if strings.ContainsAny(rest, "*?") {
+			return nil
+		}
+	}
+	entries, err := os.ReadDir(prefix)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if ok, _ := filepath.Match(want, e.Name()); ok {
+			out = append(out, filepath.Join(prefix, e.Name()))
+		}
+	}
+	return out
+}
+
+// homeAnchorTargets 把 ** 开头模式锚定到 $HOME 根级：最后一个非 ** 段
+// 为目录名或段内 glob（filepath.Match 匹配 home 直接子级）。
+func homeAnchorTargets(pat string) []string {
+	segs := strings.Split(pat, "/")
+	var anchor string
+	for i := len(segs) - 1; i >= 0; i-- {
+		if segs[i] != "**" && segs[i] != "" {
+			anchor = segs[i]
+			break
+		}
+	}
+	if anchor == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if ok, _ := filepath.Match(anchor, e.Name()); ok {
+			out = append(out, filepath.Join(home, e.Name()))
+		}
+	}
+	return out
 }
 
 // ---- darwin: Seatbelt (sandbox-exec) ----
@@ -223,7 +383,23 @@ const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 // 的敏感子路径（.git 等）追加 deny 规则（SBPL deny 优先于 allow，覆盖写白名单）。
 // .git 覆盖的保护对象是 bash/rm 等通用命令——git 自身（isGitArgv）豁免，
 // git 写操作的等级由 vcore 子命令分级表承担（§2.4）。
-func seatbeltArgs(level int, workdir string, extra []string, argv []string) []string {
+//
+// deny 追加拒绝规则（fsauth.DenyPatterns 预展开模式，§5.10 deny 隔离）：
+// 每条模式经 globToSBPLRegex 转 SBPL (regex ...) 规则，file-read* 与 file-write*
+// 各出一条读写双拒（修复前仅拒读，纯写打开仍可改写可写根内 deny 文件，实测
+// 2026-09-05；与 linux 覆盖挂载事实行为、fsauth deny=(0,0) 语义对齐），另加一条
+// network-outbound (remote unix (regex ...))——AF_UNIX connect() 不走 file-* 判定
+// （实测 2026-09-05：deny 条目 stat/读/写全拒而 curl --unix-socket 直通，
+// docker.sock = 主机逃逸）；SBPL network 过滤器 (remote unix (regex ...)) 实测可用，
+// 内核对判定路径先规范化（/tmp→/private/tmp symlink 亦命中，实测）。
+// **规则顺序：deny 表在写白名单之后输出**——SBPL 后匹配覆盖先匹配，先输出时
+// 可写根内 deny 条目（工作区的 **/.env / *.key 等）写保护会被 allow subpath
+// 覆盖（.git 覆盖幸存仅因其在白名单后输出；实测修复 2026-09-05）。
+// 字面路径以双形态进入名单（compileDeny 同时输出 canonical 与字面形）：
+// 模式自身是符号链接时（/var/run/docker.sock → 厂商 socket）两形态都须命中。
+// SBPL 无 glob filter，regex 为 POSIX ERE 且对完整路径字符串匹配（子串命中，锚定 ^ 有效）；
+// seatbelt 判定前做路径规范化（大小写变体/.SSH、symlink 跳转均被拒，实测）。字面路径直接 (regex) 亦可用，但统一走转换器保持单一路径。
+func seatbeltArgs(level int, workdir string, extra []string, argv []string, deny []string) []string {
 	forms := []string{
 		"(version 1)",
 		"(allow default)",
@@ -234,11 +410,20 @@ func seatbeltArgs(level int, workdir string, extra []string, argv []string) []st
 		for _, root := range writableRoots(workdir, extra) {
 			forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
 		}
-		if workdir != "" && !isGitArgv(argv) {
-			for _, name := range protectedMetadataNames {
-				p := filepath.Join(workdir, name)
-				forms = append(forms, "(deny file-write* (subpath "+sbplString(canonicalRoot(p))+"))")
-			}
+	}
+	for _, pat := range deny {
+		if pat == "" {
+			continue
+		}
+		re := sbplString(globToSBPLRegex(pat))
+		forms = append(forms, "(deny file-read* (regex "+re+"))")
+		forms = append(forms, "(deny file-write* (regex "+re+"))")
+		forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
+	}
+	if level >= proto.LevelWrite && workdir != "" && !isGitArgv(argv) {
+		for _, name := range protectedMetadataNames {
+			p := filepath.Join(workdir, name)
+			forms = append(forms, "(deny file-write* (subpath "+sbplString(canonicalRoot(p))+"))")
 		}
 	}
 	return append([]string{macosSeatbeltExecutable, "-p", stringsJoin(forms), "--"}, argv...)
@@ -317,6 +502,69 @@ func existingDirs(dirs ...string) []string {
 // sbplString 转义一个路径为 SBPL 字符串字面量。
 func sbplString(p string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(p, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+// globToSBPLRegex 把 fsauth glob 模式（matchPattern 语义）转 SBPL POSIX ERE
+// （SBPL 无 glob filter；regex 对完整路径字符串匹配，锚定 ^ 有效，实测 2026-09-05）。
+// 转换规则：
+//   - ** → 跨段（保 fsauth 的零段语义，吸收紧邻的分隔符）：
+//   - ** 段首（无前导 /）→ (.*)?（零/多段，可跨 /）
+//   - ** 段尾（前导 / 被吸收）→ (/.*)?（零段 = 自身，其后任意）
+//   - ** 段中（前导 / 吸收且**後跟 / 一并消费）→ /(.*/)?（零段 = 单分隔，多段 = 跨段）
+//   - *  → [^/]*       段内任意字符（不含 /）
+//   - ?  → [^/]        段内单字符
+//   - 其余字符 → 转义字面（regexp 特殊字符加 \）
+//
+// 整串锚定（^...$）保证与 fsauth 段匹配同为「全路径匹配」：正因 ^...$ 锚定，
+// .ssh2 类粘连名不会命中 **/.ssh/**（字面段后必须是串尾或 /）。残余偏差仅
+// 一处：段内 **（a**b 非标准形态）经 (.*)? 展开可跨段，而 fsauth matchOne
+// 不跨段 → 超集拒绝（安全方向，该形态本身即非法输入）。
+func globToSBPLRegex(pat string) string {
+	pat = filepath.ToSlash(pat)
+	var b strings.Builder
+	b.WriteByte('^')
+	for i := 0; i < len(pat); {
+		if strings.HasPrefix(pat[i:], "**") {
+			if i > 0 && pat[i-1] == '/' {
+				// 吸收已输出的前导 '/'：** 零段 = 无该分隔符
+				s := b.String()
+				b.Reset()
+				b.WriteString(s[:len(s)-1])
+				if i+2 >= len(pat) {
+					b.WriteString("(/.*)?") // 尾段 **
+				} else if pat[i+2] == '/' {
+					b.WriteString("/(.*/)?") // 中段 **：消费紧随的 /（零段=单分隔）
+					i++
+				} else {
+					b.WriteString("/(.*)?") // 中段 ** 无尾 /（非标准分隔形态）
+				}
+				i += 2
+				continue
+			}
+			b.WriteString("(.*)?")
+			i += 2
+			continue
+		}
+		switch pat[i] {
+		case '*':
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			b.WriteString(regexEscape(pat[i]))
+		}
+		i++
+	}
+	b.WriteByte('$')
+	return b.String()
+}
+
+// regexEscape 转义一个字节为 POSIX ERE 字面量（返回非空串）。
+func regexEscape(c byte) string {
+	if c == '\\' || strings.ContainsRune(".+*?()[]{}^$|", rune(c)) {
+		return "\\" + string(rune(c))
+	}
+	return string(rune(c))
 }
 
 // mergeEnv 把附加环境并入继承环境：同名键以附加值为准（替换而非追加——

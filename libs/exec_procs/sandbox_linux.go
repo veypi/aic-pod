@@ -31,7 +31,7 @@ func probeBackend() sandboxBackend {
 // planConfined（linux）：bwrap argv 包装，无令牌。
 // 可写根下的敏感子路径（.git 等）存在时收集为只读覆盖；git 自身豁免
 // （保护对象是 bash/rm 等通用命令，git 等级由 vcore 子命令表承担）。
-func planConfined(level int, workdir string, extra []string, argv []string) (launchPlan, error) {
+func planConfined(level int, workdir string, extra []string, argv []string, deny []string) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(level)
 	}
@@ -48,5 +48,5 @@ func planConfined(level int, workdir string, extra []string, argv []string) (lau
 	// + 追加根（fsauth 配置白名单/临时 grant，v0.14.5 统一名单）
 	cacheDirs := append(fsauth.CacheRoots(), publicRoots()...)
 	cacheDirs = append(cacheDirs, extra...)
-	return launchPlan{argv: bwrapArgs(level, workdir, cacheDirs, protected, argv)}, nil
+	return launchPlan{argv: bwrapArgs(level, workdir, cacheDirs, protected, argv, deny)}, nil
 }

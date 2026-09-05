@@ -2,6 +2,8 @@ package exec_procs
 
 import (
 	"context"
+	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -90,12 +92,12 @@ func TestWritableRootsIncludesPublicDir(t *testing.T) {
 func TestBwrapArgs(t *testing.T) {
 	argv := []string{"bash", "-c", "echo hi"}
 
-	ro := bwrapArgs(proto.LevelRead, "/ws", nil, nil, argv)
+	ro := bwrapArgs(proto.LevelRead, "/ws", nil, nil, argv, nil)
 	want := append([]string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"},
 		append(rlimitArgs(), "--", "bash", "-c", "echo hi")...)
 	assertEqual(t, "read-only", ro, want)
 
-	ww := bwrapArgs(proto.LevelWrite, "/ws", []string{"/home/u/.cache"}, []string{"/ws/.git"}, argv)
+	ww := bwrapArgs(proto.LevelWrite, "/ws", []string{"/home/u/.cache"}, []string{"/ws/.git"}, argv, nil)
 	want = append([]string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"},
 		append(rlimitArgs(), "--tmpfs", "/tmp", "--bind", "/ws", "/ws", "--bind", "/home/u/.cache", "/home/u/.cache",
 			"--ro-bind", "/ws/.git", "/ws/.git", "--", "bash", "-c", "echo hi")...)
@@ -103,14 +105,14 @@ func TestBwrapArgs(t *testing.T) {
 
 	// level 3/4/9 与 2 同语义（审批通过不豁免沙箱）
 	for _, lv := range []int{proto.LevelDanger, 4, proto.LevelApproved} {
-		got := bwrapArgs(lv, "/ws", nil, nil, argv)
+		got := bwrapArgs(lv, "/ws", nil, nil, argv, nil)
 		if !contains(got, "--bind", "/ws", "/ws") {
 			t.Fatalf("bwrapArgs(%d) missing workspace bind: %v", lv, got)
 		}
 	}
 	// 空 workdir / 空 cache / 空 protected 不产出写绑定
 	// （--ro-bind / / 是基础只读挂载，恒有）
-	got := bwrapArgs(proto.LevelWrite, "", nil, nil, argv)
+	got := bwrapArgs(proto.LevelWrite, "", nil, nil, argv, nil)
 	if contains(got, "--bind") {
 		t.Fatalf("bwrapArgs empty inputs produced write bind: %v", got)
 	}
@@ -125,7 +127,7 @@ func TestSeatbeltArgs(t *testing.T) {
 	}
 	argv := []string{"bash", "-c", "echo hi"}
 
-	ro := seatbeltArgs(proto.LevelRead, "/ws", nil, argv)
+	ro := seatbeltArgs(proto.LevelRead, "/ws", nil, argv, nil)
 	profile := ro[2]
 	if !strings.Contains(profile, "(deny file-write*)") {
 		t.Fatalf("read-only profile missing deny: %s", profile)
@@ -137,7 +139,7 @@ func TestSeatbeltArgs(t *testing.T) {
 		t.Fatalf("unexpected seatbelt argv head: %v", ro[:4])
 	}
 
-	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv)
+	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv, nil)
 	profile = ww[2]
 	for _, want := range []string{"/private/tmp", "/ws"} {
 		if !strings.Contains(profile, `(subpath "`+want+`")`) {
@@ -149,13 +151,152 @@ func TestSeatbeltArgs(t *testing.T) {
 		t.Fatalf("workspace-write profile missing .git deny: %s", profile)
 	}
 	// git 自身豁免 .git 覆盖（保护对象是 bash/rm 等通用命令）
-	gw := seatbeltArgs(proto.LevelWrite, "/ws", nil, []string{"git", "commit", "-m", "x"})
+	gw := seatbeltArgs(proto.LevelWrite, "/ws", nil, []string{"git", "commit", "-m", "x"}, nil)
 	if strings.Contains(gw[2], "deny file-write* (subpath") {
 		t.Fatalf("git invocation should be exempt from .git deny: %s", gw[2])
 	}
 	// read-only 无 .git deny（无可写根可覆盖）
 	if strings.Contains(ro[2], "deny file-write* (subpath") {
 		t.Fatalf("read-only profile should not carry subpath deny: %s", ro[2])
+	}
+}
+
+// seatbelt deny 三拒：每条模式转 file-read*、file-write* 与 network-outbound
+// (remote unix) 三条 (regex ...) 规则（SBPL 无 glob filter；读写对称双拒——
+// 修复前仅拒读，纯写打开仍可改写可写根内 deny 文件，实测 2026-09-05；
+// AF_UNIX connect 不走 file-* 判定，docker.sock 文件操作全拒而 curl --unix-socket
+// 直通，须 network-outbound 补拒，实测 2026-09-05）。字面/glob 混合形态；
+// SBPL 规则序无关（deny 恒优先于 allow），此处仅断言产物形态。
+func TestSeatbeltDenyReads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix path semantics")
+	}
+	argv := []string{"bash", "-c", "echo hi"}
+	dn := seatbeltArgs(proto.LevelRead, "/ws", nil, argv, []string{
+		"/Users/veypi/.ssh/**", "**/id_ed25519*", "/etc/master.passwd",
+	})
+	profile := dn[2]
+	for _, want := range []string{
+		`(deny file-read* (regex "^/Users/veypi/\\.ssh(/.*)?$"))`,
+		`(deny file-write* (regex "^/Users/veypi/\\.ssh(/.*)?$"))`,
+		`(deny network-outbound (remote unix (regex "^/Users/veypi/\\.ssh(/.*)?$")))`,
+		`(deny file-read* (regex "^(.*)?/id_ed25519[^/]*$"))`,
+		`(deny file-write* (regex "^(.*)?/id_ed25519[^/]*$"))`,
+		`(deny network-outbound (remote unix (regex "^(.*)?/id_ed25519[^/]*$")))`,
+		`(deny file-read* (regex "^/etc/master\\.passwd$"))`,
+		`(deny file-write* (regex "^/etc/master\\.passwd$"))`,
+		`(deny network-outbound (remote unix (regex "^/etc/master\\.passwd$")))`,
+	} {
+		if !strings.Contains(profile, want) {
+			t.Fatalf("profile missing deny rule %s: %s", want, profile)
+		}
+	}
+	// read-only 与 workspace-write 同隔离（拒绝规则与写等级无关）
+	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv, []string{"/etc/shadow"})
+	if !strings.Contains(ww[2], `(deny file-read* (regex "^/etc/shadow$"))`) ||
+		!strings.Contains(ww[2], `(deny file-write* (regex "^/etc/shadow$"))`) ||
+		!strings.Contains(ww[2], `(deny network-outbound (remote unix (regex "^/etc/shadow$")))`) {
+		t.Fatalf("workspace-write profile missing deny rules: %s", ww[2])
+	}
+}
+
+// TestSeatbeltDenyAfterWriteAllow：SBPL 后匹配覆盖先匹配——deny 表必须在写白名单
+// 之后输出，否则可写根内 deny 条目（工作区的 **/.env / *.key 等）写保护被
+// allow subpath 覆盖（.git 覆盖幸存仅因其在白名单后输出；实测修复 2026-09-05）。
+func TestSeatbeltDenyAfterWriteAllow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix path semantics")
+	}
+	argv := []string{"bash", "-c", "echo hi"}
+	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv, []string{"**/.env"})
+	profile := ww[2]
+	allowIdx := strings.LastIndex(profile, `(allow file-write* (subpath "/ws"))`)
+	denyIdx := strings.Index(profile, `(deny file-write* (regex "^(.*)?/\\.env$"))`)
+	if allowIdx < 0 || denyIdx < 0 || denyIdx < allowIdx {
+		t.Fatalf("deny rules must come after write allow (SBPL last-match-wins): %s", profile)
+	}
+}
+
+// globToSBPLRegex 段语义转换（fsauth matchPattern 对齐）：** 跨段（(.*)?）、
+// * 段内（[^/]*）、? 单字符（[^/]）、字面转义；整串锚定 ^...$。
+func TestGlobToSBPLRegex(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"**/.ssh/**", "^(.*)?/\\.ssh(/.*)?$"},
+		{"**/id_ed25519*", "^(.*)?/id_ed25519[^/]*$"},
+		{"/etc/master.passwd", "^/etc/master\\.passwd$"},
+		{"**/*.key", "^(.*)?/[^/]*\\.key$"},
+		{"/Users/veypi/.aws/**", "^/Users/veypi/\\.aws(/.*)?$"},
+		{"**", "^(.*)?$"},
+		{"/a/**/b", "^/a/(.*/)?b$"},
+	}
+	for _, c := range cases {
+		if got := globToSBPLRegex(c.in); got != c.want {
+			t.Fatalf("globToSBPLRegex(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// bwrap deny 隔离实例化（真实文件系统判定，t.TempDir 场景）：
+// 字面目录 → --tmpfs；字面文件 → --ro-bind /dev/null；尾 /** 剥目录；
+// ** 开头 → $HOME 根级锚定（t.Setenv 指向临时目录）。
+// 注意：fixture 命名必须避开宿主默认 deny 表形态（*.pem/.ssh/id_ed25519* 等）——
+// 本测试跑在平台自身沙箱内（exec 通道）时，对命中默认表名的路径 os.Stat
+// 得 EPERM，覆盖项丢失造成假失败（实测 2026-09-05）。
+func TestBwrapDenyArgs(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "secret.dat")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".testdeny"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "testkey_x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	patterns := []string{
+		dir,                // 字面目录
+		file,               // 字面文件
+		sub + "/**",        // 尾 ** → 目录
+		"**/.testdeny/**",  // home 锚定目录
+		"**/testkey_*",     // home 锚定文件 glob
+		"/nonexistent-zzz", // 不存在 → 跳过
+	}
+	// unix socket → /dev/null 覆盖（connect 隔离，对齐 seatbelt network-outbound）
+	var sockPath string
+	if runtime.GOOS != "windows" {
+		sockPath = filepath.Join(dir, "denyprobe.sock")
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			t.Fatalf("listen unix: %v", err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		patterns = append(patterns, sockPath)
+	}
+
+	got := bwrapDenyArgs(patterns)
+	for _, want := range []string{"--tmpfs", dir, "--ro-bind", "/dev/null", file,
+		"--tmpfs", sub, "--tmpfs", filepath.Join(home, ".testdeny"),
+		"--ro-bind", "/dev/null", filepath.Join(home, "testkey_x")} {
+		if !contains(got, want) {
+			t.Fatalf("bwrapDenyArgs missing %q: %v", want, got)
+		}
+	}
+	if sockPath != "" && !contains(got, "--ro-bind", "/dev/null", sockPath) {
+		t.Fatalf("bwrapDenyArgs missing socket cover %q: %v", sockPath, got)
+	}
+	// 不存在的路径不产出覆盖（不可读无害）
+	if contains(got, "/nonexistent-zzz") {
+		t.Fatalf("nonexistent deny target should be skipped: %v", got)
 	}
 }
 
@@ -185,13 +326,14 @@ func TestWritableRoots(t *testing.T) {
 	}
 }
 
-// rlimitArgs 三端同一组上限：AS 4GiB / NPROC 256 / NOFILE 1024 / CPU 600 /
+// rlimitArgs 三端同一组上限：AS 4GiB / NOFILE 1024 / CPU 600 /
 // FSIZE 1GiB / CORE 0（与 resourceLimit* 常量一致，防硬编码漂移）。
+// 不含 NPROC：RLIMIT_NPROC 按 real-UID 全系统计数，桌面常驻进程即超限（见
+// sandbox.go 常量块注释）。
 func TestRlimitArgs(t *testing.T) {
 	got := rlimitArgs()
 	want := []string{
 		"--rlimit", "AS", "4294967296",
-		"--rlimit", "NPROC", "256",
 		"--rlimit", "NOFILE", "1024",
 		"--rlimit", "CPU", "600",
 		"--rlimit", "FSIZE", "1073741824",
@@ -211,7 +353,7 @@ func TestConfineRlimits(t *testing.T) {
 		t.Fatalf("confineRlimits head: %v", got)
 	}
 	script := got[2]
-	for _, want := range []string{"ulimit -u 256", "-n 1024", "-t 600", "-f 2097152", "-c 0", `exec "$@"`} {
+	for _, want := range []string{"ulimit -n 1024", "-t 600", "-f 2097152", "-c 0", `exec "$@"`} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q: %s", want, script)
 		}

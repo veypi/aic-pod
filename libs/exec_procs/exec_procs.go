@@ -97,6 +97,14 @@ type StartOptions struct {
 	// fs_write_roots + grant_apply 临时授权）——fs 与 exec 共用同一份名单。
 	// 每次 Start 读当次值（配置动态生效）；nil = 仅基础白名单。
 	WriteRoots []string
+	// DenyPaths 是预展开的拒绝模式（§5.10 deny 隔离）：默认读全开
+	//（seatbelt allow default / bwrap 整机 ro-bind），deny 表（fsauth
+	// defaultDenyPaths + cfg fs_deny_paths）经本字段进入沙箱 profile——
+	// fs 工具与 exec 进程共用同一份名单。darwin 读写双拒（regex 规则）；
+	// linux 覆盖挂载（文件写拒/目录写黑洞）。来源 =
+	// Policy.DenyPatterns()（快照，每次 Start 读当次值）。
+	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
+	DenyPaths []string
 }
 
 // Manager 是 exec 子进程托管管理器（每 session 一个）。
@@ -157,7 +165,7 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	confined := !opts.NoSandbox && !m.NoSandbox
 	if confined {
 		var err error
-		plan, err = planConfined(opts.Level, opts.Workdir, opts.WriteRoots, opts.Exec)
+		plan, err = planConfined(opts.Level, opts.Workdir, opts.WriteRoots, opts.Exec, opts.DenyPaths)
 		if err != nil {
 			f.Close()
 			return nil, err

@@ -39,6 +39,7 @@ func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv [
 		Level:      level,
 		NoSandbox:  noSandbox,
 		WriteRoots: c.policy.WriteRootsFor(sid), // 统一名单：配置白名单 + 临时 grant（v0.14.5 §2）
+		DenyPaths:  c.policy.DenyPatterns(),     // 统一 deny 名单：默认表 + cfg fs_deny_paths（§5.10 deny 隔离）
 	})
 	if err != nil {
 		return errResp(msgID, err.Error())
