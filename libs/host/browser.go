@@ -18,7 +18,12 @@ func (c *Client) runBrowser(ctx context.Context, sid string, req *proto.ToolRequ
 	b := c.browserFor(sid)
 	// sid 绑定策略视图：文件交换（upload 读 / download 等写）经 CheckPolicy 判定，
 	// deny 名单与会话 grant/会话区在此生效（v0.14.5 评审二轮：修复前四通道漏检）
-	res, err := b.Handle(ctx, c.newEnv(sid, ""), req.MsgID, argv)
+	env := c.newEnv(sid, "")
+	// 授予等级必须随行下发（与 execFS/execCmd 同语义，v0.14.5 §2 Policy 升级判定用）：
+	// 漏传则 env.Granted 恒为 0，白名单内写（level 2）也永远触发 ApprovalError →
+	// 截图/download 等文件交换无条件等待审批，且 approve 后重执行仍循环回 waiting
+	env.Granted = req.GrantedLevel
+	res, err := b.Handle(ctx, env, req.MsgID, argv)
 	return resultToResponse(req.MsgID, res, err)
 }
 
