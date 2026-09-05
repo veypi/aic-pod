@@ -91,7 +91,7 @@ const CONNECT_TIMEOUT_MS = 15000;
 //   stateful = true（同 (session, host) 串行，服务端 slocks 保证）
 //   backgroundable = true（download/wait 长操作可后台化）
 // fs.actions = [read/write/edit/ls/rg/cp/mv/rm]（§4：与 page 端同一套 PageFS+fsops 代码，
-//   扩展 IndexedDB 后端，按 host_id 寻址；browser screenshot 产出物落 /screenshot/，fs.read 读图，§2.2）。
+//   扩展 OPFS 后端，按 host_id 寻址；browser screenshot 产出物落 /screenshot/，fs.read 读图，§2.2）。
 
 const BROWSER_LEVEL = 2;
 

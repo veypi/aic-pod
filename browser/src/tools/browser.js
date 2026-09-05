@@ -679,7 +679,7 @@ async function actScreenshot(pa, ctx) {
   const quality = Math.min(parseInt(pa.flags["quality"] || "80", 10), 100);
   const tab = await getTargetTab();
   // §2.2：browser 不返回图片数据（仅 fs.read 能把图片带进消息）。
-  // 截图落本 host 的 fs（/screenshot/，扩展 IndexedDB Blob 存储，本地单根），
+  // 截图落本 host 的 fs（/screenshot/，扩展 OPFS Blob 存储，本地单根），
   // agent 需要读图时用 fs.read（1host=本 host_id）按 attrs.path 读取。
   if (!ctx?.fs) throw new Error("fs backend not available on this host");
   const blob = await cdpScreenshot(tab.id, quality);

@@ -1,17 +1,18 @@
 // fsops.js — fs 指令集的 ls/rg/cp/mv/rm 实现（JSON 参数，PageFS 原语驱动）。
 //
 // 双端复用（同一套代码逻辑，逐字节同步，禁止漂移）：
-//   - aic/ui/assets/libs/fsops.js   — page 端（1host="page"，页面 IndexedDB）
-//   - aic-pod/browser/src/sdk/fsops.js — 浏览器扩展端（1host=host_id，扩展 IndexedDB）
+//   - aic/ui/assets/libs/fsops.js   — page 端（1host="page"，页面 OPFS）
+//   - aic-pod/browser/src/sdk/fsops.js — 浏览器扩展端（1host=host_id，扩展 OPFS）
 //
 // 语义对齐 aic-pod/libs/vcore（§2.6 三端一致）：输出/attrs/错误文案与 Go 一致
-// （错误前缀 "fs {action}: ..."）。目录 size/mtime 为 IndexedDB 模型限制
-// （无目录记录）输出 0（Go UFS 端为真实数值；一致性向量运行器归一处理）。
+// （错误前缀 "fs {action}: ..."）。PageFS（OPFS）目录无元数据（size/mtime
+// 不可得）输出 0（Go UFS 端为真实数值；一致性向量运行器归一处理）。
 //
 // 适配器接口（PageFS / 测试 MemFS 均满足）：
 //   stat(p) → {path,dir,size?,mtime?} | null   list(p) → {items:[{name,path,dir,size?,mtime?}]}
 //   walk(p) → {items:[{path,dir,size?,mtime?}]}  readRaw(p) → {content,mime,size,path}
 //   remove(p, {recursive}) → {removed, items?}   writeBlob(p, blob) → {path, size}
+//   mkdir(p)（可选，cp/mv 目录复制保留空目录用）
 //   _path?(p) → abs（可选，缺省原样）
 // ctx: {workdir?}（缺省目标 = ctx.workdir > "/"）。
 
@@ -520,7 +521,8 @@ function linesOfRaw(raw) {
 
 // ---- cp / mv / rm（对齐 vcore fileops.go）----
 
-// copyNode 复制单个文件/整棵目录树（PageFS 无原生 Rename/MkdirAll——writeBlob 自动建父路径）。
+// copyNode 复制单个文件/整棵目录树（与 vcore copyDir 对齐：目录条目显式建
+// 目录——空目录保留；文件 writeBlob 自动建父路径）。
 async function copyNode(fs, ctx, srcAbs, dstAbs) {
   const st = await fs.stat(srcAbs, ctx);
   if (st === null) throw fsErr("cp", `cannot stat source ${srcAbs}: no such file or directory`);
@@ -530,10 +532,18 @@ async function copyNode(fs, ctx, srcAbs, dstAbs) {
     await fs.writeBlob(dstAbs, blob, ctx);
     return;
   }
+  // 目录本体先建（全空目录无子项也保留）
+  if (fs.mkdir) await fs.mkdir(dstAbs, ctx);
   const w = await fs.walk(srcAbs, ctx);
+  const prefix = srcAbs.endsWith("/") ? srcAbs : srcAbs + "/";
   for (const it of w.items || []) {
-    if (it.dir) continue;
-    const rel = it.path.slice(srcAbs.length).replace(/^\/+/, "");
+    if (it.dir) {
+      // 目录条目（含空目录）：目标端显式建目录（walk 前序：父先于子）
+      const rel = it.path.slice(prefix.length).replace(/\/$/, "");
+      if (fs.mkdir) await fs.mkdir(dstAbs + "/" + rel, ctx);
+      continue;
+    }
+    const rel = it.path.slice(prefix.length);
     const r = await fs.readRaw(it.path, ctx);
     const blob = r.content instanceof Blob ? r.content : new Blob([r.content], { type: r.mime || "text/plain" });
     await fs.writeBlob(dstAbs + "/" + rel, blob, ctx);
@@ -582,7 +592,7 @@ async function fsRm(fs, ctx, p) {
   if (!st.dir) {
     out = await fs.remove(p.path, ctx);
   } else {
-    // 目录：非空需 recursive（PageFS.remove 对空目录与不存在均报 no such file）
+    // 目录：非空需 recursive（空目录直接删，与 vcore fsRm 语义一致）
     const res = await fs.list(p.path, ctx);
     const children = (res.items || []).length;
     if (children > 0 && !p.recursive) {

@@ -1,16 +1,19 @@
-// PageFS — 浏览器本地文件系统（v0.13.1 单根模型）：IndexedDB 单库单 store，
+// PageFS — 浏览器本地文件系统（OPFS 实现）：Origin Private File System 真实目录树，
 // fs 指令集 8 action（read/write/edit 本类实现，ls/rg/cp/mv/rm 委托 fsops.js）。
 //
 // 双端复用（同一套代码逻辑，逐字节同步，禁止漂移）：
-//   - aic/ui/assets/libs/page_fs.js   — page 端（1host="page"，页面 IndexedDB）
-//   - aic-pod/browser/src/sdk/page_fs.js — 浏览器扩展端（1host=host_id，扩展 IndexedDB）
-// 两处 origin 不同，IndexedDB 物理隔离；代码必须保持一致，改动双向同步。
+//   - aic/ui/assets/libs/page_fs.js   — page 端（1host="page"，页面 OPFS）
+//   - aic-pod/browser/src/sdk/page_fs.js — 浏览器扩展端（1host=host_id，扩展 OPFS）
+// 两处 origin 不同，OPFS 物理隔离；代码必须保持一致，改动双向同步。
 //
-// 存储模型（v0.13.1 单根，与 cloud 的 $SESSION/$USER 资源隔离完全解耦）：
-//   - 固定库名 aic-page-fs，单 store files；key = 规范化绝对路径，根为 "/"；
-//   - 本地空间不分用户/会话（浏览器端无资源隔离需求），$SESSION/$USER 变量不存在；
-//   - 记录 = {c: string|Blob, m: mtime}；文本存 string，二进制存 Blob；
-//   - IndexedDB 无目录概念，write 的"父目录自动创建"天然成立；
+// 存储模型（v0.16 单根，与 cloud 的 $SESSION/$USER 资源隔离完全解耦）：
+//   - navigator.storage.getDirectory() 为根，per-origin 私有文件系统；
+//   - 真实目录树：目录由 getDirectoryHandle/entries() 枚举（O(子项)，无全库扫描）；
+//   - 文件内容为字节（文本按 UTF-8 存），mtime = File.lastModified（目录无元数据）；
+//   - 目录真实存在：空目录可 list/rm；mv/rm -r 用基元组合（读→写→删 / 递归枚举删除），
+//     不依赖 FileSystemHandle.move() / removeEntry(recursive)（跨浏览器版本黑洞）；
+//   - 平台不支持（Safari <15.2 / Firefox <111 / Chrome <86、Safari 私有浏览模式等）：
+//     每次操作统一报错 fs {action}: OPFS not available in this browser（无回退）。
 //   - 总量受浏览器 storage quota 管理，写失败（quota exceeded）按执行错误返回。
 //
 // 路径翻译（仅防呆，非隔离）：AI 经 fs 通道发来的路径可能带云语义
@@ -209,60 +212,6 @@ function doubleEncodingHint(content, oldText) {
   return ' (hint: oldText contains literal "\\u003c"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters)';
 }
 
-// ---- IndexedDB 最小封装 ----
-
-function idbOpen() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(`aic-page-fs`, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains("files")) db.createObjectStore("files");
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbGet(db, store, key) {
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(store, "readonly").objectStore(store).get(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbPut(db, store, key, value) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function idbAllKeys(db, store) {
-  return new Promise((resolve, reject) => {
-    const req = db
-      .transaction(store, "readonly")
-      .objectStore(store)
-      .getAllKeys();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbDelete(db, store, key) {
-  return new Promise((resolve, reject) => {
-    const req = db
-      .transaction(store, "readwrite")
-      .objectStore(store)
-      .delete(key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  });
-}
-
 // ---- 图片压缩阶梯（对齐 vcore image.go：原尺寸质量 80/60/40 → 0.5 倍逐级缩尺寸）----
 //
 // 环境适配：page（window）与扩展 service worker 双环境同一份代码——
@@ -333,17 +282,137 @@ async function imageDimensions(blob) {
   }
 }
 
+// ---- OPFS 存储层（唯一实现，无版本分支）----
+
+// defaultRootProvider：页面/worker/SW 环境根句柄来源。
+// 平台不支持（旧浏览器、Safari 私有浏览模式抛出、无 navigator.storage 等）→
+// throw，由 _root 统一映射为 fs {action}: OPFS not available in this browser。
+async function defaultRootProvider() {
+  if (
+    typeof navigator === "undefined" ||
+    !navigator.storage ||
+    typeof navigator.storage.getDirectory !== "function"
+  ) {
+    throw new Error("OPFS not available");
+  }
+  const root = await navigator.storage.getDirectory();
+  if (!root) throw new Error("OPFS not available");
+  return root;
+}
+
+// splitPath："/a/b/c" → ["a","b","c"]；根 "/" → []
+function splitPath(abs) {
+  return abs.split("/").filter(Boolean);
+}
+
+// resolveDir：沿 parts 逐级解析目录句柄（create 时自动建）。
+// 中间段是文件抛 TypeMismatchError（映射 "not a directory"）。
+async function resolveDir(root, parts, create) {
+  let d = root;
+  for (const seg of parts) {
+    d = await d.getDirectoryHandle(seg, { create: !!create });
+  }
+  return d;
+}
+
+// fsPathErr：OPFS 异常 → fs 错误文案（kind="dir" = 路径段应为目录；
+// kind="file" = 读文件处碰到目录）。NotFound 与 TypeMismatch 逐项映射，
+// 其余按原始 message 包装（quota 等由存储层传递）。
+function fsPathErr(action, abs, e, kind) {
+  const name = e?.name;
+  if (name === "NotFoundError")
+    return fsErr(action, `${abs}: no such file or directory`);
+  if (name === "TypeMismatchError")
+    return fsErr(
+      action,
+      kind === "dir" ? `${abs}: not a directory` : `${abs}: is a directory`,
+    );
+  return fsErr(action, e?.message || String(e));
+}
+
 // ---- PageFS ----
 
 export class PageFS {
-  // 无参构造：本地单根存储（固定库名 aic-page-fs），不依赖用户/会话。
-  constructor() {
-    this._db = null; // 懒打开（首次 run）
+  // 无参构造：单根存储（OPFS 根），不依赖用户/会话。
+  // rootProvider 供测试注入（内存实现）；缺省 navigator.storage.getDirectory。
+  constructor(rootProvider) {
+    this._rootProvider = rootProvider || defaultRootProvider;
+    this._rootResult = null; // {root} | {err:true}，惰性且失败缓存（平台错误不恢复）
   }
 
-  async _ensureDB() {
-    if (!this._db) this._db = await idbOpen();
-    return this._db;
+  // _root(action)：获取 OPFS 根句柄；平台不可用报统一错误（每次携带当前 action 名）。
+  _root(action) {
+    if (!this._rootResult) {
+      this._rootResult = this._rootProvider()
+        .then((root) => ({ root }))
+        .catch(() => ({ err: true }));
+    }
+    return this._rootResult.then((r) => {
+      if (r.err)
+        throw fsErr(action, "OPFS not available in this browser");
+      return r.root;
+    });
+  }
+
+  // _readFileBytes：整读文件为字节（文本/二进制统一；文本由调用方解码）。
+  async _readFileBytes(abs, action) {
+    if (abs === "/") throw fsErr(action, `${abs}: is a directory`);
+    const root = await this._root(action);
+    const parts = splitPath(abs);
+    const name = parts.pop();
+    let d;
+    try {
+      d = await resolveDir(root, parts, false);
+    } catch (e) {
+      throw fsPathErr(action, abs, e, "dir");
+    }
+    let fh;
+    try {
+      fh = await d.getFileHandle(name);
+    } catch (e) {
+      throw fsPathErr(action, abs, e, "file");
+    }
+    const f = await fh.getFile();
+    return new Uint8Array(await f.arrayBuffer());
+  }
+
+  // _writeFileBytes：整写文件字节（覆写，父目录自动创建）。
+  async _writeFileBytes(abs, bytes, action) {
+    if (abs === "/") throw fsErr(action, `${abs}: is a directory`);
+    const root = await this._root(action);
+    const parts = splitPath(abs);
+    const name = parts.pop();
+    let d;
+    try {
+      d = await resolveDir(root, parts, true);
+    } catch (e) {
+      throw fsPathErr(action, abs, e, "dir");
+    }
+    let fh;
+    try {
+      fh = await d.getFileHandle(name, { create: true });
+    } catch (e) {
+      throw fsPathErr(action, abs, e, "file");
+    }
+    const w = await fh.createWritable();
+    try {
+      await w.write(bytes);
+    } catch (e) {
+      // 流式写失败（quota exceeded 等）：close 不再有意义，按执行错误返回
+      try {
+        await w.abort?.();
+      } catch (_) {
+        /* 尽力关闭 */
+      }
+      throw fsErr(action, e?.message || String(e));
+    }
+    try {
+      await w.close(); // close 提交（原子可见；quota on commit 在此失败）
+    } catch (e) {
+      // close 阶段失败（如 quota on commit）同样按 fs 错误文案契约包装，
+      // 不向主线程/worker 转发链路透出裸 DOMException
+      throw fsErr(action, e?.message || String(e));
+    }
   }
 
   // _env 构造路径环境：本地单根，workdir 恒 /（无 $ 变量、无会话绑定；
@@ -363,7 +432,12 @@ export class PageFS {
       if (!ALLOWED_FIELDS.has(k)) throw fsErr(action, `unknown field "${k}"`);
     }
     if (!action)
-      throw fsErr("", "action is required (supported: read, write, edit, ls, rg, cp, mv, rm)");
+      throw fsErr(
+        "",
+        "action is required (supported: read, write, edit, ls, rg, cp, mv, rm)",
+      );
+    // 平台可用性检查（不支持即统一报错，无回退）
+    await this._root(action);
 
     const env = this._env();
 
@@ -392,14 +466,6 @@ export class PageFS {
     return resolvePath(String(rawPath || ""), env.workdir);
   }
 
-  async _getFile(abs, action) {
-    const db = await this._ensureDB();
-    const rec = await idbGet(db, "files", abs);
-    if (rec === undefined)
-      throw fsErr(action, `${abs}: no such file or directory`);
-    return rec;
-  }
-
   // ---- read（§4.2）----
 
   async _read(p, env) {
@@ -420,16 +486,11 @@ export class PageFS {
       if (limit > 1000) limit = 1000;
     }
     const abs = this._resolve(p.path, env, "read");
-    const rec = await this._getFile(abs, "read");
-    const bytes =
-      rec.c instanceof Blob
-        ? new Uint8Array(await rec.c.arrayBuffer())
-        : new TextEncoder().encode(rec.c);
+    const bytes = await this._readFileBytes(abs, "read");
 
     if (!isTextBytes(bytes)) return this._binaryResult(abs, bytes);
 
-    const text =
-      typeof rec.c === "string" ? rec.c : new TextDecoder().decode(bytes);
+    const text = new TextDecoder().decode(bytes);
     const lines = text.split("\n");
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
     const total = lines.length;
@@ -515,14 +576,7 @@ export class PageFS {
     const abs = this._resolve(p.path, env, "write");
     const lines = countLines(content);
     const bytes = byteLen(content);
-    const db = await this._ensureDB();
-    try {
-      // IndexedDB 无目录概念，"父目录不存在自动创建"天然成立
-      await idbPut(db, "files", abs, { c: content, m: Date.now() });
-    } catch (e) {
-      // quota exceeded 等存储层失败按执行错误返回（§4.5）
-      throw fsErr("write", e?.message || String(e));
-    }
+    await this._writeFileBytes(abs, new TextEncoder().encode(content), "write");
     return {
       content: `wrote file: ${abs} (${lines} lines, ${bytes} bytes)`,
       attrs: {
@@ -542,15 +596,9 @@ export class PageFS {
     const edits = Array.isArray(p.edits) ? p.edits : [];
     if (!edits.length) throw fsErr("edit", "edits is required");
     const abs = this._resolve(p.path, env, "edit");
-    const rec = await this._getFile(abs, "edit");
-    if (rec.c instanceof Blob) {
-      const bytes = new Uint8Array(await rec.c.arrayBuffer());
-      if (!isTextBytes(bytes)) throw fsErr("edit", `${abs} is not a text file`);
-    }
-    let content =
-      typeof rec.c === "string"
-        ? rec.c
-        : new TextDecoder().decode(await rec.c.arrayBuffer());
+    let bytes = await this._readFileBytes(abs, "edit");
+    if (!isTextBytes(bytes)) throw fsErr("edit", `${abs} is not a text file`);
+    let content = new TextDecoder().decode(bytes);
 
     // 逐个顺序应用：后一个 edit 匹配前一个应用后的内容；
     // 失败条目记录 edit[i]: 原因，不阻塞其余 edit（部分成功语义）。
@@ -590,12 +638,7 @@ export class PageFS {
       if (failed.length === 1) throw fsErr("edit", failed[0]);
       throw fsErr("edit", `no edits applied: ${failed.join("; ")}`);
     }
-    const db = await this._ensureDB();
-    try {
-      await idbPut(db, "files", abs, { c: content, m: Date.now() });
-    } catch (e) {
-      throw fsErr("edit", e?.message || String(e));
-    }
+    await this._writeFileBytes(abs, new TextEncoder().encode(content), "edit");
     const attrs = { action: "edit", path: abs, edits: String(applied) };
     if (failed.length) {
       return {
@@ -609,13 +652,13 @@ export class PageFS {
     };
   }
 
-  // ---- 前端操作对象接口（get/put/ls/rm/exists）----
+  // ---- 前端操作对象接口（get/put/ls/rm/mkdir/mv/home/search/resolve）----
   // 面向前端程序的操作对象接口（$mod.$page_fs 直接使用，page_exec 不再包装）。
   // 底层方法 readRaw/writeBlob/writeText/list/stat/walk/remove/has 保留
   // （fsops 等内部使用，与 cloud_fs 无对应关系）。
   //
   // 与 cloud_fs 的文档化差异：
-  //   - resolve() 返回规范化绝对路径（IndexedDB 无 URL 概念；cloud_fs 返回
+  //   - resolve() 返回规范化绝对路径（OPFS 无 URL 概念；cloud_fs 返回
   //     完整 URL 供 <img> 直链——page 端取图用 get() 拿 Blob 转 dataURL/objectURL）
   //   - rm() 递归删除（对齐 httpfs RemoveAll / cloud_fs.rm 语义，无需 recursive）
 
@@ -623,40 +666,18 @@ export class PageFS {
   // 目录 {ok, dir:true, path, items}；均不存在抛错（与 cloud_fs 一致）。
   async get(path, ctx = {}) {
     const abs = this._path(path, ctx);
-    const db = await this._ensureDB();
-    const store = "files";
-    const rec = await idbGet(db, store, abs);
-    if (rec !== undefined) {
-      if (rec.c instanceof Blob) {
-        const head = new Uint8Array(await rec.c.slice(0, 512).arrayBuffer());
-        return {
-          ok: true,
-          content: rec.c,
-          mime: detectMIME(head, abs),
-          size: rec.c.size,
-          path: abs,
-        };
-      }
-      return {
-        ok: true,
-        content: rec.c,
-        mime: "text/plain",
-        size: byteLen(rec.c),
-        path: abs,
-      };
-    }
-    // 无文件记录 → 目录判定：本地根 / 恒存在（stat 同款），其余由子 key 前缀推导
     if (abs === "/") {
       const l = await this.list(abs, ctx);
       return { ok: true, dir: true, path: l.path, items: l.items };
     }
-    const prefix = abs.endsWith("/") ? abs : abs + "/";
-    const keys = await idbAllKeys(db, store);
-    if (keys.some((k) => k.startsWith(prefix))) {
+    const st = await this.stat(abs, ctx);
+    if (st === null) throw fsErr("get", `${abs}: no such file or directory`);
+    if (st.dir) {
       const l = await this.list(abs, ctx);
       return { ok: true, dir: true, path: l.path, items: l.items };
     }
-    throw fsErr("get", `${abs}: no such file or directory`);
+    const raw = await this.readRaw(abs, ctx);
+    return { ok: true, ...raw };
   }
 
   // put 整写（覆写，父目录自动创建）：string 文本 / Blob 二进制通吃。
@@ -696,17 +717,23 @@ export class PageFS {
     return { ok: true, path: this._path(path, ctx), removed: r.removed };
   }
 
-  // mkdir 本地隐式目录：IndexedDB 无目录记录，no-op（与 cloud_fs 签名一致）。
+  // mkdir 显式建目录（OPFS 真实目录，父目录自动创建；已存在幂等）。
   async mkdir(path, ctx = {}) {
-    return { ok: true, path: this._path(path, ctx) };
+    const abs = this._path(path, ctx);
+    const root = await this._root("mkdir");
+    const parts = splitPath(abs);
+    let d;
+    try {
+      d = await resolveDir(root, parts, true);
+    } catch (e) {
+      throw fsPathErr("mkdir", abs, e, "dir");
+    }
+    return { ok: true, path: abs };
   }
 
-  // mv 文件移动：get → put → rm（本地组合实现）。
+  // mv 移动：委托 fs 指令 mv 语义（src/dst 校验、目标已存在报错、目录递归移动）。
   async mv(src, dst, ctx = {}) {
-    const r = await this.get(src, ctx);
-    if (r.dir) throw new Error("page_fs.mv: 目录移动未支持");
-    await this.put(dst, r.content, ctx);
-    await this.rm(src, ctx);
+    const r = await this.run({ action: "mv", src, dst }, ctx);
     return { ok: true, path: this._path(dst, ctx) };
   }
 
@@ -738,7 +765,7 @@ export class PageFS {
   }
 
   // ---- 前端层底层方法（供内部实现与 AI 通道使用：
-  //      不走 NATS 协议信封：文本原文 / Blob 直取 / key 枚举）----
+  //      不走 NATS 协议信封：文本原文 / Blob 直取 / 目录枚举）----
 
   // 规格化：确保以 "/" 开头（只判断加不加 "/"，不做 workdir/前缀映射）
   _path(rawPath, _ctx = {}) {
@@ -749,16 +776,20 @@ export class PageFS {
   // readRaw 前端友好读：文本返回原文 string，二进制返回 Blob（附 mime/size）
   async readRaw(path, ctx = {}) {
     const abs = this._path(path, ctx);
-    const rec = await this._getFile(abs, "read");
-    if (rec.c instanceof Blob) {
-      const head = new Uint8Array(await rec.c.slice(0, 512).arrayBuffer());
-      const mime = detectMIME(head, abs);
-      return { content: rec.c, mime, size: rec.c.size, path: abs };
+    const bytes = await this._readFileBytes(abs, "read");
+    if (!isTextBytes(bytes)) {
+      const mime = detectMIME(bytes.subarray(0, 512), abs);
+      return {
+        content: new Blob([bytes], { type: mime }),
+        mime,
+        size: bytes.length,
+        path: abs,
+      };
     }
     return {
-      content: rec.c,
+      content: new TextDecoder().decode(bytes),
       mime: "text/plain",
-      size: byteLen(rec.c),
+      size: bytes.length,
       path: abs,
     };
   }
@@ -769,12 +800,8 @@ export class PageFS {
     if (!(blob instanceof Blob))
       throw fsErr("write", "writeBlob: blob is required");
     const abs = this._path(path, ctx);
-    const db = await this._ensureDB();
-    try {
-      await idbPut(db, "files", abs, { c: blob, m: Date.now() });
-    } catch (e) {
-      throw fsErr("write", e?.message || String(e));
-    }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    await this._writeFileBytes(abs, bytes, "write");
     return { ok: true, path: abs, size: blob.size };
   }
 
@@ -791,139 +818,208 @@ export class PageFS {
     };
   }
 
-  // list 目录列举：IndexedDB 无目录概念，由全部 key 前缀推导一层子项
-  // （深层 key 折叠为目录项；目录无 size）。返回 {ok, path, items}。
+  // list 目录列举：O(子项) 目录遍历（entries()）；文件项经 getFile() 取
+  // size/lastModified（目录无元数据 → size undefined/mtime undefined）。
+  // 目录不存在时返回空列表（与 $fs 前端接口的历史行为一致，存在性由 stat 判定）。
   async list(path, ctx = {}) {
     const abs = this._path(path, ctx);
-    const db = await this._ensureDB();
-    const store = "files";
+    const root = await this._root("list");
+    const parts = splitPath(abs);
     const prefix = abs.endsWith("/") ? abs : abs + "/";
-    const keys = await idbAllKeys(db, store);
-    const seen = new Map(); // seg -> {name, path, dir, size, mtime}
-    for (const k of keys) {
-      if (!k.startsWith(prefix)) continue;
-      const rest = k.slice(prefix.length);
-      if (!rest) continue;
-      const seg = rest.split("/")[0];
-      const dir = rest.includes("/");
-      if (!seen.has(seg)) {
-        seen.set(seg, {
-          name: seg,
-          path: prefix + seg + (dir ? "/" : ""),
-          dir,
+    const items = [];
+    let d;
+    try {
+      d = await resolveDir(root, parts, false);
+    } catch (e) {
+      if (e?.name === "NotFoundError") {
+        return { ok: true, path: prefix, items };
+      }
+      throw fsPathErr("list", abs, e, "dir");
+    }
+    for await (const [name, handle] of d.entries()) {
+      if (handle.kind === "directory") {
+        items.push({
+          name,
+          path: prefix + name + "/",
+          dir: true,
           size: undefined,
           mtime: undefined,
         });
-      }
-      if (!dir) {
-        const rec = await idbGet(db, store, k);
-        if (rec) {
-          const it = seen.get(seg);
-          it.size = rec.c instanceof Blob ? rec.c.size : byteLen(rec.c);
-          it.mtime = rec.m;
-        }
+      } else {
+        const f = await handle.getFile();
+        items.push({
+          name,
+          path: prefix + name,
+          dir: false,
+          size: f.size,
+          mtime: f.lastModified,
+        });
       }
     }
     // 排序对齐 vcore（§5.4）：UTF-8 字节序、目录不优先（目录名带 / 后缀自然参与排序）
-    const items = [...seen.values()].sort((a, b) => cmpBytes(a.name, b.name));
+    items.sort((a, b) => cmpBytes(a.name, b.name));
     return { ok: true, path: prefix, items };
   }
 
   // stat 单路径状态（fsops 用）：文件返回 {path,dir:false,size,mtime}；
-  // 目录由子 key 前缀推导 {path,dir:true,size:0,mtime:undefined}（IndexedDB 无目录记录）；
-  // 本地根 / 恒存在（无记录也是有效目录）；均不存在返回 null
+  // 目录返回 {path,dir:true,size:0,mtime:undefined}（目录无元数据）；
+  // 本地根 / 恒存在（有效目录）；均不存在返回 null
   // （与 vcore Stat 语义对齐：不存在报错由调用方处理）。
   async stat(path, ctx = {}) {
     const abs = this._path(path, ctx);
-    // 本地根恒存在：/（IndexedDB 无目录记录，但根概念有效，空工作区 ls 得 empty directory）
     if (abs === "/") {
       return { path: abs, dir: true, size: 0, mtime: undefined };
     }
-    const db = await this._ensureDB();
-    const store = "files";
-    const rec = await idbGet(db, store, abs);
-    if (rec !== undefined) {
+    const root = await this._root("stat");
+    const parts = splitPath(abs);
+    const name = parts[parts.length - 1];
+    let d;
+    try {
+      d = await resolveDir(root, parts.slice(0, -1), false);
+    } catch (e) {
+      if (e?.name === "NotFoundError") return null;
+      throw fsPathErr("stat", abs, e, "dir");
+    }
+    try {
+      await d.getDirectoryHandle(name);
+      return {
+        path: abs.endsWith("/") ? abs : abs + "/",
+        dir: true,
+        size: 0,
+        mtime: undefined,
+      };
+    } catch (e) {
+      if (e?.name !== "NotFoundError" && e?.name !== "TypeMismatchError")
+        throw fsPathErr("stat", abs, e, "dir");
+      // NotFound/TypeMismatch：无目录 → 试文件（TypeMismatch = 名是文件）
+    }
+    try {
+      const fh = await d.getFileHandle(name);
+      const f = await fh.getFile();
       return {
         path: abs,
         dir: false,
-        size: rec.c instanceof Blob ? rec.c.size : byteLen(rec.c),
-        mtime: rec.m,
+        size: f.size,
+        mtime: f.lastModified,
       };
+    } catch (e) {
+      if (e?.name === "NotFoundError") return null;
+      throw fsPathErr("stat", abs, e, "file");
     }
-    const prefix = abs.endsWith("/") ? abs : abs + "/";
-    const keys = await idbAllKeys(db, store);
-    if (keys.some((k) => k.startsWith(prefix))) {
-      return { path: prefix, dir: true, size: 0, mtime: undefined };
-    }
-    return null;
   }
 
   // walk 递归全量列举（fsops 的 rg/ls 用）：返回平铺 {path,dir,size,mtime}[]，
-  // 目录由全部 key 前缀推导（含深层中间目录）；不做隐藏/skip 过滤——过滤是
+  // 目录真实存在（含空目录）；不做隐藏/skip 过滤——过滤是
   // 指令语义（fsops.js），fs 层只提供原始树。
   async walk(path, ctx = {}) {
     const abs = this._path(path, ctx);
-    const db = await this._ensureDB();
-    const store = "files";
+    const root = await this._root("walk");
+    const parts = splitPath(abs);
     const prefix = abs.endsWith("/") ? abs : abs + "/";
-    const keys = await idbAllKeys(db, store);
-    const seen = new Map(); // full path -> {path, dir, size, mtime}
-    for (const k of keys) {
-      if (!k.startsWith(prefix)) continue;
-      const rec = await idbGet(db, store, k);
-      seen.set(k, {
-        path: k,
-        dir: false,
-        size: rec?.c instanceof Blob ? rec.c.size : byteLen(rec?.c ?? ""),
-        mtime: rec?.m,
-      });
-    }
-    const dirs = new Set();
-    for (const k of seen.keys()) {
-      const rest = k.slice(prefix.length);
-      if (!rest) continue;
-      let idx = rest.indexOf("/");
-      while (idx >= 0) {
-        dirs.add(prefix + rest.slice(0, idx) + "/");
-        idx = rest.indexOf("/", idx + 1);
+    const items = [];
+    const rec = async (dir, curPrefix) => {
+      for await (const [name, handle] of dir.entries()) {
+        const p = curPrefix + name + (handle.kind === "directory" ? "/" : "");
+        if (handle.kind === "directory") {
+          items.push({ path: p, dir: true, size: 0, mtime: undefined });
+          await rec(handle, p);
+        } else {
+          const f = await handle.getFile();
+          items.push({
+            path: p,
+            dir: false,
+            size: f.size,
+            mtime: f.lastModified,
+          });
+        }
       }
+    };
+    let d;
+    try {
+      d = await resolveDir(root, parts, false);
+    } catch (e) {
+      if (e?.name === "NotFoundError") {
+        return { ok: true, path: prefix, items };
+      }
+      throw fsPathErr("walk", abs, e, "dir");
     }
-    for (const d of dirs)
-      seen.set(d, { path: d, dir: true, size: 0, mtime: undefined });
-    return { ok: true, path: prefix, items: [...seen.values()] };
+    await rec(d, prefix);
+    return { ok: true, path: prefix, items };
   }
 
-  // remove 删除（对齐 vcore rm 语义）：文件/无子项直接删；有子项（非空目录）
-  // 需 ctx.recursive（-r）否则报错；递归时删除全部子 key。
-  // IndexedDB 无目录记录：空目录与不存在不可区分 → 均报 no such file（模型固有限制）。
-  // 本地根 / 禁止删除。
+  // remove 删除（对齐 vcore rm 语义）：文件/空目录直接删；非空目录需
+  // ctx.recursive（-r）否则报错；递归时先子后父枚举删除（不依赖
+  // removeEntry(recursive) 参数，全基线 API）。items = 删除条目数（含目录，
+  // 对齐 vcore countEntries）。本地根 / 禁止删除。
   async remove(path, ctx = {}) {
     const abs = this._path(path, ctx);
     if (abs === "/") throw fsErr("rm", "cannot remove root");
-    const db = await this._ensureDB();
-    const store = "files";
-    const rec = await idbGet(db, store, abs);
-    if (rec !== undefined) {
-      await idbDelete(db, store, abs);
-      return { ok: true, removed: abs };
+    const root = await this._root("rm");
+    const parts = splitPath(abs);
+    const name = parts[parts.length - 1];
+    let d;
+    try {
+      d = await resolveDir(root, parts.slice(0, -1), false);
+    } catch (e) {
+      if (e?.name === "NotFoundError")
+        throw fsErr("rm", `${abs}: no such file or directory`);
+      throw fsErr("rm", e?.message || String(e));
     }
-    const prefix = abs.endsWith("/") ? abs : abs + "/";
-    const keys = await idbAllKeys(db, store);
-    const children = keys.filter((k) => k.startsWith(prefix));
-    if (children.length > 0) {
-      if (!ctx.recursive)
+
+    // 目录分支：非空需 recursive；递归删除先子后父（不依赖 removeEntry(recursive)），
+    // items = 删除条目数（含目录，对齐 vcore countEntries）。
+    let dirHandle = null;
+    try {
+      dirHandle = await d.getDirectoryHandle(name);
+    } catch (e) {
+      if (e?.name !== "NotFoundError" && e?.name !== "TypeMismatchError")
+        throw fsErr("rm", e?.message || String(e));
+      // NotFound/TypeMismatch：非目录 → 试文件（TypeMismatch = 名是文件）
+    }
+    if (dirHandle) {
+      let count = 0;
+      const removeTree = async (dir) => {
+        for await (const [n, h] of dir.entries()) {
+          if (h.kind === "directory") {
+            count++;
+            await removeTree(h);
+            await dir.removeEntry(n); // 子目录清空后删除自身
+          } else {
+            count++;
+            await dir.removeEntry(n);
+          }
+        }
+      };
+      // 先判空：空目录直接删；非空且非 recursive 报错
+      let first = await dirHandle.entries().next();
+      let empty = first.done;
+      if (!empty && !ctx.recursive) {
         throw fsErr("rm", `${abs} is a non-empty directory (use -r)`);
-      for (const k of children) await idbDelete(db, store, k);
-      return { ok: true, removed: abs, items: children.length };
+      }
+      if (!empty) {
+        await removeTree(dirHandle);
+      }
+      await d.removeEntry(name);
+      const res = { ok: true, removed: abs };
+      if (count > 0) res.items = count;
+      return res;
     }
-    throw fsErr("rm", `${abs}: no such file or directory`);
+
+    // 文件分支
+    try {
+      await d.removeEntry(name);
+    } catch (e) {
+      if (e?.name === "NotFoundError")
+        throw fsErr("rm", `${abs}: no such file or directory`);
+      throw fsErr("rm", e?.message || String(e));
+    }
+    return { ok: true, removed: abs };
   }
 
   // has 存在性检查（boolean；原 exists 语义，fsops 等内部使用）。
+  // 文件与目录均算存在（OPFS 真实目录树语义）。
   async has(path, ctx = {}) {
-    const abs = this._path(path, ctx);
-    const db = await this._ensureDB();
-    const rec = await idbGet(db, "files", abs);
-    return rec !== undefined;
+    const st = await this.stat(path, ctx);
+    return st !== null;
   }
 }

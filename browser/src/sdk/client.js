@@ -181,8 +181,8 @@ export class AICClient {
     const kConnect = keys.kConnect;
     this.kTool = keys.kTool;
 
-    // fs 后端：与 page 端同一套 PageFS 代码（IndexedDB 本地单根），
-    // 扩展 origin 独立 → 与页面 IndexedDB 物理隔离，按 host_id 寻址（§4.5）。
+    // fs 后端：与 page 端同一套 PageFS 代码（OPFS 本地单根），
+    // 扩展 origin 独立 → 与页面 OPFS 物理隔离，按 host_id 寻址（§4.5）。
     this.fs = new PageFS();
 
     this.logf("starting aic-browser v%s [%s/%s] (host=%s)", version, deviceType, deviceName, hostID);
