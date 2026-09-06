@@ -31,7 +31,9 @@ import { runFsOps } from "./fsops.js";
 const MAX_CONTENT_BYTES = 128 << 10; // 128KB（§2.5，三端一致）
 const IMAGE_DATA_MAX_BYTES = 600 * 1024; // image_data 投递标准（§2.2，三端一致）
 
-// fs JSON 参数的合法字段（§2.1：未知字段报错）
+// fs JSON 参数的合法字段（§2.1）：执行层对未知字段**宽忽略不拒绝**——AI 按 schema
+// 全量传参是常态（如 write 时仍带 rg 的 context），多传参数当看不见。
+// 本表仅作文档与排查参考，实际执行不因未知字段中断。
 const ALLOWED_FIELDS = new Set([
   "msg_id",
   "action",
@@ -428,9 +430,8 @@ export class PageFS {
   async run(params, ctx = {}) {
     params = params || {};
     const action = String(params.action || "").toLowerCase();
-    for (const k of Object.keys(params)) {
-      if (!ALLOWED_FIELDS.has(k)) throw fsErr(action, `unknown field "${k}"`);
-    }
+    // 宽容未知字段（用户定：AI 按 schema 全量传参是常态，多余参数当看不见——忽略不拒绝）。
+    // 已知但未用字段（如 write 收到 context）同样忽略；attrs 仅报一条汇总 warning 便于排查。
     if (!action)
       throw fsErr(
         "",

@@ -1,7 +1,6 @@
 package vcore
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,12 +58,10 @@ type editOp struct {
 var FSActions = []string{"read", "write", "edit", "ls", "rg", "cp", "mv", "rm"}
 
 // RunFS 执行 fs action（原生 JSON 参数，无 argv）。
-// 未知字段报错 `fs {action}: unknown field "{name}"`（§2.1）。
+// 未知字段宽忽略（用户定：AI 按 schema 全量传参是常态，多传参数当看不见）。
 func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) {
 	var p fsParams
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&p); err != nil {
+	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fsErr("", "invalid params: %s", err)
 	}
 	if p.Action == "" {

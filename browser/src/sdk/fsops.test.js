@@ -181,7 +181,7 @@ class MemFS {
 // JS 端不覆盖的维度（Go 端已锁）：vars / protectRoots / fetch（exec curl）。
 function skipCase(c) {
   if (c.vars || c.protectRoots || c.fetch) return true;
-  // 未知字段拒绝是信封层（PageFS.run ALLOWED_FIELDS）职责，fsops 层不重复
+  // 未知字段宽忽略是信封层（PageFS.run）职责，fsops 层不重复；向量中旧拒绝用例已改为忽略语义
   if (c.name && c.name.includes("unknown field")) return true;
   return false;
 }

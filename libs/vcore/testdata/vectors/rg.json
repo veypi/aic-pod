@@ -143,11 +143,14 @@
       }
     },
     {
-      "name": "rg unknown field rejected",
+      "name": "rg unknown field ignored",
       "cmd": "fs",
-      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "-n": true},
+      "params": {"action": "rg", "pattern": "foo", "path": "/a.txt", "-n": true, "context": 0},
       "files": {"/a.txt": "foo\n"},
-      "expectError": "fs: invalid params: json: unknown field \"-n\""
+      "expect": {
+        "contentJson": {"files": [{"path": "/a.txt", "matches": [{"line": 1, "text": "foo"}]}]},
+        "attrs": {"action": "rg", "path": "/a.txt", "rows": "1", "truncated": "false"}
+      }
     },
     {
       "name": "rg no matches",
