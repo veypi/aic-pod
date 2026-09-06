@@ -209,7 +209,7 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		if rgCtx > 0 {
 			return nil, fsErr("rg", "context is only valid for content search (pattern is required)")
 		}
-		return rgFiles(ctx, env, target, p.Glob, p.All, limit)
+		return rgFiles(ctx, env, target, p.Glob, p.All, limit, p.Depth)
 	}
 
 	for _, re := range rgUnsupportedPatterns {
@@ -266,6 +266,10 @@ func hasUpper(s string) bool {
 // rgWalk 递归收集目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
 // --hidden 收录；skipDirs 恒跳过；glob 按文件名过滤）。
 func rgWalk(ctx context.Context, env *Env, dir string, globs []string, hidden bool, fn func(path string)) error {
+	return rgWalkDepth(ctx, env, dir, globs, hidden, fn, 0)
+}
+
+func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidden bool, fn func(path string), depth int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -280,7 +284,10 @@ func rgWalk(ctx context.Context, env *Env, dir string, globs []string, hidden bo
 			if skipDirs[name] || (!hidden && hiddenName) {
 				continue
 			}
-			if err := rgWalk(ctx, env, dir+"/"+name, globs, hidden, fn); err != nil {
+			if depth == 1 { continue }
+			next := depth
+			if next > 0 { next-- }
+			if err := rgWalkDepth(ctx, env, dir+"/"+name, globs, hidden, fn, next); err != nil {
 				return err
 			}
 			continue
@@ -320,7 +327,12 @@ func globOK(globs []string, name string) bool {
 }
 
 // rgFiles 实现 --files：递归列出文件（字节序，limit 上限）。
-func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidden bool, limit int) (*Result, error) {
+func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidden bool, limit int, depths ...*int) (*Result, error) {
+	depth := 0
+	if len(depths) > 0 && depths[0] != nil {
+		depth = *depths[0]
+		if depth < 0 { return nil, fsErr("rg", "depth must be nonnegative") }
+	}
 	abs, err := env.Resolve(target)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
@@ -339,7 +351,7 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	if !info.IsDir() {
 		// 单文件显式路径：直出（不受隐藏/glob 过滤，对齐真实 rg 显式路径语义）
 		files = []string{abs}
-	} else if err := rgWalk(ctx, env, abs, globs, hidden, func(p string) { files = append(files, p) }); err != nil {
+	} else if err := rgWalkDepth(ctx, env, abs, globs, hidden, func(p string) { files = append(files, p) }, depth); err != nil {
 		return nil, fsErr("rg", "%s", err)
 	}
 	// UTF-8 字节序排序（禁止 locale 相关排序，§5.4）
