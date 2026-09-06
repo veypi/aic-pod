@@ -167,8 +167,8 @@ func (c *Client) newEnv(sid, workdir string) *vcore.Env {
 		VFS:          OSVFS{},
 		Workdir:      workdir,
 		ProtectRoots: filesystemRoots(),
-		Fetcher:      httpFetcher{}, // 物理 host 不限制 SSRF（用户本机网络属其自身边界，§5.4）
-		ImageData:    true,          // host 端图片经 image_data 返回（§2.2）
+		Fetcher:      shellCurlFetcher{c: c, sid: sid}, // 外部 http(s) 走真 curl + 统一沙箱（net 域出站闸）
+		ImageData:    true,                             // host 端图片经 image_data 返回（§2.2）
 		Policy:       c.policy.View(sid),
 	}
 }
@@ -221,9 +221,15 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "bg_kill":
 		res, err := c.bgKill(sid, p.Argv)
 		return resultToResponse(req.MsgID, res, err)
-	case "grant_apply":
-		// v0.14.5 §3：文件权限白名单申请（required 4 必审批在 checkGranted 门控）。
-		return c.runGrantApply(sid, req.MsgID, p.Argv)
+	case "grant":
+		// 统一授权申请（fs/net/ssh 三域；required 4 必审批在 checkGranted 门控）。
+		return c.runGrant(sid, req.MsgID, p.Argv)
+	case "ssh":
+		// ssh 一级工具（独立通道：目标闸 = ssh 域 Policy；免沙箱内置执行）
+		return c.runSSH(ctx, sid, req, p.Argv)
+	case "scp":
+		// scp 一级工具（目标闸同 ssh 域；本地侧过 fsauth 门控；免沙箱内置执行）
+		return c.runSCP(ctx, sid, req, p.Argv)
 	}
 
 	if isCoreCommand(p.Action) {

@@ -30,9 +30,9 @@ func probeBackend() sandboxBackend {
 // planConfined（darwin）：sandbox-exec argv 包装 + sh ulimit 资源限制，无令牌。
 // Seatbelt（SBPL）不支持资源限制，用 confineRlimits 包一层 /bin/sh（
 // RLIMIT 跨 exec 继承，子进程只能降低不能提高；ulimit 失败即 fail-closed）。
-func planConfined(level int, workdir string, extra []string, argv []string, deny []string) (launchPlan, error) {
+func planConfined(spec confineSpec) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
-		return launchPlan{}, sandboxUnavailable(level)
+		return launchPlan{}, sandboxUnavailable(spec.level)
 	}
-	return launchPlan{argv: confineRlimits(seatbeltArgs(level, workdir, extra, argv, deny))}, nil
+	return launchPlan{argv: confineRlimits(seatbeltArgs(spec))}, nil
 }

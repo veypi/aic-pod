@@ -402,8 +402,8 @@ func TestReconcile(t *testing.T) {
 	saved := cfg.Global
 	defer func() { cfg.Global = saved }()
 	o := cfg.NewOptions()
-	o.FsWriteRoots = []string{custom}
-	o.FsDenyPaths = []string{secrets + "/**"}
+	o.FsAllow = []string{custom}
+	o.FsDeny = []string{secrets + "/**"}
 	cfg.Global = o
 	p.Reconcile()
 	assertGrades(t, p, custom+"/x", 1, 2)

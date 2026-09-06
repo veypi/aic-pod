@@ -36,6 +36,7 @@ package exec_procs
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -45,6 +46,7 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/fsauth"
+	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -128,6 +130,20 @@ var (
 	sandboxVerdict sandboxBackend = -1 // -1 = 未探测
 )
 
+// confineSpec 是一次沙箱包装的完整输入（三域授权模型快照 + 等级/工作区/argv）。
+// 快照语义：每次 Start 读当次值（set_config/grant 动态生效），已启动进程不回溯。
+type confineSpec struct {
+	level    int             // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
+	workdir  string          // 进程 cwd；兼作 workspace-write 的可写根
+	extra    []string        // 追加可写根（nil = 仅基础白名单）
+	argv     []string        // 被包装命令
+	deny     []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
+	fsOpen   bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
+	netOpen  bool            // net_policy=open：不加网络规则
+	netDeny  []netauth.Entry // net_deny 快照（恒优先于 allow）
+	netAllow []netauth.Entry // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
+}
+
 // Confine 将 argv 包装为沙箱执行形态（返回替换 argv；windows 的实际
 // confined 路径走 planConfined 的令牌注入，本函数仅供非 windows 调用与
 // 统一测试）。extraWrite 为追加可写根（nil = 仅基础白名单）。
@@ -135,10 +151,10 @@ var (
 // 2/3/4/9 = workspace-write；0 = 未设置/异常值，按 read-only 处理（fail-closed）。
 // 审批通过（9）不豁免沙箱——免沙箱不经本函数表达（StartOptions.NoSandbox）。
 // 无可用后端返回错误（fail-closed），绝不返回未包装 argv。
-// deny 模式恒 nil：现调用方仅测试；生产路径必须走 Start（StartOptions.DenyPaths），
-// 否则 deny 隔离静默缺失。
+// deny/net 快照恒零值：现调用方仅测试；生产路径必须走 Start（StartOptions
+// 授权快照字段），否则 deny 隔离与网络管控静默缺失。
 func Confine(level int, workdir string, argv []string) ([]string, error) {
-	plan, err := planConfined(level, workdir, nil, argv, nil)
+	plan, err := planConfined(confineSpec{level: level, workdir: workdir, argv: argv, netOpen: true})
 	if err != nil {
 		return nil, err
 	}
@@ -202,13 +218,26 @@ func confineRlimits(argv []string) []string {
 	return append([]string{"/bin/sh", "-c", script, "sh"}, argv...)
 }
 
-func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly []string, argv []string, deny []string) []string {
-	args := []string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"}
+func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string) []string {
+	// fs_policy=open（写级）：整机只读改整机可写（deny 覆盖挂载仍在后追加，恒优先）。
+	rootBind := []string{"--ro-bind", "/", "/"}
+	if spec.fsOpen && spec.level >= proto.LevelWrite {
+		rootBind = []string{"--bind", "/", "/"}
+	}
+	args := []string{"bwrap"}
+	args = append(args, rootBind...)
+	args = append(args, "--dev", "/dev", "--proc", "/proc", "--die-with-parent")
+	if !spec.netOpen {
+		// net_policy=deny：--unshare-net 全断（新 net ns 仅 loopback 且未配置——
+		// loopback 也不可用）。bwrap 无 per-destination 规则引擎，白名单粒度
+		// linux 不生效（近似层，net_allow 仅 darwin 落地；见 host_sandbox.md）。
+		args = append(args, "--unshare-net")
+	}
 	args = append(args, rlimitArgs()...)
-	if level >= proto.LevelWrite {
+	if spec.level >= proto.LevelWrite {
 		args = append(args, "--tmpfs", "/tmp")
-		if workdir != "" {
-			args = append(args, "--bind", workdir, workdir)
+		if spec.workdir != "" {
+			args = append(args, "--bind", spec.workdir, spec.workdir)
 		}
 		for _, d := range cacheDirs {
 			if d != "" {
@@ -223,8 +252,8 @@ func bwrapArgs(level int, workdir string, cacheDirs []string, protectedReadonly 
 	}
 	// deny 隔离覆盖（§5.10）：后挂载优先（bwrap 后绑定覆盖前绑定），
 	// 追加在全部 bind 之后；read-only 与 workspace-write 同隔离。
-	args = append(args, bwrapDenyArgs(deny)...)
-	return append(append(args, "--"), argv...)
+	args = append(args, bwrapDenyArgs(spec.deny)...)
+	return append(append(args, "--"), spec.argv...)
 }
 
 // bwrapDenyArgs 把 deny 模式实例化为 bwrap 覆盖挂载参数。
@@ -399,19 +428,25 @@ const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 // 模式自身是符号链接时（/var/run/docker.sock → 厂商 socket）两形态都须命中。
 // SBPL 无 glob filter，regex 为 POSIX ERE 且对完整路径字符串匹配（子串命中，锚定 ^ 有效）；
 // seatbelt 判定前做路径规范化（大小写变体/.SSH、symlink 跳转均被拒，实测）。字面路径直接 (regex) 亦可用，但统一走转换器保持单一路径。
-func seatbeltArgs(level int, workdir string, extra []string, argv []string, deny []string) []string {
+func seatbeltArgs(spec confineSpec) []string {
 	forms := []string{
 		"(version 1)",
 		"(allow default)",
 		"(deny file-write*)",
 		`(allow file-write* (literal "/dev/null"))`,
 	}
-	if level >= proto.LevelWrite {
-		for _, root := range writableRoots(workdir, extra) {
-			forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
+	if spec.level >= proto.LevelWrite {
+		if spec.fsOpen {
+			// fs_policy=open：写全放（deny 表在后输出，恒优先）。
+			forms = append(forms, "(allow file-write*)")
+		} else {
+			for _, root := range writableRoots(spec.workdir, spec.extra) {
+				forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
+			}
 		}
 	}
-	for _, pat := range deny {
+	forms = append(forms, seatbeltNetForms(spec)...)
+	for _, pat := range spec.deny {
 		if pat == "" {
 			continue
 		}
@@ -420,13 +455,93 @@ func seatbeltArgs(level int, workdir string, extra []string, argv []string, deny
 		forms = append(forms, "(deny file-write* (regex "+re+"))")
 		forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
 	}
-	if level >= proto.LevelWrite && workdir != "" && !isGitArgv(argv) {
+	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {
-			p := filepath.Join(workdir, name)
+			p := filepath.Join(spec.workdir, name)
 			forms = append(forms, "(deny file-write* (subpath "+sbplString(canonicalRoot(p))+"))")
 		}
 	}
-	return append([]string{macosSeatbeltExecutable, "-p", stringsJoin(forms), "--"}, argv...)
+	return append([]string{macosSeatbeltExecutable, "-p", stringsJoin(forms), "--"}, spec.argv...)
+}
+
+// seatbeltNetForms 生成网络管控段（net_policy=deny 锁定模式时；open 模式零规则，
+// allow default 兜底）：
+//
+//	(deny network-inbound)(deny network-outbound) 打底
+//	→ net_allow 逐条放行（2026-09-07 实测：seatbelt 网络过滤器 host 只支持
+//	  */localhost——按目标 IP/域名的内核级放行不存在；loopback 条目发
+//	  localhost 两形态（remote tcp 连通 + local tcp inbound bind/listen）；
+//	  非 loopback 条目退化为 *:port 按端口粗放行；port=* 不可表达跳过——
+//	  精细 host:port 判定由 curl 虚拟指令工具层承担（shellCurlFetcher 前置
+//	  netauth.Allowed 闸 + --resolve 钉住，见 fetcher.go））
+//	→ net_deny 逐条 deny（恒优先——过滤规则与兜底 deny 共存实测互不干扰）；
+//	  仅 loopback 条目落地（对抗内建 localhost:* allow）；非 loopback deny
+//	  不输出（基线全拒已覆盖，host 粒度内核不可表达，工具层 curl 闸精判
+//	  兜底——避免 *:port 株连同端口 allow 目标，见 seatbeltEntryForms）
+//
+// 实测纪律（2026-09-07 探针）：
+//   - `(allow network-outbound (local tcp "localhost:*"))` 是毒形态——其语义
+//     覆盖一切出站连接（本地端恒命中），等于拆掉整个 deny outbound，严禁输出；
+//   - `(remote unix ...)` 必须 regex 形态（裸字符串参数非法）；
+//   - deny network* 下系统 DNS（mDNSResponder/dnssd mach+XPC+unix socket
+//     组合）实测多轮放行均不生效——锁定模式等于无沙箱内 DNS，FQDN 目标由
+//     工具层 pod 侧解析 + curl --resolve 钉住补偿；
+//   - 规则顺序对本段不重要（过滤规则与兜底 deny 各测其序），但 deny 表（文件/
+//     unix socket）仍在本段之后输出（旧教训不回收）。
+func seatbeltNetForms(spec confineSpec) []string {
+	if spec.netOpen {
+		return nil
+	}
+	forms := []string{
+		"(deny network-inbound)",
+		"(deny network-outbound)",
+	}
+	for _, e := range spec.netAllow {
+		forms = append(forms, seatbeltEntryForms(e, "allow")...)
+	}
+	for _, e := range spec.netDeny {
+		forms = append(forms, seatbeltEntryForms(e, "deny")...)
+	}
+	return forms
+}
+
+// seatbeltEntryForms 把一条 netauth 条目实例化为 SBPL 规则（粒度限制与实测
+// 纪律见 seatbeltNetForms 注释）：
+//   - loopback（localhost/127.0.0.1/::1）：allow 发 remote tcp（连通）+
+//     local tcp inbound（bind/listen，本机服务场景）两形态；deny 仅 remote tcp
+//     （对抗内建 localhost:* allow，localhost 内核可精判）；
+//   - 非 loopback allow：退化为 *:port（host 必须为 */localhost，按端口放行）；
+//     port=* 内核不可表达，跳过（工具层 curl 闸仍按 host:port 精判）；
+//   - 非 loopback deny：不输出内核规则——锁定模式基线本就是全拒，此类规则
+//     唯一作用是对抗同端口 allow 的 *:port 粗放行，但内核无 host 粒度必然
+//     株连同端口的 allow 目标（显式放行被无关 deny 打死，2026-09-07 评审）；
+//     精细 host 判定由工具层 curl 闸承担，不假装内核能表达。
+func seatbeltEntryForms(e netauth.Entry, verb string) []string {
+	if isLoopbackHost(e.Host) {
+		addr := sbplString("localhost:" + e.Port)
+		if verb == "deny" {
+			return []string{"(deny network-outbound (remote tcp " + addr + "))"}
+		}
+		return []string{
+			"(allow network-outbound (remote tcp " + addr + "))",
+			"(allow network-inbound (local tcp " + addr + "))",
+		}
+	}
+	if verb == "deny" || e.Port == "*" {
+		return nil
+	}
+	return []string{"(allow network-outbound (remote tcp " + sbplString("*:"+e.Port) + "))"}
+}
+
+// isLoopbackHost 判定 loopback 条目（localhost 字面或 IPv4/IPv6 loopback）。
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	if ip, err := netip.ParseAddr(h); err == nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func stringsJoin(forms []string) string {

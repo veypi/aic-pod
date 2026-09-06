@@ -8,6 +8,7 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/host"
+	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/vigo"
 	"github.com/veypi/vigo/logv"
 )
@@ -15,37 +16,59 @@ import (
 // configView 是 get_config 的返回视图（含 key——设置窗口需显示当前凭证；
 // 本地 API 受 code 校验保护）。
 type configView struct {
-	Host         string   `json:"host"`
-	Key          string   `json:"key"`
-	WorkDir      string   `json:"work_dir"`
-	ExecTimeout  string   `json:"exec_timeout"`
-	HomePath     string   `json:"home_path"`
-	FsWriteRoots []string `json:"fs_write_roots"`
-	FsDenyPaths  []string `json:"fs_deny_paths"`
+	Host        string   `json:"host"`
+	Key         string   `json:"key"`
+	WorkDir     string   `json:"work_dir"`
+	ExecTimeout string   `json:"exec_timeout"`
+	HomePath    string   `json:"home_path"`
+	FsPolicy    string   `json:"fs_policy"`
+	FsDeny      []string `json:"fs_deny"`
+	FsAllow     []string `json:"fs_allow"`
+	NetPolicy   string   `json:"net_policy"`
+	NetDeny     []string `json:"net_deny"`
+	NetAllow    []string `json:"net_allow"`
+	SshPolicy   string   `json:"ssh_policy"`
+	SshDeny     []string `json:"ssh_deny"`
+	SshAllow    []string `json:"ssh_allow"`
 }
 
 // GetConfig 返回当前有效配置（cfg.Global：启动解析值 + 页面写操作同步）。
 // 注：隐藏配置（no_sandbox 等）不在此视图暴露——仅配置文件/flag/env 可配。
 func GetConfig(x *vigo.X) (*configView, error) {
 	o := effective()
-	w, d := cfg.FsRoots()
+	a := cfg.AuthSnapshot()
 	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
-		HomePath: o.NormalizedHomePath(), FsWriteRoots: w, FsDenyPaths: d}, nil
+		HomePath: o.NormalizedHomePath(),
+		FsPolicy: a.FsPolicy, FsDeny: a.FsDeny, FsAllow: a.FsAllow,
+		NetPolicy: a.NetPolicy, NetDeny: a.NetDeny, NetAllow: a.NetAllow,
+		SshPolicy: a.SshPolicy, SshDeny: a.SshDeny, SshAllow: a.SshAllow}, nil
 }
 
 // SetConfigReq 是 set_config 的白名单参数（host/work_dir/exec_timeout/home_path 可写；
 // key 不走 set_config——只走 Bind，body 中的 credential 不得被持久化）。
 // 隐藏配置（no_sandbox 等）不可经 set_config 修改，只能改配置文件。
-// fs_write_roots/fs_deny_paths（v0.14.5 §2，评审修复）：nil = 不改（保持现状），
-// 非 nil（含空数组）= 整体替换——空数组即清空，是 grant_apply --permanent 的
-// 唯一回撤出口。
+// 授权九键（policy/deny/allow × fs/net/ssh）：policy 空串 = 不改；列表 nil = 不改
+// （保持现状），非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent
+// 的唯一回撤出口。
 type SetConfigReq struct {
-	Host         string    `json:"host" src:"json"`
-	WorkDir      string    `json:"work_dir" src:"json"`
-	ExecTimeout  string    `json:"exec_timeout" src:"json"`
-	HomePath     string    `json:"home_path" src:"json"`
-	FsWriteRoots *[]string `json:"fs_write_roots" src:"json"`
-	FsDenyPaths  *[]string `json:"fs_deny_paths" src:"json"`
+	Host        string    `json:"host" src:"json"`
+	WorkDir     string    `json:"work_dir" src:"json"`
+	ExecTimeout string    `json:"exec_timeout" src:"json"`
+	HomePath    string    `json:"home_path" src:"json"`
+	FsPolicy    string    `json:"fs_policy" src:"json"`
+	FsDeny      *[]string `json:"fs_deny" src:"json"`
+	FsAllow     *[]string `json:"fs_allow" src:"json"`
+	NetPolicy   string    `json:"net_policy" src:"json"`
+	NetDeny     *[]string `json:"net_deny" src:"json"`
+	NetAllow    *[]string `json:"net_allow" src:"json"`
+	SshPolicy   string    `json:"ssh_policy" src:"json"`
+	SshDeny     *[]string `json:"ssh_deny" src:"json"`
+	SshAllow    *[]string `json:"ssh_allow" src:"json"`
+}
+
+// validPolicy 校验 policy 取值（空串 = 不改，合法）。
+func validPolicy(s string) bool {
+	return s == "" || s == cfg.PolicyDeny || s == cfg.PolicyOpen
 }
 
 // SetConfig 持久化运行参数并应用：基于文件配置落盘（flag/env 覆盖不落盘），
@@ -55,6 +78,18 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	if s := strings.TrimSpace(req.ExecTimeout); s != "" {
 		if _, err := time.ParseDuration(s); err != nil {
 			return nil, vigo.ErrInvalidArg.WithString("invalid exec_timeout: " + err.Error())
+		}
+	}
+	// 授权配置显式校验（policy 取值 / net/ssh 条目形态——运行期坏条目静默跳过，
+	// 写入前必须显式报错，否则用户以为生效）
+	if !validPolicy(req.FsPolicy) || !validPolicy(req.NetPolicy) || !validPolicy(req.SshPolicy) {
+		return nil, vigo.ErrInvalidArg.WithString("invalid policy: want deny | open")
+	}
+	for name, list := range map[string]*[]string{"net_deny": req.NetDeny, "net_allow": req.NetAllow, "ssh_deny": req.SshDeny, "ssh_allow": req.SshAllow} {
+		if list != nil {
+			if err := netauth.ValidateEntries(*list); err != nil {
+				return nil, vigo.ErrInvalidArg.WithString("invalid " + name + ": " + err.Error())
+			}
 		}
 	}
 	// 持久化运行参数（基于文件配置）
@@ -82,15 +117,43 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	}
 	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
-	// fs 权限配置（v0.14.5 §2）：nil = 不改；非 nil（含空数组）= 整体替换。
-	fsChanged := false
-	if req.FsWriteRoots != nil {
-		fileCfg.FsWriteRoots = *req.FsWriteRoots
-		fsChanged = true
+	// 授权九键：policy 空串 = 不改；列表 nil = 不改，非 nil = 整体替换。
+	authChanged := false
+	if req.FsPolicy != "" {
+		fileCfg.FsPolicy = req.FsPolicy
+		authChanged = true
 	}
-	if req.FsDenyPaths != nil {
-		fileCfg.FsDenyPaths = *req.FsDenyPaths
-		fsChanged = true
+	if req.NetPolicy != "" {
+		fileCfg.NetPolicy = req.NetPolicy
+		authChanged = true
+	}
+	if req.SshPolicy != "" {
+		fileCfg.SshPolicy = req.SshPolicy
+		authChanged = true
+	}
+	if req.FsDeny != nil {
+		fileCfg.FsDeny = *req.FsDeny
+		authChanged = true
+	}
+	if req.FsAllow != nil {
+		fileCfg.FsAllow = *req.FsAllow
+		authChanged = true
+	}
+	if req.NetDeny != nil {
+		fileCfg.NetDeny = *req.NetDeny
+		authChanged = true
+	}
+	if req.NetAllow != nil {
+		fileCfg.NetAllow = *req.NetAllow
+		authChanged = true
+	}
+	if req.SshDeny != nil {
+		fileCfg.SshDeny = *req.SshDeny
+		authChanged = true
+	}
+	if req.SshAllow != nil {
+		fileCfg.SshAllow = *req.SshAllow
+		authChanged = true
 	}
 	// home_path：必须以单个 / 开头（// 开头是协议相对 URL，拼接后会跳转到别的站点，拒绝）
 	if hp := strings.TrimSpace(req.HomePath); hp != "" {
@@ -101,6 +164,7 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	} else {
 		fileCfg.HomePath = "/" // 清空 = 恢复默认首页
 	}
+	fileCfg.Normalize()
 	if err := cfg.Save(fileCfg); err != nil {
 		return nil, vigo.ErrInternalServer.WithError(err)
 	}
@@ -114,11 +178,11 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	cfg.Global.HomePath = fileCfg.HomePath
 	o := *cfg.Global
 	mu.Unlock()
-	cfg.SetFsRoots(fileCfg.FsWriteRoots, fileCfg.FsDenyPaths)
-	// 运行参数变更（host/work_dir/exec_timeout/fs 权限）：应用新配置——保留会话与
+	cfg.SetAuth(cfg.AuthFrom(fileCfg))
+	// 运行参数变更（host/work_dir/exec_timeout/授权模型）：应用新配置——保留会话与
 	// bg 任务，仅更新参数；NATS 地址变化时重连（Client.Reconfigure，内部同步
-	// fsauth Policy：work_dir 重设 + fs 名单重载，内存即时生效）。
-	if host.Running() && (hostChanged || workDirChanged || execTimeoutChanged || fsChanged) {
+	// fsauth/netauth Policy：work_dir 重设 + 授权名单重载，内存即时生效）。
+	if host.Running() && (hostChanged || workDirChanged || execTimeoutChanged || authChanged) {
 		if err := host.ApplyConfig(o); err != nil {
 			logv.Warn().Msgf("apply config failed: %v", err)
 		}

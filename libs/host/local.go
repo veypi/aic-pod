@@ -29,17 +29,32 @@ const (
 // level 为本次调用的授予等级（沙箱 profile 选择，§5.10）；
 // noSandbox 为请求显式携带的免沙箱标记（已过 checkGranted 的 Critical(4) 必审批门）。
 func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv []string, workdir string, level int, noSandbox bool) *proto.ToolResponse {
+	return c.runProcess(ctx, sid, msgID, action, append([]string{action}, argv...), workdir, level, noSandbox)
+}
+
+// runProcess 是子进程执行的共享实现（runLocal / runSSH）：display 为展示名
+// （命令头），argv 为完整执行参数（argv[0] = 程序名）。
+// granted level 与 nosandbox 随行传给 exec_procs（§5.10：沙箱去留只由
+// 显式 nosandbox 决定——审批通过（9）不豁免沙箱）；
+// workdir 空 = 继承 host 进程 cwd（请求级缺省回落在 execCmd 层完成）。
+func (c *Client) runProcess(ctx context.Context, sid, msgID, display string, argv []string, workdir string, level int, noSandbox bool) *proto.ToolResponse {
+	action := argv[0]
 	logPath := filepath.Join(sessionWorkDir(sid), ".exec", msgID+".log")
+	netDeny, netAllow := c.netPol.Snapshot(sid)
 	res, err := c.procs.Start(ctx, exec_procs.StartOptions{
 		ID:         fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
-		Command:    strings.TrimSpace(action + " " + strings.Join(argv, " ")),
+		Command:    strings.TrimSpace(display + " " + strings.Join(argv[1:], " ")),
 		LogPath:    logPath,
-		Workdir:    workdir, // 缺省 = host 端配置工作区（调用方已填充）
-		Exec:       append([]string{action}, argv...),
+		Workdir:    workdir,
+		Exec:       argv,
 		Level:      level,
 		NoSandbox:  noSandbox,
-		WriteRoots: c.policy.WriteRootsFor(sid), // 统一名单：配置白名单 + 临时 grant（v0.14.5 §2）
-		DenyPaths:  c.policy.DenyPatterns(),     // 统一 deny 名单：默认表 + cfg fs_deny_paths（§5.10 deny 隔离）
+		WriteRoots: c.policy.WriteRootsFor(sid), // fs 域：cfg fs_allow + 临时 grant
+		DenyPaths:  c.policy.DenyPatterns(),     // fs 域 deny 名单（默认表 + cfg fs_deny）
+		FsOpen:     c.policy.OpenMode(),         // fs_policy=open 快照
+		NetOpen:    c.netPol.OpenMode(),         // net_policy=open 快照
+		NetDeny:    netDeny,                     // net 域 deny/allow 快照（含内建 localhost:*）
+		NetAllow:   netAllow,
 	})
 	if err != nil {
 		return errResp(msgID, err.Error())

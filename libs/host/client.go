@@ -20,6 +20,7 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/fsauth"
+	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/vcore"
 	vbrowser "github.com/veypi/aic-pod/libs/vcore/browser"
@@ -50,7 +51,9 @@ type Client struct {
 	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测）
 	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
 	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
-	policy    *fsauth.Policy               // 统一文件权限模型（v0.14.5 §2：fs 判定 + 沙箱白名单同实例）
+	policy    *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	netPol    *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol    *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
 	browserMu sync.Mutex
 	browsers  map[string]*vbrowser.Browser // per-session browser 实例（pod 模式不隔离，§5.6）
 	logf      func(string, ...any)
@@ -87,6 +90,8 @@ func New(opts Options) *Client {
 		replay:   &replayCache{store: map[string]time.Time{}},
 		procs:    procs,
 		policy:   policy,
+		netPol:   netauth.New(netauth.NetKeys, "localhost:*"),
+		sshPol:   netauth.New(netauth.SshKeys),
 		browsers: map[string]*vbrowser.Browser{},
 		logf:     logf,
 	}
@@ -193,10 +198,10 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	oldURL := ResolveNATSURL(c.opts.Host)
 	c.procs.SetExecTimeout(opts.ExecTimeout)
 	c.procs.NoSandbox = opts.NoSandbox
-	// 统一文件权限模型同步（v0.14.5 §2）：work_dir 变更 + 配置重载
-	//（fs_write_roots/fs_deny_paths 经 cfg.Global 由 api.SetConfig 先行更新）。
+	// 授权模型同步（三域）：work_dir 变更 + 配置重载
+	//（九键经 cfg.Global 由 api.SetConfig 先行更新）。
 	c.policy.SetWorkDir(opts.WorkDir)
-	c.policy.Reconcile()
+	c.syncAuth()
 	c.opts = opts
 	if ResolveNATSURL(opts.Host) != oldURL {
 		if c.nc != nil {
@@ -231,7 +236,7 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 			add(d)
 		}
 	}
-	for _, name := range []string{"commands", "json", "bg_list", "bg_wait", "bg_kill", "grant_apply"} {
+	for _, name := range []string{"commands", "json", "bg_list", "bg_wait", "bg_kill", "grant"} {
 		if d, ok := vcore.Decl(name); ok {
 			add(d)
 		}
@@ -248,6 +253,18 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 	}
 	if _, err := exec.LookPath("git"); err == nil {
 		if d, ok := vcore.Decl("git"); ok {
+			add(d)
+		}
+	}
+	// ssh 一级工具：ssh 二进制存在才声明（目标闸在 ssh 域 Policy，独立通道）
+	if _, err := exec.LookPath("ssh"); err == nil {
+		if d, ok := vcore.Decl("ssh"); ok {
+			add(d)
+		}
+	}
+	// scp 一级工具：scp 二进制存在才声明（目标闸同 ssh 域，本地侧 fsauth 门控）
+	if _, err := exec.LookPath("scp"); err == nil {
+		if d, ok := vcore.Decl("scp"); ok {
 			add(d)
 		}
 	}

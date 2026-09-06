@@ -4,7 +4,7 @@ package fsauth
 // 各平台位置相同）。平台特有路径（系统凭证库/浏览器 profile/容器运行时等）
 // 在 deny_{darwin,linux,windows,other}.go 的 defaultDenyPaths 里各自叠加——
 // 初始名单按平台分表（v0.14.5 评审二轮：三平台相关路径不同，分表消除
-// 跨平台变量展开串扰风险；用户 cfg fs_deny_paths 仍在本平台并集叠加）。
+// 跨平台变量展开串扰风险；用户 cfg fs_deny 仍在本平台并集叠加）。
 //
 // 条目为 glob（支持跨段 **；大小写按平台折叠）；~/$VAR/%VAR%/$UserConfigDir
 // 在 compileDeny 预展开时展开。平台上不存在的条目惰性失配无害（模式照常

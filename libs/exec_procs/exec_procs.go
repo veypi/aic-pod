@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/libs/fsauth"
+	"github.com/veypi/aic-pod/libs/netauth"
 )
 
 // MaxLines 是返回内容的最大行数（与 exec 统一截断语义一致）。
@@ -91,20 +92,32 @@ type StartOptions struct {
 	//   - 外部请求显式携带 nosandbox 且经人工审批（required Critical(4)
 	//     ⇒ 必审批；审批本身不免沙箱，仅放行该标记）。
 	NoSandbox bool
-	// WriteRoots 是追加可写根（v0.14.5 统一文件权限模型）：workspace-write
+	// WriteRoots 是追加可写根（统一授权模型 fs 域）：workspace-write
 	//（level>=2）沙箱 bind 白名单成员，与 fsauth 基础白名单（工作区/临时区/
 	// 会话区/公共区/缓存）并集。来源 = Policy.WriteRootsFor(sid)（cfg
-	// fs_write_roots + grant_apply 临时授权）——fs 与 exec 共用同一份名单。
+	// fs_allow + grant fs 临时授权）——fs 与 exec 共用同一份名单。
 	// 每次 Start 读当次值（配置动态生效）；nil = 仅基础白名单。
 	WriteRoots []string
-	// DenyPaths 是预展开的拒绝模式（§5.10 deny 隔离）：默认读全开
+	// DenyPaths 是预展开的拒绝模式（deny 隔离）：默认读全开
 	//（seatbelt allow default / bwrap 整机 ro-bind），deny 表（fsauth
-	// defaultDenyPaths + cfg fs_deny_paths）经本字段进入沙箱 profile——
+	// defaultDenyPaths + cfg fs_deny）经本字段进入沙箱 profile——
 	// fs 工具与 exec 进程共用同一份名单。darwin 读写双拒（regex 规则）；
 	// linux 覆盖挂载（文件写拒/目录写黑洞）。来源 =
 	// Policy.DenyPatterns()（快照，每次 Start 读当次值）。
 	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
 	DenyPaths []string
+	// FsOpen 是 fs_policy=open 快照：写除 deny 全放（darwin allow file-write*
+	// 打底 / bwrap 整机 rw bind），deny 覆盖仍生效。
+	FsOpen bool
+	// NetOpen 是 net_policy=open 快照：沙箱不加网络规则（现状语义）。
+	NetOpen bool
+	// NetDeny/NetAllow 是 net 域目标快照（netauth.Entry；allow 含内建
+	// localhost:* 与 sid 临时 grant）。netOpen=false 时生效：darwin 生成
+	// per-目标 allow/deny 规则（deny 恒优先）；linux --unshare-net 全断
+	//（bwrap 无 per-destination 引擎，白名单粒度不生效，近似层）；
+	// windows no-op。来源 = netauth.Policy.Snapshot(sid)。
+	NetDeny  []netauth.Entry
+	NetAllow []netauth.Entry
 }
 
 // Manager 是 exec 子进程托管管理器（每 session 一个）。
@@ -165,7 +178,11 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	confined := !opts.NoSandbox && !m.NoSandbox
 	if confined {
 		var err error
-		plan, err = planConfined(opts.Level, opts.Workdir, opts.WriteRoots, opts.Exec, opts.DenyPaths)
+		plan, err = planConfined(confineSpec{
+			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
+			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
+			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+		})
 		if err != nil {
 			f.Close()
 			return nil, err

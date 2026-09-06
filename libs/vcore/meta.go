@@ -143,13 +143,39 @@ Behavior:
 			"  capability discovery: list declared commands (name + desc) of the target;\n" +
 			"  use `action --help` for the full help of any command",
 	},
-	"grant_apply": {
-		Desc: "grant write access to a path outside the file whitelist (approval required)",
-		Help: "grant_apply <path> [--temp|--permanent]\n" +
-			"  whitelist a directory for fs writes and sandbox write access\n" +
+	"grant": {
+		Desc: "request an allow-list grant (fs/net/ssh; approval required)",
+		Help: "grant <domain> <target> [--temp|--permanent]\n" +
+			"  add a target to a domain's allow list (always requires approval, level 4)\n" +
+			"  domains:\n" +
+			"    fs  <path>        writable root (fs writes and sandbox write access)\n" +
+			"    net <host:port>   outbound network target for sandboxed processes\n" +
+			"    ssh <host[:port]> ssh tool target (bare host = all ports)\n" +
 			"  --temp (default): this session only, lost on host restart\n" +
-			"  --permanent: persisted to fs_write_roots config (all sessions, survives restart)\n" +
-			"  paths inside the deny list cannot be granted; always requires approval (level 4)",
+			"  --permanent: persisted to the domain's allow list in host config\n" +
+			"  targets in the domain's deny list cannot be granted",
+	},
+	"ssh": {
+		Desc: "run a command on a remote host via SSH (allow-listed targets only)",
+		Help: "ssh <target> [remote command...]\n" +
+			"  target = [user@]host[:port] or an alias from ~/.ssh/config\n" +
+			"  the target must be in the ssh allow list (ssh_policy/ssh_allow);\n" +
+			"  request access via: grant ssh <host[:port]> [--temp|--permanent]\n" +
+			"  flags before the target are not accepted (the tool owns them);\n" +
+			"  everything after the target is passed to the remote side verbatim\n" +
+			"  auth: the device's existing keys / ssh-agent / ~/.ssh/config\n" +
+			"  (no password prompts — non-interactive); host keys: accept-new",
+	},
+	"scp": {
+		Desc: "copy files between this host and a remote host over SSH (allow-listed targets only)",
+		Help: "scp [-r] [-p] [-q] [-P port] <source> <target>\n" +
+			"  exactly one side is remote: [user@]host:path (aliases from ~/.ssh/config work)\n" +
+			"  the remote target must be in the ssh allow list (ssh_policy/ssh_allow);\n" +
+			"  request access via: grant ssh <host[:port]> [--temp|--permanent]\n" +
+			"  flags are whitelisted (-r/-p/-q/-P); the tool owns everything else\n" +
+			"  local paths are checked against the fs policy (fs_deny = no read/write)\n" +
+			"  remote-to-remote copy is not supported; auth: device keys / agent\n" +
+			"  (batch mode, no password prompts); host keys: accept-new",
 	},
 	"json": {
 		Desc: "view and edit JSON files",

@@ -1,10 +1,11 @@
 // Package fsauth 是物理 host 统一文件权限模型（aic docs/todo.md v0.14.5 §2）：
 //
 //	Decide(canonicalPath, write) → 所需等级：
-//	deny（按平台分表的初始名单 + cfg fs_deny_paths 叠加，预展开缓存）→ 0（显式禁用，不可审批绕过）
+//	deny（按平台分表的初始名单 + cfg fs_deny 叠加，预展开缓存）→ 0（显式禁用，不可审批绕过）
 //	读（非 deny）→ 1
-//	写：白名单（work_dir/临时区/会话区/缓存/公共区 + cfg fs_write_roots + 临时 grant）→ 2
-//	写：其余 → 3（危险写，逐次审批；grant_apply --permanent 可入白名单）
+//	写（fs_policy=deny）：白名单（work_dir/临时区/会话区/缓存/公共区 + cfg fs_allow + 临时 grant）→ 2
+//	写（fs_policy=deny）：其余 → 3（危险写，逐次审批；grant fs --permanent 可入白名单）
+//	写（fs_policy=open）：非 deny → 2（统一授权模型：policy=open 除 deny 全放）
 //
 // 初始 deny 名单按平台分表（deny_{darwin,linux,windows,other}.go：三平台相关路径不同，
 // 分表消除跨平台变量展开串扰风险）；通用凭证条目在 deny_common.go 单源。
@@ -39,8 +40,9 @@ type Policy struct {
 	workDir    string   // 工作区（cfg work_dir；空 = 无）
 	sessionDir string   // 会话区根（$HOME/.aic/sessions）
 	publicDir  string   // 公共区（$HOME/.aic）
-	extraWrite []string // cfg fs_write_roots（canonical 前缀）
-	deny       []string // 拒绝模式（平台初始表 + cfg fs_deny_paths 叠加，预展开：expandVars + canonicalPattern）
+	openMode   bool     // fs_policy=open：写除 deny 名单外全放（2 级）
+	extraWrite []string // cfg fs_allow（canonical 前缀）
+	deny       []string // 拒绝模式（平台初始表 + cfg fs_deny 叠加，预展开：expandVars + canonicalPattern）
 	grants     map[string][]string
 
 	// baseRoots/decideCaches 预计算（重建点 = New/SetWorkDir/Reconcile，锁内）：
@@ -68,9 +70,10 @@ func New() *Policy {
 // rebuildLocked 全量重算派生状态（cfg 白名单/deny + 根基底预计算）。
 // New/Reconcile 的统一出口；锁内调用。
 func (p *Policy) rebuildLocked() {
-	w, d := cfg.FsRoots()
-	p.extraWrite = canonicalList(w)
-	p.deny = compileDeny(append(defaultDenyPaths(), d...))
+	a := cfg.AuthSnapshot()
+	p.openMode = a.FsPolicy == cfg.PolicyOpen
+	p.extraWrite = canonicalList(a.FsAllow)
+	p.deny = compileDeny(append(defaultDenyPaths(), a.FsDeny...))
 	p.rebuildBaseRootsLocked()
 }
 
@@ -130,9 +133,17 @@ func (p *Policy) Grant(sid, path string) {
 	p.grants[sid] = append(p.grants[sid], path)
 }
 
+// OpenMode 报告 fs_policy 是否为 open（写除 deny 全放）——沙箱 profile
+// 生成用（darwin allow file-write* 打底 / bwrap 整机 rw，deny 覆盖仍生效）。
+func (p *Policy) OpenMode() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.openMode
+}
+
 // DenyPatterns 返回预展开的 deny 模式快照（compileDeny 产物：变量展开 +
 // canonical 字面前缀）——exec 沙箱拒绝规则（§5.10 deny 隔离）与 fs 判定共用
-// 同一份名单：cfg fs_deny_paths / set_config 变更经 Reconcile 重算后，
+// 同一份名单：cfg fs_deny / set_config 变更经 Reconcile 重算后，
 // 本次调用的 Start 即取到新名单（沙箱每次 Start 构造 profile）。
 func (p *Policy) DenyPatterns() []string {
 	p.mu.RLock()
@@ -142,8 +153,8 @@ func (p *Policy) DenyPatterns() []string {
 	return out
 }
 
-// DenyHit 报告 canonical 路径是否命中 deny 名单（grant_apply 校验用：
-// deny_paths 内拒绝申请）。
+// DenyHit 报告 canonical 路径是否命中 deny 名单（grant fs 校验用：
+// deny 内拒绝申请）。
 func (p *Policy) DenyHit(path string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -178,6 +189,9 @@ func (p *Policy) decide(sid, cpath string) (int, int) {
 	defer p.mu.RUnlock()
 	if p.denyHit(cpath) {
 		return 0, 0
+	}
+	if p.openMode {
+		return 1, 2
 	}
 	if proto.InWriteRoots(cpath, p.decideRootsLocked(sid)) {
 		return 1, 2
@@ -256,7 +270,7 @@ func compileDeny(pats []string) []string {
 	return out
 }
 
-// Canonical 导出 canonical（包外少量场景用：grant_apply 落盘幂等比较等）。
+// Canonical 导出 canonical（包外少量场景用：grant fs 落盘幂等比较等）。
 func Canonical(p string) string { return canonical(p) }
 
 // canonical 展开符号链接到真实文件系统身份：EvalSymlinks 逐级向父目录回退

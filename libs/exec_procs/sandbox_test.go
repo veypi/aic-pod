@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -92,12 +93,12 @@ func TestWritableRootsIncludesPublicDir(t *testing.T) {
 func TestBwrapArgs(t *testing.T) {
 	argv := []string{"bash", "-c", "echo hi"}
 
-	ro := bwrapArgs(proto.LevelRead, "/ws", nil, nil, argv, nil)
+	ro := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true}, nil, nil)
 	want := append([]string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"},
 		append(rlimitArgs(), "--", "bash", "-c", "echo hi")...)
 	assertEqual(t, "read-only", ro, want)
 
-	ww := bwrapArgs(proto.LevelWrite, "/ws", []string{"/home/u/.cache"}, []string{"/ws/.git"}, argv, nil)
+	ww := bwrapArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true}, []string{"/home/u/.cache"}, []string{"/ws/.git"})
 	want = append([]string{"bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"},
 		append(rlimitArgs(), "--tmpfs", "/tmp", "--bind", "/ws", "/ws", "--bind", "/home/u/.cache", "/home/u/.cache",
 			"--ro-bind", "/ws/.git", "/ws/.git", "--", "bash", "-c", "echo hi")...)
@@ -105,14 +106,14 @@ func TestBwrapArgs(t *testing.T) {
 
 	// level 3/4/9 与 2 同语义（审批通过不豁免沙箱）
 	for _, lv := range []int{proto.LevelDanger, 4, proto.LevelApproved} {
-		got := bwrapArgs(lv, "/ws", nil, nil, argv, nil)
+		got := bwrapArgs(confineSpec{level: lv, workdir: "/ws", argv: argv, netOpen: true}, nil, nil)
 		if !contains(got, "--bind", "/ws", "/ws") {
 			t.Fatalf("bwrapArgs(%d) missing workspace bind: %v", lv, got)
 		}
 	}
 	// 空 workdir / 空 cache / 空 protected 不产出写绑定
 	// （--ro-bind / / 是基础只读挂载，恒有）
-	got := bwrapArgs(proto.LevelWrite, "", nil, nil, argv, nil)
+	got := bwrapArgs(confineSpec{level: proto.LevelWrite, argv: argv, netOpen: true}, nil, nil)
 	if contains(got, "--bind") {
 		t.Fatalf("bwrapArgs empty inputs produced write bind: %v", got)
 	}
@@ -127,7 +128,7 @@ func TestSeatbeltArgs(t *testing.T) {
 	}
 	argv := []string{"bash", "-c", "echo hi"}
 
-	ro := seatbeltArgs(proto.LevelRead, "/ws", nil, argv, nil)
+	ro := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true})
 	profile := ro[2]
 	if !strings.Contains(profile, "(deny file-write*)") {
 		t.Fatalf("read-only profile missing deny: %s", profile)
@@ -139,7 +140,7 @@ func TestSeatbeltArgs(t *testing.T) {
 		t.Fatalf("unexpected seatbelt argv head: %v", ro[:4])
 	}
 
-	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv, nil)
+	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true})
 	profile = ww[2]
 	for _, want := range []string{"/private/tmp", "/ws"} {
 		if !strings.Contains(profile, `(subpath "`+want+`")`) {
@@ -151,7 +152,7 @@ func TestSeatbeltArgs(t *testing.T) {
 		t.Fatalf("workspace-write profile missing .git deny: %s", profile)
 	}
 	// git 自身豁免 .git 覆盖（保护对象是 bash/rm 等通用命令）
-	gw := seatbeltArgs(proto.LevelWrite, "/ws", nil, []string{"git", "commit", "-m", "x"}, nil)
+	gw := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: []string{"git", "commit", "-m", "x"}, netOpen: true})
 	if strings.Contains(gw[2], "deny file-write* (subpath") {
 		t.Fatalf("git invocation should be exempt from .git deny: %s", gw[2])
 	}
@@ -172,9 +173,9 @@ func TestSeatbeltDenyReads(t *testing.T) {
 		t.Skip("unix path semantics")
 	}
 	argv := []string{"bash", "-c", "echo hi"}
-	dn := seatbeltArgs(proto.LevelRead, "/ws", nil, argv, []string{
+	dn := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, deny: []string{
 		"/Users/veypi/.ssh/**", "**/id_ed25519*", "/etc/master.passwd",
-	})
+	}})
 	profile := dn[2]
 	for _, want := range []string{
 		`(deny file-read* (regex "^/Users/veypi/\\.ssh(/.*)?$"))`,
@@ -192,7 +193,7 @@ func TestSeatbeltDenyReads(t *testing.T) {
 		}
 	}
 	// read-only 与 workspace-write 同隔离（拒绝规则与写等级无关）
-	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv, []string{"/etc/shadow"})
+	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, deny: []string{"/etc/shadow"}})
 	if !strings.Contains(ww[2], `(deny file-read* (regex "^/etc/shadow$"))`) ||
 		!strings.Contains(ww[2], `(deny file-write* (regex "^/etc/shadow$"))`) ||
 		!strings.Contains(ww[2], `(deny network-outbound (remote unix (regex "^/etc/shadow$")))`) {
@@ -208,7 +209,7 @@ func TestSeatbeltDenyAfterWriteAllow(t *testing.T) {
 		t.Skip("unix path semantics")
 	}
 	argv := []string{"bash", "-c", "echo hi"}
-	ww := seatbeltArgs(proto.LevelWrite, "/ws", nil, argv, []string{"**/.env"})
+	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, deny: []string{"**/.env"}})
 	profile := ww[2]
 	allowIdx := strings.LastIndex(profile, `(allow file-write* (subpath "/ws"))`)
 	denyIdx := strings.Index(profile, `(deny file-write* (regex "^(.*)?/\\.env$"))`)
@@ -384,6 +385,87 @@ func TestIsGitArgv(t *testing.T) {
 		if isGitArgv(argv) {
 			t.Fatalf("isGitArgv(%v) = true, want false", argv)
 		}
+	}
+}
+
+// seatbelt 网络管控段（net_policy=deny 锁定模式）：deny inbound/outbound 打底 +
+// loopback localhost 两形态（remote 连通 + local inbound bind/listen）+
+// 非 loopback 条目退化 *:port（2026-09-07 实测：host 必须为 */localhost；
+// outbound local tcp 是毒形态严禁输出；DNS 沙箱内不可修复不放行）+
+// port=* 跳过。open 模式零网络规则。
+func TestSeatbeltNetForms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix path semantics")
+	}
+	argv := []string{"bash", "-c", "echo hi"}
+	mustEntry := func(s string) netauth.Entry {
+		e, err := netauth.ParseEntry(s)
+		if err != nil {
+			t.Fatalf("ParseEntry(%q): %v", s, err)
+		}
+		return e
+	}
+
+	spec := confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv,
+		netAllow: []netauth.Entry{mustEntry("localhost:*"), mustEntry("123.56.83.149:1022"), mustEntry("anyhost.example:*")},
+		netDeny:  []netauth.Entry{mustEntry("203.0.113.9:443"), mustEntry("localhost:6379")},
+	}
+	profile := seatbeltArgs(spec)[2]
+	for _, want := range []string{
+		"(deny network-inbound)",
+		"(deny network-outbound)",
+		`(allow network-outbound (remote tcp "localhost:*"))`,
+		`(allow network-inbound (local tcp "localhost:*"))`,     // loopback bind/listen
+		`(allow network-outbound (remote tcp "*:1022"))`,        // 非 loopback 退化为按端口
+		`(deny network-outbound (remote tcp "localhost:6379"))`, // loopback deny 落地（对抗内建 allow）
+	} {
+		if !strings.Contains(profile, want) {
+			t.Fatalf("deny-mode profile missing %s: %s", want, profile)
+		}
+	}
+	// 毒形态严禁出现（outbound local tcp = 放掉一切出站，2026-09-07 实测）
+	if strings.Contains(profile, "network-outbound (local tcp") {
+		t.Fatalf("poison form (allow network-outbound (local tcp ...)) must never be emitted: %s", profile)
+	}
+	// port=* 的非 loopback 条目内核不可表达：不输出
+	if strings.Contains(profile, "anyhost.example") {
+		t.Fatalf("port=* non-loopback entry should be skipped: %s", profile)
+	}
+	// 非 loopback deny 不输出内核规则（基线全拒已覆盖；*:port 会株连同端口
+	// allow 目标——2026-09-07 评审修复）
+	if strings.Contains(profile, `(deny network-outbound (remote tcp "*:443"))`) {
+		t.Fatalf("non-loopback deny must not emit kernel rule (would kill same-port allows): %s", profile)
+	}
+
+	// open 模式：零网络规则
+	open := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true})
+	if strings.Contains(open[2], "network") {
+		t.Fatalf("open-mode profile should carry no network rules: %s", open[2])
+	}
+}
+
+// bwrap 网络与 fs_open：net_policy=deny → --unshare-net（全断，粒度不生效）；
+// fs_policy=open（写级）→ 整机 ro-bind 改 rw bind。
+func TestBwrapNetAndFsOpen(t *testing.T) {
+	argv := []string{"bash", "-c", "echo hi"}
+
+	deny := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv}, nil, nil)
+	if !contains(deny, "--unshare-net") {
+		t.Fatalf("deny mode missing --unshare-net: %v", deny)
+	}
+	open := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true}, nil, nil)
+	if contains(open, "--unshare-net") {
+		t.Fatalf("open mode should not unshare net: %v", open)
+	}
+	// fsOpen（写级）：--bind / /
+	fsOpen := bwrapArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, fsOpen: true}, nil, nil)
+	if !contains(fsOpen, "--bind", "/", "/") {
+		t.Fatalf("fs_open write should rw-bind root: %v", fsOpen)
+	}
+	// fsOpen 不影响 read-only 级（仍是 ro-bind）
+	fsOpenRO := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, fsOpen: true}, nil, nil)
+	if !contains(fsOpenRO, "--ro-bind", "/", "/") || contains(fsOpenRO, "--bind", "/", "/") {
+		t.Fatalf("fs_open read-only should keep ro-bind root: %v", fsOpenRO)
 	}
 }
 

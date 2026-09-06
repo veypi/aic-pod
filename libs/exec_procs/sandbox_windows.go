@@ -322,27 +322,28 @@ func probeBackend() sandboxBackend {
 //     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
 //   - 返回原样 argv + 令牌句柄 + job 句柄（spawn 后由 exec_procs 使用/关闭）
 //
-// deny 拒绝（读/写）：**windows 侧不实现**（no-op，参数仅保持签名一致）。受限令牌的 restricting
+// deny 拒绝（读/写）与 fsOpen/net 管控：**windows 侧不实现**（no-op，参数仅保持
+// 签名一致）。受限令牌的 restricting
 // list 必须保留 logon/Everyone/用户 SID（进程初始化依赖，见 createRestrictedToken
 // 注释），而文件读权限普遍授予这些组 → 读全开。per-call 隔离不能改全局
 // DACL（deny ACE 会影响宿主机全部进程）；文件级读拒绝需额外 per-call
 // 质询（能力 SID 只对白名单目录有权限），成本/工程比不适合当前阶段。
-func planConfined(level int, workdir string, extra []string, argv []string, deny []string) (launchPlan, error) {
+func planConfined(spec confineSpec) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
-		return launchPlan{}, sandboxUnavailable(level)
+		return launchPlan{}, sandboxUnavailable(spec.level)
 	}
 	var extraSids []*windows.SID
 	var tmpDir string
 	cleanup := func() {}
 
-	if level >= proto.LevelWrite {
+	if spec.level >= proto.LevelWrite {
 		dirs := make([]string, 0, 4)
-		if workdir != "" {
-			dirs = append(dirs, workdir)
+		if spec.workdir != "" {
+			dirs = append(dirs, spec.workdir)
 		}
 		dirs = append(dirs, fsauth.CacheRoots()...)
 		dirs = append(dirs, publicRoots()...)
-		dirs = append(dirs, extra...)
+		dirs = append(dirs, spec.extra...)
 		for _, d := range dirs {
 			sid, err := capabilitySID("ws", d)
 			if err != nil {
@@ -396,7 +397,7 @@ func planConfined(level int, workdir string, extra []string, argv []string, deny
 	if tmpDir != "" {
 		env = append(env, "TMP="+tmpDir, "TEMP="+tmpDir)
 	}
-	return launchPlan{argv: argv, token: uintptr(tok), job: uintptr(job), env: env, cleanup: cleanup}, nil
+	return launchPlan{argv: spec.argv, token: uintptr(tok), job: uintptr(job), env: env, cleanup: cleanup}, nil
 }
 
 // newJobWithLimits 创建 Job Object 并施加资源限制：

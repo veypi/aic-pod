@@ -39,7 +39,7 @@ type Env struct {
 	ImageData bool
 	// Policy 是统一文件权限模型（aic todo v0.14.5 §2；fsauth.Policy 的会话视图）：
 	// 文件类指令按 canonical 路径动态升级 required——deny → DeniedError（0 级，
-	// 不可审批绕过）；白名单外写 → ApprovalError（3 级，审批/grant_apply 后放行）。
+	// 不可审批绕过）；白名单外写 → ApprovalError（3 级，审批/grant fs 后放行）。
 	// nil = 无路径策略（cloud 信任域 GatedFS 独立分级 / page）。
 	Policy PathPolicy
 	// Granted 是当次调用的授予等级（host = req.GrantedLevel；审批通过 = 9）。
@@ -76,7 +76,7 @@ func (e *Env) CheckPolicy(op, abs string, write bool) error {
 		return nil
 	}
 	return &proto.ApprovalError{Reason: fmt.Sprintf(
-		"%s %s requires level %d by file policy (granted %d): approve once, or whitelist via exec grant_apply %s --permanent",
+		"%s %s requires level %d by file policy (granted %d): approve once, or whitelist via exec grant fs %s --permanent",
 		op, abs, need, e.Granted, abs)}
 }
 

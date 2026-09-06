@@ -56,10 +56,18 @@ var execCoreLevels = map[string]int{
 	"commands": proto.LevelRead,
 	"bg_kill":  proto.LevelDanger,
 
-	// grant_apply（v0.14.5 §3）：文件权限白名单申请——必人工审批
+	// grant（统一授权申请，fs/net/ssh 三域）：必人工审批
 	//（Critical 4 = 用户不可直接授予 ⇒ 必转审批；批准后 granted 9 生效）。
 	// 实现为 host 特化（写 host 配置/内存授权表），vcore 只声明元数据与等级。
-	"grant_apply": proto.LevelCritical,
+	"grant": proto.LevelCritical,
+
+	// ssh 一级工具：远端命令执行，base = Danger(3)；目标闸（ssh 域 Policy）
+	// 是独立硬条件，在 host dispatch 强制（不依赖等级）。
+	"ssh": proto.LevelDanger,
+
+	// scp 一级工具：本机↔远端文件拷贝，base = Danger(3) 同 ssh；目标闸同
+	// ssh 域，本地侧 fsauth 门控（deny 0/0），均在 host dispatch 强制。
+	"scp": proto.LevelDanger,
 }
 
 // gitSubLevels 是 git 子命令分级（§2.4）。

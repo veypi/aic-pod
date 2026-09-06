@@ -59,12 +59,28 @@ type Options struct {
 	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
 	Code string `json:"code" desc:"local api secret code (empty = random per process)"`
 
-	// 统一文件权限模型配置（v0.14.5 §2，aic todo.md）：fs_write_roots 追加可写白名单
-	// （2 级写区，grant_apply --permanent 的落点）；fs_deny_paths 追加拒绝名单
-	// （0 级不可读写，恒有默认表之上叠加）。两者均内存即时生效（沙箱每次 Start、
-	// fs 每次判定读当前值），set_config / desktop UI 动态改。
-	FsWriteRoots []string `json:"fs_write_roots" desc:"extra writable roots (file policy whitelist, level 2 writes)"`
-	FsDenyPaths  []string `json:"fs_deny_paths" desc:"extra denied paths (file policy denylist, no read/write)"`
+	// 三域授权模型（fs/net/ssh × policy/deny/allow）。统一判定式：
+	// deny 命中 → 拒；policy=open → 放；policy=deny → 仅 allow 放行。
+	//   - fs：读默认开（deny 除外）；写 policy=deny 时仅内建可写根（工作区/临时区/
+	//     会话区/缓存/公共区）+ fs_allow + 临时 grant，policy=open 时除 fs_deny 全可写
+	//   - net：exec 沙箱内子进程出站（vcore curl 经 shell curl 同样进沙箱）。
+	//     默认 open（2026-09-07 用户定：deny 默认会让 apt/wget/git clone 等工具链全断，
+	//     deny 作锁定模式选用——内核层只支持 localhost-only 粗粒度（darwin seatbelt
+	//     实测 host 必须为 */localhost；linux bwrap 全有/全无），deny 模式下非
+	//     loopback 白名单条目内核按 *:port 粗放行 + curl 虚拟指令工具层按 host:port
+	//     精判）；内建默认 allow localhost:*（net_deny localhost:* 可反杀——deny 恒优先）
+	//   - ssh：ssh 一级工具目标闸（独立通道：ssh 免沙箱执行，net 规则不作用于它）
+	// 内存即时生效（fsauth/netauth 每次判定/每次沙箱 Start 读当前值），
+	// set_config 与 grant <域> <目标> --permanent 动态改（落点即对应 allow 列表）。
+	FsPolicy  string   `json:"fs_policy" default:"deny" desc:"fs write default stance: deny (builtin roots + fs_allow only) | open (all except fs_deny)"`
+	FsDeny    []string `json:"fs_deny" desc:"denied path globs (no read/write; always wins over allow)"`
+	FsAllow   []string `json:"fs_allow" desc:"extra writable roots (level 2 writes)"`
+	NetPolicy string   `json:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
+	NetDeny   []string `json:"net_deny" desc:"denied outbound targets host:port (always wins over allow)"`
+	NetAllow  []string `json:"net_allow" desc:"allowed outbound targets host:port (builtin localhost:*; bare host = all ports)"`
+	SshPolicy string   `json:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
+	SshDeny   []string `json:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
+	SshAllow  []string `json:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
 
 	// 进程级运行时态（unexported，不参与序列化/落盘）：
 	port     int  // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
@@ -96,12 +112,33 @@ func NewOptions() *Options {
 	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/"}
 }
 
-// Normalize 填充缺省值（Host 空 → DefaultHost；HomePath 空/非法 → "/"）。
+// 授权策略取值（fs_policy/net_policy/ssh_policy 的合法值）。
+const (
+	PolicyDeny = "deny" // 仅 allow 放行
+	PolicyOpen = "open" // 除 deny 全放
+)
+
+// NormalizePolicy 归一授权策略取值：空 → def（域默认）；非法值一律 deny（安全侧失败）。
+func NormalizePolicy(s, def string) string {
+	if s == PolicyOpen || s == PolicyDeny {
+		return s
+	}
+	if s == "" {
+		return def
+	}
+	return PolicyDeny
+}
+
+// Normalize 填充缺省值（Host 空 → DefaultHost；HomePath 空/非法 → "/"；
+// 授权策略非法值 → deny）。
 func (o *Options) Normalize() {
 	if strings.TrimSpace(o.Host) == "" {
 		o.Host = DefaultHost
 	}
 	o.HomePath = o.NormalizedHomePath()
+	o.FsPolicy = NormalizePolicy(o.FsPolicy, PolicyDeny)
+	o.NetPolicy = NormalizePolicy(o.NetPolicy, PolicyOpen)
+	o.SshPolicy = NormalizePolicy(o.SshPolicy, PolicyDeny)
 }
 
 // NormalizedHomePath 返回规范化默认首页路径：空 → "/"；非 / 开头补 "/"；
@@ -249,24 +286,52 @@ func Load() (*Options, error) {
 	return o, err
 }
 
-// fsMu 守护 FsWriteRoots/FsDenyPaths 的并发读写：api.SetConfig（用户操作）与
-// host grant_apply --permanent（AI 经审批）两条写入路径共用（v0.14.5 §2/§3）。
-var fsMu sync.RWMutex
+// authMu 守护授权九键的并发读写：api.SetConfig（用户操作）与
+// host grant --permanent（AI 经审批）两条写入路径共用。
+var authMu sync.RWMutex
 
-// FsRoots 返回当前 fs 权限配置（fs_write_roots / fs_deny_paths）。
-func FsRoots() (write, deny []string) {
-	fsMu.RLock()
-	defer fsMu.RUnlock()
-	return Global.FsWriteRoots, Global.FsDenyPaths
+// AuthCfg 是三域授权配置快照（policy/deny/allow × fs/net/ssh）。
+type AuthCfg struct {
+	FsPolicy  string
+	FsDeny    []string
+	FsAllow   []string
+	NetPolicy string
+	NetDeny   []string
+	NetAllow  []string
+	SshPolicy string
+	SshDeny   []string
+	SshAllow  []string
 }
 
-// SetFsRoots 更新 fs 权限配置（内存即时生效；落盘由调用方负责——
-// api.SetConfig 走 Save，grant_apply --permanent 亦同）。
-func SetFsRoots(write, deny []string) {
-	fsMu.Lock()
-	defer fsMu.Unlock()
-	Global.FsWriteRoots = write
-	Global.FsDenyPaths = deny
+// AuthSnapshot 返回当前授权配置快照（fsauth/netauth Reconcile 的数据源）。
+// policy 在读点归一化（防空值/非法值漂移到安全语义外：fs/ssh 空=deny，net 空=open）。
+func AuthSnapshot() AuthCfg {
+	authMu.RLock()
+	defer authMu.RUnlock()
+	return AuthCfg{
+		FsPolicy: NormalizePolicy(Global.FsPolicy, PolicyDeny), FsDeny: Global.FsDeny, FsAllow: Global.FsAllow,
+		NetPolicy: NormalizePolicy(Global.NetPolicy, PolicyOpen), NetDeny: Global.NetDeny, NetAllow: Global.NetAllow,
+		SshPolicy: NormalizePolicy(Global.SshPolicy, PolicyDeny), SshDeny: Global.SshDeny, SshAllow: Global.SshAllow,
+	}
+}
+
+// SetAuth 更新授权配置（内存即时生效；落盘由调用方负责——
+// api.SetConfig 走 Save，grant --permanent 亦同）。
+func SetAuth(c AuthCfg) {
+	authMu.Lock()
+	defer authMu.Unlock()
+	Global.FsPolicy, Global.FsDeny, Global.FsAllow = NormalizePolicy(c.FsPolicy, PolicyDeny), c.FsDeny, c.FsAllow
+	Global.NetPolicy, Global.NetDeny, Global.NetAllow = NormalizePolicy(c.NetPolicy, PolicyOpen), c.NetDeny, c.NetAllow
+	Global.SshPolicy, Global.SshDeny, Global.SshAllow = NormalizePolicy(c.SshPolicy, PolicyDeny), c.SshDeny, c.SshAllow
+}
+
+// AuthFrom 从 Options 取授权快照（SetAuth 的入参装配）。
+func AuthFrom(o *Options) AuthCfg {
+	return AuthCfg{
+		FsPolicy: o.FsPolicy, FsDeny: o.FsDeny, FsAllow: o.FsAllow,
+		NetPolicy: o.NetPolicy, NetDeny: o.NetDeny, NetAllow: o.NetAllow,
+		SshPolicy: o.SshPolicy, SshDeny: o.SshDeny, SshAllow: o.SshAllow,
+	}
 }
 
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。

@@ -165,7 +165,7 @@ func TestWindowsCreateRestrictedTokenFlagMatrix(t *testing.T) {
 func TestWindowsSandboxReadOnlyDeniesWrite(t *testing.T) {
 	ws := t.TempDir()
 	target := filepath.Join(ws, "ro.txt")
-	plan, err := planConfined(proto.LevelRead, ws, nil, writeCmd(target))
+	plan, err := planConfined(confineSpec{level: proto.LevelRead, workdir: ws, argv: writeCmd(target)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestWindowsSandboxWorkspaceWrite(t *testing.T) {
 
 	// 写工作区 → 成功
 	ok := filepath.Join(ws, "ok.txt")
-	plan, err := planConfined(proto.LevelWrite, ws, nil, writeCmd(ok))
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: writeCmd(ok)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestWindowsSandboxWorkspaceWrite(t *testing.T) {
 	}
 
 	// 写外部路径 → 拒绝
-	plan2, err := planConfined(proto.LevelWrite, ws, nil, writeCmd(outside))
+	plan2, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: writeCmd(outside)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestWindowsSandboxWorkspaceWrite(t *testing.T) {
 // TMP/TEMP 注入：受限进程看到的是私有临时目录。
 func TestWindowsSandboxTempEnv(t *testing.T) {
 	ws := t.TempDir()
-	plan, err := planConfined(proto.LevelWrite, ws, nil, []string{"cmd", "/c", "echo TMP=[%TMP%]"})
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo TMP=[%TMP%]"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestWindowsSandboxTempEnv(t *testing.T) {
 // cleanup：进程结束后私有临时目录被删除。
 func TestWindowsSandboxCleanupRemovesTemp(t *testing.T) {
 	ws := t.TempDir()
-	plan, err := planConfined(proto.LevelWrite, ws, nil, []string{"cmd", "/c", "echo %TMP%"})
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo %TMP%"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestWindowsJobLimits(t *testing.T) {
 
 	// planConfined 集成：job 句柄随 plan 返回，子进程 assign 后正常执行
 	ws := t.TempDir()
-	plan, err := planConfined(proto.LevelWrite, ws, nil, []string{"cmd", "/c", "echo ok"})
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo ok"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}

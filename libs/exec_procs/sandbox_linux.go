@@ -31,22 +31,22 @@ func probeBackend() sandboxBackend {
 // planConfined（linux）：bwrap argv 包装，无令牌。
 // 可写根下的敏感子路径（.git 等）存在时收集为只读覆盖；git 自身豁免
 // （保护对象是 bash/rm 等通用命令，git 等级由 vcore 子命令表承担）。
-func planConfined(level int, workdir string, extra []string, argv []string, deny []string) (launchPlan, error) {
+func planConfined(spec confineSpec) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
-		return launchPlan{}, sandboxUnavailable(level)
+		return launchPlan{}, sandboxUnavailable(spec.level)
 	}
 	var protected []string
-	if level >= proto.LevelWrite && workdir != "" && !isGitArgv(argv) {
+	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {
-			p := filepath.Join(workdir, name)
+			p := filepath.Join(spec.workdir, name)
 			if st, err := os.Stat(p); err == nil && st.IsDir() {
 				protected = append(protected, p)
 			}
 		}
 	}
 	// 可写 bind 列表：工具链缓存（fsauth.CacheRoots）+ 公共区 $HOME/.aic（publicRoots）
-	// + 追加根（fsauth 配置白名单/临时 grant，v0.14.5 统一名单）
+	// + 追加根（cfg fs_allow/grant fs 临时授权，统一名单）
 	cacheDirs := append(fsauth.CacheRoots(), publicRoots()...)
-	cacheDirs = append(cacheDirs, extra...)
-	return launchPlan{argv: bwrapArgs(level, workdir, cacheDirs, protected, argv, deny)}, nil
+	cacheDirs = append(cacheDirs, spec.extra...)
+	return launchPlan{argv: bwrapArgs(spec, cacheDirs, protected)}, nil
 }
