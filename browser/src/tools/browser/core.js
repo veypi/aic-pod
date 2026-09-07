@@ -521,7 +521,8 @@ export function createBrowserHandler(adapter) {
         case "attr":
           return { text: el.getAttribute(_attrName) ?? "" };
         case "count":
-          return { text: String(el ? 1 : document.querySelectorAll(_loc.css).length) };
+          // @ref 命中即 1（单元素）；CSS 选择器返回匹配总数（含 0，不报 missing）
+          return { text: String(_loc.ref ? 1 : document.querySelectorAll(_loc.css).length) };
         case "box": {
           const r = el.getBoundingClientRect();
           return { text: JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height }) };
@@ -614,13 +615,19 @@ export function createBrowserHandler(adapter) {
       text = extractReadableText(result || "");
     }
     // §5.5：上限 100K 字节，超出尾部追加 "\n... (truncated)"
+    // 边界收刀用二分（log n 次 encode）：逐字符递减是 O(n²)，大文本会明显卡顿
     let truncated = false;
     const encoder = new TextEncoder();
     if (encoder.encode(text).length > READ_MAX_BYTES) {
-      // rune 边界收刀
-      let cut = READ_MAX_BYTES;
-      while (cut > 0 && encoder.encode(text.slice(0, cut)).length > READ_MAX_BYTES) cut--;
-      text = text.slice(0, cut) + "\n... (truncated)";
+      let lo = 0, hi = text.length;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (encoder.encode(text.slice(0, mid)).length <= READ_MAX_BYTES) lo = mid;
+        else hi = mid - 1;
+      }
+      // 若截点恰落在代理对中间，回退一字符避免孤立高代理（encode 会替换为 U+FFFD 超限）
+      if (lo > 0 && lo < text.length && (text.charCodeAt(lo - 1) & 0xfc00) === 0xd800) lo--;
+      text = text.slice(0, lo) + "\n... (truncated)";
       truncated = true;
     }
     return { content: text, attrs: { action: "read", truncated: String(truncated) } };
