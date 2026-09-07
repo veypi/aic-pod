@@ -1,5 +1,5 @@
 /**
- * browser-tool.js — desktop 的 browser 命令装配与壳通道服务（ESM，main.js 动态 import）
+ * browser-tool.mjs — desktop 的 browser 命令装配与壳通道服务（ESM，main.js 动态 import）
  *
  * 链路：平台 → Go 后端（NATS exec 请求）→ provider 转发（TCP 换行 JSON）→
  *   本模块 → browser core（../browser 共享代码）→ electron-adapter（CDP）。
@@ -19,7 +19,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { createBrowserHandler } from "./vendor/browser/tools/browser/core.js";
-import { createElectronAdapter } from "./electron-adapter.js";
+import { createElectronAdapter } from "./electron-adapter.mjs";
 
 // makeFs：core 的 ctx.fs 落盘适配——/screenshot/* 与 /browser/* 前缀映射到
 // 会话工作区的 .screenshot/.browser 目录（host fs 会话区可读）。
@@ -47,9 +47,9 @@ function safeSessionDir(dir) {
   return resolved;
 }
 
-export async function startBrowserServer({ log } = {}) {
+export async function startBrowserServer({ host, log } = {}) {
   const logf = log || (() => {});
-  const adapter = createElectronAdapter();
+  const adapter = createElectronAdapter(host);
   const handler = createBrowserHandler(adapter);
   const token = crypto.randomBytes(16).toString("hex");
 
@@ -121,5 +121,5 @@ export async function startBrowserServer({ log } = {}) {
   });
   const port = server.address().port;
   logf("[browser] shell channel listening on 127.0.0.1:%d", port);
-  return { port, token, server };
+  return { port, token, server, adapter };
 }

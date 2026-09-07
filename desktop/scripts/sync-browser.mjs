@@ -34,4 +34,16 @@ for (const rel of FILES) {
   synced++;
   console.log(`[sync-browser] ${rel}`);
 }
+
+// vendor 下的共享代码是 ESM（core.js/argv.js），但 desktop 根无 "type": "module"
+// （main.js 是 CJS）——缺失时 .js 被当作 CommonJS 解析，import 语法直接 SyntaxError。
+// 在 vendor/browser/ 下放一个 type:module 的 package.json 声明其模块类型。
+const pkgPath = path.join(dstRoot, "package.json");
+const pkgData = JSON.stringify({ type: "module" }, null, 2) + "\n";
+if (!fs.existsSync(pkgPath) || fs.readFileSync(pkgPath, "utf8") !== pkgData) {
+  fs.writeFileSync(pkgPath, pkgData);
+  synced++;
+  console.log("[sync-browser] package.json (type: module)");
+}
+
 if (synced === 0) console.log("[sync-browser] up to date");

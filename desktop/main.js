@@ -15,7 +15,7 @@
 // 安全：所有 IPC handler 校验 event.senderFrame.url 的 host——
 // 平台能力（local:api/window:*/pet:*）仅白名单 host（配置 host + ivec.ai）可调；
 // 设置能力（platform:check/open）仅 127.0.0.1 本地页面可调。端口/code 不出主进程。
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, dialog, session, screen } = require('electron')
+const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen } = require('electron')
 const { spawn } = require('child_process')
 const fs = require('fs')
 const net = require('net')
@@ -36,7 +36,9 @@ let petSize = 100 // 桌宠窗口边长（右键菜单缩放 50–400，随 pet-
 const probeTimeout = 5000 // {host}/root.html 探测超时
 const DEFAULT_HOST = 'https://ivec.ai'
 
-let mainWin = null // 主窗口（loading → 平台页 / 本地设置页）
+let mainWin = null // 主窗口（BaseWindow：平台页 + 隐藏的 AI 工作区标签页）
+let platformView = null // 平台页视图（原主窗口 webContents 的角色）
+let aiBrowser = null // browser 壳通道（adapter 暴露 tabControl 供未来标签切换）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
 let settingsWin = null // 本地设置窗口（系统边框，独立 partition）
 let tray = null
@@ -61,9 +63,22 @@ if (!app.requestSingleInstanceLock()) {
 
 // ---- 应用菜单 ----
 // mac 保留应用/编辑/视图菜单（Cmd+Q / Cmd+C+V / 开发者工具）；win/linux frameless 无菜单栏。
+// 应用菜单第一项不用 role:'appMenu'——dev 模式（npm start）下其 label 取进程 bundle 名
+// 固定显示 "Electron"；显式 label 让菜单栏在 dev/打包两种形态都显示 AIC Desktop。
 if (process.platform === 'darwin') {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { role: 'appMenu' },
+    {
+      label: 'AIC Desktop',
+      submenu: [
+        { role: 'about', label: '关于 AIC Desktop' },
+        { type: 'separator' },
+        { role: 'hide', label: '隐藏 AIC Desktop' },
+        { role: 'hideOthers', label: '隐藏其他' },
+        { role: 'unhide', label: '全部显示' },
+        { type: 'separator' },
+        { role: 'quit', label: '退出 AIC Desktop' },
+      ],
+    },
     { role: 'editMenu' },
     {
       label: '视图',
@@ -80,10 +95,16 @@ if (process.platform === 'darwin') {
   Menu.setApplicationMenu(null)
 }
 
+// dev 模式 Dock 图标：打包版由 electron-builder 写死在 App bundle；dev（npm start）
+// 默认是 Electron 原子图标——用 setIcon 统一为 ai.svg 生成的新图标。
+if (process.platform === 'darwin' && app.dock) {
+  app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'))
+}
+
 async function start() {
   // 1. 主窗口先加载本地 loading（静态文件，无需后端）
   createMainWindow(() => {
-    mainWin.loadFile(path.join(__dirname, 'loading.html'))
+    platformView?.webContents.loadFile(path.join(__dirname, 'loading.html'))
   })
   // 平台页注入：session 级 preload（所有 frame 生效，host 白名单过滤）
   session.defaultSession.setPreloads([path.join(__dirname, 'remote-preload.js')])
@@ -201,8 +222,9 @@ async function setupBrowserProvider() {
   const maxAttempts = 3
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const { startBrowserServer } = await import('./browser-tool.js')
-      const { port, token } = await startBrowserServer({ log: (f, ...a) => console.log('[browser]', f, ...a) })
+      const { startBrowserServer } = await import('./browser-tool.mjs')
+      const { port, token, adapter } = await startBrowserServer({ host: { win: mainWin, contentBounds, raisePlatform }, log: (f, ...a) => console.log('[browser]', f, ...a) })
+      aiBrowser = { adapter }
       const r = await fetch(`http://127.0.0.1:${localPort}/api/provider/register`, {
         method: 'POST',
         headers: { 'x-aic-code': localCode, 'Content-Type': 'application/json' },
@@ -299,8 +321,8 @@ function handleCmd(line, conn) {
   try { cmd = JSON.parse(line) } catch (_) { return reply({ ok: false, error: 'invalid json' }) }
   if (!cmd || cmd.action !== 'wake') return reply({ ok: false, error: 'unknown action' })
   let delivered = false
-  for (const w of [petWin, mainWin]) {
-    if (w && !w.isDestroyed()) { w.webContents.send('pet:cmd', { action: 'wake' }); delivered = true }
+  for (const w of [petWin, platformView]) {
+    if (w && !(w.isDestroyed ? w.isDestroyed() : w.webContents.isDestroyed())) { w.webContents.send('pet:cmd', { action: 'wake' }); delivered = true }
   }
   reply(delivered ? { ok: true } : { ok: false, error: 'no window alive' })
 }
@@ -404,7 +426,7 @@ function registerIpc() {
 
 // ---- 窗口 ----
 function createMainWindow(init) {
-  mainWin = new BrowserWindow({
+  mainWin = new BaseWindow({
     width: 1280,
     height: 800,
     minWidth: 800,
@@ -412,36 +434,65 @@ function createMainWindow(init) {
     frame: false,
     show: false,
     fullscreen: startFullscreen,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#1b2a3a',
+  })
+
+  // 平台页（原主窗口内容；session 级 preloads 自动注入 remote-preload.js）
+  platformView = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   })
-  mainWin.once('ready-to-show', () => {
-    if (startFullscreen) mainWin.setFullScreen(true)
-    mainWin.show()
+  mainWin.contentView.addChildView(platformView)
+  // 平台页 target=_blank → 系统浏览器
+  platformView.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
   })
+  layoutMain()
+  mainWin.on('resize', layoutMain)
+
+  // BaseWindow 无 ready-to-show（BrowserWindow 专属）：内容 view 创建即直接显示
+  if (startFullscreen) mainWin.setFullScreen(true)
+  mainWin.show()
   mainWin.on('close', (e) => {
     if (!quitting) {
       e.preventDefault()
       mainWin.hide()
     }
   })
-  // 平台页 target=_blank → 系统浏览器
-  mainWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) shell.openExternal(url)
-    return { action: 'deny' }
-  })
   if (init) init()
 }
 
+// 布局：平台页占满内容区（AI 工作区视图同区域，由 adapter 放置）
+function layoutMain() {
+  if (!mainWin || mainWin.isDestroyed()) return
+  const [w, h] = mainWin.getContentSize()
+  platformView?.setBounds({ x: 0, y: 0, width: w, height: h })
+}
+
+// 内容区 bounds（aiView 由 adapter 放置）：与平台页同区域
+function contentBounds() {
+  if (!mainWin || mainWin.isDestroyed()) return null
+  const [w, h] = mainWin.getContentSize()
+  return { x: 0, y: 0, width: w, height: h }
+}
+
+// 平台页视图置顶（z 顺序：contentView 后加入的在上层）——AI 工作区视图
+// 挂入后调用，保证平台页遮挡住 AI 标签页（隐藏态）
+function raisePlatform() {
+  if (!mainWin || mainWin.isDestroyed() || !platformView) return
+  mainWin.contentView.removeChildView(platformView)
+  mainWin.contentView.addChildView(platformView)
+}
+
 function loadMain(url) {
-  if (!mainWin) return
-  mainWin.loadURL(url)
-  mainWin.show()
-  mainWin.focus()
+  if (!platformView) return
+  platformView.webContents.loadURL(url)
+  mainWin?.show()
+  mainWin?.focus()
 }
 
 function loadMainLocal(pathname) {
@@ -449,7 +500,7 @@ function loadMainLocal(pathname) {
 }
 
 function setStep(text) {
-  mainWin?.webContents.executeJavaScript(`window.__setStep && window.__setStep(${JSON.stringify(text)})`).catch(() => { })
+  platformView?.webContents.executeJavaScript(`window.__setStep && window.__setStep(${JSON.stringify(text)})`).catch(() => { })
 }
 
 // ---- 本地设置窗口（系统边框，独立 partition：登录态/存储与平台隔离） ----

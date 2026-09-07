@@ -117,7 +117,7 @@ host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 �
 
 浏览器插件暴露 exec 虚拟指令 `browser`（调用形态 `exec browser <subcommand> [args...]`）。
 **平台自有指令集**：实现 = `tools/browser/core.js`（平台无关）+ `chrome-adapter.js`（chrome.* 映射）；
-desktop 端共享同一 core（Electron 适配器见 `desktop/electron-adapter.js`）。
+desktop 端共享同一 core（Electron 适配器见 `desktop/electron-adapter.mjs`）。
 caps 声明见上文（required_level=2，stateful）。
 
 > **约定：** 目标页解析优先级（`background`/`incognito` 设置项）：`incognito=true` → 独立无痕窗口内 AI 标签页；`background=true` → 普通窗口内 AI 专属标签页；两者都关（协作模式）→ **当前活跃标签页**，需切换目标时先调用 `tab <N>` 切换。工作区模式下所有操作不激活 tab、不改变窗口焦点（executeScript/CDP 不要求 tab 激活），`tab` 系列限定在 AI 工作区窗口内；screenshot 经 CDP `Page.captureScreenshot`（`captureVisibleTab` 只能截当前激活 tab）。工作区 tab 状态持久化 chrome.storage（SW 重启恢复，误关自动重建）。

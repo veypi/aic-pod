@@ -6,8 +6,8 @@ directories:
   buildResources: assets
 files:
   - main.js
-  - browser-tool.js
-  - electron-adapter.js
+  - browser-tool.mjs
+  - electron-adapter.mjs
   - loading.html
   - remote-preload.js
   - settings-preload.js

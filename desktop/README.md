@@ -9,10 +9,12 @@
 Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：本地 vigo 服务 + NATS host 会话）
  │    └─ 握手：AIC_PORT_FILE 环境变量 → 后端写 {port, code} JSON
- ├─ browser 壳通道（browser-tool.js）：browser core（vendor/，与插件同源）
+ ├─ browser 壳通道（browser-tool.mjs）：browser core（vendor/，与插件同源）
  │    + electron-adapter（webContents.debugger CDP）→ 127.0.0.1 TCP 换行 JSON
  │    → 向 Go 后端注册 provider（/api/provider/register），caps 出现 browser
- ├─ BrowserWindow（frameless）加载平台页
+ ├─ BaseWindow（frameless）主窗口：平台页 + 隐藏的「AI 工作区」标签页
+ │    （WebContentsView 常驻底层被平台页遮挡；browser 命令全程后台，
+ │     未来做标签切换 UI 时经 tabControl.show/hide 调换 z 顺序）
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
