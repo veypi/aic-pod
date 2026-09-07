@@ -5,6 +5,8 @@
 //	Electron Main (Node)
 //	 ├─ 启动：主窗口先加载本地 loading.html → spawn Go 后端（AIC_PORT_FILE 握手）
 //	 │    → 读配置 host → 探测 {host}/root.html → 跳转平台页 or 本地 /settings
+//	 │    → 启动 browser 壳通道（browser-tool.js，共享插件 core + Electron CDP
+//	 │      适配器）并向 Go 后端注册 provider（caps 出现 browser）
 //	 ├─ 平台页（{host}/ 顶层页面）：session.setPreloads 注入 remote-preload.js
 //	 │    （host 白名单过滤后暴露 window.aicDesktop：api 转发/窗口控制/外链/桌宠）
 //	 ├─ 本地设置窗口：独立 partition + settings-preload（仅探测/跳转两个能力）
@@ -100,6 +102,9 @@ async function start() {
   localPort = info.port
   localCode = info.code
 
+  // browser 壳通道与 Go provider 注册（失败不影响主流程：该 host 无 browser 能力）
+  setupBrowserProvider()
+
   setStep('正在读取配置…')
   const cfg = await getLocalConfig()
   if (cfg && cfg.host) host = cfg.host
@@ -185,6 +190,33 @@ async function probeRoot(url) {
     return r.ok || r.status === 304
   } catch (e) {
     return false
+  }
+}
+
+// ---- browser 壳通道（共享插件 browser core + Electron CDP 适配器） ----
+// browser-tool.js 是 ESM（core 同源 ESM），从 CJS 主进程动态 import 装载。
+// 注册成功后 Go 后端把 browser 加入 caps 并重发；exec browser 请求经
+// 127.0.0.1 TCP 换行 JSON 通道转发回本进程执行（Go libs/host/register.go）。
+async function setupBrowserProvider() {
+  const maxAttempts = 3
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { startBrowserServer } = await import('./browser-tool.js')
+      const { port, token } = await startBrowserServer({ log: (f, ...a) => console.log('[browser]', f, ...a) })
+      const r = await fetch(`http://127.0.0.1:${localPort}/api/provider/register`, {
+        method: 'POST',
+        headers: { 'x-aic-code': localCode, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'browser', addr: `127.0.0.1:${port}`, token }),
+        signal: AbortSignal.timeout(5000),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`)
+      console.log('[browser] provider registered (channel 127.0.0.1:%d)', port)
+      return
+    } catch (e) {
+      console.error(`[browser] provider setup failed (attempt ${attempt}/${maxAttempts}):`, e.message)
+      if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 3000))
+    }
   }
 }
 

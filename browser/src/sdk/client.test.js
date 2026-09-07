@@ -21,7 +21,7 @@ function makeClient() {
     onLog: () => {},
   });
   client.registerCommand("browser", 2, async () => ({}), {
-    desc: "control a web browser (agent-browser CLI)",
+    desc: "control a web browser (native; only on browser-extension/desktop hosts)",
     help: "browser <subcommand> [args...]",
     stateful: true,
     backgroundable: true,
@@ -57,7 +57,7 @@ test("commands 自答: {name, desc} 视图（§5.2，不含 level/help）", () =
   assert.deepEqual(JSON.parse(out.content), {
     commands: [
       { name: "commands", desc: "discover available commands on a target" },
-      { name: "browser", desc: "control a web browser (agent-browser CLI)" },
+      { name: "browser", desc: "control a web browser (native; only on browser-extension/desktop hosts)" },
     ],
   });
   assert.deepEqual(out.attrs, { action: "commands" });

@@ -6,10 +6,15 @@
   "main": "main.js",
   "private": true,
   "scripts": {
+    "prestart": "node scripts/sync-browser.mjs",
     "start": "electron .",
+    "predist": "node scripts/sync-browser.mjs",
     "dist": "electron-builder",
+    "predist:mac": "node scripts/sync-browser.mjs",
     "dist:mac": "electron-builder --mac",
+    "predist:win": "node scripts/sync-browser.mjs",
     "dist:win": "electron-builder --win",
+    "predist:linux": "node scripts/sync-browser.mjs",
     "dist:linux": "electron-builder --linux"
   },
   "devDependencies": {

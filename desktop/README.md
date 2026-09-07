@@ -9,9 +9,11 @@
 Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：本地 vigo 服务 + NATS host 会话）
  │    └─ 握手：AIC_PORT_FILE 环境变量 → 后端写 {port, code} JSON
- ├─ BrowserWindow（frameless）加载 http://127.0.0.1:{port}/?code=xxx
- │    └─ 壳页面（aic-pod/ui：header + iframe 平台页）
- └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗 200×200）
+ ├─ browser 壳通道（browser-tool.js）：browser core（vendor/，与插件同源）
+ │    + electron-adapter（webContents.debugger CDP）→ 127.0.0.1 TCP 换行 JSON
+ │    → 向 Go 后端注册 provider（/api/provider/register），caps 出现 browser
+ ├─ BrowserWindow（frameless）加载平台页
+ └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
 窗口控制：壳页面经 preload（`window.aicDesktop`）调 IPC；`/api/window_*` 端点
@@ -21,12 +23,13 @@ Electron Main (Node, main.js)
 
 ```bash
 # 1. 编译 Go 后端（desktop/bin/aic-backend）
-make desktop-backend
-# 2. 安装依赖 + 启动（需本机 electron 环境）
+make backend-bin
+# 2. 安装依赖 + 启动（npm prestart 自动同步 browser 共享代码到 vendor/）
 cd desktop && npm install && npm start
 ```
 
 壳页面/平台页改动即时生效（HTTP 服务），main.js/preload.js 改动需重启 electron。
+browser 共享 core 改动（browser/src/tools/browser/）经 npm prestart 同步，需重启 electron。
 
 ## 打包（electron-builder，须在目标平台执行）
 

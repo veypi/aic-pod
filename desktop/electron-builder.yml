@@ -6,11 +6,15 @@ directories:
   buildResources: assets
 files:
   - main.js
+  - browser-tool.js
+  - electron-adapter.js
   - loading.html
   - remote-preload.js
   - settings-preload.js
   - package.json
   - assets/**
+  - vendor/**
+  - scripts/**
 # Go 后端二进制（make desktop-backend 产出 desktop/bin/aic-backend）→ resources/backend/
 extraResources:
   - from: bin

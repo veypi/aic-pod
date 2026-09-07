@@ -137,8 +137,8 @@ function connect(settings) {
     client = c;
 
   client.registerCommand("browser", BROWSER_LEVEL, browserHandler, {
-    // desc/help 与 Go libs/vcore/meta.go 的 browser 条目同源（命令语义以 agent-browser 为基准）
-    desc: "control a web browser (agent-browser CLI)",
+    // desc/help 与 Go libs/vcore/meta.go 的 browser 条目同源（平台自有指令集）
+    desc: "control a web browser (native; only on browser-extension/desktop hosts)",
     help: `browser <subcommand> [args...] — browser automation (AIC Browser Extension, v2)
 
 Supported (13):
@@ -158,12 +158,7 @@ Supported (13):
   close                       Close the AI workspace tab (coop mode: active tab)
   sleep <dur>                 Sleep (e.g. 1s, 500ms)
 
-Unsupported (agent-browser CLI only; calling them returns unknown action):
-  type fill press keyboard hover focus check uncheck select drag dblclick
-  scroll scrollintoview pdf back forward reload is find mouse set cookies
-  storage diff trace profiler record console errors highlight inspect
-  clipboard batch auth session connect pushstate mcp skills upload
-  → 输入/导航/滚动等缺失指令用 eval <js> 替代（如 el.value=...; el.dispatchEvent(new Event('input'))）
+输入/导航/滚动等未列能力用 eval <js> 替代（如 el.value=...; el.dispatchEvent(new Event('input'))）
 
 Behavior:
   stateful: serialized per (session, host) — click/snapshot races corrupt @refs
