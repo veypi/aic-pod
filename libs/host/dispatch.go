@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/vcore"
@@ -95,7 +97,7 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 
 // checkGranted 做 granted >= required 数字比较（与 vcore 分级表同源）。
 // required = 声明表 level 与 vcore 动态表（git/browser 子命令、fs rm recursive
-// 删非空目录提升）取高。
+// 删非空目录提升）取高。browser 由壳 provider 注册时才在声明表出现（register.go）。
 // 不足返回 waiting + reason（§6.2：host 端动态审批，服务端置 waiting 等用户审批）。
 func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 	// 0 = 显式禁用：直接拒绝，不可审批绕过（与服务端 procs 同语义，纵深防御）。
@@ -117,7 +119,10 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 			NoSandbox bool     `json:"nosandbox"`
 		}
 		_ = json.Unmarshal(req.Data, &p)
-		if decl, ok := c.cmdByName[p.Action]; ok {
+		c.cmdsMu.RLock()
+		decl, ok := c.cmdByName[p.Action]
+		c.cmdsMu.RUnlock()
+		if ok {
 			required = decl.RequiredLevel
 			if dyn := vcore.ExecRequired(p.Action, p.Argv); dyn > required {
 				required = dyn
@@ -158,7 +163,7 @@ func (c *Client) execFS(ctx context.Context, req *proto.ToolRequest) *proto.Tool
 // workdir 为空时使用 host 端配置工作区（§2.1.1 缺省值）；sid 绑定文件权限
 // 视图的会话上下文（临时 grant/会话区，v0.14.5 §2）——checkGranted 的
 // FSRequiredIn 探测传空 sid（仅 Resolve/VFS，不触发策略判定）；
-// browser 文件交换传真实 sid（deny/grant 判定需要会话上下文）。
+// 有文件副作用的指令（provider 转发等）传真实 sid（deny/grant 判定需要会话上下文）。
 func (c *Client) newEnv(sid, workdir string) *vcore.Env {
 	if workdir == "" {
 		workdir = c.opts.WorkDir
@@ -174,9 +179,9 @@ func (c *Client) newEnv(sid, workdir string) *vcore.Env {
 }
 
 // execCmd 执行 exec 请求（§5.1 统一命令声明模型）：
-// 按声明表路由——核心虚拟指令走 vcore.Run，browser/bg_* 走特化实现，
-// 本地命令（探测声明的 shell/git）走 runLocal（exec_procs 托管）；
-// 未声明命令一律拒绝（不存在「未知命令透传」）。
+// 按声明表路由——核心虚拟指令走 vcore.Run，bg_*/grant/ssh/scp 走特化实现，
+// 本地命令（探测声明的 shell/git）走 runLocal（exec_procs 托管），壳注册命令
+//（browser 等）走 provider 转发；未声明命令一律拒绝（不存在「未知命令透传」）。
 func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest) *proto.ToolResponse {
 	var p struct {
 		Action    string   `json:"action"`
@@ -191,7 +196,10 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
 			Error: "exec: action is required"}
 	}
-	if _, ok := c.cmdByName[p.Action]; !ok {
+	c.cmdsMu.RLock()
+	_, declared := c.cmdByName[p.Action]
+	c.cmdsMu.RUnlock()
+	if !declared {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
 			Error: fmt.Sprintf("exec: unknown action %q (not declared by this host; run commands to discover available commands)", p.Action)}
 	}
@@ -206,9 +214,6 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "commands":
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
 			Content: c.commandsJSON(), Attrs: map[string]string{"action": "commands"}}
-	case "browser":
-		// §5.6 pod 模式：agent-browser CLI，不隔离（用户本机浏览器）
-		return c.runBrowser(ctx, sid, req, p.Argv)
 	case "json":
 		// json 虚拟指令（vcore 内存实现）：view/set/del/append/merge
 		res, err := vcore.Run(ctx, env, p.Action, p.Argv)
@@ -230,6 +235,11 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "scp":
 		// scp 一级工具（目标闸同 ssh 域；本地侧过 fsauth 门控；免沙箱内置执行）
 		return c.runSCP(ctx, sid, req, p.Argv)
+	}
+
+	// 壳 provider 命令（desktop browser 等，register.go）：转发壳进程执行
+	if prov, ok := lookupProvider(p.Action); ok {
+		return prov.Run(ctx, sid, req, p.Argv)
 	}
 
 	if isCoreCommand(p.Action) {
@@ -258,6 +268,17 @@ func isCoreCommand(action string) bool {
 		}
 	}
 	return false
+}
+
+// sessionWorkDir 返回会话工作区（v0.14.5 §4 布局，两端同构 UserOutputDir/sessions/{sid}）：
+// $HOME/.aic/sessions/{sid}——exec 日志（.exec/）、壳 provider 文件交换（.browser/）、
+// 截图（.screenshot/）的落点。PublicDir 不可得时回落系统临时目录旧位
+//（{tmp}/aic/{sid}，临时产物语义不变）。
+func sessionWorkDir(sid string) string {
+	if dir, err := cfg.PublicDir(); err == nil {
+		return filepath.Join(dir, "sessions", sid)
+	}
+	return filepath.Join(os.TempDir(), "aic", sid)
 }
 
 // hostTaskRunner 实现 vcore.TaskRunner：托管任务（curl 无 -o）经 exec_procs
@@ -296,10 +317,12 @@ func (c *Client) commandsJSON() string {
 		Name string `json:"name"`
 		Desc string `json:"desc"`
 	}
+	c.cmdsMu.RLock()
 	cmds := make([]item, 0, len(c.cmds))
 	for _, d := range c.cmds {
 		cmds = append(cmds, item{Name: d.Name, Desc: d.Desc})
 	}
+	c.cmdsMu.RUnlock()
 	data, _ := json.Marshal(map[string]any{"commands": cmds})
 	return string(data)
 }

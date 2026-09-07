@@ -35,7 +35,8 @@ aic-pod/
 │                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
 │                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
 ├── browser/              # Chrome MV3 扩展（原生 JS ESM）：Service Worker 运行时、
-│                         #   browser 工具（agent-browser 签名对齐）、page_fs/fsops（与 aic 前端双端同步）
+│                         #   browser 工具（平台自有指令集：tools/browser/core.js 平台无关核心
+│                         #   + chrome-adapter.js）、page_fs/fsops（与 aic 前端双端同步）
 ├── docs/                 # design.md（本文）、browser-client.md、host_sandbox.md（待实施规划）
 └── dist/                 # 构建产出（make 生成）
 ```
@@ -56,7 +57,7 @@ aic-pod/
 | **语言** | Go |
 | **目标平台** | Windows / macOS / Linux |
 | **权限模型** | 最高（全盘文件、完整 shell 逃生舱） |
-| **能力** | exec（统一命令声明表：vcore 虚拟指令 + 启动探测的 shell/git/browser）、fs（read/write/edit） |
+| **能力** | exec（统一命令声明表：vcore 虚拟指令 + 启动探测的 shell/git + 壳注册命令）、fs（read/write/edit） |
 | **典型场景** | 开发服务器、个人 PC、CI Runner、Docker 容器 |
 | **体积** | ~10 MB 单二进制 |
 | **参数** | `-host`（平台地址，NATS 端点由此推断）+ `-key`；配置链 flag > env（HOST/KEY/WORK_DIR/EXEC_TIMEOUT）> config.yaml > 默认 |
@@ -114,7 +115,7 @@ aic-pod/
 所有 exec 命令统一声明 `{name, desc, help, level}`，未声明命令一律拒绝（不存在「未知命令透传」）：
 
 - **恒声明**：核心 8 虚拟指令（ls/rg/tree/curl/rm/mkdir/cp/mv）+ commands + bg_list/bg_wait/bg_kill（vcore 元数据同源）
-- **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；agent-browser CLI → browser 指令
+- **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；**壳 provider 注册**（desktop 的 browser：Electron CDP 原生实现，与插件共享 core，§5.6）
 - 分级与动态提升（git push/checkout/reset、browser upload、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
 
 ### fs — 文件操作

@@ -3,8 +3,6 @@ package host
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -279,51 +277,6 @@ func TestParseWSURL(t *testing.T) {
 			t.Errorf("%s: got base=%q proxy=%q, want base=%q proxy=%q",
 				c.raw, u.base, u.proxyPath, c.base, c.proxyPath)
 		}
-	}
-}
-
-// 物理 host 集成 browser（§5.6 pod 模式）：探测声明 + 分发走 vcore/browser。
-func TestDispatchBrowserVirtual(t *testing.T) {
-	// stub agent-browser 先入 PATH（探测发生在 New），再建客户端
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "cli.log")
-	script := "#!/bin/sh\necho \"$@\" >> " + logPath + "\necho ok\n"
-	if err := os.WriteFile(filepath.Join(dir, "agent-browser"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	c, _ := testClient(t)
-	c.opts.WorkDir = dir
-
-	// caps 声明包含 browser（desc/help/level 与 vcore 元数据同源）
-	caps := c.buildCaps()
-	found := false
-	for _, v := range caps.Exec.Commands {
-		if v.Name == "browser" {
-			found = true
-			if v.Desc == "" || v.Help == "" || v.RequiredLevel == 0 {
-				t.Errorf("browser decl incomplete: %+v", v)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("caps missing browser command (agent-browser probed)")
-	}
-
-	// 验证分发走 vcore/browser 且参数不带 --session/--namespace（pod 不隔离）
-	data := signedReq(t, c, "exec", map[string]any{
-		"action": "browser", "argv": []string{"open", "https://example.com"},
-	}, 3)
-	resp := c.dispatch(context.Background(), testSubject, data)
-	if resp.State != proto.StateCompleted {
-		t.Fatalf("browser dispatch: %+v", resp)
-	}
-	log, _ := os.ReadFile(logPath)
-	if strings.Contains(string(log), "--session") || strings.Contains(string(log), "--namespace") {
-		t.Errorf("pod browser should not pass --session/--namespace: %s", log)
-	}
-	if !strings.Contains(string(log), "open https://example.com") {
-		t.Errorf("browser args = %s", log)
 	}
 }
 

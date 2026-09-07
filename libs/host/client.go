@@ -3,8 +3,9 @@
 // granted_level 纵深检查（与 vcore 分级表同源）。
 //
 // 物理 host 命令空间 = 统一命令声明表（§5.1）：恒声明（exec 核心虚拟指令 +
-// json + commands + bg_*）+ 启动探测（shell/git/agent-browser CLI，exec.LookPath）。
-// 未声明的命令一律拒绝，不存在「未知命令透传」。
+// json + commands + bg_*）+ 启动探测（shell/git，exec.LookPath）+ 本地 provider
+// 动态注册（desktop 壳的 browser 等，register.go）。未声明的命令一律拒绝，
+// 不存在「未知命令透传」。
 package host
 
 import (
@@ -23,7 +24,6 @@ import (
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/vcore"
-	vbrowser "github.com/veypi/aic-pod/libs/vcore/browser"
 )
 
 // Options 客户端配置。
@@ -48,14 +48,13 @@ type Client struct {
 	uid       string
 	credVer   uint64
 	replay    *replayCache
-	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测）
+	cmdsMu    sync.RWMutex                // cmds/cmdByName：provider 动态注册（register.go）并发保护
+	cmds      []proto.CommandDecl         // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
 	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
 	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
 	policy    *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
 	netPol    *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
 	sshPol    *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
-	browserMu sync.Mutex
-	browsers  map[string]*vbrowser.Browser // per-session browser 实例（pod 模式不隔离，§5.6）
 	logf      func(string, ...any)
 }
 
@@ -92,7 +91,6 @@ func New(opts Options) *Client {
 		policy:   policy,
 		netPol:   netauth.New(netauth.NetKeys, "localhost:*"),
 		sshPol:   netauth.New(netauth.SshKeys),
-		browsers: map[string]*vbrowser.Browser{},
 		logf:     logf,
 	}
 	c.cmds, c.cmdByName = buildCommandTable()
@@ -220,7 +218,10 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 //     （vcore 元数据同源）；文件类指令属 fs 指令集（fs.actions 声明）
 //   - 启动探测（exec.LookPath，探测到才声明）：
 //     shell（bash/zsh/sh/fish；Windows: powershell/pwsh/cmd）→ level 3（逃生舱）；
-//     git → level 1（本地凭证天然可用）；browser → agent-browser CLI
+//     git → level 1（本地凭证天然可用）；ssh/scp → level 3（目标闸独立通道）
+//
+// browser 等壳能力不在此探测——由壳进程经本地 provider 通道动态注册（register.go，
+// desktop/浏览器插件各自实现，agent-browser CLI 依赖已彻底移除）。
 func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 	var cmds []proto.CommandDecl
 	seen := map[string]bool{}
@@ -268,10 +269,9 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 			add(d)
 		}
 	}
-	if _, err := exec.LookPath("agent-browser"); err == nil {
-		if d, ok := vcore.Decl("browser"); ok {
-			add(d)
-		}
+	// 壳 provider（desktop 的 browser 等）：进程级注册表汇入（register.go）
+	for _, d := range providerDecls() {
+		add(d)
 	}
 	byName := make(map[string]proto.CommandDecl, len(cmds))
 	for _, d := range cmds {
@@ -284,6 +284,10 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 // fs.actions=null（全部 8 个）；exec.commands = 统一命令声明表。
 func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
+	c.cmdsMu.RLock()
+	decls := make([]proto.CommandDecl, len(c.cmds))
+	copy(decls, c.cmds)
+	c.cmdsMu.RUnlock()
 	return &proto.Caps{
 		HostID:        c.hostID,
 		CredentialVer: c.credVer,
@@ -291,8 +295,8 @@ func (c *Client) buildCaps() *proto.Caps {
 		DeviceType:    c.opts.DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
-		FS:            proto.FSCaps{},                   // actions=null = 全部 8 个
-		Exec:          proto.ExecCaps{Commands: c.cmds}, // 统一命令声明表
+		FS:            proto.FSCaps{},                 // actions=null = 全部 8 个
+		Exec:          proto.ExecCaps{Commands: decls}, // 统一命令声明表
 	}
 }
 
@@ -304,7 +308,10 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 	}
 	data, _ := json.Marshal(c.buildCaps())
 	nc.Publish(subj, data)
-	c.logf("caps published to %s (%d commands)", subj, len(c.cmds))
+	c.cmdsMu.RLock()
+	n := len(c.cmds)
+	c.cmdsMu.RUnlock()
+	c.logf("caps published to %s (%d commands)", subj, n)
 }
 
 func (c *Client) heartbeatLoop() {

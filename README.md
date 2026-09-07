@@ -127,33 +127,29 @@ make build-browser   # → dist/aic-browser.zip
 
 ### 工具能力
 
-插件注册一个 `browser` 工具，签名与 `agent-browser` CLI 对齐：
+插件注册 `browser` 工具（平台自有指令集，扩展内原生 JS 实现，desktop 端同源共享）：
 
 ```json
-{ "action": "<action>", "argv": ["..."] }
+{ "action": "browser", "argv": ["<subcommand>", "..."] }
 ```
 
-| action | 说明 |
+| 子命令 | 说明 |
 |---|---|
-| `open` | 打开 URL |
-| `click` / `dblclick` | 点击 / 双击元素 |
-| `close` | 关闭标签页 |
-| `download` | 点击触发下载 |
-| `eval` | 执行 JavaScript |
+| `open` | 打开 URL（AI 工作区标签页） |
+| `click` | 点击元素（CSS 选择器或 @ref） |
+| `close` | 关闭工作区标签页 |
+| `download` | 点击元素触发下载 |
+| `eval` | CDP 执行 JavaScript（DevTools 语义，不受页面 CSP 限制） |
 | `get` | 获取页面信息 (text/html/title/url/value/attr/count/box/styles) |
-| `network` | 查看网络请求 |
+| `network` | 查看网络请求（页内 fetch/XHR 拦截器） |
 | `read` | 提取页面可读文本 |
-| `screenshot` | 截图（支持 `--full` 全页面） |
+| `screenshot` | 截图（CDP Page.captureScreenshot） |
 | `snapshot` | a11y tree 快照（生成 @ref 用于元素定位） |
 | `tab` | 标签页管理 (new/list/close/<N>) |
-| `wait` | 等待条件 (selector/ms/--load/--text/--fn) |
-| `scroll` / `hover` | 滚动 / 悬停 |
-| `fill` / `press` / `select` | 表单操作 |
-| `back` / `forward` / `reload` | 导航 |
+| `wait` | 等待条件 (selector/ms/--url/--load/--text/--fn/--download) |
 | `sleep` | 暂停 |
-| `cookies` | Cookie 管理 |
-| `storage` | localStorage/sessionStorage 操作 |
-| `pipeline` | 链式执行多个操作 |
+
+未列能力（type/fill/press/滚动/导航等）用 `eval <js>` 注入 JS 替代。
 
 ### 对比 desktop 客户端
 

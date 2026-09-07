@@ -94,16 +94,16 @@ var gitSubLevels = map[string]int{
 // gitValueFlags 是 git 带值 flag 已知表（§5.5：子命令判定先跳过带值 flag）。
 var gitValueFlags = map[string]bool{"-C": true, "-c": true}
 
-// browserSubLevels 是 browser 子命令分级（§2.4）。
-// host 端 eval 单独提升至 Danger（读已登录站点 DOM/cookie），由 caps 声明覆盖。
+// browserSubLevels 是 browser 子命令分级（§2.4，自有指令集——仅声明端存在：
+// 浏览器插件 / desktop 壳原生 JS 实现，见 aic-pod/browser/src/tools/browser/）。
+// 读类 Read(1)；其余页面交互统一 Write(2) 基线（§2.4：click 逐次确认会使
+// 浏览自动化不可用）。
 var browserSubLevels = map[string]int{
 	"snapshot":   proto.LevelRead,
 	"read":       proto.LevelRead,
 	"get":        proto.LevelRead,
 	"screenshot": proto.LevelRead,
 	"network":    proto.LevelRead,
-
-	"upload": proto.LevelDanger, // 文件外发
 }
 
 // jsonSubLevels 是 json 子命令分级（view=Read，修改类=Write——对齐 fs write/edit）。
@@ -187,7 +187,7 @@ func checkoutPathspecLike(args []string) bool {
 	return false
 }
 
-// browserRequired 判定 browser 子命令等级：读类 Read(1)，upload Danger(3)，
+// browserRequired 判定 browser 子命令等级：读类 Read(1)，
 // 其余核心页面交互统一 Write(2) 基线（§2.4：click 逐次确认会使浏览自动化不可用）。
 func browserRequired(argv []string) int {
 	sub := ""
