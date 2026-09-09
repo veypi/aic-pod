@@ -27,6 +27,9 @@ DOCKER_IMAGE ?= veypi/aic-pod
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
 GOHOSTARCH := $(shell go env GOHOSTARCH)
+# 后端二进制名：go build 显式 -o 不会自动补 .exe（仅默认命名会），Windows 必须显式带扩展名
+# （main.js 在 win32 固定 spawn aic-backend.exe）
+BACKEND_BIN := aic-backend$(if $(filter windows,$(GOHOSTOS)),.exe,)
 # VERSION：git 版本（tag 优先，无 tag 时为短 commit hash），注入 cli 产物与 desktop/package.json
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 # Windows 资源版本号：纯数字点分（go-winres 不接受 dirty 后缀）
@@ -79,12 +82,13 @@ cli-windows-amd64:
 # 打包：electron-builder（须在目标平台构建，无法交叉），产物 dist/aic-desktop-*。
 # ==============================================================================
 
-# Go 后端二进制：dev 运行（desktop/bin/aic-backend）与 electron-builder
-# extraResources（resources/backend/）共用
+# Go 后端二进制：dev 运行（desktop/bin/）与 electron-builder extraResources
+# （resources/backend/）共用。先清掉两侧旧名，避免跨平台残留被打进包。
 backend-bin:
 	@mkdir -p $(DESKTOP_DIR)/bin
-	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(DESKTOP_DIR)/bin/aic-backend" .
-	@echo "→ $(DESKTOP_DIR)/bin/aic-backend"
+	@rm -f $(DESKTOP_DIR)/bin/aic-backend $(DESKTOP_DIR)/bin/aic-backend.exe
+	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" .
+	@echo "→ $(DESKTOP_DIR)/bin/$(BACKEND_BIN)"
 
 # electron-builder 依赖安装（node_modules）
 desktop-deps:
@@ -113,6 +117,7 @@ desktop-darwin-%:
 desktop-windows-%:
 	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --win
+	@test -f $(BIN_DIR)/win-unpacked/resources/backend/aic-backend.exe || { echo "✗ 打包缺 resources/backend/aic-backend.exe（backend-bin 命名回归？）"; exit 1; }
 	@echo "→ $(BIN_DIR)/aic-desktop-win-$*.exe"
 
 # Linux：AppImage（需 Linux runner）
