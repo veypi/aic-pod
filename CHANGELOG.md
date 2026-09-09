@@ -5,6 +5,18 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## v0.6.2 — 2026-09-09
+
+### 修复
+
+- **本地配置页保存被连接失败阻断**（`ui/page/settings.html`）：保存改为先落盘
+  （set_config）→ 凭证改动过才 bind → 探测跳转；bind 失败不再中断保存（只提示
+  “地址已保存；凭证未生效”），探测失败改中性提示，本地服务断开时提示重新打开
+  配置页。修复换平台/改地址时“链接失败导致保存不了”。
+- **桌面端换地址后新平台页无本地通道**（`desktop/main.js`）：注入白名单随
+  `platform:open` 增量更新——改地址后新平台页恢复 `window.aicDesktop` 注入
+  （绑定面板/窗口控制不再失效）。
+
 ## v0.6.1 — 2026-09-09
 
 ### 修复
