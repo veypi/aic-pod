@@ -94,7 +94,7 @@ func imeLinuxGNOME() (string, error, bool) {
 			inner = inner[open+next+2:]
 		}
 	}
-	if strings.TrimSpace(cur) == fmt.Sprintf("uint32 %d", pos) {
+	if strings.TrimSpace(string(cur)) == fmt.Sprintf("uint32 %d", pos) {
 		return "", nil, true
 	}
 	if err := exec.Command("gsettings", "set", schema, "current", fmt.Sprintf("%d", pos)).Run(); err != nil {
