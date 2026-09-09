@@ -160,3 +160,27 @@ func readLines(t *testing.T, path string) []string {
 	}
 	return out
 }
+
+// TestCuaLiveSessionRevive 真机集成：显式结束会话制造 "has ended"，验证
+// call 自动 start_session 复活并重试（本机装了 cua-driver 才跑，只读动作）。
+func TestCuaLiveSessionRevive(t *testing.T) {
+	if findCuaDriver() == "" {
+		t.Skip("cua-driver not installed")
+	}
+	initCuaRuntime(t.Logf)
+	if cuaRt == nil {
+		t.Skip("cua runtime not initialized")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if _, err := cuaRt.call(ctx, "start_session", map[string]any{}); err != nil {
+		t.Fatalf("start_session: %v", err)
+	}
+	if _, err := cuaRt.call(ctx, "end_session", map[string]any{}); err != nil {
+		t.Fatalf("end_session: %v", err)
+	}
+	// 会话已结束：普通动作会被驱动拒绝，call 应自动复活后重试成功。
+	if _, err := cuaRt.call(ctx, "list_apps", map[string]any{}); err != nil {
+		t.Fatalf("call after ended session (revive failed): %v", err)
+	}
+}
