@@ -49,7 +49,7 @@ func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolRes
 	}
 	if c.policy.DenyHit(abs) {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateRejected,
-			Error: fmt.Sprintf("exec grant fs: %s is in the fs_deny list and cannot be granted", abs)}
+			Error: fmt.Sprintf("exec grant fs: %s is in the fs_deny list and cannot be granted (deny entries are not approval-able; add an explicit fs_allow entry in host config — bare path or glob like **/.env — to override)", abs)}
 	}
 	scope := "session"
 	if permanent {
@@ -83,7 +83,7 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 	}
 	if pol.DenyHit(e) {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateRejected,
-			Error: fmt.Sprintf("exec grant %s: %s is in the %s_deny list and cannot be granted", domain, e.String(), domain)}
+			Error: fmt.Sprintf("exec grant %s: %s is in the %s_deny list and cannot be granted (deny entries are not approval-able; add a narrower allow entry in host config to override)", domain, e.String(), domain)}
 	}
 	scope := "session"
 	if permanent {

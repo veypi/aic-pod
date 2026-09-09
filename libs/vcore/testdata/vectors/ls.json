@@ -18,7 +18,7 @@
       "files": {"/docs/a.txt": "a", "/docs/.env": "x", "/docs/.git/": ""},
       "mtimes": {"/docs/.git/": 0},
       "expect": {
-        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"is_repo\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
         "attrs": {"action": "ls", "path": "/docs", "rows": "1", "truncated": "false"}
       }
     },
@@ -29,7 +29,7 @@
       "files": {"/docs/a.txt": "a", "/docs/.env": "xyz", "/docs/.git/": ""},
       "mtimes": {"/docs/.git/": 0},
       "expect": {
-        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"items\":[{\"name\":\".env\",\"dir\":false,\"size\":3,\"mod_time\":0},{\"name\":\".git\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "content": "{\"cwd\":\"/docs\",\"dir\":true,\"is_repo\":true,\"items\":[{\"name\":\".env\",\"dir\":false,\"size\":3,\"mod_time\":0},{\"name\":\".git\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
         "attrs": {"action": "ls", "path": "/docs", "rows": "3", "truncated": "false"}
       }
     },
@@ -137,8 +137,51 @@
       "files": {"/d/ok.txt": "o", "/d/.env": "e", "/d/.git/y.txt": "y", "/d/node_modules/x.txt": "x"},
       "mtimes": {"/d/.git/": 0, "/d/node_modules/": 0},
       "expect": {
-        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"node_modules\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"ok.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"is_repo\":true,\"items\":[{\"name\":\"node_modules\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"ok.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
         "attrs": {"action": "ls", "path": "/d", "rows": "2", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls of repo root reports is_repo and branch",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/repo"},
+      "files": {"/repo/.git/HEAD": "ref: refs/heads/dev\n", "/repo/a.txt": "a"},
+      "mtimes": {"/repo/.git/": 0},
+      "expect": {
+        "content": "{\"branch\":\"dev\",\"cwd\":\"/repo\",\"dir\":true,\"is_repo\":true,\"items\":[{\"name\":\"a.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/repo", "rows": "1", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls marks repo roots with branch, detached HEAD has none",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/top"},
+      "files": {"/top/plain/": "", "/top/repo/.git/HEAD": "ref: refs/heads/main\n", "/top/repo/readme.md": "r", "/top/det/.git/HEAD": "0123456789abcdef0123456789abcdef01234567\n"},
+      "mtimes": {"/top/plain/": 0, "/top/repo/": 0, "/top/det/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/top\",\"dir\":true,\"items\":[{\"name\":\"det\",\"dir\":true,\"size\":0,\"mod_time\":0,\"is_repo\":true},{\"name\":\"plain\",\"dir\":true,\"size\":0,\"mod_time\":0},{\"name\":\"repo\",\"dir\":true,\"size\":0,\"mod_time\":0,\"is_repo\":true,\"branch\":\"main\"}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/top", "rows": "3", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls depth 2 marks nested repo roots",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/d", "depth": 2},
+      "files": {"/d/a/.git/HEAD": "ref: refs/heads/feature/x\n", "/d/a/x.txt": "x", "/d/b/y.txt": "y"},
+      "mtimes": {"/d/a/": 0, "/d/a/.git/": 0, "/d/b/": 0},
+      "expect": {
+        "content": "{\"cwd\":\"/d\",\"dir\":true,\"items\":[{\"name\":\"a\",\"dir\":true,\"size\":0,\"mod_time\":0,\"is_repo\":true,\"branch\":\"feature/x\",\"items\":[{\"name\":\"x.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}]},{\"name\":\"b\",\"dir\":true,\"size\":0,\"mod_time\":0,\"items\":[{\"name\":\"y.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}]}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/d", "rows": "4", "truncated": "false"}
+      }
+    },
+    {
+      "name": "ls .git file (worktree) is not a repo",
+      "cmd": "fs",
+      "params": {"action": "ls", "path": "/wt", "all": true},
+      "files": {"/wt/.git": "gitdir: /elsewhere\n", "/wt/f.txt": "f"},
+      "expect": {
+        "content": "{\"cwd\":\"/wt\",\"dir\":true,\"items\":[{\"name\":\".git\",\"dir\":false,\"size\":19,\"mod_time\":0},{\"name\":\"f.txt\",\"dir\":false,\"size\":1,\"mod_time\":0}],\"truncated\":false}",
+        "attrs": {"action": "ls", "path": "/wt", "rows": "2", "truncated": "false"}
       }
     },
     {

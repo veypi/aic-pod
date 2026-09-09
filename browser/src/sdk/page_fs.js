@@ -25,6 +25,8 @@
 // edit 唯一匹配/重叠校验。错误文案与 vcore 保持一致。
 // 实现取舍：>8MB 大文件不整读是 Go 端的内存优化，输出语义相同；
 // 浏览器端 Blob.text() 整读，输出与流式分支逐字节一致。
+// ls 的 git 基本探测（§4.5）：目录下 .git 为目录 → is_repo=true + branch（读 .git/HEAD），
+// 仅徽标用途无 git 语义（git 操作仅 cloud）。
 
 import { runFsOps } from "./fsops.js";
 
@@ -699,16 +701,61 @@ export class PageFS {
     };
   }
 
-  // ls 一层目录列表（= list，cloud_fs 同名）。返回 {ok, path, items}。
+  // ls 一层目录列表（= list，cloud_fs 同名）。返回 {ok, path, is_repo?, branch?, items}。
   // opts.depth > 1 时递归展开子目录（items[].items 嵌套，与 cloud/host 对齐）。
+  // git 基本探测（§4.5）：目录下 .git 为目录 → is_repo=true + branch（读 .git/HEAD）；
+  // 仅徽标用途，无 git 语义（git 操作仅 cloud）。
   async ls(path, ctx = {}) {
     const r = await this.list(path, ctx);
+    const items = await this._markRepos(r.items, ctx);
     if ((ctx.depth || 1) > 1) {
-      for (const it of r.items) {
-        if (it.dir) it.items = (await this.list(it.path, ctx)).items;
+      for (const it of items) {
+        if (it.dir) it.items = await this._markRepos((await this.list(it.path, ctx)).items, ctx);
       }
     }
-    return r;
+    const self = await this._gitRepoInfo(r.path || this._path(path, ctx), ctx);
+    return {
+      ok: true,
+      path: r.path,
+      ...(self.isRepo ? { is_repo: true } : {}),
+      ...(self.branch ? { branch: self.branch } : {}),
+      items,
+    };
+  }
+
+  // _gitRepoInfo(dirAbs, ctx)：.git 为目录 → {isRepo:true, branch}（读 .git/HEAD 的
+  // "ref: refs/heads/<name>" 行；detached/读取失败 → branch:""）。与 vcore gitRepoInfo /
+  // vigo httpfs isGitRepo 同判定（.git 文件形态的 worktree/submodule 不识别）。
+  async _gitRepoInfo(dirAbs, ctx = {}) {
+    const base = String(dirAbs || "").replace(/\/+$/, "");
+    let st = null;
+    try {
+      st = await this.stat(`${base}/.git`, ctx);
+    } catch (e) {
+      st = null; // 适配器对不存在路径抛错（PageFS 本体返回 null）
+    }
+    if (!st || !st.dir) return { isRepo: false, branch: "" };
+    let head = "";
+    try {
+      const raw = await this.readRaw(`${base}/.git/HEAD`, ctx);
+      if (raw && typeof raw.content === "string") head = raw.content;
+    } catch (e) {
+      /* .git 存在但 HEAD 不可读：仓库成立、分支未知 */
+    }
+    const line = head.split("\n")[0].trim();
+    const prefix = "ref: refs/heads/";
+    return { isRepo: true, branch: line.startsWith(prefix) ? line.slice(prefix.length) : "" };
+  }
+
+  // _markRepos(items, ctx)：为目录条目补 is_repo/branch（原对象上新增字段，返回同一数组）。
+  async _markRepos(items, ctx = {}) {
+    for (const it of items || []) {
+      if (!it.dir) continue;
+      const repo = await this._gitRepoInfo(it.path, ctx);
+      if (repo.isRepo) it.is_repo = true;
+      if (repo.branch) it.branch = repo.branch;
+    }
+    return items || [];
   }
 
   // rm 递归删除（对齐 httpfs RemoveAll / cloud_fs.rm）：文件或整棵目录树。

@@ -33,21 +33,35 @@ func imageResult(env *Env, abs string, data []byte, mime string) (*Result, error
 		r.Content = imageContent(abs, mime, w, h, len(data))
 		return r, nil
 	}
-	out, compressedNote := data, ""
+	dataURI, compressedNote, err := EncodeImageData(data, mime)
+	if err != nil {
+		return nil, fsErr("read", "image too large even after compression (%d bytes)", len(data))
+	}
+	if compressedNote != "" {
+		r.Attrs["image_compressed"] = compressedNote
+	}
+	r.Attrs["image_data"] = dataURI
+	r.Content = imageContent(abs, mime, w, h, len(data))
+	return r, nil
+}
+
+// EncodeImageData 将图片字节编码为 §2.2 标准的 data URI（供 host 端非 read
+// 指令把本地截图等转成 image_data 附在工具返回里——服务端统一落盘投递）：
+// 超过 imageDataMaxBytes 自动压缩为 JPEG（与 imageResult 同算法）。
+// 返回 (dataURI, 压缩说明 note, err)，note 为空表示未压缩。
+func EncodeImageData(data []byte, mime string) (string, string, error) {
+	out, note := data, ""
 	if len(data) > imageDataMaxBytes {
 		c, err := compressImage(data, mime)
 		if err != nil {
-			return nil, fsErr("read", "image too large even after compression (%d bytes)", len(data))
+			return "", "", err
 		}
 		out = c.data
-		compressedNote = fmt.Sprintf("%d bytes → image/jpeg %dx%d quality %d (%d bytes)",
+		note = fmt.Sprintf("%d bytes → image/jpeg %dx%d quality %d (%d bytes)",
 			len(data), c.width, c.height, c.quality, len(c.data))
-		r.Attrs["image_compressed"] = compressedNote
 	}
-	r.Attrs["image_data"] = fmt.Sprintf("data:%s;base64,%s",
-		pickMIME(mime, compressedNote != ""), base64.StdEncoding.EncodeToString(out))
-	r.Content = imageContent(abs, mime, w, h, len(data))
-	return r, nil
+	return fmt.Sprintf("data:%s;base64,%s",
+		pickMIME(mime, note != ""), base64.StdEncoding.EncodeToString(out)), note, nil
 }
 
 func pickMIME(orig string, compressed bool) string {

@@ -284,9 +284,13 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 			if skipDirs[name] || (!hidden && hiddenName) {
 				continue
 			}
-			if depth == 1 { continue }
+			if depth == 1 {
+				continue
+			}
 			next := depth
-			if next > 0 { next-- }
+			if next > 0 {
+				next--
+			}
 			if err := rgWalkDepth(ctx, env, dir+"/"+name, globs, hidden, fn, next); err != nil {
 				return err
 			}
@@ -331,7 +335,9 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	depth := 0
 	if len(depths) > 0 && depths[0] != nil {
 		depth = *depths[0]
-		if depth < 0 { return nil, fsErr("rg", "depth must be nonnegative") }
+		if depth < 0 {
+			return nil, fsErr("rg", "depth must be nonnegative")
+		}
 	}
 	abs, err := env.Resolve(target)
 	if err != nil {

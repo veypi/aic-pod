@@ -400,14 +400,17 @@ export function createBrowserHandler(adapter) {
 
   // CDP 截图（captureVisibleTab 只能截当前激活 tab，工作区 tab 不激活——
   // 统一走 Page.captureScreenshot，attach 不要求 tab 活跃，与 eval 同通道）。
-  async function cdpScreenshot(tabId, quality) {
+  async function cdpScreenshot(tabId, quality, full) {
     await adapter.cdp.attach(tabId);
     try {
+      const params = { format: "jpeg", quality };
+      if (full) {
+        // --full：整页截图（视口外内容随 captureBeyondViewport 一并捕获）
+        params.captureBeyondViewport = true;
+        params.fromSurface = true;
+      }
       const res = await withTimeout(
-        adapter.cdp.send(tabId, "Page.captureScreenshot", {
-          format: "jpeg",
-          quality,
-        }),
+        adapter.cdp.send(tabId, "Page.captureScreenshot", params),
         CDP_EVAL_TIMEOUT_MS,
         `screenshot timeout after ${CDP_EVAL_TIMEOUT_MS / 1000}s`,
       );
@@ -415,7 +418,7 @@ export function createBrowserHandler(adapter) {
       const bin = atob(res.data);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return new Blob([bytes], { type: "image/jpeg" });
+      return { blob: new Blob([bytes], { type: "image/jpeg" }), b64: res.data };
     } finally {
       try {
         await adapter.cdp.detach(tabId);
@@ -659,16 +662,20 @@ export function createBrowserHandler(adapter) {
   async function actScreenshot(pa, ctx) {
     const quality = Math.min(parseInt(pa.flags["quality"] || "80", 10), 100);
     const tab = await getTargetTab();
-    // §2.2：browser 不返回图片数据（仅 fs.read 能把图片带进消息）。
-    // 截图落本 host 的 fs（插件=/screenshot/ OPFS Blob；desktop=会话 .screenshot/ 目录，
-    // 由 Go 后端落盘），agent 需要读图时用 fs.read（1host=本 host_id）按 attrs.path 读取。
     if (!ctx?.fs) throw new Error("fs backend not available on this host");
-    const blob = await cdpScreenshot(tab.id, quality);
+    const shot = await cdpScreenshot(tab.id, quality, pa.bools["full"]);
     const name = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
-    const out = await ctx.fs.put(`/screenshot/${name}`, blob);
+    const out = await ctx.fs.put(`/screenshot/${name}`, shot.blob);
+    // §2.2（2026-09-08 通用化）：browser 截图也返回 image_data（data URI），
+    // 服务端统一落盘投喂模型视觉输入，无需再 fs.read；限制 1MB 原始字节
+    // （base64 约 1.4M 字符），超限降级为仅 path（fs.read 读图），不阻断截图本身。
+    const attrs = { action: "screenshot", path: out.path };
+    if (shot.b64 && shot.b64.length <= 1_400_000) {
+      attrs.image_data = `data:image/jpeg;base64,${shot.b64}`;
+    }
     return {
-      content: `✓ Screenshot saved to ${out.path} (${out.bytes} bytes; read it with fs.read on this host)`,
-      attrs: { action: "screenshot", path: out.path },
+      content: `✓ Screenshot saved to ${out.path} (${out.bytes} bytes)`,
+      attrs,
     };
   }
 

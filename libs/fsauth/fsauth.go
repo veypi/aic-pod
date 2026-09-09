@@ -7,6 +7,15 @@
 //	写（fs_policy=deny）：其余 → 3（危险写，逐次审批；grant fs --permanent 可入白名单）
 //	写（fs_policy=open）：非 deny → 2（统一授权模型：policy=open 除 deny 全放）
 //
+// allow 覆盖 deny（2026-09-09，两键语义）：**显式 fs_allow 条目压过 deny**——
+// 裸路径条目覆盖其子树，带通配条目按 glob 精确匹配（如 `/ws/**/.env` 只放 .env）；
+// 命中即回落正常分级（读 1、写 2），同时豁免 deny 的读写双拒。
+// 内建便利根（工作区/临时区/公共区/缓存/会话区）与临时 grant 不压 deny——
+// 它们是写便利不是信任声明（公共区里的 browser cookie 库、缓存/工作区里的
+// .env/*.pem/*.key 仍受保护）；要开洞就把条目显式写进 fs_allow。
+// deny 本身恒为读写双拒且不可审批（写入凭证目录 = 持久化/注入）。
+// exec 沙箱经 DenyOverridePatterns 取同一展开（§5.10：两侧同源）。
+//
 // 初始 deny 名单按平台分表（deny_{darwin,linux,windows,other}.go：三平台相关路径不同，
 // 分表消除跨平台变量展开串扰风险）；通用凭证条目在 deny_common.go 单源。
 //
@@ -41,7 +50,8 @@ type Policy struct {
 	sessionDir string   // 会话区根（$HOME/.aic/sessions）
 	publicDir  string   // 公共区（$HOME/.aic）
 	openMode   bool     // fs_policy=open：写除 deny 名单外全放（2 级）
-	extraWrite []string // cfg fs_allow（canonical 前缀）
+	extraWrite []string // cfg fs_allow 裸路径条目（canonical 前缀：写白名单根 + 子树压 deny）
+	allowGlobs []string // cfg fs_allow 通配条目（canonicalPattern 展开：精确授权 + 压 deny）
 	deny       []string // 拒绝模式（平台初始表 + cfg fs_deny 叠加，预展开：expandVars + canonicalPattern）
 	grants     map[string][]string
 
@@ -72,7 +82,7 @@ func New() *Policy {
 func (p *Policy) rebuildLocked() {
 	a := cfg.AuthSnapshot()
 	p.openMode = a.FsPolicy == cfg.PolicyOpen
-	p.extraWrite = canonicalList(a.FsAllow)
+	p.extraWrite, p.allowGlobs = splitAllow(a.FsAllow)
 	p.deny = compileDeny(append(defaultDenyPaths(), a.FsDeny...))
 	p.rebuildBaseRootsLocked()
 }
@@ -153,8 +163,10 @@ func (p *Policy) DenyPatterns() []string {
 	return out
 }
 
-// DenyHit 报告 canonical 路径是否命中 deny 名单（grant fs 校验用：
-// deny 内拒绝申请）。
+// DenyHit 报告 canonical 路径是否命中 deny 名单原始表（grant fs 校验用：
+// deny 内拒绝申请）。不含 fs_allow 覆盖——覆盖只在显式 allow 条目内生效，
+// 而 grant 的目标通常尚未入白名单（且临时 grant 不压 deny，见 decide）；
+// 需要例外时用户写 cfg fs_allow（grant --permanent 亦落在那里）。
 func (p *Policy) DenyHit(path string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -179,7 +191,8 @@ type View struct {
 	sid string
 }
 
-// Decide 返回 (read, write) 所需等级（canonical 判定；deny → 0/0）。
+// Decide 返回 (read, write) 所需等级（canonical 判定；deny → 0/0，
+// 显式 fs_allow 条目命中 → 回落正常分级并豁免 deny）。
 func (v *View) Decide(path string) (int, int) {
 	return v.p.decide(v.sid, canonical(path))
 }
@@ -187,10 +200,13 @@ func (v *View) Decide(path string) (int, int) {
 func (p *Policy) decide(sid, cpath string) (int, int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.denyHit(cpath) {
+	// allow 覆盖 deny：显式 fs_allow 条目（裸路径子树 / 通配 glob）命中即放行。
+	// 内建便利根与临时 grant 不参与（安全默认保持权威）。
+	allowHit := p.allowHitLocked(cpath)
+	if p.denyHit(cpath) && !allowHit {
 		return 0, 0
 	}
-	if p.openMode {
+	if p.openMode || allowHit {
 		return 1, 2
 	}
 	if proto.InWriteRoots(cpath, p.decideRootsLocked(sid)) {
@@ -227,7 +243,7 @@ func (p *Policy) bindRootsLocked(sid string) []string {
 	return roots
 }
 
-// denyHit 判定 canonical 路径命中预展开 deny 表。
+// denyHit 判定 canonical 路径命中预展开 deny 表（原始表，不含例外）。
 func (p *Policy) denyHit(cpath string) bool {
 	for _, pat := range p.deny {
 		if matchPattern(pat, cpath) {
@@ -235,6 +251,72 @@ func (p *Policy) denyHit(cpath string) bool {
 		}
 	}
 	return false
+}
+
+// allowHitLocked 判定显式 allow 条目命中（cfg fs_allow）：裸路径条目覆盖其子树
+// （root 自身 + 全部后代），通配条目按 glob 精确匹配。命中 → 写 2 且豁免 deny
+// 的读写双拒（allow 覆盖 deny）。内建便利根与临时 grant 不在本判定内——它们
+// 是写便利不是信任声明（公共区的 browser cookie 库、缓存/工作区里的 .env 等
+// 仍受 deny 保护）；要开洞必须显式写 fs_allow。判定在 canonical 路径上进行，
+// symlink 跳转出 allow 条目不豁免（与 deny 同口径）。
+func (p *Policy) allowHitLocked(cpath string) bool {
+	for _, root := range p.extraWrite {
+		if matchPattern(joinPattern(root, "**"), cpath) {
+			return true
+		}
+	}
+	for _, pat := range p.allowGlobs {
+		if matchPattern(pat, cpath) {
+			return true
+		}
+	}
+	return false
+}
+
+// joinPattern 拼接「根 + 子模式」（根为 "/" 时不产生 "//"——matchPattern 按 / 分段，
+// 双斜杠会引入空段使模式整体失配）。
+func joinPattern(root, sub string) string {
+	if root == "/" {
+		return "/" + sub
+	}
+	return strings.TrimSuffix(root, "/") + "/" + sub
+}
+
+// DenyOverridePatterns 返回压过 deny 的展开模式快照（exec 沙箱放行规则与 fs 判定
+// 共用同一展开，§5.10 两侧同源）：裸路径条目 → <root>/**（子树），通配条目原样。
+// 内建根与临时 grant 不入内（与 allowHitLocked 同口径）；cfg 变更经 Reconcile 后
+// 本次 Start 即取新名单。
+func (p *Policy) DenyOverridePatterns() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.extraWrite) == 0 && len(p.allowGlobs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p.extraWrite)+len(p.allowGlobs))
+	for _, root := range p.extraWrite {
+		out = append(out, joinPattern(root, "**"))
+	}
+	out = append(out, p.allowGlobs...)
+	return out
+}
+
+// splitAllow 拆分 cfg fs_allow 条目：裸路径（无通配）→ 写白名单根（canonical
+// 前缀，覆盖子树）；带通配条目 → 精确 glob（canonicalPattern 只展开字面前缀，
+// 与 compileDeny 同口径）。两类条目都压 deny（allow 覆盖 deny 语义）；展开失败
+// （未定义变量/无家目录）的条目整条跳过（宁缺毋滥，同 compileDeny）。
+func splitAllow(entries []string) (roots, globs []string) {
+	for _, raw := range entries {
+		e, ok := expandVars(strings.TrimSpace(raw))
+		if !ok || e == "" {
+			continue
+		}
+		if strings.ContainsAny(e, "*?") {
+			globs = append(globs, canonicalPattern(e))
+			continue
+		}
+		roots = append(roots, canonical(e))
+	}
+	return roots, globs
 }
 
 // compileDeny 预展开拒绝模式：expandVars（~ / $VAR / %VAR% / $UserConfigDir）

@@ -181,7 +181,7 @@ func (c *Client) newEnv(sid, workdir string) *vcore.Env {
 // execCmd 执行 exec 请求（§5.1 统一命令声明模型）：
 // 按声明表路由——核心虚拟指令走 vcore.Run，bg_*/grant/ssh/scp 走特化实现，
 // 本地命令（探测声明的 shell/git）走 runLocal（exec_procs 托管），壳注册命令
-//（browser 等）走 provider 转发；未声明命令一律拒绝（不存在「未知命令透传」）。
+// （browser 等）走 provider 转发；未声明命令一律拒绝（不存在「未知命令透传」）。
 func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest) *proto.ToolResponse {
 	var p struct {
 		Action    string   `json:"action"`
@@ -235,6 +235,9 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "scp":
 		// scp 一级工具（目标闸同 ssh 域；本地侧过 fsauth 门控；免沙箱内置执行）
 		return c.runSCP(ctx, sid, req, p.Argv)
+	case "cua":
+		// cua 一级命令（§5.10：Go 原生桥接 cua-driver MCP 持久子进程）
+		return c.runCua(ctx, sid, req, p.Argv)
 	}
 
 	// 壳 provider 命令（desktop browser 等，register.go）：转发壳进程执行
@@ -273,7 +276,7 @@ func isCoreCommand(action string) bool {
 // sessionWorkDir 返回会话工作区（v0.14.5 §4 布局，两端同构 UserOutputDir/sessions/{sid}）：
 // $HOME/.aic/sessions/{sid}——exec 日志（.exec/）、壳 provider 文件交换（.browser/）、
 // 截图（.screenshot/）的落点。PublicDir 不可得时回落系统临时目录旧位
-//（{tmp}/aic/{sid}，临时产物语义不变）。
+// （{tmp}/aic/{sid}，临时产物语义不变）。
 func sessionWorkDir(sid string) string {
 	if dir, err := cfg.PublicDir(); err == nil {
 		return filepath.Join(dir, "sessions", sid)

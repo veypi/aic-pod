@@ -12,6 +12,9 @@ Electron Main (Node, main.js)
  ├─ browser 壳通道（browser-tool.mjs）：browser core（vendor/，与插件同源）
  │    + electron-adapter（webContents.debugger CDP）→ 127.0.0.1 TCP 换行 JSON
  │    → 向 Go 后端注册 provider（/api/provider/register），caps 出现 browser
+ ├─ cua（本机 GUI 自动化）：Go 后端原生桥接 cua-driver（libs/host/cua.go，
+ │    MCP 持久子进程懒启动）；启动探测到 cua-driver 二进制才声明（不经壳通道）；
+ │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 CuaDriver.app，host 自动拉起）
  ├─ BaseWindow（frameless）主窗口：平台页 + 隐藏的「AI 工作区」标签页
  │    （WebContentsView 常驻底层被平台页遮挡；browser 命令全程后台，
  │     未来做标签切换 UI 时经 tabControl.show/hide 调换 z 顺序）

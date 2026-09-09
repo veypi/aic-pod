@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// MatchPattern 导出 matchPattern（exec_procs 的 bwrap deny 例外覆盖判定用——
+// 例外模式对覆盖挂载目标是否整体覆盖必须与 fs 判定同口径，不得另写一套 glob）。
+func MatchPattern(pattern, cpath string) bool { return matchPattern(pattern, cpath) }
+
 // matchPattern 判定 canonical 路径是否命中 glob 模式（v0.14.5 §2 匹配器）：
 //   - 支持跨段 `**`（匹配零或多段）；段内 `*`（任意非分隔符字符）、`?`（单字符）；
 //     `[` 按字面匹配（不支持字符类；与 canonicalPattern 的字面前缀检测集同口径）；

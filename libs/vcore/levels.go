@@ -106,6 +106,54 @@ var browserSubLevels = map[string]int{
 	"network":    proto.LevelRead,
 }
 
+// cuaSubLevels 是 cua 子命令分级（§2.4，desktop 壳 provider：cua-driver MCP 桥接）。
+// 读类 Read(1)；窗口内交互 Write(2) 基线（与 browser 同理：逐次确认会使自动化不可用）；
+// --delivery foreground 由 cuaRequired 提级 Danger(3)——前台接管是用户可见的
+// 越界行为，逐次审批；动作默认走驱动后台精确路由（方案 v3），scope 已移除。
+var cuaSubLevels = map[string]int{
+	"doctor":        proto.LevelRead,
+	"apps":          proto.LevelRead,
+	"windows":       proto.LevelRead,
+	"snapshot":      proto.LevelRead,
+	"browser-state": proto.LevelRead,
+
+	"launch":    proto.LevelWrite,
+	"navigate":  proto.LevelWrite,
+	"bclick":    proto.LevelWrite,
+	"btype":     proto.LevelWrite,
+	"bend":      proto.LevelWrite,
+	"click":     proto.LevelWrite,
+	"dclick":    proto.LevelWrite,
+	"rclick":    proto.LevelWrite,
+	"type":      proto.LevelWrite,
+	"key":       proto.LevelWrite,
+	"hotkey":    proto.LevelWrite,
+	"scroll":    proto.LevelWrite,
+	"drag":      proto.LevelWrite,
+	"move":      proto.LevelWrite,
+	"set-value": proto.LevelWrite,
+	"menu":      proto.LevelWrite,
+	"set-frame": proto.LevelWrite,
+	// front：前台激活应用（窃取用户前台焦点，用户可见接管）→ Danger(3)
+	"front": proto.LevelDanger,
+
+	// run：JS 脚本执行——内容可含任意动作无法静态分级，恒 Danger(3) 逐次
+	// 审批（脚本全文随审批可见），对齐 shell 逃生舱语义。
+	"run": proto.LevelDanger,
+}
+
+// cuaValueFlags 是 cua 带值 flag 表（子命令判定跳过其值；布尔 flag 不在列）。
+var cuaValueFlags = map[string]bool{
+	"--pid": true, "--window": true, "--token": true,
+	"--x": true, "--y": true, "--x1": true, "--y1": true, "--x2": true, "--y2": true,
+	"--text": true, "--app": true, "--value": true, "--path": true,
+	"--direction": true, "--amount": true, "--width": true, "--height": true,
+	"--delivery": true,
+	"--url":      true, "--query": true, "--ref": true, "--mode": true, "--route": true,
+	"--grep": true, "--context": true, "--target": true, "--tab": true,
+	"--code": true, "--file": true,
+}
+
 // jsonSubLevels 是 json 子命令分级（view=Read，修改类=Write——对齐 fs write/edit）。
 var jsonSubLevels = map[string]int{
 	"view":   proto.LevelRead,
@@ -126,6 +174,8 @@ func ExecRequired(action string, argv []string) int {
 		return gitRequired(argv)
 	case "browser":
 		return browserRequired(argv)
+	case "cua":
+		return cuaRequired(argv)
 	case "json":
 		return jsonRequired(argv)
 	}
@@ -201,6 +251,61 @@ func browserRequired(argv []string) int {
 		return lv
 	}
 	return proto.LevelWrite
+}
+
+// cuaRequired 判定 cua 子命令等级：
+//  1. 全参数扫描 --delivery foreground → Danger(3)（用户可见接管）；
+//  2. 取首个非 flag 且非 flag 值的子命令查表（读类 Read，交互 Write）；
+//  3. clipboard 嵌套子命令：read=Read，write=Write；
+//  4. bprepare 嵌套：--isolated=Write（驱动自持隔离 profile），
+//     缺省 existing_profile=Danger（开启用户真实浏览器的远程调试，逐次审批）；
+//  5. 未知子命令 Danger 兑底（未知动作保守）。
+func cuaRequired(argv []string) int {
+	danger := false
+	sub, clipboardSub := "", ""
+	isolated := false
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if a == "--isolated" {
+			isolated = true
+		}
+		if a == "--delivery" && i+1 < len(argv) && argv[i+1] == "foreground" {
+			danger = true
+		}
+		if cuaValueFlags[a] {
+			i++ // 跳过 flag 值
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if sub == "" {
+			sub = a
+			continue
+		}
+		if sub == "clipboard" && clipboardSub == "" {
+			clipboardSub = a
+		}
+	}
+	if danger {
+		return proto.LevelDanger
+	}
+	if sub == "clipboard" {
+		if clipboardSub == "read" {
+			return proto.LevelRead
+		}
+		return proto.LevelWrite
+	}
+	if sub == "bprepare" {
+		if isolated {
+			return proto.LevelWrite
+		}
+		return proto.LevelDanger
+	}
+	if lv, ok := cuaSubLevels[sub]; ok {
+		return lv
+	}
+	return proto.LevelDanger
 }
 
 // jsonRequired 判定 json 子命令等级：首个非 flag 参数（json 无带值 flag）。

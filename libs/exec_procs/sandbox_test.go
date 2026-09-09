@@ -218,6 +218,50 @@ func TestSeatbeltDenyAfterWriteAllow(t *testing.T) {
 	}
 }
 
+// TestSeatbeltDenyOverride：fs_allow 覆盖 deny 的 seatbelt 落地——deny 规则
+// 之后追加 allow（SBPL 后匹配覆盖先匹配，与 deny 压过写白名单同一机制）；
+// 写级才发 write allow（read-only 不发）；.git 写保护在覆盖规则之后输出（恒优先）；
+// 无覆盖条目时零新增规则。
+func TestSeatbeltDenyOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix path semantics")
+	}
+	argv := []string{"bash", "-c", "cat .env"}
+	override := []string{"/ws/**/.env"}
+	wantAllow := `(allow file-read* (regex ` + sbplString(globToSBPLRegex(override[0])) + `))`
+
+	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true,
+		deny: []string{"**/.env"}, override: override})
+	profile := ww[2]
+	denyIdx := strings.Index(profile, `(deny file-read* (regex "^(.*)?/\\.env$"))`)
+	allowIdx := strings.Index(profile, wantAllow)
+	if denyIdx < 0 || allowIdx < 0 || allowIdx < denyIdx {
+		t.Fatalf("override allow must come after deny (last-match-wins): %s", profile)
+	}
+	if !strings.Contains(profile, `(allow file-write* (regex `+sbplString(globToSBPLRegex(override[0]))+`))`) {
+		t.Fatalf("write-level profile missing override write allow: %s", profile)
+	}
+	// 覆盖不豁免 .git 写保护：保护规则在覆盖规则之后输出（SBPL 后匹配覆盖先匹配）。
+	gitIdx := strings.Index(profile, `(deny file-write* (subpath "/ws/.git"))`)
+	if gitIdx < 0 || gitIdx < allowIdx {
+		t.Fatalf(".git write protection must come after override allow: %s", profile)
+	}
+
+	ro := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true,
+		deny: []string{"**/.env"}, override: override})
+	if !strings.Contains(ro[2], wantAllow) {
+		t.Fatalf("read-only profile missing override read allow: %s", ro[2])
+	}
+	if strings.Contains(ro[2], `(allow file-write* (regex `+sbplString(globToSBPLRegex(override[0]))+`))`) {
+		t.Fatalf("read-only profile must not carry override write allow: %s", ro[2])
+	}
+
+	plain := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, deny: []string{"**/.env"}})
+	if strings.Contains(plain[2], wantAllow) {
+		t.Fatalf("profile without overrides must not emit allow rules: %s", plain[2])
+	}
+}
+
 // globToSBPLRegex 段语义转换（fsauth matchPattern 对齐）：** 跨段（(.*)?）、
 // * 段内（[^/]*）、? 单字符（[^/]）、字面转义；整串锚定 ^...$。
 func TestGlobToSBPLRegex(t *testing.T) {
@@ -284,7 +328,7 @@ func TestBwrapDenyArgs(t *testing.T) {
 		patterns = append(patterns, sockPath)
 	}
 
-	got := bwrapDenyArgs(patterns)
+	got := bwrapDenyArgs(patterns, nil)
 	for _, want := range []string{"--tmpfs", dir, "--ro-bind", "/dev/null", file,
 		"--tmpfs", sub, "--tmpfs", filepath.Join(home, ".testdeny"),
 		"--ro-bind", "/dev/null", filepath.Join(home, "testkey_x")} {
@@ -298,6 +342,57 @@ func TestBwrapDenyArgs(t *testing.T) {
 	// 不存在的路径不产出覆盖（不可读无害）
 	if contains(got, "/nonexistent-zzz") {
 		t.Fatalf("nonexistent deny target should be skipped: %v", got)
+	}
+}
+
+// TestBwrapDenyOverride：fs_allow 覆盖 deny 的 bwrap 落地（近似层）——被覆盖
+// 模式完整覆盖的覆盖挂载目标跳过覆盖（文件精确命中 / 目录仅 <target>/**），
+// 更窄的目录覆盖与 unix socket 保持覆盖（安全方向，与 seatbelt 不发 network allow 对齐）。
+func TestBwrapDenyOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bwrap is linux-only; the argv builder is cross-compiled")
+	}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "secret.dat")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// 文件精确命中 + 目录 <target>/** → 两者跳过覆盖（覆盖落地）；
+	// 目录 dir 自身无对应 dir/** 覆盖 → 保持覆盖。
+	got := bwrapDenyArgs([]string{file, sub, dir}, []string{file, sub + "/**"})
+	if contains(got, "--ro-bind", "/dev/null", file) {
+		t.Fatalf("overridden file must skip the /dev/null cover: %v", got)
+	}
+	if contains(got, "--tmpfs", sub) {
+		t.Fatalf("overridden dir (target/**) must skip the tmpfs cover: %v", got)
+	}
+	if !contains(got, "--tmpfs", dir) {
+		t.Fatalf("non-overridden dir must keep its tmpfs cover: %v", got)
+	}
+
+	// 更窄的目录覆盖（sub/x/**）无法用覆盖挂载表达 → 保持覆盖。
+	narrow := bwrapDenyArgs([]string{sub}, []string{sub + "/x/**"})
+	if !contains(narrow, "--tmpfs", sub) {
+		t.Fatalf("narrow dir override must keep the tmpfs cover: %v", narrow)
+	}
+
+	// unix socket：connect 隔离不在 allow 覆盖面内 → 恒保持覆盖。
+	if runtime.GOOS != "windows" {
+		sockPath := filepath.Join(dir, "denyprobe2.sock")
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			t.Fatalf("listen unix: %v", err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		sock := bwrapDenyArgs([]string{sockPath}, []string{sockPath})
+		if !contains(sock, "--ro-bind", "/dev/null", sockPath) {
+			t.Fatalf("socket override must keep the cover (connect stays denied): %v", sock)
+		}
 	}
 }
 

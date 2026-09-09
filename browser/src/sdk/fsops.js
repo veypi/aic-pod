@@ -7,6 +7,8 @@
 // 语义对齐 aic-pod/libs/vcore（§2.6 三端一致）：输出/attrs/错误文案与 Go 一致
 // （错误前缀 "fs {action}: ..."）。PageFS（OPFS）目录无元数据（size/mtime
 // 不可得）输出 0（Go UFS 端为真实数值；一致性向量运行器归一处理）。
+// ls 的 git 基本探测（§4.5，与 vcore gitRepoInfo 同源）：目录下 .git 为目录时
+// 输出 is_repo=true，并读 .git/HEAD 解析分支名（branch）；detached/读取失败为空。
 //
 // 适配器接口（PageFS / 测试 MemFS 均满足）：
 //   stat(p) → {path,dir,size?,mtime?} | null   list(p) → {items:[{name,path,dir,size?,mtime?}]}
@@ -92,7 +94,33 @@ async function absOf(fs, target, ctx) {
   return fs._path ? await fs._path(target, ctx) : target;
 }
 
-// ---- ls（对齐 vcore ls.go：JSON 树输出，depth>1 递归）----
+// ---- ls（对齐 vcore ls.go：JSON 树输出，depth>1 递归；含 .git 基本探测）----
+
+// gitRepoInfo 探测目录是否为 git 仓库根并解析当前分支（基本探测，无 git 语义；
+// 与 vcore gitRepoInfo / vigo httpfs isGitRepo 同判定）：.git 必须是目录
+// （worktree/submodule 的 .git 文件不识别）；分支读 .git/HEAD 的
+// "ref: refs/heads/<name>" 行，detached/读取失败/非 ref 形态 → 空。
+// 只读 .git/HEAD 这一个元数据文件，不执行任何 git 操作。
+async function gitRepoInfo(fs, ctx, dir) {
+  const base = String(dir || "").replace(/\/+$/, "");
+  let st = null;
+  try {
+    st = await fs.stat(`${base}/.git`, ctx);
+  } catch (e) {
+    st = null; // 适配器对不存在路径抛错（PageFS/MemFS 返回 null）
+  }
+  if (!st || !st.dir) return { isRepo: false, branch: "" };
+  let head = "";
+  try {
+    const raw = await fs.readRaw(`${base}/.git/HEAD`, ctx);
+    if (raw && typeof raw.content === "string") head = raw.content;
+  } catch (e) {
+    /* .git 存在但 HEAD 不可读：仓库成立、分支未知 */
+  }
+  const line = head.split("\n")[0].trim();
+  const prefix = "ref: refs/heads/";
+  return { isRepo: true, branch: line.startsWith(prefix) ? line.slice(prefix.length) : "" };
+}
 
 async function fsLs(fs, ctx, p) {
   let depth = LS_DEFAULT_DEPTH;
@@ -117,7 +145,15 @@ async function fsLs(fs, ctx, p) {
   const state = { count: 0, truncated: false };
   const items = await buildLsDir(fs, ctx, target, depth, all, state);
   sortLsEntries(items);
-  const out = { cwd: abs, dir: true, items, truncated: state.truncated };
+  // 顶层键序对齐 Go lsDirOut：branch? → cwd → dir → is_repo? → items → truncated
+  const repo = await gitRepoInfo(fs, ctx, target);
+  const out = {};
+  if (repo.branch) out.branch = repo.branch;
+  out.cwd = abs;
+  out.dir = true;
+  if (repo.isRepo) out.is_repo = true;
+  out.items = items;
+  out.truncated = state.truncated;
   return { content: JSON.stringify(out), attrs: { action: "ls", path: abs, rows: String(state.count), truncated: String(state.truncated) } };
 }
 
@@ -137,6 +173,11 @@ async function buildLsDir(fs, ctx, dir, remain, all, state) {
     const mt = e.mtime === undefined ? 0 : Math.floor(e.mtime / 1000);
     const ent = { name, dir: e.dir, size, mod_time: mt };
     state.count++;
+    if (e.dir) {
+      const repo = await gitRepoInfo(fs, ctx, `${dir.replace(/\/$/, "")}/${name}`);
+      if (repo.isRepo) ent.is_repo = true;
+      if (repo.branch) ent.branch = repo.branch;
+    }
     if (e.dir && remain > 1 && !LS_SKIP_DIRS.has(name)) {
       ent.items = await buildLsDir(fs, ctx, `${dir.replace(/\/$/, "")}/${name}`, remain - 1, all, state);
     }

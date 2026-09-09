@@ -34,6 +34,7 @@ aic-pod/
 ├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
 │                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
 │                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
+│                         #   壳 provider：browser-tool.mjs（共享插件 core + CDP）
 ├── browser/              # Chrome MV3 扩展（原生 JS ESM）：Service Worker 运行时、
 │                         #   browser 工具（平台自有指令集：tools/browser/core.js 平台无关核心
 │                         #   + chrome-adapter.js）、page_fs/fsops（与 aic 前端双端同步）

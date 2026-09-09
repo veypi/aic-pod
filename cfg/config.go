@@ -12,12 +12,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
 	"github.com/rs/zerolog"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
+	"gopkg.in/yaml.v3"
 )
 
 // DefaultHost 是默认平台地址。
@@ -34,7 +36,10 @@ var DeviceType = "cli"
 // vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：
 //
 //   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path/-code）与 env 键
-//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH/CODE）的来源，也是配置文件的键
+//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH/CODE）的来源，也是本地 API（get_config/
+//     set_config）的键
+//   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；历史落盘形态（结构体默认
+//     小写字段名，如 fsdeny/workdir）在 UnmarshalYAML 里兼容读入，Save 后自愈为新形态
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
 //
@@ -43,48 +48,95 @@ var DeviceType = "cli"
 //
 // 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
 type Options struct {
-	Host        string `json:"host" default:"https://ivec.ai" desc:"platform address (NATS endpoint inferred)"`
-	Key         string `json:"key" desc:"binding credential key (from platform device page)"`
-	WorkDir     string `json:"work_dir" desc:"working directory for exec (default: system temp dir)"`
-	ExecTimeout string `json:"exec_timeout" default:"30m" desc:"exec background timeout"`
+	Host        string `json:"host" yaml:"host" default:"https://ivec.ai" desc:"platform address (NATS endpoint inferred)"`
+	Key         string `json:"key" yaml:"key" desc:"binding credential key (from platform device page)"`
+	WorkDir     string `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: system temp dir)"`
+	ExecTimeout string `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
-	HomePath string `json:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
+	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
 	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
-	NoSandbox bool `json:"no_sandbox" desc:"disable process sandbox for exec calls (default: sandbox enabled)"`
+	NoSandbox bool `json:"no_sandbox" yaml:"no_sandbox" desc:"disable process sandbox for exec calls (default: sandbox enabled)"`
 	// Code 本地 API 校验码（x-aic-code 头，纯随机秘钥，与端口无关）：
 	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
 	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
-	Code string `json:"code" desc:"local api secret code (empty = random per process)"`
+	Code string `json:"code" yaml:"code" desc:"local api secret code (empty = random per process)"`
 
 	// 三域授权模型（fs/net/ssh × policy/deny/allow）。统一判定式：
-	// deny 命中 → 拒；policy=open → 放；policy=deny → 仅 allow 放行。
+	// deny 命中 → 拒，除非存在更具体的 allow（具体度优先，同精度 deny 胜）；
+	// policy=open → 未命中 deny 一律放；policy=deny → 仅 allow 放行。
 	//   - fs：读默认开（deny 除外）；写 policy=deny 时仅内建可写根（工作区/临时区/
-	//     会话区/缓存/公共区）+ fs_allow + 临时 grant，policy=open 时除 fs_deny 全可写
+	//     会话区/缓存/公共区）+ fs_allow + 临时 grant，policy=open 时除 fs_deny 全可写。
+	//     **fs_allow 显式条目压过 fs_deny**（allow 覆盖 deny）：裸路径覆盖其子树，
+	//     带通配条目按 glob 精确匹配（如 `**/.env` 只放 .env）；内建便利根与临时
+	//     grant 不压（它们是写便利不是信任声明——公共区的 browser cookie 库、
+	//     缓存/工作区里的 .env/*.pem/*.key 仍受保护）；deny 恒为读写双拒且不可审批
 	//   - net：exec 沙箱内子进程出站（vcore curl 经 shell curl 同样进沙箱）。
 	//     默认 open（2026-09-07 用户定：deny 默认会让 apt/wget/git clone 等工具链全断，
 	//     deny 作锁定模式选用——内核层只支持 localhost-only 粗粒度（darwin seatbelt
 	//     实测 host 必须为 */localhost；linux bwrap 全有/全无），deny 模式下非
 	//     loopback 白名单条目内核按 *:port 粗放行 + curl 虚拟指令工具层按 host:port
-	//     精判）；内建默认 allow localhost:*（net_deny localhost:* 可反杀——deny 恒优先）
+	//     精判）；内建默认 allow localhost:*（具体端口 net_deny 可反杀——具体度优先）
 	//   - ssh：ssh 一级工具目标闸（独立通道：ssh 免沙箱执行，net 规则不作用于它）
+	// 具体度：host 恒精确匹配（不支持通配主机），端口数字 > *；同精度 deny 胜。
 	// 内存即时生效（fsauth/netauth 每次判定/每次沙箱 Start 读当前值），
 	// set_config 与 grant <域> <目标> --permanent 动态改（落点即对应 allow 列表）。
-	FsPolicy  string   `json:"fs_policy" default:"deny" desc:"fs write default stance: deny (builtin roots + fs_allow only) | open (all except fs_deny)"`
-	FsDeny    []string `json:"fs_deny" desc:"denied path globs (no read/write; always wins over allow)"`
-	FsAllow   []string `json:"fs_allow" desc:"extra writable roots (level 2 writes)"`
-	NetPolicy string   `json:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
-	NetDeny   []string `json:"net_deny" desc:"denied outbound targets host:port (always wins over allow)"`
-	NetAllow  []string `json:"net_allow" desc:"allowed outbound targets host:port (builtin localhost:*; bare host = all ports)"`
-	SshPolicy string   `json:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
-	SshDeny   []string `json:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
-	SshAllow  []string `json:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
+	FsPolicy  string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write default stance: deny (builtin roots + fs_allow only) | open (all except fs_deny)"`
+	FsDeny    []string `json:"fs_deny" yaml:"fs_deny" desc:"denied path globs (no read/write, not approval-able; overridden by explicit fs_allow entries)"`
+	FsAllow   []string `json:"fs_allow" yaml:"fs_allow" desc:"explicit allow entries: writable + deny override — bare path covers its subtree, glob entry matches exactly (e.g. **/.env); overrides fs_deny"`
+	NetPolicy string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
+	NetDeny   []string `json:"net_deny" yaml:"net_deny" desc:"denied outbound targets host:port (always wins over allow)"`
+	NetAllow  []string `json:"net_allow" yaml:"net_allow" desc:"allowed outbound targets host:port (builtin localhost:*; bare host = all ports)"`
+	SshPolicy string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
+	SshDeny   []string `json:"ssh_deny" yaml:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
+	SshAllow  []string `json:"ssh_allow" yaml:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
 
 	// 进程级运行时态（unexported，不参与序列化/落盘）：
 	port     int  // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
 	codeAuto bool // Code 为本次进程随机生成（Save 时跳过落盘）
+}
+
+// UnmarshalYAML 接受两种键形态：yaml tag（snake_case，与 json tag/本地 API 同名，
+// 文档与 Save 落盘形态）与结构体默认键（小写字段名，2026-09-09 之前的落盘形态）。
+// 同名字段以 yaml tag 形态优先（显式键胜出）；两种形态都兼容意味着历史配置文件
+// （fspolicy/fsdeny/workdir 等）不会因格式切换而失效，Save 后自愈为新形态。
+// 坏文件/未知键由 yaml 层忽略（LoadFile 仅 warn，不阻断启动）。
+func (o *Options) UnmarshalYAML(value *yaml.Node) error {
+	type alias Options // 别名不继承本方法，避免递归
+	var a alias
+	if err := value.Decode(&a); err != nil {
+		return err
+	}
+	*o = Options(a)
+	var raw map[string]yaml.Node
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	rv := reflect.ValueOf(o).Elem()
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		tag := strings.Split(f.Tag.Get("yaml"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if _, ok := raw[tag]; ok {
+			continue // snake_case 形态已生效
+		}
+		node, ok := raw[strings.ToLower(f.Name)]
+		if !ok {
+			continue
+		}
+		if err := node.Decode(rv.Field(i).Addr().Interface()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Port 返回本地管理 API 监听端口（未启动为 0）。

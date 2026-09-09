@@ -58,7 +58,7 @@ func TestAllowedDenyMode(t *testing.T) {
 	if !p.Allowed("s1", "10.0.0.1", 22) {
 		t.Error("10.0.0.1:* should allow any port")
 	}
-	// deny 恒优先（即使 allow 也含）
+	// 具体度优先：allow 为 * 不压具体端口 deny（同精度/更宽 allow → deny 胜）
 	p.Configure("deny", []string{"example.com:443"}, []string{"example.com:*"})
 	if p.Allowed("s1", "example.com", 443) {
 		t.Error("deny should win over allow")
@@ -96,6 +96,68 @@ func TestBuiltinLoopback(t *testing.T) {
 	q.Configure("deny", nil, nil)
 	if q.Allowed("s1", "localhost", 22) {
 		t.Error("ssh instance should have no builtin loopback")
+	}
+}
+
+// TestAllowedSpecificity：具体度优先（端口数字 > *；同精度 deny 胜）——
+// 宽 deny 可被窄 allow 压过（端口级例外），窄 deny 仍可反杀宽 allow；
+// 临时 grant 不压 deny；Snapshot 剔除被压过的 deny 条目。
+func TestAllowedSpecificity(t *testing.T) {
+	has := func(list []Entry, host, port string) bool {
+		for _, e := range list {
+			if e.Host == host && e.Port == port {
+				return true
+			}
+		}
+		return false
+	}
+	p := New(NetKeys)
+	// 宽 deny + 窄 allow：例外端口放行，其余端口仍拒（deny/open 两模式同效）
+	p.Configure("deny", []string{"bad.com"}, []string{"bad.com:443"})
+	if !p.Allowed("s1", "bad.com", 443) {
+		t.Error("specific allow should override all-port deny")
+	}
+	if p.Allowed("s1", "bad.com", 80) {
+		t.Error("non-excepted port should stay denied")
+	}
+	p.Configure("open", []string{"bad.com"}, []string{"bad.com:443"})
+	if !p.Allowed("s1", "bad.com", 443) {
+		t.Error("open mode: specific allow should override all-port deny")
+	}
+	if p.Allowed("s1", "bad.com", 80) {
+		t.Error("open mode: non-excepted port should stay denied")
+	}
+	// 同精度 → deny 胜
+	p.Configure("deny", []string{"bad.com:443"}, []string{"bad.com:443"})
+	if p.Allowed("s1", "bad.com", 443) {
+		t.Error("tie must go to deny")
+	}
+	// 窄 deny + 宽 allow → deny 胜（反杀，同旧语义）
+	p.Configure("deny", []string{"bad.com:443"}, []string{"bad.com"})
+	if p.Allowed("s1", "bad.com", 443) {
+		t.Error("specific deny should beat all-port allow")
+	}
+	if !p.Allowed("s1", "bad.com", 80) {
+		t.Error("other ports of an all-port allow should stay allowed")
+	}
+	// 临时 grant 不压 deny
+	p.Configure("deny", []string{"bad.com"}, nil)
+	e, _ := ParseEntry("bad.com:443")
+	p.Grant("s1", e)
+	if p.Allowed("s1", "bad.com", 443) {
+		t.Error("temp grant must not override deny")
+	}
+	// Snapshot 剔除被窄 allow 压过的端口 * deny（具体 deny 与 cfg allow 保留）
+	p.Configure("deny", []string{"bad.com", "other.com:22"}, []string{"bad.com:443"})
+	deny, allow := p.Snapshot("s1")
+	if has(deny, "bad.com", "*") {
+		t.Error("narrowed all-port deny must be dropped from snapshot")
+	}
+	if !has(deny, "other.com", "22") {
+		t.Error("specific deny must stay in snapshot")
+	}
+	if !has(allow, "bad.com", "443") {
+		t.Error("cfg allow must stay in snapshot")
 	}
 }
 

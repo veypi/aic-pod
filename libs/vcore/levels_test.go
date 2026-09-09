@@ -52,3 +52,63 @@ func TestGitRequired(t *testing.T) {
 		}
 	}
 }
+
+// cua 子命令分级（§2.4）：读类 Read，窗口交互 Write，
+// --delivery foreground 提级 Danger；未知子命令 Danger 兜底。
+func TestCuaRequired(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want int
+	}{
+		{[]string{"apps"}, proto.LevelRead},
+		{[]string{"windows", "--pid", "1234"}, proto.LevelRead},
+		{[]string{"snapshot", "--pid", "1234", "--png"}, proto.LevelRead},
+		{[]string{"doctor"}, proto.LevelRead},
+		{[]string{"clipboard", "read"}, proto.LevelRead},
+		{[]string{"clipboard", "write", "hello"}, proto.LevelWrite},
+		{[]string{"launch", "--app", "Notes"}, proto.LevelWrite},
+		{[]string{"click", "--token", "t1"}, proto.LevelWrite},
+		{[]string{"click", "--x", "100", "--y", "200"}, proto.LevelWrite},
+		{[]string{"type", "--text", "hello"}, proto.LevelWrite},
+		{[]string{"hotkey", "cmd+c"}, proto.LevelWrite},
+		{[]string{"set-frame", "--pid", "1", "--window", "2", "--x", "0", "--y", "0", "--width", "800", "--height", "600"}, proto.LevelWrite},
+		// front：前台激活（窃取前台焦点）→ Danger
+		{[]string{"front", "--pid", "1234"}, proto.LevelDanger},
+		// 前台投递 → Danger（任意位置出现都提级）
+		{[]string{"click", "--token", "t1", "--delivery", "foreground"}, proto.LevelDanger},
+		// 未知子命令兜底
+		{[]string{"explode"}, proto.LevelDanger},
+		{[]string{}, proto.LevelDanger},
+		// flag 值不干扰子命令判定
+		{[]string{"--pid", "1234", "snapshot"}, proto.LevelRead},
+		// typed browser 家族
+		{[]string{"browser-state", "--pid", "1"}, proto.LevelRead},
+		{[]string{"navigate", "--url", "https://example.com"}, proto.LevelWrite},
+		{[]string{"bclick", "--ref", "e1"}, proto.LevelWrite},
+		{[]string{"btype", "--ref", "e1", "--text", "x"}, proto.LevelWrite},
+		{[]string{"bend"}, proto.LevelWrite},
+		// bprepare：隔离 profile=Write；绑定用户真实浏览器=Danger
+		{[]string{"bprepare", "--isolated"}, proto.LevelWrite},
+		{[]string{"bprepare", "--pid", "1", "--window", "2"}, proto.LevelDanger},
+		// run：JS 脚本执行恒 Danger（内容不可静态分级，脚本全文随审批可见）；
+		// --code 值不干扰子命令判定
+		{[]string{"run", "--code", "click(1,2)"}, proto.LevelDanger},
+		{[]string{"run", "--file", "/tmp/a.js"}, proto.LevelDanger},
+	}
+	for _, c := range cases {
+		if got := cuaRequired(c.argv); got != c.want {
+			t.Errorf("cuaRequired(%v) = %d, want %d", c.argv, got, c.want)
+		}
+	}
+}
+
+// cua 注册声明（§6.3）：provider 注册白名单依赖 vcore.Decl 有元数据。
+func TestCuaDecl(t *testing.T) {
+	d, ok := Decl("cua")
+	if !ok {
+		t.Fatal("Decl(cua) not found")
+	}
+	if d.RequiredLevel != proto.LevelWrite || d.Desc == "" || d.Help == "" {
+		t.Errorf("Decl(cua) = %+v", d)
+	}
+}

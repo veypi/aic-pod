@@ -48,8 +48,8 @@ type Client struct {
 	uid       string
 	credVer   uint64
 	replay    *replayCache
-	cmdsMu    sync.RWMutex                // cmds/cmdByName：provider 动态注册（register.go）并发保护
-	cmds      []proto.CommandDecl         // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
+	cmdsMu    sync.RWMutex                 // cmds/cmdByName：provider 动态注册（register.go）并发保护
+	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
 	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
 	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
 	policy    *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
@@ -85,15 +85,19 @@ func New(opts Options) *Client {
 	policy := fsauth.New()
 	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{
-		opts:     opts,
-		replay:   &replayCache{store: map[string]time.Time{}},
-		procs:    procs,
-		policy:   policy,
-		netPol:   netauth.New(netauth.NetKeys, "localhost:*"),
-		sshPol:   netauth.New(netauth.SshKeys),
-		logf:     logf,
+		opts:   opts,
+		replay: &replayCache{store: map[string]time.Time{}},
+		procs:  procs,
+		policy: policy,
+		netPol: netauth.New(netauth.NetKeys, "localhost:*"),
+		sshPol: netauth.New(netauth.SshKeys),
+		logf:   logf,
 	}
 	c.cmds, c.cmdByName = buildCommandTable()
+	// cua 探测声明成功 → 建立进程级运行时（MCP 子进程懒启动，cua.go）
+	if _, ok := c.cmdByName["cua"]; ok {
+		initCuaRuntime(c.logf)
+	}
 	return c
 }
 
@@ -269,6 +273,13 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 			add(d)
 		}
 	}
+	// cua 一级命令（§5.10）：cua-driver 二进制探测（CUA_DRIVER_PATH → PATH →
+	// 常见安装路径），探测到才声明（运行时单例在 New() 建立，需 logf）
+	if findCuaDriver() != "" {
+		if d, ok := vcore.Decl("cua"); ok {
+			add(d)
+		}
+	}
 	// 壳 provider（desktop 的 browser 等）：进程级注册表汇入（register.go）
 	for _, d := range providerDecls() {
 		add(d)
@@ -295,7 +306,7 @@ func (c *Client) buildCaps() *proto.Caps {
 		DeviceType:    c.opts.DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
-		FS:            proto.FSCaps{},                 // actions=null = 全部 8 个
+		FS:            proto.FSCaps{},                  // actions=null = 全部 8 个
 		Exec:          proto.ExecCaps{Commands: decls}, // 统一命令声明表
 	}
 }

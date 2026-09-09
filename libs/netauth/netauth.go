@@ -1,15 +1,18 @@
 // Package netauth 是 host:port 目标策略引擎（三域授权模型的 net/ssh 两域共用，
 // 一个包两个实例）：
 //
-//	判定式（与 fsauth 同形）：deny 命中 → 拒；policy=open → 放；
-//	policy=deny → 仅 allow 放行。
+//	判定式（与 fsauth 同形；具体度优先，2026-09-09）：
+//	deny 命中 → 拒，除非存在更具体的 allow（端口数字 > *；同精度 deny 胜）；
+//	policy=open → 未命中 deny 一律放；policy=deny → 仅 allow 放行。
+//	临时 grant 不压 deny（只有内建/cfg allow 参与具体度比较——grant 是 AI 经
+//	审批申请的，不应顺带解开显式 deny；需要例外时用户写 cfg）。
 //
 // 条目形态 host:port：host 小写/去尾点归一、IP 经 netip 归一（归一后字符串
-// 相等即匹配）；port 为数字或 *（全端口）；bare host 归一为 host:*。
-// user@ 前缀在解析时剥掉（用户是认证细节，不是网络目标）。
+// 相等即匹配，**不支持通配主机**）；port 为数字或 *（全端口）；bare host 归一为
+// host:*。user@ 前缀在解析时剥掉（用户是认证细节，不是网络目标）。
 //
 // net 实例带内建默认 allow localhost:*（loopback 放行——go test/httptest/
-// dev server 的命根子；net_deny localhost:* 可反杀，deny 恒优先）。
+// dev server 的命根子；net_deny localhost:<port> 具体端口仍可反杀——具体度优先）。
 // ssh 实例无内建条目。
 //
 // 配置源 = cfg 授权快照（net_policy/net_deny/net_allow、ssh_policy/ssh_deny/
@@ -197,8 +200,10 @@ func (p *Policy) DenyHit(e Entry) bool {
 	return false
 }
 
-// Allowed 判定目标连通性：deny 命中 → 拒；open → 放；deny → 仅 allow
-// （内建 + cfg + sid 临时 grant）放行。host 归一化与条目同口径。
+// Allowed 判定目标连通性：命中 deny → 拒，除非存在更具体的 allow（具体度优先：
+// 端口数字 > *；同精度 deny 胜）。policy=open 时未命中 deny 一律放；policy=deny
+// 时仅 allow（内建 + cfg + sid 临时 grant）放行。临时 grant 不压 deny（只有
+// 内建/cfg allow 参与具体度比较）。host 归一化与条目同口径。
 func (p *Policy) Allowed(sid, host string, port int) bool {
 	q := Entry{Host: host, Port: strconv.Itoa(port)}
 	if ip, err := netip.ParseAddr(strings.TrimSuffix(strings.ToLower(host), ".")); err == nil {
@@ -208,23 +213,35 @@ func (p *Policy) Allowed(sid, host string, port int) bool {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	denyHit, denySpecific := false, false
 	for _, d := range p.deny {
 		if entryMatch(d, q) {
-			return false
+			denyHit = true
+			if d.Port != "*" {
+				denySpecific = true
+			}
 		}
+	}
+	cfgHit, cfgSpecific := false, false
+	for _, list := range [][]Entry{p.builtin, p.allow} {
+		for _, e := range list {
+			if entryMatch(e, q) {
+				cfgHit = true
+				if e.Port != "*" {
+					cfgSpecific = true
+				}
+			}
+		}
+	}
+	if denyHit {
+		// 具体度优先：只有更具体的 allow（具体端口）能压过端口 * 的 deny。
+		return cfgHit && cfgSpecific && !denySpecific
 	}
 	if p.mode == cfg.PolicyOpen {
 		return true
 	}
-	for _, e := range p.builtin {
-		if entryMatch(e, q) {
-			return true
-		}
-	}
-	for _, e := range p.allow {
-		if entryMatch(e, q) {
-			return true
-		}
+	if cfgHit {
+		return true
 	}
 	for _, e := range p.grants[sid] {
 		if entryMatch(e, q) {
@@ -245,14 +262,36 @@ func entryMatch(r, q Entry) bool {
 
 // Snapshot 返回 sid 的（deny, allow）条目快照——沙箱 profile 生成用
 // （allow = 内建 + cfg + sid 临时 grant；open 模式下沙箱层直接放行不读本快照）。
+// deny 剔除被同 host 具体端口 allow 压过的端口 * 条目（具体度优先；同精度 deny
+// 胜）——deny 模式下未放行端口由基线全拒兜底，剔除不降低隔离；grant 不参与
+// 剔除（不压 deny，与 Allowed 同口径）。
 func (p *Policy) Snapshot(sid string) (deny, allow []Entry) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	deny = append(deny, p.deny...)
 	allow = append(allow, p.builtin...)
 	allow = append(allow, p.allow...)
 	allow = append(allow, p.grants[sid]...)
+	for _, d := range p.deny {
+		if portNarrowedByAllow(d, p.builtin) || portNarrowedByAllow(d, p.allow) {
+			continue
+		}
+		deny = append(deny, d)
+	}
 	return deny, allow
+}
+
+// portNarrowedByAllow 报告端口 * 的 deny 条目是否被同 host 的具体端口 allow
+// 压过（具体度优先）。
+func portNarrowedByAllow(d Entry, allow []Entry) bool {
+	if d.Port != "*" {
+		return false
+	}
+	for _, a := range allow {
+		if a.Host == d.Host && a.Port != "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // List 返回 sid 视角的当前 allow 清单（规范形态字符串，grant 响应回显用）。

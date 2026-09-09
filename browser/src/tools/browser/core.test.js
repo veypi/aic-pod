@@ -280,9 +280,27 @@ test("screenshot 走 CDP 并落 ctx.fs", async () => {
   const r = await h(myCtx, { argv: ["screenshot"] });
   assert.equal(r.attrs.action, "screenshot");
   assert.match(r.attrs.path, /^\/screenshot\/screenshot-.*\.jpg$/);
+  assert.match(r.attrs.image_data, /^data:image\/jpeg;base64,/);
   assert.equal(puts.length, 1);
   assert.equal(puts[0].size, 9); // "fake-jpeg"
   assert.equal(ad._state.calls.cdpSend.at(-1).method, "Page.captureScreenshot");
+});
+
+test("screenshot --full 传 captureBeyondViewport/fromSurface", async () => {
+  const myCtx = {
+    ...ctx,
+    fs: { put: async (p, blob) => { return { path: p, bytes: blob.size }; } },
+  };
+  const ad = makeAdapter();
+  const h = createBrowserHandler(ad);
+  await h(ctx, { argv: ["open", "https://example.com"] });
+  const r = await h(myCtx, { argv: ["screenshot", "--full"] });
+  assert.equal(r.attrs.action, "screenshot");
+  assert.match(r.attrs.image_data, /^data:image\/jpeg;base64,/);
+  const send = ad._state.calls.cdpSend.at(-1);
+  assert.equal(send.method, "Page.captureScreenshot");
+  assert.equal(send.params.captureBeyondViewport, true);
+  assert.equal(send.params.fromSurface, true);
 });
 
 test("screenshot 无 fs 后端报错", async () => {

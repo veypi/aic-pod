@@ -304,3 +304,46 @@ func TestLocalAPIGetLog(t *testing.T) {
 		t.Fatalf("get_log not a JSON object: %q", body)
 	}
 }
+
+// fs_allow（显式条目 = 写白名单根 + deny 覆盖）：裸路径与 glob 条目均落盘并经
+// get_config 回读（指针字段 nil = 不改，空数组 = 清空）。
+func TestLocalAPISetConfigFsAllow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	initTestAPI(t)
+	status, resp := req(t, "POST", "/api/set_config", cfg.Global.Code, `{"fs_allow":["/ws","/ws/**/.env"]}`)
+	if status != http.StatusOK {
+		t.Fatalf("set fs_allow = %d %q", status, resp)
+	}
+	o, err := cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.FsAllow) != 2 || o.FsAllow[0] != "/ws" || o.FsAllow[1] != "/ws/**/.env" {
+		t.Fatalf("fs_allow not saved: %+v", o.FsAllow)
+	}
+	status, body := req(t, "GET", "/api/get_config", cfg.Global.Code, "")
+	if status != http.StatusOK {
+		t.Fatalf("get_config = %d", status)
+	}
+	var v struct {
+		FsAllow []string `json:"fs_allow"`
+	}
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.FsAllow) != 2 {
+		t.Fatalf("get_config fs_allow = %v", v.FsAllow)
+	}
+	// 空数组 = 清空
+	status, resp = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"fs_allow":[]}`)
+	if status != http.StatusOK {
+		t.Fatalf("clear fs_allow = %d %q", status, resp)
+	}
+	o, err = cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.FsAllow) != 0 {
+		t.Fatalf("fs_allow not cleared: %+v", o.FsAllow)
+	}
+}

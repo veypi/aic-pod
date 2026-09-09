@@ -51,6 +51,27 @@ func setDeny(t *testing.T, p *Policy, extra ...string) {
 	p.deny = compileDeny(append(defaultDenyPaths(), extra...))
 }
 
+// setAllow 重设 fs_allow 显式条目（包内测试 helper；同 rebuildLocked 的 splitAllow 语义：
+// 裸路径 → 写白名单根，通配 → 精确 glob）。
+func setAllow(t *testing.T, p *Policy, entries ...string) {
+	t.Helper()
+	roots, globs := splitAllow(entries)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.extraWrite = roots
+	p.allowGlobs = globs
+	p.rebuildBaseRootsLocked()
+}
+
+// addAllowRoot 追加单个裸路径 fs_allow 条目（包内测试 helper；同 rebuildLocked 语义）。
+func addAllowRoot(t *testing.T, p *Policy, root string) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.extraWrite = append(p.extraWrite, canonical(root))
+	p.rebuildBaseRootsLocked()
+}
+
 // TestDenyPatterns：预展开 deny 模式快照（exec 沙箱读拒绝单源）——
 // 默认表含 `.ssh` 展开到 home 绝对路径（变量已展开、字面前缀 canonical），
 // 且与断言相同为同一份列表（快照语义，调用方修改不影响 Policy）。
@@ -102,6 +123,92 @@ func TestDecideGrading(t *testing.T) {
 	assertGrades(t, p, base+"/secrets/key.pem", 0, 0)
 	assertGrades(t, p, base+"/secrets", 0, 0)
 	assertGrades(t, p, base+"/secrets-sub/x", 1, 3) // 前缀不同名不命中
+}
+
+// TestDecideAllowOverride：allow 覆盖 deny（两键语义，2026-09-09）——显式 fs_allow
+// 条目压过 deny：裸路径覆盖其子树、通配条目精确匹配（并授予写 2）；内建便利根
+// （工作区/临时区/公共区/缓存/会话区）与临时 grant 不压（安全默认保持权威）。
+func TestDecideAllowOverride(t *testing.T) {
+	base := mkBase(t)
+	ws := filepath.Join(base, "ws")
+	proj := filepath.Join(ws, "proj")
+	other := filepath.Join(base, "other")
+	allowed := filepath.Join(base, "allowed")
+	granted := filepath.Join(base, "granted")
+	mkdir(t, proj, other, allowed, granted)
+	p := newTestPolicy(t, ws)
+	setDeny(t, p, "**/.env", "**/*.pem")
+
+	// 触发点：工作区内的 .env 无差别拒（内建根不压 deny）
+	assertGrades(t, p, proj+"/.env", 0, 0)
+	assertGrades(t, p, proj+"/cert.pem", 0, 0)
+	// 内建便利根同样不压：公共区 / 临时区 / 会话区
+	assertGrades(t, p, p.publicDir+"/.env", 0, 0)
+	assertGrades(t, p, os.TempDir()+"/.env", 0, 0)
+	assertGradesSid(t, p, "s1", p.sessionDir+"/s1/.env", 0, 0)
+	// 临时 grant 不压 deny（grant 是 AI 经审批申请的，不构成信任声明）
+	p.Grant("s1", granted)
+	assertGradesSid(t, p, "s1", granted+"/.env", 0, 0)
+
+	// 通配条目：精确覆盖（只放 .env，同目录 *.pem 仍拒），并授予写 2
+	setAllow(t, p, proj+"/**/.env")
+	assertGrades(t, p, proj+"/.env", 1, 2)
+	assertGrades(t, p, proj+"/sub/.env", 1, 2)
+	assertGrades(t, p, proj+"/cert.pem", 0, 0) // 未覆盖的 deny 条目照旧
+	assertGrades(t, p, other+"/.env", 0, 0)    // 作用域外照旧
+	assertGrades(t, p, ws+"/.env", 0, 0)       // 兄弟目录不在 glob 内
+	assertGrades(t, p, proj+"/main.go", 1, 2)
+
+	// 裸路径条目：覆盖其子树（.env 与 *.pem 都放），同时是写白名单根
+	setAllow(t, p, allowed)
+	assertGrades(t, p, allowed+"/.env", 1, 2)
+	assertGrades(t, p, allowed+"/sub/cert.pem", 1, 2)
+	assertGrades(t, p, proj+"/.env", 0, 0)
+
+	// 多条目：裸路径 + 通配并存；展开快照只含显式条目
+	setAllow(t, p, allowed, proj+"/**/.env")
+	assertGrades(t, p, allowed+"/.env", 1, 2)
+	assertGrades(t, p, proj+"/.env", 1, 2)
+	assertGrades(t, p, proj+"/cert.pem", 0, 0)
+	pats := p.DenyOverridePatterns()
+	if len(pats) != 2 {
+		t.Fatalf("DenyOverridePatterns = %v, want 2 entries (explicit only)", pats)
+	}
+	wantRoot := canonical(allowed) + "/**"
+	wantGlob := canonicalPattern(proj + "/**/.env")
+	for _, want := range []string{wantRoot, wantGlob} {
+		found := false
+		for _, pat := range pats {
+			if pat == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("DenyOverridePatterns missing %q: %v", want, pats)
+		}
+	}
+
+	// DenyHit 仍是原始表（grant fs 校验语义：deny 内目标不因 allow 而可 grant）
+	if !p.DenyHit(proj + "/.env") {
+		t.Error("DenyHit must stay raw (no allow override) for grant validation")
+	}
+
+	// 空/未定义变量条目整条跳过
+	setAllow(t, p, "", "  ", "$UNDEFINED_VAR_XYZ/x")
+	if got := p.DenyOverridePatterns(); got != nil {
+		t.Errorf("invalid entries must be skipped, got %v", got)
+	}
+
+	// 根为 "/" 的边界：拼接不得产生 "//"（否则模式整体失配）
+	p2 := newTestPolicy(t, "")
+	setDeny(t, p2, "**/.env")
+	setAllow(t, p2, "/")
+	assertGrades(t, p2, "/etc/proj/.env", 1, 2)
+	for _, pat := range p2.DenyOverridePatterns() {
+		if strings.Contains(pat, "//") {
+			t.Errorf("DenyOverridePatterns must not contain double slash: %q", pat)
+		}
+	}
 }
 
 // TestDenyDefaults：平台初始表字面形态自洽（逐条遍历本平台生效表：

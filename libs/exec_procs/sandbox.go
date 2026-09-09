@@ -14,6 +14,9 @@
 // 文件操作全被拒而 curl --unix-socket 直通）、linux bwrap 覆盖挂载（文件/
 // socket 读写双拒 / 目录读黑洞＋写入不落地）——fs 与 exec 共用同一份 deny 名单；
 // windows 侧不实现（restricting 集初始化依赖，见 sandbox_windows.go 注释）。
+// allow 覆盖 deny（2026-09-09）：显式 fs_allow 条目经
+// StartOptions.DenyOverride 进入 profile 压过 deny（darwin 后置 allow 规则 /
+// linux 跳过被完整覆盖的覆盖挂载目标）——fs 判定与沙箱同一展开（两侧同源）。
 //
 // 内部指令（fs/curl/json 等）走 vcore VFS + Roots/ProtectRoots 路径收容，
 // 不经过本包（文件效应由路径级权限控制）。
@@ -138,6 +141,7 @@ type confineSpec struct {
 	extra    []string        // 追加可写根（nil = 仅基础白名单）
 	argv     []string        // 被包装命令
 	deny     []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
+	override []string        // deny 覆盖展开模式（fsauth.DenyOverridePatterns 快照：fs_allow 裸路径→root/**、通配原样）
 	fsOpen   bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
 	netOpen  bool            // net_policy=open：不加网络规则
 	netDeny  []netauth.Entry // net_deny 快照（恒优先于 allow）
@@ -252,7 +256,7 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string)
 	}
 	// deny 隔离覆盖（§5.10）：后挂载优先（bwrap 后绑定覆盖前绑定），
 	// 追加在全部 bind 之后；read-only 与 workspace-write 同隔离。
-	args = append(args, bwrapDenyArgs(spec.deny)...)
+	args = append(args, bwrapDenyArgs(spec.deny, spec.override)...)
 	return append(append(args, "--"), spec.argv...)
 }
 
@@ -270,17 +274,59 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string)
 //   - 无法实例化（中间 **、含 [ 字符类语法）→ 跳过：exec 通道无兜底（fsauth
 //     判定层仅约束 fs 工具/VFS，拦不住进程内 cat）；bwrap deny 隔离是近似层，
 //     完整 glob 语义仅 seatbelt。
-func bwrapDenyArgs(deny []string) []string {
+//
+// deny 覆盖（fs_allow，2026-09-09）：覆盖挂载目标被 allow 条目完整覆盖时跳过
+// 该目标（见 coveredByOverride）——更窄的覆盖无法用覆盖挂载表达（tmpfs 已遮蔽
+// 原内容），保持覆盖（近似层，与 seatbelt 的精确 allow 规则有已知差异）。
+func bwrapDenyArgs(deny, override []string) []string {
 	var args []string
 	for _, pat := range deny {
 		if pat == "" {
 			continue
 		}
 		for _, p := range denyCoverTargets(pat) {
+			if coveredByOverride(p, override) {
+				continue
+			}
 			args = append(args, overlayArgs(p)...)
 		}
 	}
 	return args
+}
+
+// coveredByOverride 判定 deny 覆盖挂载目标是否被 allow 条目完整覆盖（是则跳过
+// 覆盖，allow 覆盖 deny 在 linux 落地）：
+//   - 普通文件：allow 模式命中该文件本身即整体覆盖（覆盖粒度 = 单文件）；
+//   - 目录：仅当 allow 模式恰为 <target>/**（整棵子树）才跳过——更窄的覆盖无法用
+//     覆盖挂载表达（tmpfs 已遮蔽原内容），保持覆盖（安全方向）；
+//   - unix socket / 设备：恒不跳过——connect 隔离不在 allow 覆盖面内（对齐
+//     seatbelt 不发 network allow 规则，allow 只放行文件读写）。
+func coveredByOverride(target string, override []string) bool {
+	if target == "" || len(override) == 0 {
+		return false
+	}
+	st, err := os.Stat(target)
+	if err != nil {
+		return false
+	}
+	switch {
+	case st.IsDir():
+		for _, e := range override {
+			if e == target+"/**" {
+				return true
+			}
+		}
+		return false
+	case st.Mode().IsRegular():
+		for _, e := range override {
+			if fsauth.MatchPattern(e, target) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // overlayArgs 返回单目标路径的覆盖挂载参数（目录 tmpfs / 普通文件与 unix
@@ -428,6 +474,15 @@ const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 // 模式自身是符号链接时（/var/run/docker.sock → 厂商 socket）两形态都须命中。
 // SBPL 无 glob filter，regex 为 POSIX ERE 且对完整路径字符串匹配（子串命中，锚定 ^ 有效）；
 // seatbelt 判定前做路径规范化（大小写变体/.SSH、symlink 跳转均被拒，实测）。字面路径直接 (regex) 亦可用，但统一走转换器保持单一路径。
+//
+// allow 覆盖 deny（fs_allow，2026-09-09）：deny 规则之后逐条追加
+// (allow file-read* (regex ...))，写级（level>=2）再追加 (allow file-write* ...)
+// ——SBPL 后匹配覆盖先匹配，allow 因此压过 deny（与 deny 压过写白名单同一机制）。
+// 覆盖模式已由 fsauth.DenyOverridePatterns 展开为绝对 glob（裸路径条目 → <root>/**，
+// 通配条目原样），作用域由展开本身保证（无需 SBPL 侧过滤）。不发 network-outbound
+// allow 规则：网络段优先级不随规则序（见 seatbeltNetForms 实测纪律），socket
+// connect 保持 deny（allow 只放行文件读写；bwrap 侧 socket 同理不跳过覆盖）。
+// 覆盖规则在 .git 写保护之前输出——.git 保护恒优先，不被 allow 豁免。
 func seatbeltArgs(spec confineSpec) []string {
 	forms := []string{
 		"(version 1)",
@@ -454,6 +509,17 @@ func seatbeltArgs(spec confineSpec) []string {
 		forms = append(forms, "(deny file-read* (regex "+re+"))")
 		forms = append(forms, "(deny file-write* (regex "+re+"))")
 		forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
+	}
+	// allow 覆盖 deny：deny 之后追加放行规则（SBPL 后匹配覆盖先匹配）。
+	for _, pat := range spec.override {
+		if pat == "" {
+			continue
+		}
+		re := sbplString(globToSBPLRegex(pat))
+		forms = append(forms, "(allow file-read* (regex "+re+"))")
+		if spec.level >= proto.LevelWrite {
+			forms = append(forms, "(allow file-write* (regex "+re+"))")
+		}
 	}
 	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {

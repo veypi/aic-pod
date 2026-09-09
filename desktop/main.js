@@ -163,7 +163,9 @@ function spawnBackend() {
     const portFile = path.join(app.getPath('userData'), 'aic-port.json')
     try { fs.rmSync(portFile, { force: true }) } catch (e) { /* 忽略 */ }
     backend = spawn(backendBin, [], {
-      env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop' },
+      // AIC_NODE_BIN：Electron 二进位路径，后端 cua run 以 ELECTRON_RUN_AS_NODE=1
+      // 将其当纯 node 运行时跑脚本（三平台 Electron 包自带，零新增依赖）。
+      env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop', AIC_NODE_BIN: process.execPath },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
@@ -218,8 +220,7 @@ async function probeRoot(url) {
 // browser-tool.js 是 ESM（core 同源 ESM），从 CJS 主进程动态 import 装载。
 // 注册成功后 Go 后端把 browser 加入 caps 并重发；exec browser 请求经
 // 127.0.0.1 TCP 换行 JSON 通道转发回本进程执行（Go libs/host/register.go）。
-async function setupBrowserProvider() {
-  const maxAttempts = 3
+async function setupBrowserProvider() {  const maxAttempts = 3
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const { startBrowserServer } = await import('./browser-tool.mjs')

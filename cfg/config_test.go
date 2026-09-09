@@ -3,6 +3,7 @@ package cfg
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -170,6 +171,69 @@ func TestNormalizedHomePath(t *testing.T) {
 		if got := o.NormalizedHomePath(); got != c.want {
 			t.Errorf("NormalizedHomePath(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// 配置文件键形态：yaml tag（snake_case，与本地 API/文档同名）为主形态，历史
+// 小写字段名（fspolicy/workdir/fsdeny…）兼容读入；两形态同现时 snake_case 胜出；
+// Save 落盘为 snake_case（旧文件自愈）。
+func TestConfigYAMLKeyForms(t *testing.T) {
+	isolateConfigDir(t)
+	p, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// snake_case 形态（文档/本地 API 形态）
+	body := "host: http://localhost:4000\nwork_dir: /ws\nfs_policy: open\nfs_allow:\n  - /ws/**/.env\nno_sandbox: true\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Host != "http://localhost:4000" || o.WorkDir != "/ws" || o.FsPolicy != PolicyOpen || !o.NoSandbox ||
+		len(o.FsAllow) != 1 || o.FsAllow[0] != "/ws/**/.env" {
+		t.Fatalf("snake_case config not parsed: %+v", *o)
+	}
+	// 历史小写字段名形态（兼容读入）
+	legacy := "host: http://x:1\nworkdir: /legacy\nexectimeout: 9m\nfspolicy: deny\nfsallow:\n  - /legacy/allow\nfsdeny:\n  - '**/*.pem'\n"
+	if err := os.WriteFile(p, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Host != "http://x:1" || o.WorkDir != "/legacy" || o.ExecTimeout != "9m" || o.FsPolicy != PolicyDeny ||
+		len(o.FsAllow) != 1 || o.FsAllow[0] != "/legacy/allow" || len(o.FsDeny) != 1 || o.FsDeny[0] != "**/*.pem" {
+		t.Fatalf("legacy lowercased config not parsed: %+v", *o)
+	}
+	// 两形态同现：yaml tag 形态胜出
+	both := "host: http://x:1\nwork_dir: /snake\nworkdir: /legacy\n"
+	if err := os.WriteFile(p, []byte(both), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.WorkDir != "/snake" {
+		t.Fatalf("snake_case must win over legacy key: %q", o.WorkDir)
+	}
+	// Save 落盘为 snake_case（自愈）
+	if err := Save(o); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "work_dir: /snake") || strings.Contains(string(b), "workdir:") {
+		t.Fatalf("Save must write snake_case keys:\n%s", b)
 	}
 }
 

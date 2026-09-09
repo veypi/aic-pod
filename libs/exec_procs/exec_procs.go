@@ -106,6 +106,13 @@ type StartOptions struct {
 	// Policy.DenyPatterns()（快照，每次 Start 读当次值）。
 	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
 	DenyPaths []string
+	// DenyOverride 是压过 deny 的展开模式（fs_allow 显式条目）：来源 =
+	// Policy.DenyOverridePatterns()（裸路径条目 → <root>/**，通配条目原样）。
+	// deny 隔离的放行面——darwin 在 deny 规则之后追加 file-read*/file-write*
+	// allow（SBPL 后匹配覆盖先匹配；写级才发 write 规则）；linux 跳过被覆盖
+	// 完整覆盖的覆盖挂载目标（近似层，见 bwrapDenyArgs）。socket connect 不落地
+	// （网络段优先级不随规则序，connect 保持 deny）。nil = 无覆盖。
+	DenyOverride []string
 	// FsOpen 是 fs_policy=open 快照：写除 deny 全放（darwin allow file-write*
 	// 打底 / bwrap 整机 rw bind），deny 覆盖仍生效。
 	FsOpen bool
@@ -180,7 +187,7 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		var err error
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
-			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
+			deny: opts.DenyPaths, override: opts.DenyOverride, fsOpen: opts.FsOpen,
 			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})
 		if err != nil {

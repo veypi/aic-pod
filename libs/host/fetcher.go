@@ -84,13 +84,14 @@ func (f shellCurlFetcher) Fetch(ctx context.Context, req vcore.HTTPReq) (io.Read
 
 	netDeny, netAllow := f.c.netPol.Snapshot(f.sid)
 	sp, err := f.c.procs.Spawn(ctx, exec_procs.StartOptions{
-		Command:   "curl " + req.URL,
-		Exec:      argv,
-		Level:     proto.LevelRead, // curl 进程自身零写需求；落盘由 vcore VFS 承担
-		DenyPaths: f.c.policy.DenyPatterns(),
-		NetOpen:   f.c.netPol.OpenMode(),
-		NetDeny:   netDeny,
-		NetAllow:  netAllow,
+		Command:      "curl " + req.URL,
+		Exec:         argv,
+		Level:        proto.LevelRead, // curl 进程自身零写需求；落盘由 vcore VFS 承担
+		DenyPaths:    f.c.policy.DenyPatterns(),
+		DenyOverride: f.c.policy.DenyOverridePatterns(), // allow 覆盖 deny（单源：与 fs 判定同展开）
+		NetOpen:      f.c.netPol.OpenMode(),
+		NetDeny:      netDeny,
+		NetAllow:     netAllow,
 	})
 	if err != nil {
 		return nil, -1, err
