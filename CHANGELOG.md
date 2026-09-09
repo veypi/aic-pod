@@ -5,6 +5,16 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## v0.6.1 — 2026-09-09
+
+### 修复
+
+- **Windows desktop 启动 ENOENT**：`Makefile` 的 `backend-bin` 用显式 `-o .../aic-backend`
+  构建，而 go build 显式命名不会自动补 `.exe`（仅默认命名会）——Windows 包里是
+  `resources/backend/aic-backend`，`main.js` 却固定 spawn `aic-backend.exe`，启动即
+  `spawn ... ENOENT`（自 v0.5.4 Electron 迁移起存在）。现按宿主平台补扩展名，并新增
+  Windows 打包后断言；顺带清理跨平台残留二进制（旧 Windows exe 曾被塞进 mac 包）。
+
 ## v0.6.0 — 2026-09-09
 
 ### 破坏性变更
