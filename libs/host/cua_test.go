@@ -34,11 +34,21 @@ func TestCuaMcpArgs(t *testing.T) {
 	}
 }
 
-// daemon 自动拉起参数（纯函数）：open -n -g -a CuaDriver --args serve --grant existing-profile。
+// daemon 自动拉起参数（纯函数）：空 appPath = 用户自装形态（-a CuaDriver）；
+// 非空 = 桌面端内置 app 路径直启（open -n -g <app> --args serve --grant ...）。
 func TestCuaDaemonLaunchArgs(t *testing.T) {
-	want := []string{"-n", "-g", "-a", "CuaDriver", "--args", "serve", "--grant", "existing-profile"}
-	if got := cuaDaemonLaunchArgs(); !reflect.DeepEqual(got, want) {
-		t.Errorf("cuaDaemonLaunchArgs() = %v, want %v", got, want)
+	cases := []struct {
+		name    string
+		appPath string
+		want    []string
+	}{
+		{"用户自装（-a CuaDriver）", "", []string{"-n", "-g", "-a", "CuaDriver", "--args", "serve", "--grant", "existing-profile"}},
+		{"内置 app 路径直启", "/app/Resources/cua/darwin/CuaDriver.app", []string{"-n", "-g", "/app/Resources/cua/darwin/CuaDriver.app", "--args", "serve", "--grant", "existing-profile"}},
+	}
+	for _, c := range cases {
+		if got := cuaDaemonLaunchArgs(c.appPath); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: cuaDaemonLaunchArgs(%q) = %v, want %v", c.name, c.appPath, got, c.want)
+		}
 	}
 }
 
@@ -96,6 +106,19 @@ func TestMapCuaArgv(t *testing.T) {
 			args: map[string]any{"pid": 1, "window_id": 2, "x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0}}},
 		{[]string{"clipboard", "read"}, want{tool: "clipboard_read", args: map[string]any{"include_text": true}}},
 		{[]string{"clipboard", "write", "hello"}, want{tool: "clipboard_write", args: map[string]any{"text": "hello"}}},
+		// 未知 flag 透传：kebab→snake，值类型自动推断（int/float/bool/string）
+		{[]string{"click", "--x", "10", "--y", "20", "--count", "2"}, want{
+			tool: "click", args: map[string]any{"x": 10.0, "y": 20.0, "count": 2}}},
+		{[]string{"click", "--x", "10", "--y", "20", "--debug-image-out", "/tmp/d.png"}, want{
+			tool: "click", args: map[string]any{"x": 10.0, "y": 20.0, "debug_image_out": "/tmp/d.png"}}},
+		{[]string{"click", "--x", "10", "--y", "20", "--from-zoom"}, want{
+			tool: "click", args: map[string]any{"x": 10.0, "y": 20.0, "from_zoom": true}}},
+		{[]string{"click", "--x", "10", "--y", "20", "--foo", "1.5"}, want{
+			tool: "click", args: map[string]any{"x": 10.0, "y": 20.0, "foo": 1.5}}},
+		{[]string{"move", "--x", "10", "--y", "20", "--scope", "desktop"}, want{
+			tool: "move_cursor", args: map[string]any{"x": 10.0, "y": 20.0, "scope": "desktop"}}},
+		// run 为本地特化（tool 空），未知 flag 不透传
+		{[]string{"run", "--code", "return 1", "--bogus", "1"}, want{}},
 		// launch --url：多 URL 全量收集
 		{[]string{"launch", "--app", "Google Chrome", "--url", "https://a.com", "--url", "https://b.com"}, want{
 			tool: "launch_app", args: map[string]any{"name": "Google Chrome", "urls": []string{"https://a.com", "https://b.com"}}}},
@@ -181,10 +204,9 @@ func cuaArgsEqual(a, b any) bool {
 
 func TestMapCuaArgvErrors(t *testing.T) {
 	cases := [][]string{
-		{"explode"},                    // 未知子命令
-		{},                             // 空
-		{"click", "--bogus", "1"},      // 未知 flag
-		{"click", "--x", "abc"},        // 非数字
+		{"explode"},               // 未知子命令
+		{},                        // 空
+		{"click", "--x", "abc"}, // 非数字
 		{"snapshot", "--pid", "1234"},  // 缺 --window
 		{"drag", "--x1", "1"},          // 缺必填
 		{"set-value", "--value", "on"}, // 缺 --token
@@ -201,8 +223,7 @@ func TestMapCuaArgvErrors(t *testing.T) {
 		{"btype", "--text", "x"},       // 缺 --ref
 		{"btype", "--ref", "e1"},       // 缺 --text
 		{"bprepare"},                   // existing_profile 缺 --pid
-		{"bprepare", "--pid", "1"},     // existing_profile 缺 --window
-		{"snapshot", "--pid", "1", "--window", "2", "--img"}, // --img 已移除（并入 --png）
+		{"bprepare", "--pid", "1"}, // existing_profile 缺 --window
 		{"run"}, // 缺 --code/--file
 		{"run", "--code", "return 1", "--file", "/tmp/x.js"}, // 二选一互斥
 	}

@@ -112,19 +112,30 @@ const bind = { pid: 0, window: 0 }
 
 function targetArgs(extra) {
   const a = Object.assign({}, extra)
+  // scope=desktop 走真实桌面指针路由，驱动禁止与 pid/window 同用（click /
+  // move_cursor schema）——此时不注入绑定目标。
+  if (a.scope === 'desktop') return a
   if (bind.pid && a.pid === undefined) a.pid = bind.pid
   if (bind.window && a.window_id === undefined) a.window_id = bind.window
   return a
 }
 
-// optArgs 合并动作选项：{delivery:'foreground'|'background'}。默认不传 = 驱动
-// 后台精确路由（AX 语义 → browser/CDP → 窗口本地指针 → PID 键盘 → 拒绝）；
-// 只有该路由不可用且用户显式授权时才传 foreground（真实全局事件，IME 穿透，
-// 但会窃取前台焦点——前提是目标 app 已前台，先 cua.front(pid)）。
-// scope 已移除：scope:'desktop' 会动用户物理指针，自动化无正当用途。
+// optArgs 合并动作选项：{delivery:'foreground'|'background', scope:'desktop'|'window',
+// 其余键原样透传驱动参数（count/debug_image_out/from_zoom/action…）}。
+// 默认不传 = 驱动后台精确路由（AX 语义 → browser/CDP → 窗口本地指针 → PID 键盘 → 拒绝）；
+// delivery:'foreground' = 真实全局键盘事件（IME 穿透，会窃取前台焦点）。
+// scope:'desktop' = 真实物理指针（会动用户鼠标），坐标为桌面截图物理像素。用途：目标 app
+// 的原生模态菜单只认真实指针点击（2026-09-09 Blender 实测：窗口本地指针点不中 Add 菜单项），
+// 以及需要先摆好光标位置再按相对位置操作的场景。
 function optArgs(args, opts) {
-  if (opts && opts.delivery) args.delivery_mode = opts.delivery
-  if (opts && opts.scope) throw new Error('scope 已移除：自动化不动真实指针；窗口内动作走驱动默认 scope')
+  if (!opts) return args
+  if (opts.delivery) args.delivery_mode = opts.delivery
+  if (opts.scope) args.scope = opts.scope
+  // 其余键原样透传（驱动参数名），合法性由驱动 schema 终审。
+  for (const k of Object.keys(opts)) {
+    if (k === 'delivery' || k === 'scope') continue
+    args[k] = opts[k]
+  }
   return args
 }
 
@@ -225,7 +236,7 @@ const cua = {
     return { pid: bind.pid, window: bind.window }
   },
 
-  // 动作（均可带末参 opts={delivery}；scope 已移除）
+  // 动作（均可带末参 opts={delivery,scope}）
   click: async (a, b, opts) => rpc('click', 'click', targetArgs(optArgs(clickArgs(a, b), opts))),
   dclick: async (a, b, opts) => rpc('dclick', 'double_click', targetArgs(optArgs(clickArgs(a, b), opts))),
   rclick: async (a, b, opts) => rpc('rclick', 'right_click', targetArgs(optArgs(clickArgs(a, b), opts))),
@@ -262,7 +273,7 @@ const cua = {
     rpc('scroll', 'scroll', targetArgs(optArgs(amount ? { direction, amount } : { direction }, opts)), direction),
   drag: async (x1, y1, x2, y2, opts) =>
     rpc('drag', 'drag', targetArgs(optArgs({ from_x: x1, from_y: y1, to_x: x2, to_y: y2 }, opts))),
-  move: async (x, y) => rpc('move', 'move_cursor', { x, y }),
+  move: async (x, y, opts) => rpc('move', 'move_cursor', optArgs({ x, y }, opts || {})),
   // 虚拟光标浮层（daemon 唯一形态，浮层依赖 AppKit 主线程宿主）。浮层纯显示
   // 不交互；与动作同会话执行时驱动自动联动光标动画（主题
   // cua-driver-actions-v2），脚本无需逐步 move。

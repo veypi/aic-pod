@@ -108,8 +108,9 @@ var browserSubLevels = map[string]int{
 
 // cuaSubLevels 是 cua 子命令分级（§2.4，desktop 壳 provider：cua-driver MCP 桥接）。
 // 读类 Read(1)；窗口内交互 Write(2) 基线（与 browser 同理：逐次确认会使自动化不可用）；
-// --delivery foreground 由 cuaRequired 提级 Danger(3)——前台接管是用户可见的
-// 越界行为，逐次审批；动作默认走驱动后台精确路由（方案 v3），scope 已移除。
+// --delivery foreground 与 --scope desktop 由 cuaRequired 提级 Danger(3)——
+// 前台接管/真实鼠标接管都是用户可见的越界行为，逐次审批；动作默认走驱动后台
+// 精确路由（方案 v3，窗口本地指针）。
 var cuaSubLevels = map[string]int{
 	"doctor":        proto.LevelRead,
 	"apps":          proto.LevelRead,
@@ -143,13 +144,15 @@ var cuaSubLevels = map[string]int{
 }
 
 // cuaValueFlags 是 cua 带值 flag 表（子命令判定跳过其值；布尔 flag 不在列）。
+// 未知 flag 由 host 侧原样透传驱动（不在本表）——子命令恒为首个非 flag 元素，
+// 故不影响判定；未知 flag 在子命令之前时落入 Danger 兜底（保守方向）。
 var cuaValueFlags = map[string]bool{
 	"--pid": true, "--window": true, "--token": true,
 	"--x": true, "--y": true, "--x1": true, "--y1": true, "--x2": true, "--y2": true,
 	"--text": true, "--app": true, "--value": true, "--path": true,
 	"--direction": true, "--amount": true, "--width": true, "--height": true,
-	"--delivery": true,
-	"--url":      true, "--query": true, "--ref": true, "--mode": true, "--route": true,
+	"--delivery": true, "--scope": true,
+	"--url": true, "--query": true, "--ref": true, "--mode": true, "--route": true,
 	"--grep": true, "--context": true, "--target": true, "--tab": true,
 	"--code": true, "--file": true,
 }
@@ -254,7 +257,7 @@ func browserRequired(argv []string) int {
 }
 
 // cuaRequired 判定 cua 子命令等级：
-//  1. 全参数扫描 --delivery foreground → Danger(3)（用户可见接管）；
+//  1. 全参数扫描 --delivery foreground / --scope desktop → Danger(3)（用户可见接管）；
 //  2. 取首个非 flag 且非 flag 值的子命令查表（读类 Read，交互 Write）；
 //  3. clipboard 嵌套子命令：read=Read，write=Write；
 //  4. bprepare 嵌套：--isolated=Write（驱动自持隔离 profile），
@@ -269,7 +272,13 @@ func cuaRequired(argv []string) int {
 		if a == "--isolated" {
 			isolated = true
 		}
-		if a == "--delivery" && i+1 < len(argv) && argv[i+1] == "foreground" {
+		// --delivery / --delivery-mode（透传写法）foreground 均提级 Danger：
+		// 两个写法都必须命中，避免透传绕过前台接管的逐次审批。
+		if (a == "--delivery" || a == "--delivery-mode") && i+1 < len(argv) && argv[i+1] == "foreground" {
+			danger = true
+		}
+		// --scope desktop = 真实物理指针（移动/点击用户鼠标，用户可见接管）→ Danger
+		if a == "--scope" && i+1 < len(argv) && argv[i+1] == "desktop" {
 			danger = true
 		}
 		if cuaValueFlags[a] {

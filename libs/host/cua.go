@@ -6,14 +6,15 @@ package host
 // JSON-RPC）→ `cua-driver mcp` 持久子进程。无 JS/壳通道中间层。
 //
 //   - 探测模型（§5.1）：buildCommandTable 启动探测 cua-driver 二进制
-//     （CUA_DRIVER_PATH → PATH → 常见安装路径），探测到才声明；
+//     （CUA_DRIVER_PATH → CUA_DRIVER_APP 派生 → PATH → 常见安装路径），探测到才声明；
 //   - 子进程生命周期：首次 cua 调用懒启动，常驻复用（snapshot 的
 //     element_token 缓存/光标/录制状态随 MCP 连接连续）；死亡则当次调用
 //     报错暴露、下次调用自动重生一次；进程级单例随 host 进程回收；
 //   - 连接形态（darwin）：daemon 唯一形态——`mcp --socket <默认 socket>` 代理到
 //     CuaDriver.app 常驻 daemon（AppKit 主线程宿主身份，虚拟光标浮层/录制
 //     回放/前台投递依赖它；TCC 授权归 CuaDriver.app，用户授权一次）。daemon
-//     缺席时自动拉起（open -n -g -a CuaDriver --args serve）并轮询 socket；
+//     缺席时自动拉起（桌面端内置 app：CUA_DRIVER_APP 路径直启；用户自装：
+//     open -n -g -a CuaDriver --args serve）并轮询 socket；
 //     拉起失败/未授权明确报错，永不静默换身份。非 darwin 暂无 daemon 自动
 //     拉起环境，保留 `mcp --direct` 过渡；
 //   - 沙箱：cua-driver 本质是控制本机 GUI 的宿主体外能力（辅助功能/录屏
@@ -102,8 +103,16 @@ var cuaDaemonLastTry time.Time
 // -n 新实例、-g 不激活前台、--args serve 进入 daemon 形态；
 // --grant existing-profile 解锁“绑定用户真实浏览器”能力（驱动 standard 模式
 // 要求 trusted launch grant；平台层 bprepare existing 仍逐次 Danger 审批）。
-func cuaDaemonLaunchArgs() []string {
-	return []string{"-n", "-g", "-a", "CuaDriver", "--args", "serve", "--grant", "existing-profile"}
+// appPath 非空 = 桌面端内置发行物形态（resources/cua/darwin/CuaDriver.app，
+// 路径直启，不依赖 LaunchServices 名称注册）；空 = 用户自装形态（-a CuaDriver）。
+func cuaDaemonLaunchArgs(appPath string) []string {
+	args := []string{"-n", "-g"}
+	if appPath != "" {
+		args = append(args, appPath)
+	} else {
+		args = append(args, "-a", "CuaDriver")
+	}
+	return append(args, "--args", "serve", "--grant", "existing-profile")
 }
 
 // ensureCuaDaemon 保证 darwin daemon 在监听：socket 存活直接返回；缺席则
@@ -126,9 +135,14 @@ func ensureCuaDaemon(ctx context.Context, logf func(string, ...any)) error {
 	cuaDaemonLastTry = time.Now()
 	cuaDaemonLaunchMu.Unlock()
 
-	logf("[cua] daemon absent, launching: open %s", strings.Join(cuaDaemonLaunchArgs(), " "))
-	if out, err := exec.CommandContext(ctx, "open", cuaDaemonLaunchArgs()...).CombinedOutput(); err != nil {
-		return fmt.Errorf("cua: 拉起 CuaDriver daemon 失败: %v (%s)；确认 /Applications/CuaDriver.app 已安装（daemon 形态依赖 app 身份）",
+	// CUA_DRIVER_APP：桌面端内置 CuaDriver.app 路径（resources/cua/darwin/）——
+	// 路径直启（签名/公证原样保留，TCC 授权仍归 com.trycua.driver）；
+	// 未设置时回落用户自装形态（open -a CuaDriver）。
+	appPath := os.Getenv("CUA_DRIVER_APP")
+	launchArgs := cuaDaemonLaunchArgs(appPath)
+	logf("[cua] daemon absent, launching: open %s", strings.Join(launchArgs, " "))
+	if out, err := exec.CommandContext(ctx, "open", launchArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("cua: 拉起 CuaDriver daemon 失败: %v (%s)；确认 CuaDriver.app 可用（内置 resources/cua 或 /Applications 安装；daemon 形态依赖 app 身份）",
 			err, strings.TrimSpace(string(out)))
 	}
 	deadline := time.Now().Add(cuaDaemonReadyTimeout)
@@ -147,10 +161,18 @@ func ensureCuaDaemon(ctx context.Context, logf func(string, ...any)) error {
 		cuaDaemonReadyTimeout.Seconds(), sock)
 }
 
-// findCuaDriver 探测 cua-driver 二进制：CUA_DRIVER_PATH 环境变量 → PATH →
-// 常见安装路径。找不到返回空串（buildCommandTable 则不声明 cua）。
+// findCuaDriver 探测 cua-driver 二进制：CUA_DRIVER_PATH 环境变量 →
+// CUA_DRIVER_APP（内置 app 派生 Contents/MacOS/cua-driver）→ PATH → 常见安装
+// 路径。找不到返回空串（buildCommandTable 则不声明 cua）。
 func findCuaDriver() string {
 	if p := os.Getenv("CUA_DRIVER_PATH"); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// CUA_DRIVER_APP：桌面端内置 CuaDriver.app 路径（仅设 APP 未设 PATH 时兜底）
+	if app := os.Getenv("CUA_DRIVER_APP"); app != "" {
+		p := filepath.Join(app, "Contents", "MacOS", "cua-driver")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
@@ -491,7 +513,7 @@ var cuaValueFlags = map[string]bool{
 	"--x": true, "--y": true, "--x1": true, "--y1": true, "--x2": true, "--y2": true,
 	"--text": true, "--app": true, "--value": true, "--path": true,
 	"--direction": true, "--amount": true, "--width": true, "--height": true,
-	"--delivery": true, "--button": true,
+	"--delivery": true, "--button": true, "--scope": true,
 	"--url": true, "--query": true, "--ref": true, "--mode": true, "--route": true,
 	"--grep": true, "--context": true, "--target": true, "--tab": true,
 	"--code": true, "--file": true,
@@ -500,6 +522,24 @@ var cuaValueFlags = map[string]bool{
 var cuaBoolFlags = map[string]bool{"--png": true, "--replace": true, "--isolated": true}
 
 var errCuaFlagAbsent = fmt.Errorf("flag absent")
+
+// cuaCoerceArg 把透传 flag 的字符串值转为驱动 schema 期望的 JSON 标量：
+// true/false → bool；整数 → int；小数 → float64；其余 → string。
+func cuaCoerceArg(v string) any {
+	switch v {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return n
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	return v
+}
 
 type cuaCall struct {
 	cli           bool           // doctor：一次性 CLI
@@ -518,11 +558,14 @@ type cuaCall struct {
 	paste         string         // type：非 ASCII 文本改走剪贴板粘贴（clipboard_write + 粘贴热键）
 }
 
-// mapCuaArgv 把 cua argv 映射为 MCP 调用。未知子命令/非法参数报错。
-func mapCuaArgv(argv []string) (*cuaCall, error) {
+// mapCuaArgv 把 cua argv 映射为 MCP 调用。未知子命令报错。
+// 未知 --flag 不拒绝：原样透传给驱动工具参数（kebab-case → snake_case，值类型
+// 自动推断；参数合法性由驱动 schema 终审，aic-pod 不做二次白名单）。
+func mapCuaArgv(argv []string) (call *cuaCall, err error) {
 	flags := map[string]string{}
 	flagsAll := map[string][]string{} // 可重复 flag（如 --url）全量收集
 	bools := map[string]bool{}
+	passthrough := map[string]any{} // 未知 flag：驱动参数名 → 值
 	var positional []string
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
@@ -536,11 +579,31 @@ func mapCuaArgv(argv []string) (*cuaCall, error) {
 		} else if cuaBoolFlags[a] {
 			bools[a] = true
 		} else if strings.HasPrefix(a, "--") {
-			return nil, fmt.Errorf("unknown flag %s", a)
+			// 未知 flag：kebab→snake 后透传；下一参数不以 -- 开头则视作其值，
+			// 否则为布尔 true。
+			key := strings.ReplaceAll(strings.TrimPrefix(a, "--"), "-", "_")
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "--") {
+				i++
+				passthrough[key] = cuaCoerceArg(argv[i])
+			} else {
+				passthrough[key] = true
+			}
 		} else {
 			positional = append(positional, a)
 		}
 	}
+	// 装配完成后合并透传参数：仅走驱动的子命令（tool 非空）；run/doctor 为本地
+	// 特化（tool 空）不参与。同名键透传覆盖——显式指定优先。
+	defer func() {
+		if err == nil && call != nil && call.tool != "" && len(passthrough) > 0 {
+			if call.args == nil {
+				call.args = map[string]any{}
+			}
+			for k, v := range passthrough {
+				call.args[k] = v
+			}
+		}
+	}()
 	sub := ""
 	if len(positional) > 0 {
 		sub = positional[0]
@@ -624,6 +687,9 @@ func mapCuaArgv(argv []string) (*cuaCall, error) {
 		}
 		if v, ok := flags["--delivery"]; ok {
 			args["delivery_mode"] = v
+		}
+		if v, ok := flags["--scope"]; ok {
+			args["scope"] = v
 		}
 		return args, nil
 	}
@@ -876,6 +942,11 @@ func mapCuaArgv(argv []string) (*cuaCall, error) {
 		}
 		if err := reqNum(args, "--y", "y"); err != nil {
 			return nil, err
+		}
+		// --scope desktop：真实物理指针（桌面截图坐标）；window（默认）只动
+		// agent 光标浮层。
+		if v, ok := flags["--scope"]; ok {
+			args["scope"] = v
 		}
 		return &cuaCall{tool: "move_cursor", args: args}, nil
 	case "front":

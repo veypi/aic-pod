@@ -74,8 +74,16 @@ func TestCuaRequired(t *testing.T) {
 		{[]string{"set-frame", "--pid", "1", "--window", "2", "--x", "0", "--y", "0", "--width", "800", "--height", "600"}, proto.LevelWrite},
 		// front：前台激活（窃取前台焦点）→ Danger
 		{[]string{"front", "--pid", "1234"}, proto.LevelDanger},
-		// 前台投递 → Danger（任意位置出现都提级）
+		// 前台投递 → Danger（任意位置出现都提级；--delivery-mode 为透传写法）
 		{[]string{"click", "--token", "t1", "--delivery", "foreground"}, proto.LevelDanger},
+		{[]string{"click", "--x", "1", "--y", "2", "--delivery-mode", "foreground"}, proto.LevelDanger},
+		// --scope desktop = 真实物理指针（用户可见接管）→ Danger；window 不提级
+		{[]string{"move", "--x", "1", "--y", "2", "--scope", "desktop"}, proto.LevelDanger},
+		{[]string{"click", "--x", "1", "--y", "2", "--scope", "desktop"}, proto.LevelDanger},
+		{[]string{"--scope", "desktop", "move", "--x", "1", "--y", "2"}, proto.LevelDanger},
+		{[]string{"move", "--x", "1", "--y", "2", "--scope", "window"}, proto.LevelWrite},
+		// 透传参数不干扰子命令判定（子命令恒为首个非 flag 元素）
+		{[]string{"click", "--x", "1", "--y", "2", "--count", "2"}, proto.LevelWrite},
 		// 未知子命令兜底
 		{[]string{"explode"}, proto.LevelDanger},
 		{[]string{}, proto.LevelDanger},

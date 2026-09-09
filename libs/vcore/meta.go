@@ -95,7 +95,8 @@ Behavior:
                                  --grep 过滤树：命中行+祖先链+前后行+token 图例
                                  （window_id 从 cua windows / launch 应答取）
 
-动作（目标二选一：snapshot 给的 --token，或像素 --x/--y；--pid/--window 限定窗口）：
+动作（目标二选一：snapshot 给的 --token，或像素 --x/--y；--pid/--window 限定窗口；
+  --delivery / --scope 见下「投递语义」）：
   cua click|dclick|rclick [--token T | --x X --y Y] [--pid N --window W]
   cua type --text "..."          插入文本（AX 元素或当前焦点）；含非 ASCII
                                  （中文等）自动改走剪贴板粘贴——逐键合成会被
@@ -104,7 +105,7 @@ Behavior:
   cua hotkey <combo>             组合键（cmd+c / ctrl+shift+s）
   cua scroll --direction up|down|left|right [--amount N]
   cua drag --x1 X --y1 Y --x2 X --y2 Y
-  cua move --x X --y Y           移动光标
+  cua move --x X --y Y [--scope window|desktop]   移动光标
   cua front --pid N [--window W]  前台激活应用（窃取前台焦点，Danger 逐次审批；
                                  前台投递/IME 敏感输入的前提）
   cua set-value --token T --value V   设置非文本控件值（下拉/勾选/滑块）
@@ -113,6 +114,9 @@ Behavior:
   cua launch --app <name> [--url U]... 启动/唤起应用（可带 URL 开页）
   cua clipboard read|write [text]     系统剪贴板
   cua doctor                     环境自检（一次性 CLI，不走 MCP）
+  参数透传：未知 --flag 原样传给驱动工具（kebab-case → snake_case，值自动
+  推断 bool/数字/字符串，无值视为 true）——如 --count 2、--debug-image-out
+  /tmp/x.png、--from-zoom；合法性由驱动 schema 终审，本层不做白名单。
 
 浏览器正解（typed browser 家族，页面操作优先于地址栏/像素）：
   cua bprepare --isolated          准备驱动自持隔离浏览器（不需登录态优先）
@@ -127,9 +131,14 @@ Behavior:
 投递语义：动作默认走驱动后台精确路由（AX 语义 → browser/CDP → 窗口本地
   指针 → PID 键盘 → 结构化拒绝），不动前台/真实指针；驱动 refused 时才考虑
   显式前台升级（平台不自动升）。
+  --scope window（默认）  窗口本地指针（虚拟，不动真实鼠标）；--x/--y 为
+                          窗口截图坐标（get_window_state PNG 坐标空间）
+  --scope desktop         真实物理指针（会移动用户鼠标），坐标为桌面物理
+                          像素；驱动禁止与 --pid/--window 同用
 提级 Danger(3)（逐次审批）：
   --delivery foreground          前台投递（可能改变焦点/光标，用户可见接管；
                                  IME 敏感输入需先 cua front 激活）
+  --scope desktop                真实鼠标接管（任意子命令携带即提级）
 
 输入法护栏（默认开启，自动；三平台）：键盘类动作（key/hotkey/type）执行前
   检测系统输入法，若是中文/日文 IME 则自动切到英文键盘布局——IME 会把
@@ -153,7 +162,7 @@ Behavior:
            cua.paste("长文本")（剪贴板写入+粘贴热键，长文本比 type 可靠）；
            cua.key("enter")；
            cua.hotkey("cmd+s")；cua.scroll("down",3)；cua.drag(x1,y1,x2,y2)；
-           cua.move(x,y)；cua.setValue(token,v)；cua.menu("File>Save")；
+           cua.move(x,y[,opts])；cua.setValue(token,v)；cua.menu("File>Save")；
            cua.setFrame(x,y,w,h)；cua.clipboardRead()/clipboardWrite(t)
     浏览器 await cua.bprepare({isolated:true})；cua.navigate(url)；
            cua.bclick({ref}|[x,y])；cua.btype(ref, text)；cua.browserState()；cua.bend()
@@ -162,7 +171,10 @@ Behavior:
     投递   动作默认后台精确路由，不动前台/真实指针；需要前台接管时带末参
            opts：{delivery:"foreground"}（真实全局事件——IME 活跃的文本框里
            后台合成修饰键会被输入法吃掉，换 foreground 穿透；需先 front 前台
-           激活，否则事件落到别的 app）。scope 已移除。
+           激活，否则事件落到别的 app）。真实物理指针带 opts：{scope:"desktop"}
+           （桌面物理像素坐标，会移动用户鼠标；target 绑定的 pid/window 自动
+           跳过——驱动禁止 scope=desktop 与 pid/window 同用；run 恒 Danger(3)
+           审批，脚本内 scope 不改变等级）。
   动作错误抛 JS 异常——可 try/catch 自适应重试；未捕获即终止。
   return 值与逐步 transcript（含各步耗时/错误）随应答返回，全文落 .cua/run-*.jsonl。
   脚本运行在 host 上（node），可直接 require('node:fs') 读写本机文件、读 .cua/
