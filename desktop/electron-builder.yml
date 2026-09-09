@@ -14,13 +14,20 @@ files:
   - package.json
   - assets/**
   - vendor/**
+  # vendor/cua 走 extraResources（→ resources/cua），不进 asar（否则重复打包 + 丢可执行位/签名）
+  - "!vendor/cua/**"
   - scripts/**
 # Go 后端二进制（make desktop-backend 产出 desktop/bin/aic-backend）→ resources/backend/
+# cua-driver 发行物（scripts/sync-cua.mjs 同步，固定版本 + sha256 校验）→ resources/cua/
+# 运行时 main.js 注入 CUA_DRIVER_PATH / CUA_DRIVER_APP；vendor 未同步时该平台不带 cua
+# （后端回落系统探测，用户自装 cua-driver 仍可用）
 extraResources:
   - from: bin
     to: backend
     filter:
       - aic-backend*
+  - from: vendor/cua
+    to: cua
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg

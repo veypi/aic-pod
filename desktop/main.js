@@ -157,6 +157,25 @@ async function start() {
   })
 }
 
+// ---- 内置 cua-driver（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----
+// 固定版本随包分发：macOS 指向 CuaDriver.app（签名/公证原样，TCC 授权归
+// com.trycua.driver），win/linux 指向裸二进制。未同步时不注入——Go 后端
+// findCuaDriver 回落系统安装路径（用户自装 cua-driver 仍可用）。
+function cuaEnv() {
+  const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+  const root = app.isPackaged
+    ? path.join(process.resourcesPath, 'cua', plat)
+    : path.join(__dirname, 'vendor', 'cua', plat)
+  if (process.platform === 'darwin') {
+    const appPath = path.join(root, 'CuaDriver.app')
+    const bin = path.join(appPath, 'Contents', 'MacOS', 'cua-driver')
+    if (!fs.existsSync(bin)) return {}
+    return { CUA_DRIVER_PATH: bin, CUA_DRIVER_APP: appPath }
+  }
+  const bin = path.join(root, process.platform === 'win32' ? 'cua-driver.exe' : 'cua-driver')
+  return fs.existsSync(bin) ? { CUA_DRIVER_PATH: bin } : {}
+}
+
 // ---- 启动子进程与握手 ----
 function spawnBackend() {
   return new Promise((resolve) => {
@@ -165,7 +184,8 @@ function spawnBackend() {
     backend = spawn(backendBin, [], {
       // AIC_NODE_BIN：Electron 二进位路径，后端 cua run 以 ELECTRON_RUN_AS_NODE=1
       // 将其当纯 node 运行时跑脚本（三平台 Electron 包自带，零新增依赖）。
-      env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop', AIC_NODE_BIN: process.execPath },
+      // cuaEnv()：内置 cua-driver 路径注入（缺失时空对象，回落系统探测）。
+      env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop', AIC_NODE_BIN: process.execPath, ...cuaEnv() },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))

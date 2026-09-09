@@ -1,0 +1,28 @@
+{
+  "product": "cua-driver",
+  "repo": "trycua/cua",
+  "version": "0.25.0",
+  "tag": "cua-driver-rs-v0.25.0",
+  "license": "MIT",
+  "licenseFile": "cua-LICENSE.md",
+  "assets": {
+    "darwin": {
+      "file": "cua-driver-rs-0.25.0-darwin-universal.tar.gz",
+      "sha256": "02e3dc00f57e967d7e1d30fbc42b1329fdac1ac6052935e1356b48d21c862ee4",
+      "payload": "CuaDriver.app",
+      "keep": ["CuaDriver.app"]
+    },
+    "win32": {
+      "file": "cua-driver-rs-0.25.0-windows-x86_64.zip",
+      "sha256": "4ea967b72209aefa8c25126feaedaba662b8bee8cdec01f69b2ff2b19d3781e7",
+      "payload": "cua-driver.exe",
+      "keep": ["cua-driver.exe", "cua-driver-uia.exe", "cua-cursor-theme.exe"]
+    },
+    "linux": {
+      "file": "cua-driver-rs-0.25.0-linux-x86_64.tar.gz",
+      "sha256": "06720cf1caa11876b795b6ade257c15be368738c1bc864b461d19994e87aa02c",
+      "payload": "cua-driver",
+      "keep": ["cua-driver", "cua-cursor-theme", "wayland-helper"]
+    }
+  }
+}

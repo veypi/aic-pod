@@ -14,7 +14,9 @@ Electron Main (Node, main.js)
  │    → 向 Go 后端注册 provider（/api/provider/register），caps 出现 browser
  ├─ cua（本机 GUI 自动化）：Go 后端原生桥接 cua-driver（libs/host/cua.go，
  │    MCP 持久子进程懒启动）；启动探测到 cua-driver 二进制才声明（不经壳通道）；
- │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 CuaDriver.app，host 自动拉起）
+ │    发行物内置：scripts/sync-cua.mjs 按 desktop/cua.json 固定版本 + sha256 同步到
+ │    vendor/cua → resources/cua，main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP；
+ │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
  ├─ BaseWindow（frameless）主窗口：平台页 + 隐藏的「AI 工作区」标签页
  │    （WebContentsView 常驻底层被平台页遮挡；browser 命令全程后台，
  │     未来做标签切换 UI 时经 tabControl.show/hide 调换 z 顺序）
@@ -35,6 +37,8 @@ cd desktop && npm install && npm start
 
 壳页面/平台页改动即时生效（HTTP 服务），main.js/preload.js 改动需重启 electron。
 browser 共享 core 改动（browser/src/tools/browser/）经 npm prestart 同步，需重启 electron。
+内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
+`npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。
 
 ## 打包（electron-builder，须在目标平台执行）
 
@@ -44,6 +48,14 @@ make desktop-darwin-amd64    # macOS x64
 make desktop-windows-amd64   # Windows → dist/aic-desktop-win-x64.exe（NSIS）
 make desktop-linux-amd64     # Linux → dist/aic-desktop-linux-x64.AppImage
 ```
+
+打包前自动同步 cua-driver（`desktop/cua.json` 固定版本 + sha256 校验 →
+`vendor/cua → resources/cua`，三平台：mac `CuaDriver.app`、win/linux 裸二进制），
+安装包自带 cua 能力，用户零安装。macOS 首次使用仍需用户在系统弹窗给 “Cua Driver”
+授予辅助功能/屏幕录制（TCC 授权归上游 app 身份 com.trycua.driver，跨我们发版保持）。
+升级 cua：改 `desktop/cua.json` 的 tag/sha256 后 `npm run cua-sync -- --force`。
+受限网络（GitHub 直连不稳）：手动下载对应资产后 `npm run cua-sync -- --asset <文件>`
+（仍走 sha256 校验）。
 
 CI：`.github/workflows/build.yml` desktop job（tag v* 触发，五平台产物）。
 

@@ -90,30 +90,34 @@ backend-bin:
 desktop-deps:
 	cd $(DESKTOP_DIR) && npm install
 
+# cua-driver 发行物同步（固定版本 + sha256 校验；desktop/vendor/cua 已 gitignore）
+cua-sync:
+	cd $(DESKTOP_DIR) && node scripts/sync-cua.mjs
+
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version
+.PHONY: backend-bin desktop-deps desktop-version cua-sync
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
 # macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	$(MAKE) desktop-version backend-bin
+	$(MAKE) desktop-version backend-bin cua-sync
 	@arch=$$(echo $* | sed 's/amd64/x64/'); \
 	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
 	@echo "→ $(BIN_DIR)/aic-desktop-mac-$*.dmg"
 
 # Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	$(MAKE) desktop-version backend-bin
+	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --win
 	@echo "→ $(BIN_DIR)/aic-desktop-win-$*.exe"
 
 # Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	$(MAKE) desktop-version backend-bin
+	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --linux
 	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"
 
