@@ -278,6 +278,15 @@ function computeAllowedHosts(platform) {
   return list
 }
 
+// 记住目标平台 host：改地址后新平台页也要注入 remote-preload（白名单缓存启动时
+// 只按配置 host 算一次，设置窗口确认打开新地址时增量并入）。
+function rememberPlatformHost(url) {
+  try {
+    const h = new URL(url).host
+    if (h && !allowedHostsCache.includes(h)) allowedHostsCache.push(h)
+  } catch (e) { /* 非法 URL 忽略 */ }
+}
+
 // 校验 IPC 调用方 frame 是否平台白名单（host ∈ 配置 host / ivec.ai）
 function isPlatformFrame(event) {
   try {
@@ -439,6 +448,7 @@ function registerIpc() {
     if (!isLocalFrame(e)) return false
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
+    rememberPlatformHost(u)
     loadMain(u)
     closeSettings()
     return true
