@@ -389,6 +389,9 @@ func (m *cuaMcp) notify(method string, params any) {
 }
 
 // call 执行 tools/call（callMu 串行 + 懒启动）；isError 转为 error。
+// 驱动侧会话空闲结束时报 "session ... has ended"，普通动作不会自动复活
+// （"ordinary actions never revive ended names"）：这里显式 start_session
+// 重建同名会话后重试一次；结束的调用已被驱动拒绝、未执行，重试安全。
 func (m *cuaMcp) call(ctx context.Context, name string, args map[string]any) (*mcpResult, error) {
 	m.callMu.Lock()
 	defer m.callMu.Unlock()
@@ -401,7 +404,23 @@ func (m *cuaMcp) call(ctx context.Context, name string, args map[string]any) (*m
 		callCtx, cancel = context.WithTimeout(ctx, 120*time.Second)
 		defer cancel()
 	}
-	raw, err := m.request(callCtx, "tools/call", map[string]any{"name": name, "arguments": args})
+	res, err := m.callTool(callCtx, name, args)
+	if err != nil && cuaSessionEndedErr(err) {
+		sargs := map[string]any{}
+		if s, _ := args["session"].(string); s != "" {
+			sargs["session"] = s
+		}
+		if _, rerr := m.callTool(callCtx, "start_session", sargs); rerr == nil {
+			m.logf("[cua] session ended before %s; revived and retrying", name)
+			res, err = m.callTool(callCtx, name, args)
+		}
+	}
+	return res, err
+}
+
+// callTool 单次 tools/call（调用方须持 callMu；不做会话修复）。
+func (m *cuaMcp) callTool(ctx context.Context, name string, args map[string]any) (*mcpResult, error) {
+	raw, err := m.request(ctx, "tools/call", map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return nil, err
 	}
@@ -424,6 +443,15 @@ func (m *cuaMcp) call(ctx context.Context, name string, args map[string]any) (*m
 		return nil, fmt.Errorf("%s", strings.Join(texts, "\n"))
 	}
 	return &res, nil
+}
+
+// cuaSessionEndedErr 判定错误是否为驱动侧会话已结束（需 start_session 复活）。
+func cuaSessionEndedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "has ended") && strings.Contains(msg, "start_session")
 }
 
 // killLocked 终止子进程并清理状态。调用方须持 mu。
