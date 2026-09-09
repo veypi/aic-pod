@@ -171,6 +171,19 @@ function wrapSnap(structured) {
   return s
 }
 
+// imeEnsure：键盘类动作前确保系统输入法处于英文布局（Go 侧检测/切换，
+// 已是英文时零开销跳过）。中文 IME 会把组合键（如 Shift+A）当输入法切换
+// 吃掉——2026-09-09 Blender 实测搜狗拼音下 Shift+A 退化成裸 a。
+// 失败不阻断动作：按键是否真正生效由动作结果暴露。
+async function imeEnsure() {
+  try { await rawRpc('__ime', {}) } catch { /* 护栏失败不阻断 */ }
+}
+
+// hasNonASCII：中文/日文等文本经逐键合成会被 IME 吞或转候选，改走剪贴板。
+function hasNonASCII(s) {
+  return /[^\x00-\x7F]/.test(s)
+}
+
 // ---- cua API（与单指令子命令一一对应） ----
 const cua = {
   // 感知
@@ -216,14 +229,23 @@ const cua = {
   click: async (a, b, opts) => rpc('click', 'click', targetArgs(optArgs(clickArgs(a, b), opts))),
   dclick: async (a, b, opts) => rpc('dclick', 'double_click', targetArgs(optArgs(clickArgs(a, b), opts))),
   rclick: async (a, b, opts) => rpc('rclick', 'right_click', targetArgs(optArgs(clickArgs(a, b), opts))),
-  type: async (text, opts) => rpc('type', 'type_text', targetArgs(optArgs({ text: String(text) }, opts)), briefStr(text, 80)),
+  type: async (text, opts) => {
+    const s = String(text)
+    // 非 ASCII：不走逐键合成（IME 会吞/转候选），改走剪贴板粘贴
+    if (hasNonASCII(s)) return cua.paste(s, opts)
+    await imeEnsure()
+    return rpc('type', 'type_text', targetArgs(optArgs({ text: s }, opts)), briefStr(s, 80))
+  },
   async paste(text, opts) {
     await rpc('clipboard.write', 'clipboard_write', { text: String(text) }, briefStr(text, 80))
     await sleep(120)
     const mod = platform === 'darwin' ? 'cmd' : 'ctrl'
     return cua.hotkey(mod + '+v', opts)
   },
-  key: async (name, opts) => rpc('key', 'press_key', targetArgs(optArgs({ key: name }, opts)), name),
+  key: async (name, opts) => {
+    await imeEnsure()
+    return rpc('key', 'press_key', targetArgs(optArgs({ key: name }, opts)), name)
+  },
   // hotkey 走 press_key+modifiers（hotkey 工具对 Blender 等原生 app 会丢修饰键：
   // cmd+a 退化成裸 'a'、ctrl+n 退化成 'n'；press_key 的 modifiers 数组为实测可靠
   // 路径——2026-09-09 另一产品的 Blender 记录中 super+a / ctrl+shift+s 均生效）。
@@ -231,6 +253,9 @@ const cua = {
     const parts = String(combo).split('+')
     if (parts.length < 2) throw new Error('hotkey 需要组合键（如 cmd+v）')
     const args = { key: parts[parts.length - 1], modifiers: parts.slice(0, -1) }
+    // cmd/ctrl 组合键一般不被 IME 拦截，但 Shift+X 类会被（搜狗把 Shift 当
+    // 中英切换）——统一走护栏
+    await imeEnsure()
     return rpc('hotkey', 'press_key', targetArgs(optArgs(args, opts)), combo)
   },
   scroll: async (direction, amount, opts) =>

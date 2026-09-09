@@ -487,6 +487,7 @@ type cuaCall struct {
 	script        bool           // run：JS 脚本执行（runCuaScript 特化）
 	code          string         // run --code：内联脚本全文
 	file          string         // run --file：host 绝对路径脚本文件
+	paste         string         // type：非 ASCII 文本改走剪贴板粘贴（clipboard_write + 粘贴热键）
 }
 
 // mapCuaArgv 把 cua argv 映射为 MCP 调用。未知子命令/非法参数报错。
@@ -775,6 +776,11 @@ func mapCuaArgv(argv []string) (*cuaCall, error) {
 		args, err := targetArgs()
 		if err != nil {
 			return nil, err
+		}
+		// 非 ASCII（中文等）不走逐键合成：IME 会把字母转候选/吞掉。改走
+		// 剪贴板粘贴（runCua 的 paste 分支），平台无关。
+		if hasNonASCII(text) {
+			return &cuaCall{tool: "type_text", args: args, paste: text}, nil
 		}
 		args["text"] = text
 		return &cuaCall{tool: "type_text", args: args}, nil
@@ -1080,7 +1086,7 @@ func grepTree(text, kw string, ctxLines int) (string, []int) {
 }
 
 // runCua 执行 cua 命令（dispatch 特化分支，声明表命中后路由到此）。
-func (c *Client) runCua(ctx context.Context, sid string, req *proto.ToolRequest, argv []string) *proto.ToolResponse {
+func (c *Client) runCua(ctx context.Context, sid string, req *proto.ToolRequest, argv []string) (resp *proto.ToolResponse) {
 	if cuaRt == nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
 			Error: "cua: cua-driver not available on this host"}
@@ -1088,6 +1094,22 @@ func (c *Client) runCua(ctx context.Context, sid string, req *proto.ToolRequest,
 	mapped, err := mapCuaArgv(argv)
 	if err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "cua: " + err.Error()}
+	}
+	// IME 护栏（cua_ime.go）：键盘类动作前确保英文输入法——中文 IME 会把
+	// Shift+A 这类组合键当输入法切换吃掉。发生切换/失败时在响应末尾附一行
+	// 说明；已是英文则零开销静默。
+	if (mapped.tool == "press_key" || mapped.tool == "type_text") && mapped.paste == "" {
+		if note := imeGuard(); note != "" {
+			defer func() {
+				if resp != nil && resp.State == proto.StateCompleted {
+					resp.Content = strings.TrimRight(resp.Content, "\n") + "\n[ime] " + note
+				}
+			}()
+		}
+	}
+	// 非 ASCII 文本：剪贴板粘贴特化（逐键合成会被 IME 吞/转候选）
+	if mapped.paste != "" {
+		return c.runCuaPaste(ctx, req, mapped)
 	}
 	// run：JS 脚本执行（本地桥 + node runner，cua_run.go）
 	if mapped.script {
@@ -1221,11 +1243,49 @@ func (c *Client) runCua(ctx context.Context, sid string, req *proto.ToolRequest,
 		}
 		texts = append(texts, string(sc))
 	}
-	resp := &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted, Content: strings.Join(texts, "\n")}
+	resp = &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted, Content: strings.Join(texts, "\n")}
 	if filePath != "" {
 		resp.Attrs = map[string]string{"path": filePath}
 	}
 	return resp
+}
+
+// runCuaPaste 执行非 ASCII 文本输入：写剪贴板 + 粘贴热键。
+// 不走逐键合成（IME 会拦截/转候选），也不依赖目标控件的 AX 文本接口
+// （Blender 等原生 app 不实现 AXSetAttribute 文本写入）。投递语义沿用原
+// type 的 pid/window/delivery 参数。
+func (c *Client) runCuaPaste(ctx context.Context, req *proto.ToolRequest, mapped *cuaCall) *proto.ToolResponse {
+	fail := func(err error) *proto.ToolResponse {
+		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "cua: " + err.Error()}
+	}
+	if _, err := cuaRt.call(ctx, "clipboard_write", map[string]any{"text": mapped.paste}); err != nil {
+		return fail(fmt.Errorf("paste: clipboard_write: %w", err))
+	}
+	args := make(map[string]any, len(mapped.args)+2)
+	for k, v := range mapped.args {
+		args[k] = v
+	}
+	args["key"] = "v"
+	args["modifiers"] = []string{pasteModifier()}
+	res, err := cuaRt.call(ctx, "press_key", args)
+	if err != nil {
+		return fail(fmt.Errorf("paste: %s+v: %w", pasteModifier(), err))
+	}
+	texts := []string{fmt.Sprintf("pasted %d char(s) via clipboard (%s+v)", len([]rune(mapped.paste)), pasteModifier())}
+	for _, item := range res.Content {
+		if item.Type == "text" && item.Text != "" {
+			texts = append(texts, item.Text)
+		}
+	}
+	if res.StructuredContent != nil {
+		sc, _ := json.Marshal(res.StructuredContent)
+		const maxLen = 64 * 1024
+		if len(sc) > maxLen {
+			sc = append(sc[:maxLen], []byte("... (truncated)")...)
+		}
+		texts = append(texts, string(sc))
+	}
+	return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted, Content: strings.Join(texts, "\n")}
 }
 
 // ---- snapshot 特化：正文落盘 + 返回精简 ----

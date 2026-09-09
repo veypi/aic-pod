@@ -97,7 +97,9 @@ Behavior:
 
 动作（目标二选一：snapshot 给的 --token，或像素 --x/--y；--pid/--window 限定窗口）：
   cua click|dclick|rclick [--token T | --x X --y Y] [--pid N --window W]
-  cua type --text "..."          插入文本（AX 元素或当前焦点）
+  cua type --text "..."          插入文本（AX 元素或当前焦点）；含非 ASCII
+                                 （中文等）自动改走剪贴板粘贴——逐键合成会被
+                                 输入法吞或转候选
   cua key <key>                  单键（enter/tab/esc...）
   cua hotkey <combo>             组合键（cmd+c / ctrl+shift+s）
   cua scroll --direction up|down|left|right [--amount N]
@@ -129,6 +131,13 @@ Behavior:
   --delivery foreground          前台投递（可能改变焦点/光标，用户可见接管；
                                  IME 敏感输入需先 cua front 激活）
 
+输入法护栏（默认开启，自动；三平台）：键盘类动作（key/hotkey/type）执行前
+  检测系统输入法，若是中文/日文 IME 则自动切到英文键盘布局——IME 会把
+  Shift+A 这类组合键当输入法切换吃掉（2026-09-09 Blender 实测：搜狗拼音下
+  Shift+A 退化成裸 a）。已是英文时零开销跳过；发生切换时响应末尾附 [ime]
+  一行。非 ASCII 文本输入（type 含中文）平台无关地改走剪贴板粘贴。
+  关闭：环境变量 AIC_CUA_IME_GUARD=0。
+
 脚本批处理（多步自动化首选，免逐指令往返）：
   cua run --file <host绝对路径>  执行脚本文件（先 fs write 写好，再 run）
   cua run --code '<js>'          内联短脚本
@@ -140,8 +149,9 @@ Behavior:
            → {title,bounds,elements[],text_path,png_path?}
            s.find("标签") / s.findAll(/正则/) 模糊找元素（label/value 含即中）
     动作   cua.click(el|[x,y]|x,y) 元素优先 token、兑底 frame 中心；
-           dclick/rclick 同理；cua.type("文本")；cua.paste("长文本")（剪贴板
-           写入+粘贴热键，长文本比 type 可靠）；cua.key("enter")；
+           dclick/rclick 同理；cua.type("文本")（含中文自动走剪贴板）；
+           cua.paste("长文本")（剪贴板写入+粘贴热键，长文本比 type 可靠）；
+           cua.key("enter")；
            cua.hotkey("cmd+s")；cua.scroll("down",3)；cua.drag(x1,y1,x2,y2)；
            cua.move(x,y)；cua.setValue(token,v)；cua.menu("File>Save")；
            cua.setFrame(x,y,w,h)；cua.clipboardRead()/clipboardWrite(t)

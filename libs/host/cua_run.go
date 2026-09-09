@@ -328,6 +328,10 @@ func (b *cuaRunBridge) dispatch(ctx context.Context, r *cuaRunReq) *cuaRunResp {
 	switch r.Tool {
 	case "__hello":
 		structured = map[string]any{"platform": runtime.GOOS, "session": "aic-" + b.sid}
+	case "__ime":
+		// 键盘类动作前的 IME 护栏（cua_ime.go）：脚本侧 cua.key/hotkey/type
+		// 调用前显式触发；已是英文时零开销（一次 defaults 读取）。
+		structured = map[string]any{"note": imeGuard()}
 	case "__snapshot":
 		structured, err = b.snapshot(ctx, r.Args)
 	default:
