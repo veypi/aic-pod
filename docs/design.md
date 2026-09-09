@@ -2,7 +2,7 @@
 
 ## 概述
 
-AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程/插件形式运行在各类终端设备上，通过 NATS over WebSocket 连入 AIC 服务端，将设备上的执行能力（命令执行、文件操作、浏览器控制等）注册为 LLM 可调用的工具。
+AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程/插件形式运行在各类终端设备上，通过 NATS over WebSocket 连入 AIC 服务端，将设备上的执行能力（命令执行、文件操作、浏览器控制、原生 GUI 自动化、ssh/scp 转发等）注册为 LLM 可调用的工具。本机能力受三域授权（fs/net/ssh）与进程沙箱两道闸控制（详见 [host_sandbox.md](host_sandbox.md)）。
 
 每个客户端是**能力代理**——它不决策做什么，只忠实地在本地执行服务端发来的指令并返回结果，同时通过验签确保指令来源可信。
 
@@ -14,8 +14,8 @@ aic-pod/
 ├── Makefile              # 构建/发版（build/all/build-browser/docker-build/release）
 ├── Dockerfile            # 容器镜像（ENTRYPOINT ["aic","run"]）
 │
-├── init.go               # 根包 pod：Version 常量（cli/desktop 版本兜底唯一来源）
-├── cfg/                  # 配置中心：Options 结构体 + Global 全局有效配置（config.yaml 0600 原子写）
+├── init.go               # 根包 pod：本地服务装配（Router + Start/Stop）
+├── cfg/                  # 配置中心：Options + Global（含 Version/DeviceType）、config.yaml 0600 原子写
 ├── api/                  # 本地管理 HTTP 层（包级 Router：127.0.0.1 随机端口 + local_code 通道，
 │                         #   vigo 声明式 handler + 统一 JSON 响应；ui/settings.html 静态资源）
 ├── libs/                 # 客户端核心：协议 + host 运行时 + 指令引擎 + 子进程托管
@@ -23,22 +23,26 @@ aic-pod/
 │   │                     #   caps v2、客户端版本门禁、nonce 防重放（固定向量测试锁定）
 │   ├── host/             # host agent 运行时：NATS 连接/重连/认证失败处理、caps 发布、心跳、
 │   │                     #   请求分发（验签→deadline→防重放→纵深检查）、统一命令声明表、
+│   │                     #   fs/exec/bg_* 路由、壳 provider 注册、cua 桥接（cua.go/cua_run.go）、
 │   │                     #   配置模型（cli/desktop 共享 config.yaml）、Runner（会话生命周期）
-│   ├── vcore/            # 虚拟指令引擎：统一命令声明表与分级表（meta/levels 同包维护）、
-│   │                     #   ls/rg/tree/curl/rm/mkdir/cp/mv/git/browser/bg_*/commands 实现、
-│   │                     #   OS VFS 适配、argv 双层解析
-│   └── exec_procs/       # 子进程统一托管：stdout+stderr 合并落盘、请求超时自动后台化、
-│                         #   bg_list/bg_wait/bg_kill、进程组终止
+│   ├── vcore/            # 虚拟指令引擎：命令声明表与分级表（meta/levels 同包维护）、
+│   │                     #   curl/json/bg_*/commands + git/browser/cua/ssh/scp 元数据与分级、
+│   │                     #   fs 8 action 实现、OS VFS 适配、argv 双层解析
+│   ├── fsauth/           # 文件授权：fs 域判定（policy/deny/allow、内置根、会话临时 grant、env 清洗）
+│   ├── netauth/          # 网络授权：net 域出站闸（deny/allow、localhost 内建、沙箱网络规则）
+│   └── exec_procs/       # 子进程统一托管：沙箱包装（seatbelt/bwrap/受限令牌）+ 日志落盘 +
+│                         #   请求超时自动后台化 + bg_list/bg_wait/bg_kill + 进程组终止
 │
 ├── cli/                  # 命令行入口：aic（vigo/flags 解析，主命令运行，无子指令）
 ├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
 │                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
 │                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
-│                         #   壳 provider：browser-tool.mjs（共享插件 core + CDP）
+│                         #   壳 provider：browser-tool.mjs（共享插件 core + Electron CDP）
+│                         #   内置 cua-driver 发行物（cua.json + scripts/sync-cua.mjs → resources/cua）
 ├── browser/              # Chrome MV3 扩展（原生 JS ESM）：Service Worker 运行时、
 │                         #   browser 工具（平台自有指令集：tools/browser/core.js 平台无关核心
 │                         #   + chrome-adapter.js）、page_fs/fsops（与 aic 前端双端同步）
-├── docs/                 # design.md（本文）、browser-client.md、host_sandbox.md（待实施规划）
+├── docs/                 # design.md（本文）、host_sandbox.md（沙箱与三域授权）、browser-client.md
 └── dist/                 # 构建产出（make 生成）
 ```
 
@@ -57,8 +61,8 @@ aic-pod/
 |------|------|
 | **语言** | Go |
 | **目标平台** | Windows / macOS / Linux |
-| **权限模型** | 最高（全盘文件、完整 shell 逃生舱） |
-| **能力** | exec（统一命令声明表：vcore 虚拟指令 + 启动探测的 shell/git + 壳注册命令）、fs（read/write/edit） |
+| **权限模型** | 高（沙箱 + 三域授权门控；shell 为 level 3 逃生舱） |
+| **能力** | exec（统一命令声明表：核心虚拟指令 + 启动探测的 shell/git/ssh/scp）、fs（8 action）、ssh/scp |
 | **典型场景** | 开发服务器、个人 PC、CI Runner、Docker 容器 |
 | **体积** | ~10 MB 单二进制 |
 | **参数** | `-host`（平台地址，NATS 端点由此推断）+ `-key`；配置链 flag > env（HOST/KEY/WORK_DIR/EXEC_TIMEOUT）> config.yaml > 默认 |
@@ -70,6 +74,7 @@ aic-pod/
 | **语言** | Node（主进程）+ Go（后端二进制） |
 | **目标平台** | Windows / macOS / Linux |
 | **形态** | 启动：loading → spawn 后端（AIC_PORT_FILE 握手）→ 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + ivec.ai），平台页经 window.aicDesktop 直调本地 API（端口/code 不出主进程，IPC handler 校验 senderFrame host） |
+| **能力** | 与 cli 相同（exec/fs/ssh/scp，沙箱 + 三域授权）；另有壳 provider `browser`（Electron CDP）与 `cua`（cua-driver MCP 桥接，原生 GUI 自动化，内置发行物随包分发） |
 | **本地页面** | 仅 /settings 配置页（系统边框设置窗口 / 未配置时主窗口），托盘「本地配置」入口；设置保存后探测并跳 {host}/hosts |
 | **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
 | **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 host 注册 |
@@ -81,7 +86,7 @@ aic-pod/
 | **语言** | 原生 JS（ESM，MV3 Service Worker） |
 | **目标平台** | Chrome（Firefox 未做） |
 | **密钥派生** | Web Crypto API（SubtleCrypto，与 Go 端 HKDF 同语义） |
-| **能力** | browser 指令（DOM 操作、截图、标签页管理）+ fs 8 action（read/write/edit/ls/rg/cp/mv/rm，操作扩展 PageFS） |
+| **能力** | browser 指令（DOM 操作、截图、标签页管理，与 desktop 壳通道共享平台无关 core）+ fs 8 action（read/write/edit/ls/rg/cp/mv/rm，操作扩展 PageFS） |
 | **限制** | 浏览器沙箱：无 shell、无系统文件系统 |
 
 ### embedded / mobile — 未来规划（未实现）
@@ -90,6 +95,24 @@ aic-pod/
 |------|------|
 | **embedded** | Go（可能 tinygo）：受限白名单命令 + 限定目录，目标树莓派/IoT/边缘节点（< 5MB） |
 | **mobile** | Dart/Flutter：iOS/Android，系统沙箱 + 用户授权（拍照/定位/通知/传感器） |
+
+## 安全模型
+
+两道闸（判定唯一权威见 [host_sandbox.md](host_sandbox.md)，实现见 `libs/fsauth`、`libs/netauth`、`libs/exec_procs`）：
+
+- **三域授权**（fs / net / ssh × policy / deny / allow），统一判定式：
+  `deny 命中 → 拒，除非存在更具体的 allow（具体度优先，同精度 deny 胜）；
+  policy=open → 未命中 deny 一律放；policy=deny → 仅 allow 放行`。
+  fs 域读默认开、写受 policy + 内置可写根 + `fs_allow` + 临时 grant 控制（显式 allow 可覆盖 deny）；
+  net 域管沙箱内子进程出站（内建 localhost:*）；ssh 域是 ssh/scp 一级工具的目标闸。
+  `set_config` 与 `grant <域> <目标> [--permanent]` 动态生效（已启动进程不回溯）。
+- **进程沙箱**：exec 调用默认进沙箱（darwin seatbelt / linux bubblewrap / windows
+  受限令牌 + 能力 SID ACL），按授予等级选 profile（1=read-only，2/3/4/9=workspace-write），
+  叠加 env 敏感变量清洗、资源限制与网络闸；无可用后端 **fail-closed**。
+  免沙箱唯一通道 = 请求级 `nosandbox` + 单独人工审批（Critical(4)）——审批通过（9）
+  本身不豁免沙箱。
+
+cua / browser / ssh / scp 属宿主体外或独立通道能力，不进 exec 沙箱，各自受目标闸与等级表控制。
 
 ## 指令模型（指令集 v2.5）
 
@@ -115,9 +138,11 @@ aic-pod/
 
 所有 exec 命令统一声明 `{name, desc, help, level}`，未声明命令一律拒绝（不存在「未知命令透传」）：
 
-- **恒声明**：核心 8 虚拟指令（ls/rg/tree/curl/rm/mkdir/cp/mv）+ commands + bg_list/bg_wait/bg_kill（vcore 元数据同源）
-- **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；**壳 provider 注册**（desktop 的 browser：Electron CDP 原生实现，与插件共享 core，§5.6）
-- 分级与动态提升（git push/checkout/reset、browser upload、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
+- **恒声明**：核心虚拟指令（`curl`/`json` + `commands`/`bg_list`/`bg_wait`/`bg_kill`，vcore 元数据同源）
+- **fs 指令集**（独立工具，8 action）：`read`/`write`/`edit`/`ls`/`rg`/`cp`/`mv`/`rm`
+- **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；ssh/scp → 独立目标闸（ssh 域 Policy）；cua（cua-driver 二进制）→ 本机 GUI 自动化（§5.10）
+- **壳 provider 注册**：desktop 的 `browser`（Electron CDP 原生实现，与插件共享 core，§5.6）
+- 分级与动态提升（git push/checkout/reset、browser 子命令、cua `--delivery foreground`/`--scope desktop`、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
 
 ### fs — 文件操作
 
@@ -131,6 +156,10 @@ aic-pod/
 | `read` | `<path> [--offset N] [--limit N]` | 读取文件（host 端可返回 image_data，§2.2 图片投递收敛） |
 | `write` | `<path> --content <string>` | 写入文件（覆盖） |
 | `edit` | `<path> --old <string> --new <string> [--replace-all]` | 替换内容 |
+| `ls` | `<path> [--depth N]` | 列目录（递归树） |
+| `rg` | `<pattern> <path> [--glob G] [--context N] [--limit N]` | 内容搜索 |
+| `cp` / `mv` | `<src> <dst>` | 复制 / 移动（目录递归） |
+| `rm` | `<path> [--recursive]` | 删除（删非空目录提级 Danger(3)） |
 
 物理 host 的路径为本地绝对路径；cloud/page 走 UFS/PageFS（见 instruction_sets_v2.md §2.1.1）。
 
@@ -160,8 +189,10 @@ c.RegisterCommand(proto.CommandDecl{
 |------|------|
 | `libs/proto` | 协议层唯一权威：subject 构造/解析（连接级）、ToolRequest/ToolResponse 信封、HKDF 三密钥派生、连接 token 与请求签名（canonical 输入 + HMAC-SHA256）、caps v2、版本门禁、nonce 防重放。固定向量测试锁定双端一致。 |
 | `libs/host` | host agent 运行时：NATS 连接（TokenHandler 动态签发连接 token）/重连（republish caps）/认证失败处理、caps v2 发布、20s 心跳、请求分发（验签→deadline→nonce 去重→granted_level 纵深检查）、统一命令声明表构建、fs/exec/browser/bg_* 路由、配置模型（Config/解析链/原子持久化）、Runner（host 会话生命周期，cli/desktop 共用）。 |
-| `libs/vcore` | 虚拟指令引擎：命令声明表与分级表同包维护（meta.go/levels.go）、ls/rg/tree/curl/rm/mkdir/cp/mv/git 等内存实现、OS VFS 适配接口（OSVFS/memvfs）、argv 双层解析、图片尺寸/压缩。 |
-| `libs/exec_procs` | 子进程统一托管：stdout+stderr 合并落盘日志、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
+| `libs/vcore` | 虚拟指令引擎：命令声明表与分级表同包维护（meta.go/levels.go）、curl/json 等虚拟指令与 fs 8 action 实现、git/browser/cua/ssh/scp 元数据与动态分级、OS VFS 适配接口（OSVFS/memvfs）、argv 双层解析、图片尺寸/压缩。 |
+| `libs/fsauth` | 文件授权：fs 域判定（policy/deny/allow 匹配、内置根、会话级临时 grant、沙箱 deny 模式展开、env 敏感变量清洗）。 |
+| `libs/netauth` | 网络授权：net 域出站判定（deny 恒优先于 allow、localhost 内建、具体度排序、沙箱网络规则生成）。 |
+| `libs/exec_procs` | 子进程统一托管 + 沙箱：seatbelt/bubblewrap/受限令牌包装（按等级选 profile、env 清洗、资源限制、网络闸，无可用后端 fail-closed）、stdout+stderr 合并落盘、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
 | `api` | 本地管理 API：包级 Router（security 中间件 + common.JsonResponse/JsonErrorResponse 统一响应），127.0.0.1 随机端口 + local_code 通道（端点 ping/get_config/set_config/bind/unbind/get_status/get_log/start/stop + /settings 设置页静态资源）；host 会话生命周期自持（libs/host Runner，Init(deviceType, version) 创建，Start 时自动连接已绑定设备）；外链由壳页面处理（Electron 系统浏览器 IPC / 浏览器壳新标签，平台页 local_handler 拦截后 postMessage 转交）；有效配置读写 cfg.Global，get_log 读日志文件尾部。 |
 | `cfg` | 配置中心：Options 结构体（flag/env/文件/default 四级解析，port/code 进程级隐私字段）+ Global 全局有效配置 + Load/LoadFile/Save（config.yaml 0600 原子写）+ LogPath/LogWriter（aic.log console 格式滚动写入，cli console+文件双写、desktop 仅文件）。 |
 
@@ -185,7 +216,12 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
   **显式 flag > 环境变量 > 配置文件（LoadConfig 填充默认值）> 结构体默认**
 - flag：`-host` / `-key` / `-work_dir` / `-exec_timeout` / `-home_path`（json tag 即 flag 名）
 - env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT` / `HOME_PATH`（字段名大写，无前缀）
-- 配置键：`host`（平台地址，默认 https://ivec.ai）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）
+- 配置键：`host`（平台地址，默认 https://ivec.ai）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）、`code`（本地 API 校验码，空 = 进程级随机）
+- 三域授权键（vigo/flags 自动注册 flag/env，env 名 = json tag 大写）：
+  `fs_policy`/`fs_deny`/`fs_allow`、`net_policy`/`net_deny`/`net_allow`、`ssh_policy`/`ssh_deny`/`ssh_allow`；
+  隐藏项 `no_sandbox`（全局跳过 exec 沙箱，仅配置文件/flag/env 可改，本地管理 API 不暴露）
+- 发版版本位：只改 `cfg/config.go` 的 `Version`（带 `v` 前缀）与 `browser/manifest.json`（无前缀）；
+  `desktop/package.json` 由 `make desktop-version` 从 git describe 自动同步
 - NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /api/nc
 - 本地管理 API（api 包 Router）：cli 与 desktop 启动时在 127.0.0.1 随机端口监听，
   打印带 local_code 的引导链接（`{host}/hosts?local_code={port}.{code}`），浏览器访问即绑定/管理本机
@@ -225,7 +261,9 @@ c.Connect()
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| **Phase 1** | `libs/` + `api` + `cli`/`desktop` — host agent 运行时、统一命令声明表（指令集 v2.5）、配置体系 | 完成 |
-| **Phase 2** | `embedded` — 适配 tinygo、命令白名单、限定目录 | 规划（未开始） |
-| **Phase 3** | `browser` — Chrome MV3 扩展（Web Crypto、browser 指令、page_fs/fsops 双端同步） | 完成 |
-| **Phase 4** | `mobile` — Dart/Flutter App | 规划（未开始） |
+| **Phase 1** | `libs/` + `api` + `cli`/`desktop` — host agent 运行时、统一命令声明表、配置体系 | 完成 |
+| **Phase 2** | 安全模型 — 三域授权（fs/net/ssh）+ exec 进程沙箱（seatbelt/bwrap/受限令牌） | 完成 |
+| **Phase 3** | `browser` — Chrome MV3 扩展 + desktop 壳通道（core/adapter 拆分，CDP 原生） | 完成 |
+| **Phase 4** | `cua` — 本机 GUI 自动化（cua-driver MCP 桥接，内置发行物随包分发） | 完成 |
+| **Phase 5** | `embedded` — 适配 tinygo、命令白名单、限定目录 | 规划（未开始） |
+| **Phase 6** | `mobile` — Dart/Flutter App | 规划（未开始） |

@@ -1,6 +1,16 @@
 # aic-pod
 
-AIC Pod 客户端 — 部署在 PC/服务器上，通过 NATS WebSocket 连接 AIC 平台，提供命令执行和文件操作能力。
+AIC Pod 客户端 — 部署在 PC/服务器上，通过 NATS WebSocket 连接 AIC 平台，把本机能力
+（命令执行 / 文件操作 / 浏览器自动化 / 原生 GUI 自动化 / ssh·scp 转发）注册为 LLM 可调用的工具。
+
+| 客户端 | 形态 | 核心能力 |
+|---|---|---|
+| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser（壳通道）、cua（原生 GUI 自动化） |
+| **cli** | 单二进制 `aic` | exec（沙箱 + 三域授权）、fs、ssh/scp |
+| **browser** | Chrome MV3 扩展 | browser 指令集 + PageFS |
+
+安全模型见 [docs/host_sandbox.md](docs/host_sandbox.md)，架构见 [docs/design.md](docs/design.md)，
+版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 配置
 
@@ -18,10 +28,35 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 | `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 | `HOME_PATH` | `-home_path` | `home_path` | `/` | 桌面端默认打开地址（host 后的路径，如 `/`、`/a`） |
+| `CODE` | `-code` | `code` | 空 | 本地管理 API 校验码（空 = 进程级随机） |
+| `FS_POLICY` | `-fs_policy` | `fs_policy` | `deny` | 文件写默认立场：`deny`（仅内置根 + `fs_allow`）\| `open`（除 `fs_deny` 全放） |
+| `FS_DENY` / `FS_ALLOW` | `-fs_deny` / `-fs_allow` | `fs_deny` / `fs_allow` | — | 路径 glob 拒绝 / 显式允许（允许可覆盖拒绝；裸路径覆盖子树，glob 精确匹配） |
+| `NET_POLICY` | `-net_policy` | `net_policy` | `open` | 沙箱进程出站立场：`open` \| `deny`（仅 localhost） |
+| `NET_DENY` / `NET_ALLOW` | `-net_deny` / `-net_allow` | `net_deny` / `net_allow` | — | 出站目标 `host:port` 拒绝 / 允许（拒绝恒优先；内建 localhost:*） |
+| `SSH_POLICY` | `-ssh_policy` | `ssh_policy` | `deny` | ssh/scp 目标立场：`deny` \| `open` |
+| `SSH_DENY` / `SSH_ALLOW` | `-ssh_deny` / `-ssh_allow` | `ssh_deny` / `ssh_allow` | — | ssh 目标 `host[:port]` 拒绝 / 允许（拒绝恒优先） |
+| `NO_SANDBOX` | `-no_sandbox` | `no_sandbox` | `false` | 隐藏项：全局跳过 exec 沙箱（等同放弃进程级隔离，慎用；本地管理 API 不可改） |
+
+> 三域授权（fs/net/ssh × policy/deny/allow）的完整判定式、内置根与会话级临时 grant
+> 语义见 [docs/host_sandbox.md](docs/host_sandbox.md)。
 
 本地管理 API（LocalAPI）由 api 包提供（cli/desktop 共用，vigo 框架实现）：
 `aic run` 启动时在 127.0.0.1 随机端口监听并**打印带 local_code 的引导链接**，
 用户浏览器访问该链接即可绑定/管理本机（与桌面端同一套通道协议）。
+
+## 安全模型
+
+本机能力默认受两道闸控制：
+
+- **三域授权**（fs / net / ssh × policy / deny / allow）：每个域有默认立场（`deny`/`open`）、
+  拒绝列表与显式允许列表（拒绝恒优先，显式允许可覆盖拒绝）；另有三类内置根（工作区、
+  会话目录、系统临时目录）与会话级临时 grant（`grant <域> <目标>` 可加 `--permanent` 落盘）。
+- **进程沙箱**（exec 调用）：darwin `sandbox-exec`（Seatbelt）/ linux bubblewrap /
+  windows 受限令牌；按授予等级选 profile（read-only / workspace-write），叠加环境变量
+  清洗、资源限制与网络出站闸。无可用后端时 **fail-closed**（命令不执行，绝不裸跑）。
+
+请求级 `nosandbox` 可显式申请免沙箱：required 恒提升 Critical(4) ⇒ 必转人工审批，
+且审批通过（granted 9）本身不豁免沙箱——免沙箱必须携带该标记单独审批。
 
 ## CLI
 
@@ -127,7 +162,9 @@ make build-browser   # → dist/aic-browser.zip
 
 ### 工具能力
 
-插件注册 `browser` 工具（平台自有指令集，扩展内原生 JS 实现，desktop 端同源共享）：
+插件注册 `browser` 工具（平台自有指令集）：平台无关核心 `browser/src/tools/browser/core.js`
++ 各端 adapter（插件 `chrome-adapter` / desktop 壳 `electron-adapter`，Electron CDP 原生接入）
+共享同一份 core——插件与 desktop 壳通道指令集一致：
 
 ```json
 { "action": "browser", "argv": ["<subcommand>", "..."] }
@@ -153,13 +190,13 @@ make build-browser   # → dist/aic-browser.zip
 
 ### 对比 desktop 客户端
 
-| 维度 | desktop (CLI/Docker) | browser (Extension) |
+| 维度 | desktop / cli | browser (Extension) |
 |---|---|---|
-| 运行时 | 独立二进制 | Chrome Service Worker |
-| 核心能力 | `exec` (命令执行), `fs` (文件操作) | `browser` (浏览器自动化) |
+| 运行时 | Electron + Go 后端子进程 / 单二进制 | Chrome Service Worker |
+| 核心能力 | `exec`（沙箱 + 三域授权）、`fs`、`ssh`/`scp`；desktop 另有 `browser`（壳通道）与 `cua`（原生 GUI 自动化） | `browser`（浏览器自动化）+ PageFS |
 | 登录态 | 无状态 | 直接用浏览器登录态 |
-| 安装 | 下载二进制 | 加载扩展 |
-| 适用场景 | 服务器运维 | Web 自动化测试、网页数据采集 |
+| 安装 | 下载安装包 / 二进制 | 加载扩展 |
+| 适用场景 | 本机/服务器运维、桌面自动化 | Web 自动化测试、网页数据采集 |
 
 ## 构建
 
@@ -175,8 +212,17 @@ make desktop-all                # desktop 全平台（linux desktop 需容器/CI
 make build-browser              # 打包 Chrome Extension → dist/aic-browser.zip
 make docker-build               # 编译 cli + Docker 镜像
 make docker-push                # 推送镜像
-make release                    # cli-all + desktop-all + build-browser + GitHub Release
+make release                    # 本地全量构建 + gh release create（需各平台工具链）
 make clean                      # 清理
 ```
+
+desktop 打包前自动同步内置 cua-driver（`desktop/cua.json` 固定版本 + sha256 →
+`vendor/cua → resources/cua`，三平台）；离线/受限网络用
+`npm run cua-sync -- --asset <已下载资产>`。
+
+**发版流程**：推送 tag `v*` 触发 CI（`.github/workflows/build.yml`）构建 desktop 全平台 +
+cli 全平台 + browser zip 并创建 GitHub Release；版本号只改 `cfg/config.go`（带 `v` 前缀）
+与 `browser/manifest.json`（无前缀），`desktop/package.json` 由 `make desktop-version`
+从 git describe 自动同步。
 
 依赖：Node 22+（Electron/electron-builder）、Go（后端二进制 `make backend-bin`）、`go-winres`（windows cli 资源）。
