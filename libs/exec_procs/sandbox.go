@@ -176,10 +176,11 @@ func selectBackend() sandboxBackend {
 }
 
 // sandboxUnavailable 构造 fail-closed 错误（命令未执行）。
+// 免沙箱唯一通道是显式 nosandbox 请求（单独人工审批）——审批通过（9）不豁免沙箱（§5.10）。
 func sandboxUnavailable(level int) error {
 	return fmt.Errorf(
 		"sandbox: level %d requires confinement but no sandbox backend is usable on this host "+
-			"(install bubblewrap on Linux); the command was NOT run — approve level 9 to run unconfined", level)
+			"(install bubblewrap on Linux); the command was NOT run — rerun with nosandbox to run unconfined (separate human approval)", level)
 }
 
 // ---- linux: bubblewrap（跨平台编译的纯 argv 构建，测试直接引用）----
