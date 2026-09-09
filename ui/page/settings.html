@@ -166,8 +166,15 @@
   // 页面与本地 API 同源（壳页面 /settings 路由）：$mod.$fetch 自动携带 x-aic-code
   setMsg = (text, ok) => {
     $refs.msg.textContent = text;
-    $refs.msg.style.color = ok ? '#4ade80' : '#f87171';
+    if (ok === 'warn') $refs.msg.style.color = '#facc15';
+    else $refs.msg.style.color = ok ? '#4ade80' : '#f87171';
   };
+
+  // 网络层失败（本地服务已重启/端口变化）：fetch 抛 TypeError；业务错误走 HTTP JSON
+  isNetErr = (e) => e instanceof TypeError || /failed to fetch|networkerror|load failed/i.test((e && e.message) || '');
+
+  // 凭证脏检查基线（get_config 回填值）：与当前输入一致时保存不重绑
+  loadedKey = '';
 
   refreshStatus = async () => {
     try {
@@ -190,6 +197,7 @@
       const cfg = await $mod.$fetch('/api/get_config');
       $refs.host.value = cfg.host || '';
       $refs.key.value = cfg.key || '';
+      loadedKey = cfg.key || '';
       $refs.work_dir.value = cfg.work_dir || '';
       $refs.exec_timeout.value = cfg.exec_timeout || '';
       $refs.home_path.value = cfg.home_path || '/';
@@ -201,6 +209,9 @@
   // 窗口重新获得焦点 → 刷新连接状态（不重拉 get_config，避免覆盖正在编辑的输入框）
   window.addEventListener('focus', () => refreshStatus());
 
+  // 保存：先落盘（set_config）→ 凭证改动过才 bind → 探测跳转。
+  // 连接/探测失败都不回滚、不阻断已保存的配置（2026-09-09 修复：原先 bind 在前，
+  // 旧凭证连旧地址失败会中断 set_config，导致改地址保存不了）。
   save = async () => {
     const host = $refs.host.value.trim();
     const key = $refs.key.value.trim();
@@ -208,11 +219,24 @@
     const exec_timeout = $refs.exec_timeout.value.trim();
     const home_path = $refs.home_path.value.trim();
     try {
-      if (key) await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
       await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout, home_path}});
-      setMsg('已保存，检测平台…', true);
-      await probeAndJump(host);
-    } catch (e) {setMsg('保存失败: ' + e.message, false);}
+    } catch (e) {
+      setMsg(isNetErr(e) ? '本地服务不可达（可能已重启），请重新打开本地配置页' : '保存失败: ' + e.message, false);
+      refreshStatus();
+      return;
+    }
+    if (key && key !== loadedKey) {
+      try {
+        await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
+        loadedKey = key;
+      } catch (e) {
+        setMsg('地址已保存；凭证未生效: ' + e.message, 'warn');
+        refreshStatus();
+        return;
+      }
+    }
+    setMsg('已保存，检测平台…', true);
+    await probeAndJump(host, '已保存（平台暂不可达，请检查地址）', true);
     refreshStatus();
   };
 
@@ -223,8 +247,9 @@
     return h.replace(/\/+$/, '');
   };
 
-  // 探测 {host}/root.html 可达后跳转平台（Electron：主进程 IPC；浏览器：新标签）
-  probeAndJump = async (rawHost) => {
+  // 探测 {host}/root.html 可达后跳转平台（Electron：主进程 IPC；浏览器：新标签）。
+  // failMsg/warn：不可达提示（保存流程=中性提示，跳转流程=默认红色告警）。
+  probeAndJump = async (rawHost, failMsg, warn) => {
     const h = normalizeHost(rawHost);
     let ok = false;
     if (window.aicDesktop && window.aicDesktop.checkPlatform) {
@@ -245,7 +270,7 @@
       }
       return true;
     }
-    setMsg('平台不可达，请检查地址', false);
+    setMsg(failMsg || '平台不可达，请检查地址', warn ? 'warn' : false);
     return false;
   };
 
