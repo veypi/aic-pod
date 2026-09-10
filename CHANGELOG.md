@@ -23,6 +23,16 @@
   隔离实例真机自测（真 CGEvent 点击/键盘 + 渲染器级滚轮 + 独立 harness 页）：透明洞
   合成、洞内点击/拖拽/滚轮路由、洞外放行、焦点转移（打字进原生内容）、隐藏门控全部
   通过；平台侧新增 `buildHolesPath` 纯函数单测（8/8）。
+- **修正（同日）——遮罩/弹窗不再触发内容隐藏**（`desktop/main.js` + `desktop/remote-preload.js` +
+  aic 仓 `ui/os/wincontent.js` + `ui/page/local/browser.html` + `ui/page/local/desktop.html`）：
+  v2 初版沿用 v1「遮挡即隐藏」语义（Alt/launcher/任何弹窗/浮窗出现 → 内容整隐）被废弃——
+  反转模型的目的正是遮罩直接叠画。改为：① 洞只看结构条件（内容存在/rect 有效/页面可见），
+  遮罩下内容保持可见（半透明可透出）；② 背景 mask 收敛到桌面背景层 `body::before`（内容
+  元素背景透明 + 画布透明兜底；整页 body mask 取消，否则遮罩会被挖出洞）；③ 输入资格改
+  页面侧判定（`elementsFromPoint`：洞内且栈顶为内容元素）→ `nativeWin.mouse / native:wheel`
+  → 主进程复核 + 翻译下发（`before-mouse-event` 主进程路由废弃——壳无法感知 DOM 遮挡）；
+  ④ 新增 `tracker.setEnabled`（0 标签空态撤洞）。真实实例复测：Alt/弹窗/浮窗覆盖下内容不
+  隐藏，被盖处点击归遮罩、露出处点击进原生内容。
 
 ## 未发布 — 2026-09-09
 

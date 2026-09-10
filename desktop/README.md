@@ -21,10 +21,9 @@ Electron Main (Node, main.js)
  │    自绘） + 原生内容池（OS 原生窗口内容 v2 反转模型，设计唯一源 =
  │    aic/docs/os_native_windows.md）——AI browser 标签与「本地配置」设置视图
  │    （WebContentsView）恒在平台页之下，由平台页 OS 窗口占位元素经 nativeWin 桥
- │    驱动贴位；可见性 = 页面整页 mask 开洞（撤洞即隐藏），隐藏 = 撤洞 + 输入禁用
- │    （视图恒挂树，隐藏态 CDP 截图照常可用）；洞内输入由主进程
- │    `before-mouse-event` 命中转发（sticky 拖拽捕获 + 焦点转移），wheel 走页面
- │    listener → IPC `native:wheel` 桥（Electron before-mouse-event 不覆盖 wheel）
+ │    驱动贴位；洞 = 内容区（背景层 `body::before` mask + 内容元素透明；遮罩/弹窗
+ │    直接叠画、不隐藏内容）；输入资格由页面侧 DOM 判定（elementsFromPoint）→ IPC
+ │    `native:mouse / native:wheel` → 主进程复核 + 坐标翻译下发（含拖拽捕获 + 焦点转移）
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 

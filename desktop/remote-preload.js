@@ -69,9 +69,10 @@ if (isLocal) {
       layout: (st) => ipcRenderer.invoke('native:layout', st),
       // {kind:'settings', rect, visible}：设置 hostView 贴位（懒创建/摘除保活）
       hostLayout: (st) => ipcRenderer.invoke('native:host-layout', st),
-      // v2：洞内 wheel 转发（页面 listener 调用；主进程命中校验 + 符号换算后 sendInputEvent，
-      // 见 aic/docs/os_native_windows.md §6——Electron before-mouse-event 不覆盖 wheel）
-      wheel: (x, y, dx, dy, mode) => ipcRenderer.send('native:wheel', { x, y, dx, dy, mode }),
+      // v2：洞内输入转发（页面侧命中判定 → 壳侧坐标翻译 + sendInputEvent + 焦点转移；
+      // 设计见 aic/docs/os_native_windows.md §6）
+      mouse: (m) => ipcRenderer.send('native:mouse', m || {}),
+      wheel: (m) => ipcRenderer.send('native:wheel', m || {}),
       // 标签集变化（全量推送）；返回取消函数
       onChanged: (fn) => {
         const h = (e, st) => fn(st)
