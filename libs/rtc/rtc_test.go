@@ -455,3 +455,50 @@ func TestRTCReadBinError(t *testing.T) {
 		t.Fatalf("want error frame, got %+v", resp)
 	}
 }
+
+// readbin 并发（2026-09-10）：同一 channel 两请求背靠背发出，设备端 goroutine
+// 并发执行、chunk 帧带 id 交错回传，客户端按 id 分流重组，两路各自字节精确。
+func TestRTCReadBinConcurrent(t *testing.T) {
+	_, tc := setup(t, "secret-code", stubRunFS(false))
+	tc.auth(t, "secret-code")
+	// 两文件载荷位置相关且互异（> inlineLimit 走流式），串味立即可见
+	a := make([]byte, 80<<10)
+	b := make([]byte, 80<<10)
+	for i := range a {
+		a[i] = byte(i)
+		b[i] = byte(255 - i)
+	}
+	tc.putFile("/a.bin", a)
+	tc.putFile("/b.bin", b)
+	chA := tc.register("c1")
+	chB := tc.register("c2")
+	send := func(id, path string) {
+		rawArgs, _ := json.Marshal(map[string]any{"path": path})
+		raw, _ := json.Marshal(fsFrame{ID: id, Op: "readbin", Args: rawArgs})
+		tc.sendFrame(t, raw)
+	}
+	send("c1", "/a.bin")
+	send("c2", "/b.bin") // 不等第一路完成
+	respA := tc.await(t, chA)
+	respB := tc.await(t, chB)
+	if !respA.OK || !respB.OK {
+		t.Fatalf("concurrent readbin: A ok=%v err=%s; B ok=%v err=%s", respA.OK, respA.Error, respB.OK, respB.Error)
+	}
+	dataA, err := base64.StdEncoding.DecodeString(string(respA.Data))
+	if err != nil {
+		t.Fatalf("A bad base64: %v", err)
+	}
+	dataB, err := base64.StdEncoding.DecodeString(string(respB.Data))
+	if err != nil {
+		t.Fatalf("B bad base64: %v", err)
+	}
+	if !bytes.Equal(dataA, a) {
+		t.Fatalf("A payload mismatch: got %d bytes", len(dataA))
+	}
+	if !bytes.Equal(dataB, b) {
+		t.Fatalf("B payload mismatch: got %d bytes", len(dataB))
+	}
+	if respA.Attrs["size"] != fmt.Sprint(len(a)) || respB.Attrs["size"] != fmt.Sprint(len(b)) {
+		t.Fatalf("attrs: A=%+v B=%+v", respA.Attrs, respB.Attrs)
+	}
+}

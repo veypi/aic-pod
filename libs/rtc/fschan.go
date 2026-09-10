@@ -15,7 +15,9 @@ import (
 // fsChannelLabel 是 fs 数据通道的协商标签（页面 createDataChannel("fs")）。
 const fsChannelLabel = "fs"
 
-// 帧协议 v1（全 JSON 文本帧；同一 channel 上请求由客户端串行化）：
+// 帧协议 v1（全 JSON 文本帧；并发口径：响应/chunk 帧带请求 id 按 id 分流，
+// 设备端每请求独立 goroutine 执行、发送由 sendMu 串行——readbin 可并发，
+// fs 调用客户端保持串行）：
 //
 //	鉴权：{id, op:"auth", code} → {op:"auth_ok", host_id,...} / {op:"auth_err", error}
 //	请求：{id, op:"fs", args{action,...}}——args 即 vcore.RunFS 原生输入；
