@@ -244,7 +244,7 @@
     <div class="btns">
       <button @click="save()">保存</button>
       <button id="btnReconnect" ref="btnReconnect" @click="reconnect()">重连</button>
-      <button class="ghost" ref="btnClose" style="display:none" @click="closePanel()">关闭</button>
+      <button v-if="canClose" class="ghost" @click="closePanel()">关闭</button>
       <span id="msg" ref="msg"></span>
     </div>
   </div>
@@ -476,11 +476,13 @@
     refreshStatus();
   };
 
-  // 嵌入桌面端 B 区时提供「关闭」（浏览器直开本地页无 aicDesktop.closeSettings，按钮保持隐藏）
+  // 内嵌桌面端 hostView 时提供「关闭」（浏览器直开/主视图整窗形态无 aicDesktop.closeSettings → 不渲染）。
+  // 声明式渲染：setup 在 DOM 编译前执行、$refs 不可用（vhtml 契约），桥条件只能走 $data 标记 + 模板 v-if
+  //（2026-09-10 事故：setup 里直接改 $refs.btnClose.style 导致按钮恒隐藏）。
+  canClose = !!(window.aicDesktop && window.aicDesktop.closeSettings);
   closePanel = () => {
     if (window.aicDesktop && window.aicDesktop.closeSettings) window.aicDesktop.closeSettings();
   };
-  if (window.aicDesktop && window.aicDesktop.closeSettings) $refs.btnClose.style.display = '';
 </script>
 
 </html>
