@@ -5,6 +5,46 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## 未发布 — 2026-09-09
+
+### 修复
+
+- **Windows 桌面端 Alt+Space 弹系统菜单**（`desktop/main.js`）：Alt+Space 走系统
+  DefWindowProc 弹窗口菜单（还原/最小化/最大化/关闭），且 WM_SYSKEYDOWN 被系统消费——
+  页面收不到 keydown，应用内 launcher 快捷键（keymap 默认 leader=Alt + space）失效。
+  现窗口聚焦期间 RegisterHotKey 抢占该组合（系统不再弹菜单），命中后把 Space 键回注
+  平台页，走页面既有 keymap（改键位跟随）；失焦即注销；桌宠窗聚焦时仅吞掉。
+
+### 新增
+
+- **桌面端主窗口 A/B 左右分区**（`desktop/main.js` + `electron-adapter.mjs`，新增
+  `divider.html` / `divider-preload.js`）：A = 平台页常驻左侧；B 区（右）默认收起，
+  AI browser 标签创建时自动展开（标签从全遮挡隐藏改为 B 区可见），最后一个标签关闭
+  自动收起；「本地配置」从独立窗口改为内嵌 B 区设置视图（settingsView 保持 B 最前，
+  新标签不顶掉正在编辑的设置页，关闭后露出标签或收起 B）。分隔条可拖拽调宽
+  （B≥360 / A≥400，拖拽时覆层接管鼠标），宽度持久化 `userData/b-width.json`。
+  adapter 新增 `tabControl.relayout`（resize/拖拽重设标签 bounds）与 `onTabsChanged`
+  钩子，`hideAiTab` 修正 z 序（先重挂再置顶平台页，终态遮挡成立）。
+  设置页卡片宽度响应式（`min(520px,100%)` + border-box）适配窄 B 区。
+- **托盘「打开配置目录」**（`desktop/main.js`）：菜单新增项用系统文件管理器打开 Go
+  后端配置根（`os.UserConfigDir()/aic`：config.yaml / aic.log / browser 状态同根）。
+  Electron 侧按平台推导同一路径（darwin `~/Library/Application Support/aic`；
+  win32 `%APPDATA%/aic`；linux `${XDG_CONFIG_HOME:-~/.config}/aic`），目录缺失时先建再开。
+- **本地配置页三域授权编辑**（`ui/page/settings.html`）：fs / net / ssh 三域各一组
+  policy 下拉（deny=仅允许名单放行 / open=除拒绝名单全放）+ deny / allow 名单编辑器
+  （条目增删，回车或按钮添加）。保存随 set_config 全量提交九键（空数组 = 清空，匹配
+  后端整体替换语义），条目形态校验由后端既有逻辑报错；卡片超高改为整页滚动（原 flex
+  居中布局超高会截顶）。后端九键 API 此前已就绪，本次纯前端接入。
+- **cua cursor 子命令**（`libs/host/cua.go` + `libs/vcore/{meta,levels}.go`）：`cua cursor on|off|state|motion|theme <id>` 控制 agent 光标浮层——驱动 MCP `set_agent_cursor_enabled` / `get_agent_cursor_state` / `set_agent_cursor_motion` / `set_agent_cursor_theme` 的 argv 面（motion 参数经未知 flag 透传）。背景：Windows 上浮层是覆盖整个虚拟屏的透明点击穿透分层窗口，cua 操作后残留导致全系统鼠标指针闪烁（cua-driver 0.25.0，同类症状 openai/codex#34340）；host 的 cua-driver MCP 子进程常驻复用、浮层不随操作销毁，`cua cursor off` 是无摩擦止血入口。
+- **cua 声明基线 Write(2) → Read(1)**（`libs/vcore/meta.go` Decl）：声明层不设 Write 地板，读类子命令动态降级不再被 max(声明, 动态) 吃掉（对齐 git/json）；cursor 全子命令 = Read(1)。写/危险动作仍由 cuaRequired 动态提升。
+
+### 测试
+
+- 托盘配置目录 / 设置页授权区 / A/B 分区：`node --check desktop/{main,settings-preload,divider-preload}.js`
+  绿；`vhtml check ui/page/settings.html` 绿；`go build ./...` 绿（ui embed 重编译通过）。
+- Alt+Space 回注机制（隐藏窗口 + `webContents.sendInputEvent`）：页面收到 `{code:'Space', altKey:true}` 的 keydown/keyup（keymap 匹配条件），`globalShortcut.register('Alt+Space')` 合法返回 true。
+- `TestMapCuaArgv`/`TestMapCuaArgvErrors`（cursor 成功/报错）、`TestCuaRequired`（cursor 全 Read）、`TestCuaDecl`（基线 Read）；`go build ./...` + `go vet ./libs/{host,vcore}` 绿；`go test ./libs/vcore ./libs/host` 除既有环境性失败（TestVcoreVectorsOnOSVFS 的 .env 用例在平台沙箱内 EPERM）外绿。
+
 ## v0.6.2 — 2026-09-09
 
 ### 修复
