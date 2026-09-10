@@ -13,10 +13,11 @@
  *   settings → 固定 { background: true }（desktop 不提供协作模式：AI 一律在
  *              AI 工作区标签页作业；平台标签页操作有自指风险）
  *
- * 标签可见性：AI 工作区视图常驻挂在主窗口 contentView **底层**，被平台页
- * 完全遮挡（用户不可见 = 隐藏标签页）；实测被遮挡的 WebContentsView 依然有
- * compositor surface，CDP 截图稳定可用——无需 show/hide 花招、零闪现。
- * 未来做标签切换 UI 时，showAiTab/hideAiTab（z 顺序调换）即切换显示。
+ * 标签可见性（A/B 分区模型，2026-09-10）：B 区收起时 AI 视图挂 contentView
+ * 底层，被平台页完全遮挡（隐藏标签页；实测被遮挡的 WebContentsView 依然有
+ * compositor surface，CDP 截图稳定可用——零闪现）；标签创建 → main.js 自动
+ * 展开右侧 B 区，contentBounds() 返回 B 矩形，标签在 B 区可见；全部关闭 →
+ * B 收起回落遮挡隐藏。showAiTab/hideAiTab 即两种态的 z 序切换。
  *
  * currentSessionDir 由 browser-tool 在每次调用前设置（串行链保证无交叉）——
  * 下载产物的落盘目录（Go 后端下发的会话工作区）。
@@ -41,8 +42,10 @@ const BG_PARTITION = "persist:aic-worker"; // AI 工作区（独立存储，不�
 /**
  * host（main.js 注入，见 startBrowserServer）：
  *   win: BaseWindow 主窗口
- *   contentBounds(): () => {x,y,width,height} 内容区（占满窗口）
+ *   contentBounds(): () => {x,y,width,height} AI 标签 bounds——B 展开时为右侧 B
+ *                  矩形（标签可见），收起时为全内容区（平台页遮挡 = 隐藏）
  *   raisePlatform(): 平台页视图置顶（AI 视图挂入/隐藏后恢复遮挡）
+ *   onTabsChanged(n): 标签数变化回调（main.js 驱动 B 区自动开合）
  */
 export function createElectronAdapter(host) {
   if (!host || !host.win) throw new Error("electron adapter requires host.win");
@@ -136,7 +139,7 @@ export function createElectronAdapter(host) {
     return view;
   }
 
-  // 标签 z 顺序：contentView 后加入的 view 在上层。
+  // 标签 z 顺序：contentView 后加入的 view 在上层（调用方负责先摘下已挂载 view）。
   // 隐藏态 = AI 视图在底层（平台页遮挡）；显示态 = AI 视图提升到平台页之上。
   function applyZ() {
     const b = boundsToContentArea();
@@ -146,20 +149,25 @@ export function createElectronAdapter(host) {
     }
   }
 
+  // 标签 z 序切换前一律先摘后挂（contentView 上已挂载的 view 重复 addChildView 会失败）
   function showAiTab() {
     if (aiVisible) return;
-    applyZ(); // AI 视图最后加入 → 顶层显示（未来标签切换 UI 调用）
+    for (const { view } of tabs.values()) {
+      host.win.contentView.removeChildView(view);
+    }
+    applyZ(); // AI 视图重新挂入并 setBounds（B 展开 = B 矩形，顶层可见）
     aiVisible = true;
   }
 
   function hideAiTab() {
     if (!aiVisible) return;
-    // AI 视图回落底层：移除后重建 z 顺序（platformView 由 main.js 持有，重新置顶）
+    // AI 视图回落底层：先摘再按当前 contentBounds 重挂（B 已收起 = 全尺寸），
+    // 最后置顶平台页——终态平台页在最上，AI 视图被遮挡（隐藏）。
     for (const { view } of tabs.values()) {
       host.win.contentView.removeChildView(view);
     }
-    if (host.raisePlatform) host.raisePlatform();
     applyZ();
+    if (host.raisePlatform) host.raisePlatform();
     aiVisible = false;
   }
 
@@ -185,11 +193,17 @@ export function createElectronAdapter(host) {
     // browser-tool 每次调用前设置（下载产物落盘目录）
     setSessionDir(dir) { currentSessionDir = dir || null; },
 
-    // 主窗口标签栏控制（main.js 点击「AI 工作区 / 平台」标签时调用）
+    // B 区开合控制（main.js setBOpen / layoutMain 调用）
     tabControl: {
       show: showAiTab,
       hide: hideAiTab,
       hasWorkTabs: () => tabs.size > 0,
+      // 窗口 resize / B 区拖拽后按当前 contentBounds 重设所有标签 bounds（z 序不动）
+      relayout() {
+        const b = boundsToContentArea();
+        if (!b) return;
+        for (const { view } of tabs.values()) view.setBounds(b);
+      },
     },
 
     tabs: {
@@ -210,13 +224,14 @@ export function createElectronAdapter(host) {
           throw new Error(`window ${windowId} not found`);
         }
         const view = createView(url || "about:blank");
-        // 隐藏标签页：挂入 contentView 底层（平台页遮挡），不提升层
+        // 挂入 contentView（B 收起时底层遮挡；contentBounds 由 host 决定）
         {
           const b = boundsToContentArea();
           if (b) view.setBounds(b);
           host.win.contentView.addChildView(view);
-          if (host.raisePlatform) host.raisePlatform(); // 平台页置顶遮挡 AI 视图
+          if (host.raisePlatform) host.raisePlatform(); // 平台页置顶（B 收起 = 遮挡隐藏）
         }
+        host.onTabsChanged?.(tabs.size); // 首个标签 → main.js 自动展开 B 区
         return tabOf(view.webContents.id);
       },
       async update(id, props) {
@@ -236,8 +251,9 @@ export function createElectronAdapter(host) {
         tabs.delete(id);
         attached.delete(id);
         if (wc) wc.close();
-        // 若未来标签切换 UI 已显示 AI 标签且最后一个工作区 tab 被关 → 回落平台页
+        // 最后一个工作区 tab 被关 → 回落平台页遮挡态（main.js 经 onTabsChanged 收起 B）
         if (tabs.size === 0 && aiVisible) hideAiTab();
+        host.onTabsChanged?.(tabs.size);
       },
       onUpdated: {
         add(fn) { updatedListeners.add(fn); },

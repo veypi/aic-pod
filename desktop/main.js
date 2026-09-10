@@ -9,13 +9,15 @@
 //	 │      适配器）并向 Go 后端注册 provider（caps 出现 browser）
 //	 ├─ 平台页（{host}/ 顶层页面）：session.setPreloads 注入 remote-preload.js
 //	 │    （host 白名单过滤后暴露 window.aicDesktop：api 转发/窗口控制/外链/桌宠）
-//	 ├─ 本地设置窗口：独立 partition + settings-preload（仅探测/跳转两个能力）
-//	 └─ 托盘：打开 / 本地配置 / 退出；桌宠 = 透明小窗加载 {host}/pet
+//	 ├─ 主窗口 A/B 左右分区：A=平台页常驻左侧；B（右）默认收起，AI browser 标签
+//	 │    创建 / 本地配置打开时展开；分隔条可拖拽调宽（持久化 userData/b-width.json）
+//	 ├─ 本地设置页：内嵌 B 区 WebContentsView（独立 partition + settings-preload）
+//	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
 //
 // 安全：所有 IPC handler 校验 event.senderFrame.url 的 host——
 // 平台能力（local:api/window:*/pet:*）仅白名单 host（配置 host + ivec.ai）可调；
 // 设置能力（platform:check/open）仅 127.0.0.1 本地页面可调。端口/code 不出主进程。
-const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen } = require('electron')
+const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut } = require('electron')
 const { spawn } = require('child_process')
 const fs = require('fs')
 const net = require('net')
@@ -40,7 +42,11 @@ let mainWin = null // 主窗口（BaseWindow：平台页 + 隐藏的 AI 工作�
 let platformView = null // 平台页视图（原主窗口 webContents 的角色）
 let aiBrowser = null // browser 壳通道（adapter 暴露 tabControl 供未来标签切换）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
-let settingsWin = null // 本地设置窗口（系统边框，独立 partition）
+let settingsView = null // B 区内嵌设置视图（WebContentsView，独立 partition + settings-preload）
+let dividerView = null // A/B 分隔条视图（8px 热区；拖拽中扩为全宽覆层接管鼠标）
+let bOpen = false // B 区是否展开（AI 标签创建 / 打开本地配置时展开）
+let bWidth = null // B 区宽度（null = 未拖拽过，首开按 45%；拖拽后持久化）
+let dividerDragging = false
 let tray = null
 let backend = null
 let quitting = false
@@ -142,7 +148,7 @@ async function start() {
     loadMain(host.replace(/\/+$/, '') + homePath)
   } else {
     loadMainLocal('/settings')
-    openSettings() // 配置窗口提示用户填 host
+    openSettings() // B 区展开设置页提示用户填 host
   }
 
   try {
@@ -244,7 +250,7 @@ async function setupBrowserProvider() {  const maxAttempts = 3
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const { startBrowserServer } = await import('./browser-tool.mjs')
-      const { port, token, adapter } = await startBrowserServer({ host: { win: mainWin, contentBounds, raisePlatform }, log: (f, ...a) => console.log('[browser]', f, ...a) })
+      const { port, token, adapter } = await startBrowserServer({ host: { win: mainWin, contentBounds, raisePlatform, onTabsChanged }, log: (f, ...a) => console.log('[browser]', f, ...a) })
       aiBrowser = { adapter }
       const r = await fetch(`http://127.0.0.1:${localPort}/api/provider/register`, {
         method: 'POST',
@@ -453,6 +459,48 @@ function registerIpc() {
     closeSettings()
     return true
   })
+
+  // 设置视图关闭（内嵌 B 区后由设置页「关闭」按钮触发）
+  ipcMain.handle('settings:close', (e) => {
+    if (!isLocalFrame(e)) return false
+    closeSettings()
+    return true
+  })
+
+  // A/B 分隔条拖拽（仅分隔条视图可触发）
+  ipcMain.on('b:divider-down', (e) => { if (dividerView && e.sender === dividerView.webContents) startDividerDrag() })
+  ipcMain.on('b:divider-move', (e, x) => { if (dividerView && e.sender === dividerView.webContents) moveDividerDrag(x) })
+  ipcMain.on('b:divider-up', (e) => { if (dividerView && e.sender === dividerView.webContents) endDividerDrag() })
+}
+
+// ---- Windows：Alt+Space 抢占（应用内 leader+space = launcher，系统默认弹窗口菜单） ----
+// Electron 33 的窗口过程把 Alt+Space 交给 DefWindowProc 弹系统菜单（还原/最小化/最大化/
+// 关闭），WM_SYSKEYDOWN 也被系统消费——页面收不到 keydown，应用内快捷键失效、菜单乱弹。
+// 处理：窗口聚焦期间 RegisterHotKey 抢占该组合（系统不再弹菜单），命中后把 Space 键回注
+// 平台页——页面按既有 keymap 决定动作（默认 launcher，改键位也跟随）。失焦即注销，不长期
+// 占用系统热键；注册失败（被 PowerToys Run 等占用）只告警，维持现状。
+const ALT_SPACE = 'Alt+Space'
+let altSpaceHeld = false
+
+function syncAltSpace() {
+  if (process.platform !== 'win32') return
+  const focused = !!mainWin && !mainWin.isDestroyed() && (mainWin.isFocused() || (!!petWin && !petWin.isDestroyed() && petWin.isFocused()))
+  if (focused && !altSpaceHeld) {
+    altSpaceHeld = globalShortcut.register(ALT_SPACE, onAltSpace)
+    if (!altSpaceHeld) console.warn('[hotkey] Alt+Space 注册失败（已被其它应用占用？）')
+  } else if (!focused && altSpaceHeld) {
+    globalShortcut.unregister(ALT_SPACE)
+    altSpaceHeld = false
+  }
+}
+
+// 命中：主窗聚焦 → 回注 Space（alt 修饰）走页面 keymap；桌宠聚焦 → 仅吞掉不弹菜单
+function onAltSpace() {
+  if (!mainWin || mainWin.isDestroyed() || !mainWin.isFocused()) return
+  const wc = platformView && !platformView.webContents.isDestroyed() ? platformView.webContents : null
+  if (!wc) return
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'Space', modifiers: ['alt'] })
+  wc.sendInputEvent({ type: 'keyUp', keyCode: 'Space', modifiers: ['alt'] })
 }
 
 // ---- 窗口 ----
@@ -482,12 +530,30 @@ function createMainWindow(init) {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+  // B 区宽度持久化恢复（拖拽落点；无记录首开默认 45%）
+  bWidth = loadBWidth()
+  // A/B 分隔条（8px 热区 1px 视觉线；仅 B 展开时挂入，拖拽中扩为全宽覆层）
+  dividerView = new WebContentsView({
+    backgroundColor: '#1b2a3a',
+    webPreferences: {
+      preload: path.join(__dirname, 'divider-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  dividerView.webContents.loadFile(path.join(__dirname, 'divider.html'))
+
   layoutMain()
   mainWin.on('resize', layoutMain)
+  mainWin.on('focus', syncAltSpace)
+  mainWin.on('blur', syncAltSpace)
+  mainWin.on('blur', endDividerDrag) // 拖拽中窗口失焦 → 兜底结束拖拽
 
   // BaseWindow 无 ready-to-show（BrowserWindow 专属）：内容 view 创建即直接显示
   if (startFullscreen) mainWin.setFullScreen(true)
   mainWin.show()
+  syncAltSpace()
   mainWin.on('close', (e) => {
     if (!quitting) {
       e.preventDefault()
@@ -497,18 +563,123 @@ function createMainWindow(init) {
   if (init) init()
 }
 
-// 布局：平台页占满内容区（AI 工作区视图同区域，由 adapter 放置）
+// ---- A/B 左右分区布局 ----
+// A = 平台页（左，常驻）；B = AI 标签页 / 本地设置（右，默认收起）。
+// B 展开时 platformView 收窄为 A 区，分隔条占 DIVIDER_W，B 矩形供 adapter
+// （contentBounds）与 settingsView 使用——标签与平台页不再重叠；遮挡隐藏
+// 语义只在 B 收起时生效（全尺寸底层遮挡，CDP 截图照常用）。
+const DIVIDER_W = 8
+const MIN_A_WIDTH = 400
+const MIN_B_WIDTH = 360
+
+function clampBWidth(bw, contentW) {
+  return Math.max(MIN_B_WIDTH, Math.min(contentW - MIN_A_WIDTH - DIVIDER_W, bw))
+}
+
+// B 区矩形（bWidth 未设 = 首开 45%；随窗口尺寸 clamp）
+function bRect(w, h) {
+  const bw = clampBWidth(bWidth ?? Math.round(w * 0.45), w)
+  return { x: w - bw, y: 0, width: bw, height: h }
+}
+
 function layoutMain() {
   if (!mainWin || mainWin.isDestroyed()) return
   const [w, h] = mainWin.getContentSize()
-  platformView?.setBounds({ x: 0, y: 0, width: w, height: h })
+  if (!bOpen) {
+    platformView?.setBounds({ x: 0, y: 0, width: w, height: h })
+    aiBrowser?.adapter?.tabControl?.relayout?.()
+    return
+  }
+  const b = bRect(w, h)
+  platformView?.setBounds({ x: 0, y: 0, width: b.x - DIVIDER_W, height: h })
+  if (dividerView && !dividerDragging) dividerView.setBounds({ x: b.x - DIVIDER_W, y: 0, width: DIVIDER_W, height: h })
+  if (settingsView && !settingsView.webContents.isDestroyed()) settingsView.setBounds(b)
+  aiBrowser?.adapter?.tabControl?.relayout?.()
 }
 
-// 内容区 bounds（aiView 由 adapter 放置）：与平台页同区域
+// AI 标签 bounds（adapter 唯一布局入口）：B 展开 = B 矩形（可见）；收起 = 全内容区（遮挡隐藏）
 function contentBounds() {
   if (!mainWin || mainWin.isDestroyed()) return null
   const [w, h] = mainWin.getContentSize()
-  return { x: 0, y: 0, width: w, height: h }
+  return bOpen ? bRect(w, h) : { x: 0, y: 0, width: w, height: h }
+}
+
+// B 区开合：展开 = 标签提升到 B 区可见 + 挂入分隔条；收起 = 标签回落底层遮挡 +
+// 销毁设置视图 + 摘分隔条。
+function setBOpen(open) {
+  if (!mainWin || mainWin.isDestroyed()) return
+  if (bOpen === open) { layoutMain(); return }
+  bOpen = open
+  const tc = aiBrowser?.adapter?.tabControl
+  if (open) {
+    tc?.show?.()
+    if (dividerView) mainWin.contentView.addChildView(dividerView)
+  } else {
+    tc?.hide?.()
+    destroySettingsView()
+    if (dividerView) mainWin.contentView.removeChildView(dividerView)
+  }
+  layoutMain()
+}
+
+// adapter 标签数变化钩子：首个标签创建 → B 自动展开；最后一个关闭 → 无设置时收起。
+// 设置视图存在时保持 B 最前（新标签不顶掉正在编辑的设置页）。
+function onTabsChanged(n) {
+  if (!mainWin || mainWin.isDestroyed()) return
+  if (n > 0) {
+    if (!bOpen) setBOpen(true)
+    else if (settingsView && !settingsView.webContents.isDestroyed()) {
+      // 已挂载视图重复 addChildView 会失败：先摘后挂 = 移到最顶
+      mainWin.contentView.removeChildView(settingsView)
+      mainWin.contentView.addChildView(settingsView)
+    }
+    return
+  }
+  if (settingsView && !settingsView.webContents.isDestroyed()) return layoutMain()
+  setBOpen(false)
+}
+
+// B 区宽度拖拽：按下后分隔条扩为全宽覆层接管鼠标（快速拖动不丢事件），
+// 抬起/窗口失焦结束并持久化宽度。
+function startDividerDrag() {
+  if (dividerDragging || !mainWin || mainWin.isDestroyed() || !dividerView) return
+  dividerDragging = true
+  const [w, h] = mainWin.getContentSize()
+  dividerView.setBounds({ x: 0, y: 0, width: w, height: h })
+  mainWin.contentView.removeChildView(dividerView) // 覆层置顶（已挂载视图需先摘后挂）
+  mainWin.contentView.addChildView(dividerView)
+}
+
+function moveDividerDrag(clientX) {
+  if (!dividerDragging || !mainWin || mainWin.isDestroyed()) return
+  const [w] = mainWin.getContentSize()
+  bWidth = clampBWidth(w - Math.round(Number(clientX) || 0), w)
+  layoutMain() // dividerDragging 期间分隔条保持全宽覆层（不收缩回热区）
+}
+
+function endDividerDrag() {
+  if (!dividerDragging) return
+  dividerDragging = false
+  saveBWidth()
+  layoutMain()
+}
+
+// B 区宽度持久化：userData/b-width.json {width}（拖拽结束即写，一次拖拽一次写盘）
+function bWidthFile() {
+  return path.join(app.getPath('userData'), 'b-width.json')
+}
+
+function loadBWidth() {
+  try {
+    const v = JSON.parse(fs.readFileSync(bWidthFile(), 'utf-8'))
+    if (v && Number.isFinite(v.width) && v.width > 0) return Math.round(v.width)
+  } catch (_) { /* 首次/损坏 → 默认 45% */ }
+  return null
+}
+
+function saveBWidth() {
+  if (!bWidth) return
+  try { fs.writeFileSync(bWidthFile(), JSON.stringify({ width: bWidth })) } catch (_) { /* 忽略 */ }
 }
 
 // 平台页视图置顶（z 顺序：contentView 后加入的在上层）——AI 工作区视图
@@ -534,18 +705,15 @@ function setStep(text) {
   platformView?.webContents.executeJavaScript(`window.__setStep && window.__setStep(${JSON.stringify(text)})`).catch(() => { })
 }
 
-// ---- 本地设置窗口（系统边框，独立 partition：登录态/存储与平台隔离） ----
+// ---- 本地设置页（内嵌 B 区视图，独立 partition：登录态/存储与平台隔离） ----
 function openSettings() {
-  if (settingsWin && !settingsWin.isDestroyed()) {
-    settingsWin.show()
-    settingsWin.focus()
+  if (!mainWin || mainWin.isDestroyed()) return
+  if (settingsView && !settingsView.webContents.isDestroyed()) {
+    setBOpen(true)
+    focusMain()
     return
   }
-  settingsWin = new BrowserWindow({
-    width: 760,
-    height: 640,
-    frame: true,
-    parent: mainWin,
+  settingsView = new WebContentsView({
     webPreferences: {
       partition: 'settings',
       preload: path.join(__dirname, 'settings-preload.js'),
@@ -554,12 +722,26 @@ function openSettings() {
       sandbox: true,
     },
   })
-  settingsWin.loadURL(`http://127.0.0.1:${localPort}/settings?code=${encodeURIComponent(localCode)}`)
-  settingsWin.on('closed', () => { settingsWin = null })
+  settingsView.webContents.on('destroyed', () => { settingsView = null })
+  settingsView.webContents.loadURL(`http://127.0.0.1:${localPort}/settings?code=${encodeURIComponent(localCode)}`)
+  setBOpen(true) // 先展开（标签 z 序就位），再挂设置视图保持 B 最前
+  mainWin.contentView.addChildView(settingsView)
+  layoutMain()
+  focusMain()
 }
 
+function destroySettingsView() {
+  if (!settingsView) return
+  if (mainWin && !mainWin.isDestroyed()) mainWin.contentView.removeChildView(settingsView)
+  if (!settingsView.webContents.isDestroyed()) settingsView.webContents.close()
+  settingsView = null
+}
+
+// 关闭设置视图：标签仍在 → B 保持（露出标签）；否则收起 B
 function closeSettings() {
-  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close()
+  destroySettingsView()
+  if (aiBrowser?.adapter?.tabControl?.hasWorkTabs?.()) layoutMain()
+  else setBOpen(false)
 }
 
 // ---- 托盘：win 右下角 / mac 菜单栏 ----
@@ -569,10 +751,25 @@ function createTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开', click: () => focusMain() },
     { label: '本地配置', click: () => openSettings() },
+    { label: '打开配置目录', click: () => openConfigDir() },
     { type: 'separator' },
     { label: '退出', click: () => { quitting = true; app.quit() } },
   ]))
   tray.on('click', () => focusMain())
+}
+
+// Go 后端配置根目录（os.UserConfigDir()/aic：config.yaml / aic.log / browser 状态同根）。
+// Electron 侧按平台推导同一路径，供托盘「打开配置目录」用系统文件管理器打开。
+function configDir() {
+  if (process.platform === 'darwin') return path.join(app.getPath('home'), 'Library', 'Application Support', 'aic')
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(app.getPath('home'), 'AppData', 'Roaming'), 'aic')
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(app.getPath('home'), '.config'), 'aic')
+}
+
+function openConfigDir() {
+  const dir = configDir()
+  try { fs.mkdirSync(dir, { recursive: true }) } catch (e) { /* 建目录失败由 openPath 报错兜底 */ }
+  shell.openPath(dir).then((err) => { if (err) console.error('[tray] open config dir failed:', err) })
 }
 
 // ---- 桌宠位置/尺寸缓存：userData/pet-pos.json {x,y,size}（进入恢复上次，拖动/缩放防抖落盘） ----
@@ -644,6 +841,8 @@ function enterPet(page) {
       sandbox: true,
     },
   })
+  petWin.on('focus', syncAltSpace)
+  petWin.on('blur', syncAltSpace)
   // 平台桌宠页（仅放行 /pet 与 /a/{aid}/pet，query 透传）；remote-preload 注入（host 白名单）
   const raw = String(page || '')
   const p = /^\/pet($|\?)|^\/a\/[^/]+\/pet($|\?)/.test(raw) ? raw : '/pet'
@@ -662,6 +861,7 @@ function enterPet(page) {
 // 双击桌宠：仅销毁小窗，主窗口不动
 function leavePet() {
   if (petWin) { petWin.destroy(); petWin = null }
+  syncAltSpace() // 桌宠销毁后主窗恢复焦点前的兜底对账
   petDragOff = null
   savePetPosNow() // 防抖未落盘时兜底写盘
   return state()

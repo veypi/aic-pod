@@ -17,14 +17,21 @@ Electron Main (Node, main.js)
  │    发行物内置：scripts/sync-cua.mjs 按 desktop/cua.json 固定版本 + sha256 同步到
  │    vendor/cua → resources/cua，main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP；
  │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
- ├─ BaseWindow（frameless）主窗口：平台页 + 隐藏的「AI 工作区」标签页
- │    （WebContentsView 常驻底层被平台页遮挡；browser 命令全程后台，
- │     未来做标签切换 UI 时经 tabControl.show/hide 调换 z 顺序）
+ ├─ BaseWindow（frameless）主窗口 A/B 左右分区：A=平台页常驻左侧；B 区（右）
+ │    默认收起——AI browser 标签创建时自动展开（WebContentsView 在 B 区可见），
+ │    最后一个标签关闭自动收起；「本地配置」内嵌 B 区设置视图（独立 partition，
+ │    保持 B 最前）。分隔条 8px 热区可拖拽调宽（拖拽中扩全宽覆层接管鼠标），
+ │    宽度持久化 userData/b-width.json；B 收起时标签全尺寸回落底层被平台页
+ │    遮挡（隐藏态 CDP 截图照常可用）
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
 窗口控制：壳页面经 preload（`window.aicDesktop`）调 IPC；`/api/window_*` 端点
 保留（cli 浏览器壳下返回 desktop:false）。
+
+Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢占（否则走系统
+DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
+键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
 
 ## 开发
 
