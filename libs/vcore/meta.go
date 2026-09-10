@@ -113,6 +113,13 @@ Behavior:
   cua set-frame --pid N --window W --x X --y Y --width W --height H
   cua launch --app <name> [--url U]... 启动/唤起应用（可带 URL 开页）
   cua clipboard read|write [text]     系统剪贴板
+  cua cursor on|off|state             agent 光标浮层开关/状态（纯显示不交互）
+  cua cursor motion [--knob V]...     浮层动画/空闲隐藏参数（未知 flag 透传驱动，
+                                      如 --glide-duration-ms 700 --spring 0.72）
+  cua cursor theme <theme_id> [--reduced-motion auto|on|off]
+                                      选用已安装主题（只能选用，不能安装数据）
+  Windows：浮层是覆盖整个虚拟屏的透明点击穿透分层窗口，残留会导致全系统鼠标
+  指针闪烁——cua cursor off 可即时止血（不影响动作执行），cua cursor on 恢复。
   cua doctor                     环境自检（一次性 CLI，不走 MCP）
   参数透传：未知 --flag 原样传给驱动工具（kebab-case → snake_case，值自动
   推断 bool/数字/字符串，无值视为 true）——如 --count 2、--debug-image-out
@@ -168,6 +175,7 @@ Behavior:
            cua.bclick({ref}|[x,y])；cua.btype(ref, text)；cua.browserState()；cua.bend()
     控制   await cua.sleep(ms)；cua.log(msg)；console.log 同 log
            await cua.front(pid) 前台激活目标应用（Danger；前台投递的前提）
+           cua.cursor.show()/hide()/state()/motion(opts) 浮层开关与状态
     投递   动作默认后台精确路由，不动前台/真实指针；需要前台接管时带末参
            opts：{delivery:"foreground"}（真实全局事件——IME 活跃的文本框里
            后台合成修饰键会被输入法吃掉，换 foreground 穿透；需先 front 前台
@@ -307,7 +315,9 @@ func Decl(name string) (proto.CommandDecl, bool) {
 	} else if name == "browser" {
 		level = proto.LevelWrite // 基础 = write；读类子命令动态降级在 browserRequired
 	} else if name == "cua" {
-		level = proto.LevelWrite // 基础 = write；读类子命令动态降级、scope/foreground 提级在 cuaRequired
+		// 基础 = read（2026-09-09 用户定）：声明层不设 Write 地板，否则读类子命令
+		// 的动态降级永远被 max(声明, 动态) 吃掉；写/危险动作由 cuaRequired 动态提升。
+		level = proto.LevelRead
 	}
 	return proto.CommandDecl{Name: name, Desc: m.Desc, Help: m.Help, RequiredLevel: level}, true
 }

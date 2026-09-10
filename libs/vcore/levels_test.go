@@ -66,6 +66,12 @@ func TestCuaRequired(t *testing.T) {
 		{[]string{"doctor"}, proto.LevelRead},
 		{[]string{"clipboard", "read"}, proto.LevelRead},
 		{[]string{"clipboard", "write", "hello"}, proto.LevelWrite},
+		// cursor：agent 光标浮层控制全 Read（Windows 闪烁止血入口，纯视觉层）
+		{[]string{"cursor", "off"}, proto.LevelRead},
+		{[]string{"cursor", "on"}, proto.LevelRead},
+		{[]string{"cursor", "state"}, proto.LevelRead},
+		{[]string{"cursor", "motion", "--glide-duration-ms", "700"}, proto.LevelRead},
+		{[]string{"cursor", "theme", "cua.default", "--reduced-motion", "off"}, proto.LevelRead},
 		{[]string{"launch", "--app", "Notes"}, proto.LevelWrite},
 		{[]string{"click", "--token", "t1"}, proto.LevelWrite},
 		{[]string{"click", "--x", "100", "--y", "200"}, proto.LevelWrite},
@@ -116,7 +122,7 @@ func TestCuaDecl(t *testing.T) {
 	if !ok {
 		t.Fatal("Decl(cua) not found")
 	}
-	if d.RequiredLevel != proto.LevelWrite || d.Desc == "" || d.Help == "" {
+	if d.RequiredLevel != proto.LevelRead || d.Desc == "" || d.Help == "" {
 		t.Errorf("Decl(cua) = %+v", d)
 	}
 }

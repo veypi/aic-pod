@@ -117,6 +117,10 @@ var cuaSubLevels = map[string]int{
 	"windows":       proto.LevelRead,
 	"snapshot":      proto.LevelRead,
 	"browser-state": proto.LevelRead,
+	// cursor：agent 光标浮层控制（on/off/state/motion/theme）——纯视觉层，
+	// 不碰用户数据/前台/真实指针，全部 Read(1)（2026-09-09 用户定：
+	// Windows 浮层残留导致系统指针闪烁时需无摩擦止血）。
+	"cursor": proto.LevelRead,
 
 	"launch":    proto.LevelWrite,
 	"navigate":  proto.LevelWrite,
@@ -258,7 +262,7 @@ func browserRequired(argv []string) int {
 
 // cuaRequired 判定 cua 子命令等级：
 //  1. 全参数扫描 --delivery foreground / --scope desktop → Danger(3)（用户可见接管）；
-//  2. 取首个非 flag 且非 flag 值的子命令查表（读类 Read，交互 Write）；
+//  2. 取首个非 flag 且非 flag 值的子命令查表（读类 Read，交互 Write；cursor 全 Read）；
 //  3. clipboard 嵌套子命令：read=Read，write=Write；
 //  4. bprepare 嵌套：--isolated=Write（驱动自持隔离 profile），
 //     缺省 existing_profile=Danger（开启用户真实浏览器的远程调试，逐次审批）；

@@ -106,6 +106,20 @@ func TestMapCuaArgv(t *testing.T) {
 			args: map[string]any{"pid": 1, "window_id": 2, "x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0}}},
 		{[]string{"clipboard", "read"}, want{tool: "clipboard_read", args: map[string]any{"include_text": true}}},
 		{[]string{"clipboard", "write", "hello"}, want{tool: "clipboard_write", args: map[string]any{"text": "hello"}}},
+		// cursor：agent 光标浮层（on/off/state/motion/theme）
+		{[]string{"cursor", "off"}, want{tool: "set_agent_cursor_enabled", args: map[string]any{"enabled": false}}},
+		{[]string{"cursor", "on"}, want{tool: "set_agent_cursor_enabled", args: map[string]any{"enabled": true}}},
+		{[]string{"cursor", "state"}, want{tool: "get_agent_cursor_state", args: map[string]any{}}},
+		{[]string{"cursor", "motion", "--glide-duration-ms", "700", "--spring", "0.72"}, want{
+			tool: "set_agent_cursor_motion",
+			args: map[string]any{"glide_duration_ms": 700, "spring": 0.72}}},
+		{[]string{"cursor", "theme", "cua.default"}, want{
+			tool: "set_agent_cursor_theme", args: map[string]any{"theme_id": "cua.default"}}},
+		{[]string{"cursor", "theme", "cua.default", "--reduced-motion", "off"}, want{
+			tool: "set_agent_cursor_theme",
+			args: map[string]any{"theme_id": "cua.default", "reduced_motion": "off"}}},
+		{[]string{"cursor", "theme", "--theme-id", "cua.default"}, want{
+			tool: "set_agent_cursor_theme", args: map[string]any{"theme_id": "cua.default"}}},
 		// 未知 flag 透传：kebab→snake，值类型自动推断（int/float/bool/string）
 		{[]string{"click", "--x", "10", "--y", "20", "--count", "2"}, want{
 			tool: "click", args: map[string]any{"x": 10.0, "y": 20.0, "count": 2}}},
@@ -213,6 +227,9 @@ func TestMapCuaArgvErrors(t *testing.T) {
 		{"set-value", "--token", "t1"}, // 缺 --value
 		{"clipboard"},                  // 缺 read|write
 		{"clipboard", "write"},         // 缺文本
+		{"cursor"},                     // 缺嵌套子命令
+		{"cursor", "bogus"},            // 未知嵌套子命令
+		{"cursor", "theme"},            // 缺 theme_id
 		{"type"},                       // 缺 --text
 		{"menu", "--pid", "1"},         // 缺 --path
 		{"front"},                      // 缺 --pid

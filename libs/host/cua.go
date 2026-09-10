@@ -1028,6 +1028,37 @@ func mapCuaArgv(argv []string) (call *cuaCall, err error) {
 			return &cuaCall{tool: "clipboard_write", args: map[string]any{"text": text}}, nil
 		}
 		return nil, fmt.Errorf("clipboard requires read|write")
+	case "cursor":
+		// agent 光标浮层控制（驱动 MCP：set_agent_cursor_enabled /
+		// get_agent_cursor_state / set_agent_cursor_motion / set_agent_cursor_theme）。
+		// 不注入 session——作用于本 MCP 连接的 implicit session（即普通 cua 动作
+		// 那个会话）；会话已结束时 call() 自动 start_session 复活重试。
+		// 全子命令 Read(1)（levels.go）：纯视觉层，Windows 浮层残留导致系统指针
+		// 闪烁时的无摩擦止血入口。motion 参数经未知 flag 透传（kebab→snake）。
+		if len(positional) < 2 {
+			return nil, fmt.Errorf("cursor requires on|off|state|motion|theme")
+		}
+		switch positional[1] {
+		case "on":
+			return &cuaCall{tool: "set_agent_cursor_enabled", args: map[string]any{"enabled": true}}, nil
+		case "off":
+			return &cuaCall{tool: "set_agent_cursor_enabled", args: map[string]any{"enabled": false}}, nil
+		case "state":
+			return &cuaCall{tool: "get_agent_cursor_state", args: map[string]any{}}, nil
+		case "motion":
+			return &cuaCall{tool: "set_agent_cursor_motion", args: map[string]any{}}, nil
+		case "theme":
+			args := map[string]any{}
+			if len(positional) > 2 {
+				args["theme_id"] = positional[2]
+			} else if v, ok := passthrough["theme_id"]; ok {
+				args["theme_id"] = v
+			} else {
+				return nil, fmt.Errorf("cursor theme requires <theme_id>")
+			}
+			return &cuaCall{tool: "set_agent_cursor_theme", args: args}, nil
+		}
+		return nil, fmt.Errorf("cursor requires on|off|state|motion|theme")
 	}
 	return nil, fmt.Errorf("unknown cua subcommand %q", sub)
 }
