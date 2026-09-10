@@ -5,20 +5,21 @@
   <meta charset="utf-8">
   <title>AIC 本地设置</title>
   <style>
+    html,
     body {
       margin: 0;
-      width: 100%;
-      height: 100%;
+      min-height: 100%;
+    }
+
+    body {
       display: flex;
-      align-items: center;
-      justify-content: center;
       background: var(--bg-color-secondary, #1e2128);
     }
 
     .card {
-      width: 520px;
-      border: 1px solid var(--border-color, #2a2e37);
-      border-radius: 12px;
+      width: min(520px, 100%);
+      box-sizing: border-box;
+      margin: auto;
       padding: 28px 32px
     }
 
@@ -62,6 +63,86 @@
 
     .row input {
       flex: 1
+    }
+
+    select {
+      padding: 5px 8px;
+      border: 1px solid var(--border-color, #3a3f4a);
+      border-radius: 8px;
+      background: var(--bg-color, #16181d);
+      color: var(--text-color, #e8eaed);
+      font-size: 12px
+    }
+
+    .auth-title {
+      margin: 22px 0 2px;
+      font-size: 14px;
+      color: var(--text-color, #e8eaed)
+    }
+
+    .auth-hint {
+      color: var(--text-color-tertiary, #8b919c);
+      font-size: 12px
+    }
+
+    .domain {
+      border: 1px solid var(--border-color, #3a3f4a);
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      margin-top: 12px
+    }
+
+    .dhead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px
+    }
+
+    .dname {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-color, #e8eaed)
+    }
+
+    .alist label {
+      margin-top: 8px
+    }
+
+    .alist input {
+      font-family: ui-monospace, monospace;
+      font-size: 12px
+    }
+
+    .entries:empty {
+      display: none
+    }
+
+    .entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+      font-family: ui-monospace, monospace;
+      font-size: 12px
+    }
+
+    .entry span {
+      flex: 1;
+      word-break: break-all;
+      color: var(--text-color-secondary, #aab0ba)
+    }
+
+    button.x {
+      padding: 0 6px;
+      background: transparent;
+      color: var(--text-color-tertiary, #8b919c);
+      font-size: 14px
+    }
+
+    button.x:hover {
+      background: transparent;
+      color: #f87171
     }
 
     .status {
@@ -154,10 +235,14 @@
     <input id="exec_timeout" ref="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
     <label>默认打开地址 (home_path)</label>
     <input id="home_path" ref="home_path" placeholder="留空 = /（如 /、/a）">
+    <div class="auth-title">访问授权</div>
+    <div class="auth-hint">deny 恒优先：policy=deny 仅 allow 放行，policy=open 除 deny 全放。保存即生效。</div>
+    <div id="auth" ref="auth"></div>
     <div class="btns">
       <button @click="save()">保存</button>
       <button id="btnReconnect" ref="btnReconnect" @click="reconnect()">重连</button>
       <button class="ghost" @click="backToPlatform()">返回平台</button>
+      <button class="ghost" ref="btnClose" style="display:none" @click="closePanel()">关闭</button>
       <span id="msg" ref="msg"></span>
     </div>
   </div>
@@ -175,6 +260,94 @@
 
   // 凭证脏检查基线（get_config 回填值）：与当前输入一致时保存不重绑
   loadedKey = '';
+
+  // 三域授权（fs/net/ssh × policy/deny/allow）：boot 回填 get_config 九键，UI 编辑
+  // 内存态，save 全量提交（空数组 = 清空，匹配后端 set_config 整体替换语义）。
+  domains = [
+    {key: 'fs', name: '文件 (fs)', ph: '路径或 glob，如 /Users/x/proj 或 **/.env'},
+    {key: 'net', name: '网络 (net)', ph: 'host:port，如 example.com:443'},
+    {key: 'ssh', name: 'SSH (ssh)', ph: 'host[:port]，如 192.168.1.10'},
+  ];
+  auth = {
+    fs: {policy: 'deny', deny: [], allow: []},
+    net: {policy: 'open', deny: [], allow: []},
+    ssh: {policy: 'deny', deny: [], allow: []},
+  };
+
+  renderAuth = () => {
+    const root = $refs.auth;
+    root.innerHTML = '';
+    for (const d of domains) {
+      const st = auth[d.key];
+      const box = document.createElement('div');
+      box.className = 'domain';
+      const head = document.createElement('div');
+      head.className = 'dhead';
+      const name = document.createElement('span');
+      name.className = 'dname';
+      name.textContent = d.name;
+      const sel = document.createElement('select');
+      for (const v of ['deny', 'open']) {
+        const op = document.createElement('option');
+        op.value = v;
+        op.textContent = v === 'deny' ? 'deny（仅允许名单放行）' : 'open（除拒绝名单全放）';
+        sel.appendChild(op);
+      }
+      sel.value = st.policy;
+      sel.onchange = () => { st.policy = sel.value; };
+      head.appendChild(name);
+      head.appendChild(sel);
+      box.appendChild(head);
+      box.appendChild(listEl(d, st, 'deny', '拒绝'));
+      box.appendChild(listEl(d, st, 'allow', '允许'));
+      root.appendChild(box);
+    }
+  };
+
+  // 单张名单编辑器：标签 + 条目行（等宽文本 + × 删除）+ 输入行（回车/按钮添加）
+  listEl = (d, st, kind, title) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'alist';
+    const lab = document.createElement('label');
+    lab.textContent = `${title} (${d.key}_${kind})`;
+    wrap.appendChild(lab);
+    const ul = document.createElement('div');
+    ul.className = 'entries';
+    st[kind].forEach((item, i) => {
+      const row = document.createElement('div');
+      row.className = 'entry';
+      const t = document.createElement('span');
+      t.textContent = item;
+      const del = document.createElement('button');
+      del.className = 'x';
+      del.textContent = '×';
+      del.onclick = () => { st[kind].splice(i, 1); renderAuth(); };
+      row.appendChild(t);
+      row.appendChild(del);
+      ul.appendChild(row);
+    });
+    wrap.appendChild(ul);
+    const row = document.createElement('div');
+    row.className = 'row';
+    const inp = document.createElement('input');
+    inp.placeholder = d.ph;
+    const add = document.createElement('button');
+    add.className = 'ghost';
+    add.style.whiteSpace = 'nowrap';
+    add.textContent = '添加';
+    const doAdd = () => {
+      const v = inp.value.trim();
+      if (!v || st[kind].includes(v)) return;
+      st[kind].push(v);
+      renderAuth();
+    };
+    add.onclick = doAdd;
+    inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); doAdd(); } };
+    row.appendChild(inp);
+    row.appendChild(add);
+    wrap.appendChild(row);
+    return wrap;
+  };
 
   refreshStatus = async () => {
     try {
@@ -201,6 +374,12 @@
       $refs.work_dir.value = cfg.work_dir || '';
       $refs.exec_timeout.value = cfg.exec_timeout || '';
       $refs.home_path.value = cfg.home_path || '/';
+      for (const d of domains) {
+        auth[d.key].policy = cfg[d.key + '_policy'] || auth[d.key].policy;
+        auth[d.key].deny = cfg[d.key + '_deny'] || [];
+        auth[d.key].allow = cfg[d.key + '_allow'] || [];
+      }
+      renderAuth();
     } catch (e) {setMsg('加载失败: ' + e.message, false);}
     refreshStatus();
   };
@@ -219,7 +398,13 @@
     const exec_timeout = $refs.exec_timeout.value.trim();
     const home_path = $refs.home_path.value.trim();
     try {
-      await $mod.$fetch('/api/set_config', {method: 'POST', body: {host, work_dir, exec_timeout, home_path}});
+      const body = {host, work_dir, exec_timeout, home_path};
+      for (const d of domains) {
+        body[d.key + '_policy'] = auth[d.key].policy;
+        body[d.key + '_deny'] = auth[d.key].deny;
+        body[d.key + '_allow'] = auth[d.key].allow;
+      }
+      await $mod.$fetch('/api/set_config', {method: 'POST', body});
     } catch (e) {
       setMsg(isNetErr(e) ? '本地服务不可达（可能已重启），请重新打开本地配置页' : '保存失败: ' + e.message, false);
       refreshStatus();
@@ -294,6 +479,12 @@
     // 跳转当前配置的平台地址（主进程跳转 / 浏览器新标签）
     probeAndJump($refs.host.value.trim());
   };
+
+  // 嵌入桌面端 B 区时提供「关闭」（浏览器直开本地页无 aicDesktop.closeSettings，按钮保持隐藏）
+  closePanel = () => {
+    if (window.aicDesktop && window.aicDesktop.closeSettings) window.aicDesktop.closeSettings();
+  };
+  if (window.aicDesktop && window.aicDesktop.closeSettings) $refs.btnClose.style.display = '';
 </script>
 
 </html>
