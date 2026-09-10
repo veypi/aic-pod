@@ -5,6 +5,9 @@
   <meta charset="utf-8">
   <title>AIC 本地设置</title>
   <style>
+    /* vhtml 组件样式默认只命中模板编译期节点（选择器被自动追加 [vrefof=组件URL]）；
+       renderAuth/listEl 用 createElement 运行时创建的节点不带该标记 → 全部选择器
+       加 body 前缀走作用域穿透（编译为宿主 [vref] 后代选择器），动静节点通吃。 */
     html,
     body {
       margin: 0;
@@ -16,32 +19,32 @@
       background: var(--bg-color-secondary, #1e2128);
     }
 
-    .card {
+    body .card {
       width: min(520px, 100%);
       box-sizing: border-box;
       margin: auto;
       padding: 28px 32px
     }
 
-    h1 {
+    body h1 {
       font-size: 17px;
       margin: 0 0 4px
     }
 
-    .sub {
+    body .sub {
       color: var(--text-color-tertiary, #8b919c);
       font-size: 12px;
       margin-bottom: 18px
     }
 
-    label {
+    body label {
       display: block;
       margin: 12px 0 4px;
       color: var(--text-color-secondary, #aab0ba);
       font-size: 13px
     }
 
-    input {
+    body input {
       width: 100%;
       padding: 8px 10px;
       border: 1px solid var(--border-color, #3a3f4a);
@@ -51,21 +54,21 @@
       font-size: 13px
     }
 
-    input:focus {
+    body input:focus {
       outline: none;
       border-color: #4b83f6
     }
 
-    .row {
+    body .row {
       display: flex;
       gap: 8px
     }
 
-    .row input {
+    body .row input {
       flex: 1
     }
 
-    select {
+    body select {
       padding: 5px 8px;
       border: 1px solid var(--border-color, #3a3f4a);
       border-radius: 8px;
@@ -74,51 +77,51 @@
       font-size: 12px
     }
 
-    .auth-title {
+    body .auth-title {
       margin: 22px 0 2px;
       font-size: 14px;
       color: var(--text-color, #e8eaed)
     }
 
-    .auth-hint {
+    body .auth-hint {
       color: var(--text-color-tertiary, #8b919c);
       font-size: 12px
     }
 
-    .domain {
+    body .domain {
       border: 1px solid var(--border-color, #3a3f4a);
       border-radius: 10px;
       padding: 10px 12px 12px;
       margin-top: 12px
     }
 
-    .dhead {
+    body .dhead {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px
     }
 
-    .dname {
+    body .dname {
       font-size: 13px;
       font-weight: 600;
       color: var(--text-color, #e8eaed)
     }
 
-    .alist label {
+    body .alist label {
       margin-top: 8px
     }
 
-    .alist input {
+    body .alist input {
       font-family: ui-monospace, monospace;
       font-size: 12px
     }
 
-    .entries:empty {
+    body .entries:empty {
       display: none
     }
 
-    .entry {
+    body .entry {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -127,25 +130,25 @@
       font-size: 12px
     }
 
-    .entry span {
+    body .entry span {
       flex: 1;
       word-break: break-all;
       color: var(--text-color-secondary, #aab0ba)
     }
 
-    button.x {
+    body button.x {
       padding: 0 6px;
       background: transparent;
       color: var(--text-color-tertiary, #8b919c);
       font-size: 14px
     }
 
-    button.x:hover {
+    body button.x:hover {
       background: transparent;
       color: #f87171
     }
 
-    .status {
+    body .status {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -154,7 +157,7 @@
       color: var(--text-color-secondary, #aab0ba)
     }
 
-    .dot {
+    body .dot {
       width: 10px;
       height: 10px;
       border-radius: 50%;
@@ -162,26 +165,26 @@
       flex: none
     }
 
-    .dot.on {
+    body .dot.on {
       background: #4ade80
     }
 
-    .dot.off {
+    body .dot.off {
       background: #f87171
     }
 
-    #stext {
+    body #stext {
       flex: 1
     }
 
-    .btns {
+    body .btns {
       margin-top: 22px;
       display: flex;
       gap: 10px;
       align-items: center
     }
 
-    button {
+    body button {
       padding: 9px 16px;
       border: none;
       border-radius: 8px;
@@ -191,26 +194,26 @@
       cursor: pointer
     }
 
-    button:hover {
+    body button:hover {
       background: #2f5cd8
     }
 
-    button:disabled {
+    body button:disabled {
       opacity: .5;
       cursor: default
     }
 
-    button.ghost {
+    body button.ghost {
       background: transparent;
       border: 1px solid var(--border-color, #3a3f4a);
       color: var(--text-color-secondary, #c6cbd4)
     }
 
-    button.ghost:hover {
+    body button.ghost:hover {
       border-color: #4b83f6
     }
 
-    #msg {
+    body #msg {
       font-size: 12px;
       margin-left: auto
     }
@@ -227,7 +230,7 @@
     <label>凭证 (key)</label>
     <div class="row">
       <input id="key" ref="key" placeholder="host key">
-      <button @click="updateKey()" style="white-space:nowrap">更新</button>
+      <button @click="getKey()" style="white-space:nowrap" title="打开平台设备页获取绑定 key">获取</button>
     </div>
     <label>工作目录 (work_dir)</label>
     <input id="work_dir" ref="work_dir" placeholder="留空 = 系统临时目录">
@@ -241,7 +244,6 @@
     <div class="btns">
       <button @click="save()">保存</button>
       <button id="btnReconnect" ref="btnReconnect" @click="reconnect()">重连</button>
-      <button class="ghost" @click="backToPlatform()">返回平台</button>
       <button class="ghost" ref="btnClose" style="display:none" @click="closePanel()">关闭</button>
       <span id="msg" ref="msg"></span>
     </div>
@@ -388,8 +390,8 @@
   // 窗口重新获得焦点 → 刷新连接状态（不重拉 get_config，避免覆盖正在编辑的输入框）
   window.addEventListener('focus', () => refreshStatus());
 
-  // 保存：先落盘（set_config）→ 凭证改动过才 bind → 探测跳转。
-  // 连接/探测失败都不回滚、不阻断已保存的配置（2026-09-09 修复：原先 bind 在前，
+  // 保存：先落盘（set_config）→ 凭证改动过才 bind；不跳转、不关闭页面（原地提示）。
+  // 连接/绑定失败都不回滚、不阻断已保存的配置（2026-09-09 修复：原先 bind 在前，
   // 旧凭证连旧地址失败会中断 set_config，导致改地址保存不了）。
   save = async () => {
     const host = $refs.host.value.trim();
@@ -420,8 +422,7 @@
         return;
       }
     }
-    setMsg('已保存，检测平台…', true);
-    await probeAndJump(host, '已保存（平台暂不可达，请检查地址）', true);
+    setMsg('已保存', true);
     refreshStatus();
   };
 
@@ -432,9 +433,9 @@
     return h.replace(/\/+$/, '');
   };
 
-  // 探测 {host}/root.html 可达后跳转平台（Electron：主进程 IPC；浏览器：新标签）。
-  // failMsg/warn：不可达提示（保存流程=中性提示，跳转流程=默认红色告警）。
-  probeAndJump = async (rawHost, failMsg, warn) => {
+  // 探测 {host}/root.html 可达后打开平台（Electron：主窗口跳转、配置页保留；
+  // 浏览器：新标签）。failMsg：不可达时的红色提示。
+  probeAndJump = async (rawHost, failMsg) => {
     const h = normalizeHost(rawHost);
     let ok = false;
     if (window.aicDesktop && window.aicDesktop.checkPlatform) {
@@ -455,12 +456,12 @@
       }
       return true;
     }
-    setMsg(failMsg || '平台不可达，请检查地址', warn ? 'warn' : false);
+    setMsg(failMsg || '平台不可达，请检查地址', false);
     return false;
   };
 
-  updateKey = () => {
-    // 跳转 {host}/hosts 绑定（平台设备管理页，桌面经主进程跳转 / 浏览器新标签）
+  getKey = () => {
+    // 获取：打开 {host}/hosts 设备页拿绑定 key（桌面主窗口打开、配置页保留；浏览器新标签）
     probeAndJump($refs.host.value.trim());
   };
 
@@ -473,11 +474,6 @@
     } catch (e) {setMsg('重连失败: ' + e.message, false);}
     $refs.btnReconnect.disabled = false;
     refreshStatus();
-  };
-
-  backToPlatform = () => {
-    // 跳转当前配置的平台地址（主进程跳转 / 浏览器新标签）
-    probeAndJump($refs.host.value.trim());
   };
 
   // 嵌入桌面端 B 区时提供「关闭」（浏览器直开本地页无 aicDesktop.closeSettings，按钮保持隐藏）

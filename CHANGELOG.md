@@ -9,6 +9,12 @@
 
 ### 修复
 
+- **本地配置页：授权区样式丢失 + 操作会关闭页面**（`ui/page/settings.html` +
+  `desktop/main.js` + `desktop/settings-preload.js`）：三域授权编辑器
+  （renderAuth/listEl）是运行时 DOM，组件样式默认选择器只命中编译期节点
+  （[vrefof]）→ 选择器统一加 `body ` 前缀走作用域穿透；「保存」不再跳转
+  （只落盘/按需绑定/原地提示），「更新」改名「获取」且打开平台页不再关闭
+  设置视图，删除「返回平台」（桌面 A/B 同窗后多余）。
 - **Windows 桌面端 Alt+Space 弹系统菜单**（`desktop/main.js`）：Alt+Space 走系统
   DefWindowProc 弹窗口菜单（还原/最小化/最大化/关闭），且 WM_SYSKEYDOWN 被系统消费——
   页面收不到 keydown，应用内 launcher 快捷键（keymap 默认 leader=Alt + space）失效。

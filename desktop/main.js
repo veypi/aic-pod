@@ -456,7 +456,7 @@ function registerIpc() {
     if (!/^https?:\/\//.test(u)) return false
     rememberPlatformHost(u)
     loadMain(u)
-    closeSettings()
+    // 不关闭设置视图：配置页内任何操作（保存/获取）都不得让配置页消失
     return true
   })
 
