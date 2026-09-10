@@ -7,7 +7,43 @@
 
 ## 未发布 — 2026-09-09
 
+### 变更（破坏性）
+
+- **OS 原生窗口内容 P0：B 区/A/B 分区整体删除**（`desktop/main.js` +
+  `desktop/electron-adapter.mjs` + `desktop/remote-preload.js` +
+  `desktop/settings-preload.js` + `desktop/README.md`，删 `divider.html` /
+  `divider-preload.js`；设计唯一源 = aic/docs/os_native_windows.md）：主窗口
+  回到平台页恒满窗；AI browser 标签与「本地配置」设置视图（WebContentsView
+  原生内容池）改由平台页 OS 窗口占位元素经新增 `window.aicDesktop.nativeWin`
+  桥驱动贴位（rect/可见性唯一驱动源 = 渲染器；`native:state/tab-create/
+  tab-close/tab-activate/tab-navigate/layout/host-layout` IPC 全走
+  isPlatformFrame 白名单），隐藏 = z 序回落平台页之下（遮挡隐藏，隐藏态 CDP
+  截图语义不变）。标签页 window.open 拦截转新标签（不再弹裸 BrowserWindow）；
+  标题/URL/loading 经 `native:changed` 全量推平台页标签条。托盘「本地配置」：
+  平台在线 → `native:open-host` → 平台 OS 开 `/local/desktop` 窗口贴位；
+  平台不可达 → 主视图整窗加载本地设置页（remote-preload 本地分支给
+  checkPlatform/openPlatform）。平台页整帧跳转/渲染进程崩溃 → 原生内容复位
+  隐藏态。remote-preload 重构为平台白名单/本地 127.0.0.1 双分支。
+
 ### 修复
+
+- **header 全屏按钮无效：创建窗口时显式传 `fullscreen: false` 毒化 NSWindow**（
+  `desktop/main.js`）：macOS frameless BaseWindow 创建时传 `fullscreen: false`
+  → 之后 `setFullScreen(true)` 恒 no-op（Electron 33.4.11 最小复现：显式 false
+  2/2 失败、不传该键 2/2 正常）。改为只在启动即全屏时传 `fullscreen: true`。
+  排查路径：渲染侧探针确认 IPC/白名单全通且 1.5s 延迟后 `isFullScreen()` 仍
+  false → 同二进制隔离实验逐项二分（maximise/子 view/resize 监听/加载内容均
+  无关）→ 唯一定位到创建选项。
+- **remote-preload 本地分支误吞平台页**（`desktop/remote-preload.js` +
+  `desktop/main.js`）：本地设置页判定原先按 hostname（`127.0.0.1|localhost`），
+  平台开发态跑在 localhost:4000 时被误判为本地页——只暴露设置子集，窗口控制/
+  nativeWin 全部缺失（症状：header 窗口按钮渲染但点击无效、AI 建标签不开窗、
+  托盘本地配置无反应）。改为按主进程下发的精确 host:port（`allowed:hosts` 下发
+  形态改 `{hosts, local}`）；`isLocalFrame` 同步收紧为 `127.0.0.1:<port>`。
+- **视图菜单三个 role 在 BaseWindow 上崩溃**（`desktop/main.js`）：
+  `role:reload/toggleDevTools/togglefullscreen` 找 `focusedWindow().webContents`，
+  BaseWindow 无 webContents → undefined 异常（点「开发者工具」报错）。改为显式
+  handler（platformView.reload / toggleDevTools / mainWin.setFullScreen）。
 
 - **本地配置页：授权区样式丢失 + 操作会关闭页面**（`ui/page/settings.html` +
   `desktop/main.js` + `desktop/settings-preload.js`）：三域授权编辑器
@@ -20,6 +56,12 @@
   页面收不到 keydown，应用内 launcher 快捷键（keymap 默认 leader=Alt + space）失效。
   现窗口聚焦期间 RegisterHotKey 抢占该组合（系统不再弹菜单），命中后把 Space 键回注
   平台页，走页面既有 keymap（改键位跟随）；失焦即注销；桌宠窗聚焦时仅吞掉。
+- **设置页「关闭」按钮恒隐藏：setup 阶段碰 $refs**（`ui/page/settings.html`）：
+  按钮显示逻辑原先写在 `<script setup>` 里 `$refs.btnClose.style.display = ''`——
+  vhtml 契约 setup 在 DOM 编译前执行、`$refs` 尚不可用，该行失效 → 按钮恒
+  display:none（hostView 内「关闭」从未可见；关闭链路 closeSettings → 销毁视图
+  + host-closed → 关 OS 窗口因此从未生效）。改为声明式：setup 只放 `canClose`
+  布尔标记（桥存在性判断），模板 `v-if` 渲染。
 
 ### 新增
 
@@ -33,13 +75,17 @@
   同源，5 次失败锁 1 分钟）+ fs 帧协议（全 JSON 文本帧，32KB 内联阈值，
   48KB chunk 流式，8MB 发送高水位 backpressure）；fs 执行体复用 vcore.RunFS
   （granted=9 本地控制台信任级，fsauth 三域 deny/allow 照常生效）。
-  环路对测 9 例（误码拒绝/鉴权+内联/64KB 流式结果重组/80KB 流式写注回/
-  通道关闭 PC 回收/readbin 内联与流式精确往返、区间透传、错误帧）。
+  环路对测 10 例（误码拒绝/鉴权+内联/64KB 流式结果重组/80KB 流式写注回/
+  通道关闭 PC 回收/readbin 内联与流式精确往返、区间透传、错误帧、并发
+  双路交错重组）。并发口径：响应/chunk 帧带请求 id 按 id 分流，设备端每请求
+  独立 goroutine 执行、发送 sendMu 串行——readbin 页面侧并发（≤4 路信号量），
+  fs 调用保持串行（2026-09-10 手机实网验证：华为浏览器 ArkWeb 直连建连 +
+  4 路并发字节精确）。
 - **readbin 二进制字节出口（2026-09-10 同批）**：帧协议新增 `readbin` op
   （直连控制台私有，不属于 fs 指令集）——`vcore.ReadBin`（新，libs/vcore/
   readbin.go：字节区间读 + fsauth 同一判定实例 + 单次上限 256MB）+ base64
   文本帧回送（bin:true + attrs{mime,size,total}，超 32KB 走 chunk 流）；
-  供前端预览/下载大二进制（视频等）。同批修复实网首测暴露的 P1：
+  供前端预览组件 SW 流式桥边下边播大二进制（视频/PDF 等）。同批修复实网首测暴露的 P1：
   `vcore.Result` 补 json tag（缺 tag 时 Go 序列化出大写键 Content/Attrs，
   页面按小写解析静默丢空——Go 对测反序列化大小写不敏感、JS mock 用小写，
   双双漏检；rtc_test 加线上契约断言防回归）与 P2 加固（fs 通道关闭即回收
