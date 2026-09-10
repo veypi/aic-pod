@@ -8,7 +8,7 @@
 //	 │    → 读配置 host → 探测 {host}/root.html → 跳转平台页 or 本地 /settings
 //	 │    → 启动 browser 壳通道（browser-tool.js，共享插件 core + Electron CDP
 //	 │      适配器）并向 Go 后端注册 provider（caps 出现 browser）
-//	 ├─ 平台页（{host}/ 顶层页面）：session.setPreloads 注入 remote-preload.js
+//	 ├─ 平台页（{host}/ 顶层页面）：session.registerPreloadScript 注入 remote-preload.js
 //	 │    （host 白名单过滤后暴露 window.aicDesktop：api 转发/窗口控制/外链/桌宠
 //	 │    + nativeWin 原生内容桥；本地 127.0.0.1 页面只给设置子集）
 //	 ├─ 原生内容池：AI 工作区标签（WebContentsView 池，adapter 持有）+ 设置视图
@@ -116,8 +116,13 @@ async function start() {
   createMainWindow(() => {
     platformView?.webContents.loadFile(path.join(__dirname, 'loading.html'))
   })
-  // 平台页注入：session 级 preload（所有 frame 生效，host 白名单过滤）
-  session.defaultSession.setPreloads([path.join(__dirname, 'remote-preload.js')])
+  // 平台页注入：session 级 preload（所有 frame 生效，host 白名单过滤；Electron 35+
+  // registerPreloadScript 取代已废弃的 setPreloads）
+  session.defaultSession.registerPreloadScript({
+    type: 'frame',
+    id: 'aic-remote-preload',
+    filePath: path.join(__dirname, 'remote-preload.js'),
+  })
 
   registerIpc()
   startCmdServer()
@@ -696,6 +701,9 @@ function createMainWindow(init) {
     },
   })
   mainWin.contentView.addChildView(platformView)
+  // 平台页 zoom 硬钉 1（Electron 44 setZoomMode）：nativeWin 坐标契约
+  //（CSS px = DIP，zoom 恒等映射）由框架保证，不依赖“页面未启用 zoom”的约定
+  platformView.webContents.setZoomMode('disabled')
   // 平台页 target=_blank → 系统浏览器
   platformView.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)

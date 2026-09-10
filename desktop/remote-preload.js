@@ -1,4 +1,4 @@
-// remote-preload.js — 注入 defaultSession 全部 frame（session.setPreloads）。
+// remote-preload.js — 注入 defaultSession 全部 frame（Electron 35+ session.registerPreloadScript）。
 // 按 frame 来源分两支（端口/code 由主进程持有，页面完全无感）：
 //   - 平台白名单 host（配置 host + https://ivec.ai）：完整能力（api 转发/窗口控制/
 //     外链/桌宠 + nativeWin 原生内容桥——OS 原生窗口内容协议，设计见

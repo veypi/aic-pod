@@ -111,6 +111,26 @@
 - **cua cursor 子命令**（`libs/host/cua.go` + `libs/vcore/{meta,levels}.go`）：`cua cursor on|off|state|motion|theme <id>` 控制 agent 光标浮层——驱动 MCP `set_agent_cursor_enabled` / `get_agent_cursor_state` / `set_agent_cursor_motion` / `set_agent_cursor_theme` 的 argv 面（motion 参数经未知 flag 透传）。背景：Windows 上浮层是覆盖整个虚拟屏的透明点击穿透分层窗口，cua 操作后残留导致全系统鼠标指针闪烁（cua-driver 0.25.0，同类症状 openai/codex#34340）；host 的 cua-driver MCP 子进程常驻复用、浮层不随操作销毁，`cua cursor off` 是无摩擦止血入口。
 - **cua 声明基线 Write(2) → Read(1)**（`libs/vcore/meta.go` Decl）：声明层不设 Write 地板，读类子命令动态降级不再被 max(声明, 动态) 吃掉（对齐 git/json）；cursor 全子命令 = Read(1)。写/危险动作仍由 cuaRequired 动态提升。
 
+### 工具链：Electron 33.4.11 → 44.3.0（2026-09-10）
+
+- **背景**：33 早已不在安全维护窗口（官方只回补最近 3 个大版本）且落后当前稳定线
+  10 个大版本；升级到 44.3.0（Chromium 130 → 152 / Node 20 → 24），
+  electron-builder 25.1.8 → 26.15.3。
+- **API 迁移**：`session.setPreloads`（35 起废弃）→ `registerPreloadScript({type:'frame',
+  id:'aic-remote-preload'})`；平台页 `setZoomMode('disabled')` 硬钉 zoom=1
+  （nativeWin 坐标契约从“页面未启用 zoom”的约定改为框架保证）。
+- **下载流变化（42+）**：`electron` 包不再 postinstall 下载二进制，改为首次运行/
+  打包时按需下载（`npx install-electron --no` 可显式预下）；
+  `ELECTRON_SKIP_BINARY_DOWNLOAD` 移除，镜像经 `ELECTRON_MIRROR` /
+  `NPM_CONFIG_ELECTRON_MIRROR` 生效。
+- **影响核对**：macOS ≥13（本机 26.6.2 ✓；CI macos-14/15 ✓）；32 位构建取消
+  （只出 x64/arm64 ✓）；renderer `clipboard` 移除（平台用 web 面 ✓）；dialog
+  `defaultPath` 默认 Downloads（只用 showErrorBox ✓）；Windows 全屏隐藏菜单
+  （win 无应用菜单 ✓）；PDF OOPIF 与 ANGLE 静态链接列入回归面。
+- **验证**：`node --check` 全绿；`go build ./...` 绿；`npx electron --version`
+  = v44.3.0；GUI 冒烟通过（窗口控制/全屏、Alt+Space、托盘本地配置、AI browser
+  建标签与隐藏标签截图）。
+
 ### 测试
 
 - 托盘配置目录 / 设置页授权区 / A/B 分区：`node --check desktop/{main,settings-preload,divider-preload}.js`
