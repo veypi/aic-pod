@@ -14,17 +14,19 @@
  *   settings → 固定 { background: true }（desktop 不提供协作模式：AI 一律在
  *              AI 工作区标签页作业；平台标签页操作有自指风险）
  *
- * 原生内容池（docs §4 硬约束）：
+ * 原生内容池（docs §4 硬约束；v2 反转模型）：
  *   - 平台页（OS Browser 窗口占位元素）是 rect/可见性的唯一驱动源：
  *     tabControl.applyLayout({rect, visible})；rect = 占位元素 getBoundingClientRect
  *     （CSS px = DIP，contentView 相对——platformView 恒满窗且位于 (0,0)，zoom=1）。
- *   - 隐藏 = z 序回落 platformView 之下（遮挡隐藏：被遮挡的 WebContentsView 保持
- *     compositor surface，CDP 截图稳定可用）。禁 detach / 零尺寸 bounds / 屏外坐标；
- *     rect 无效时只切 z 序，bounds 保持最后一次有效值。
- *   - z 序不变量（底→顶）：可见态 [platformView, ...tabs（active 最顶）]；
- *     隐藏态 [...tabs, platformView]。settings 视图由 main.js 恒挂最顶（onRestack 回调）。
+ *   - 可见性由页面 mask 开洞表达（页面侧 wincontent.js）；壳侧不再翻转 z 序：
+ *     tabs 恒在 [settings, platformView] 之下，仅做 bounds 同步 + 成员重排。
+ *     隐藏（visible=false）= 撤洞 + 输入禁用；视图恒挂树，compositor surface 保持，
+ *     隐藏态 CDP 截图不受影响。禁 detach / 零尺寸 bounds / 屏外坐标；bounds 保持最后有效值。
+ *   - z 序不变量（底→顶）：[…tabs（active 恒在 tabs 最顶）, settings, platformView]。
+ *     池成员重排（建/关/切激活）后经 onRestack 回调 main.js 抬回 settings/platform。
  *   - activeTabId = 可视激活（用户点标签/新建驱动）；AI 的 current tab 在 core
  *     store 里（browser tab N 只切命令目标），不动可视激活（不抢焦点语义）。
+ *   - poolState()：主进程输入路由读取活动 tab 的洞 rect（见 main.js onBeforeMouseEvent）。
  *
  * currentSessionDir 由 browser-tool 在每次调用前设置（串行链保证无交叉）——
  * 下载产物的落盘目录（Go 后端下发的会话工作区）。
@@ -66,7 +68,6 @@ export function createElectronAdapter(host) {
   let poolRect = null; // {x,y,width,height}，最后一次有效 rect（隐藏不清零）
   let poolVisible = false;
   let activeTabId = null; // 可视激活标签（内容区显示）
-  let zRaised = false; // 当前 z 态：true = tabs 在 platformView 之上
   // 下载：一次性监听 + 完成历史（searchComplete 数据源）
   const createdListeners = new Set();
   const downloadHistory = [];
@@ -155,33 +156,29 @@ export function createElectronAdapter(host) {
     );
   }
 
-  // 目标 z 序重建（底→顶）：可见 [platform, ...tabs(active 末位)] / 隐藏 [...tabs, platform]。
-  // 先摘后挂（已挂载视图重复 addChildView 会失败）；settings 不在本序内，main.js
-  // 经 onRestack 恢复其最顶。
-  function rebuildOrder(show) {
+  // 成员重排（v2）：tabs 池内 active 恒最顶；重排后由 onRestack 抬回 settings/platform
+  //（不变量：底→顶 […tabs, settings, platformView]）。先摘后挂（已挂载视图重复
+  // addChildView 会失败）；settings/platform 不在本序内。
+  function restackTabs() {
     const cv = contentView();
     const active = tabs.get(activeTabId)?.view || null;
     const others = [...tabs.values()].map((t) => t.view).filter((v) => v !== active);
-    const ordered = show
-      ? [host.platformView, ...others, ...(active ? [active] : [])]
-      : [...others, ...(active ? [active] : []), host.platformView];
+    const ordered = [...others, ...(active ? [active] : [])];
     for (const v of ordered) if (cv.children.includes(v)) cv.removeChildView(v);
     for (const v of ordered) cv.addChildView(v);
   }
 
-  // force = 标签集/激活变化（重建序）；否则仅可见态翻转时重建，bounds 每次同步
+  // force = 标签集/激活变化（重排）；否则仅 bounds 同步（可见性由页面 mask 表达）
   function syncZ(force = false) {
     if (host.win.isDestroyed()) return;
-    const show = poolShown();
     const r = effectiveRect();
     if (r) {
       for (const { view } of tabs.values()) {
         if (!view.webContents.isDestroyed()) view.setBounds(r);
       }
     }
-    if (!force && show === zRaised) return;
-    zRaised = show;
-    rebuildOrder(show);
+    if (!force) return;
+    restackTabs();
     try { host.onRestack?.(); } catch { /* settings 未建 */ }
   }
 
@@ -203,7 +200,7 @@ export function createElectronAdapter(host) {
     return keys.length ? keys[keys.length - 1] : null;
   };
 
-  // 创建 AI 工作区标签页视图（不挂树：z 序由 syncZ 统一重建，bounds 由 effectiveRect 给）
+  // 创建 AI 工作区标签页视图（不挂树：成员重排由 syncZ 统一处理，bounds 由 effectiveRect 给）
   function createView(url) {
     const view = new WebContentsView({
       webPreferences: {
@@ -300,6 +297,13 @@ export function createElectronAdapter(host) {
       },
       hasWorkTabs: () => tabs.size > 0,
       getState: state,
+      // v2 输入路由（main.js）：活动 tab 的洞（可见才返回）；null = 该处无洞
+      poolState() {
+        if (!poolShown()) return null;
+        const active = tabs.get(activeTabId);
+        if (!active || active.view.webContents.isDestroyed()) return null;
+        return { wc: active.view.webContents, rect: poolRect };
+      },
     },
 
     tabs: {

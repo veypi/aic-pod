@@ -5,6 +5,25 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## 未发布 — 2026-09-10
+
+### 变更（破坏性）
+
+- **OS 原生窗口内容 v2 反转模型**（`desktop/main.js` + `desktop/electron-adapter.mjs` +
+  `desktop/remote-preload.js` + `desktop/README.md`；平台侧配套在 aic 仓
+  `ui/os/wincontent.js` + `ui/layout/os.html`；设计唯一源 = aic/docs/os_native_windows.md）：
+  平台页恒最顶且背景透明，原生内容（AI 标签池 / 设置 hostView）恒在其下（z 序不变量
+  [tabs…, settings, platform]，标签池重排后经 onRestack 抬回）；可见性 = 页面整页 mask
+  开洞（body mask-image SVG evenodd，「洞」= 内容区占位 rect），隐藏 = 撤洞 + 输入禁用，
+  壳侧不再翻转 z 序（视图恒挂树，隐藏态 CDP 截图语义不变）。新增主进程输入路由：平台页
+  `before-mouse-event` 命中洞 → preventDefault + 坐标翻译后 sendInputEvent 转发目标视图
+  （含 sticky 拖拽捕获、mouseDown 焦点转移 wc.focus()）；wheel 不在该事件覆盖内
+  （Electron 44 源码级依据）→ 页面 wheel listener → IPC `native:wheel` → 主进程命中复核
+  + 符号换算（DOM deltaY 与 sendInputEvent 相反，deltaMode=1 按 40px/行）后转发。
+  隔离实例真机自测（真 CGEvent 点击/键盘 + 渲染器级滚轮 + 独立 harness 页）：透明洞
+  合成、洞内点击/拖拽/滚轮路由、洞外放行、焦点转移（打字进原生内容）、隐藏门控全部
+  通过；平台侧新增 `buildHolesPath` 纯函数单测（8/8）。
+
 ## 未发布 — 2026-09-09
 
 ### 变更（破坏性）

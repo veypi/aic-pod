@@ -1,7 +1,7 @@
 // AIC Desktop — Electron 主进程（纯远程壳：Chromium 渲染平台 + Go 后端子进程）。
 //
-// 架构（2026-09-10 OS 原生窗口内容 P0，B 区/A/B 分区整体删除；设计唯一源 =
-// aic/docs/os_native_windows.md）：
+// 架构（2026-09-10 OS 原生窗口内容 v2 反转模型，B 区/A/B 分区整体删除；v1 P0 同日
+// 被取代；设计唯一源 = aic/docs/os_native_windows.md）：
 //
 //	Electron Main (Node)
 //	 ├─ 启动：主窗口先加载本地 loading.html → spawn Go 后端（AIC_PORT_FILE 握手）
@@ -11,9 +11,11 @@
 //	 ├─ 平台页（{host}/ 顶层页面）：session.registerPreloadScript 注入 remote-preload.js
 //	 │    （host 白名单过滤后暴露 window.aicDesktop：api 转发/窗口控制/外链/桌宠
 //	 │    + nativeWin 原生内容桥；本地 127.0.0.1 页面只给设置子集）
-//	 ├─ 原生内容池：AI 工作区标签（WebContentsView 池，adapter 持有）+ 设置视图
-//	 │    （hostView，懒创建保活）——rect/可见性唯一驱动源 = 平台页 OS 窗口占位
-//	 │    元素（native:layout / native:host-layout），隐藏 = z 序回落平台页之下
+//	 ├─ 原生内容池（v2 反转模型）：AI 工作区标签（WebContentsView 池，adapter 持有）+
+//	 │    设置视图（hostView，懒创建保活）——恒在平台页之下；rect/可见性唯一驱动源 =
+//	 │    平台页 OS 窗口占位元素（native:layout / native:host-layout）；可见性 = 页面
+//	 │    mask 开洞（撤洞即隐藏），命中洞的输入由主进程 before-mouse-event 路由转发
+//	 │    （wheel 走页面 IPC 桥 native:wheel）
 //	 ├─ 本地设置页：平台不可达时主视图整窗加载（首配）；平台在线时经托盘
 //	 │    「本地配置」→ native:open-host → 平台 OS 开 /local/desktop 窗口贴位
 //	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
@@ -271,16 +273,8 @@ async function setupBrowserProvider() {
               }
             } catch (_) { /* 渲染器重建中 */ }
           },
-          // tabs/platformView z 序重建后：恢复 settings 视图最顶（settings 恒最顶不变量）
-          onRestack: () => {
-            if (settingsView && !settingsView.webContents.isDestroyed() && mainWin && !mainWin.isDestroyed()) {
-              const cv = mainWin.contentView
-              if (cv.children.includes(settingsView)) {
-                cv.removeChildView(settingsView)
-                cv.addChildView(settingsView)
-              }
-            }
-          },
+          // tab 池重排后恢复 z 序不变量 [tabs…, settings, platform]（docs §4.4）
+          onRestack: () => stackTop(),
         },
         log: (f, ...a) => console.log('[browser]', f, ...a),
       })
@@ -429,8 +423,9 @@ function applyHostLayout(rect, visible) {
   if (!mainWin || mainWin.isDestroyed()) return
   const v = ensureSettingsView()
   const cv = mainWin.contentView
-  if (!cv.children.includes(v)) cv.addChildView(v) // 挂即最顶
+  if (!cv.children.includes(v)) cv.addChildView(v)
   v.setBounds(hostRect)
+  raisePlatform() // v2：平台页恒最顶（设置视图挂其下，docs §4.4）
 }
 
 function ensureSettingsView() {
@@ -462,9 +457,83 @@ function destroySettingsView() {
   settingsView = null
 }
 
+// v2 z 序不变量（底→顶）：[…tabs, settings, platform]——platform 恒最顶（docs §4.4）。
+// tabs 由 adapter 重排（onRestack 回调），本函数把 settings/platform 抬回顶部。
+function raisePlatform() {
+  if (!mainWin || mainWin.isDestroyed() || !platformView) return
+  const cv = mainWin.contentView
+  if (cv.children.includes(platformView)) cv.removeChildView(platformView)
+  cv.addChildView(platformView)
+}
+function stackTop() {
+  if (!mainWin || mainWin.isDestroyed()) return
+  const cv = mainWin.contentView
+  if (settingsView && !settingsView.webContents.isDestroyed() && cv.children.includes(settingsView)) {
+    cv.removeChildView(settingsView)
+    cv.addChildView(settingsView)
+  }
+  raisePlatform()
+}
+
+// ---- v2 输入路由：平台页洞命中 → 转发原生视图（docs §6） ----
+// Electron 44 before-mouse-event 只覆盖鼠标类事件（wheel 不在列，源码依据见 docs §6）；
+// wheel 走页面 listener → IPC（native:wheel）→ sendInputEvent 桥。
+const FWD_MOUSE_TYPES = new Set(['mouseDown', 'mouseUp', 'mouseMove', 'contextMenu'])
+let fwdSticky = null // 按钮捕获：mouseDown 命中后锁定该目标直到 mouseUp
+
+const rectHas = (r, x, y) => !!r && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+
+// 输入目标（v2）：settings 恒在 tabs 之上；null = 该处无洞（输入留给平台页）
+function settingsInputTarget() {
+  if (!settingsView || settingsView.webContents.isDestroyed()) return null
+  if (!mainWin || mainWin.isDestroyed() || !mainWin.contentView.children.includes(settingsView)) return null
+  if (!hostRect || hostRect.width < 2 || hostRect.height < 2) return null
+  return { kind: 'settings', wc: settingsView.webContents, rect: hostRect }
+}
+function tabInputTarget() {
+  const st = tabCtl()?.poolState?.()
+  return st ? { kind: 'tab', wc: st.wc, rect: st.rect } : null
+}
+function targetOf(kind) {
+  return kind === 'settings' ? settingsInputTarget() : tabInputTarget()
+}
+function inputTargetAt(x, y) {
+  if (fwdSticky) {
+    // 捕获期锁定原目标（坐标可越界，原样翻译）
+    const t = targetOf(fwdSticky.kind)
+    if (t && t.wc === fwdSticky.wc && !t.wc.isDestroyed()) return t
+    fwdSticky = null // 目标已销毁（关窗/退出）→ 释放捕获
+  }
+  const s = settingsInputTarget()
+  if (s && rectHas(s.rect, x, y)) return s
+  const t = tabInputTarget()
+  if (t && rectHas(t.rect, x, y)) return t
+  return null
+}
+function forwardMouseEvent(t, m) {
+  const ev = { type: m.type, x: Math.round(m.x - t.rect.x), y: Math.round(m.y - t.rect.y) }
+  if (m.button) ev.button = m.button
+  if (m.clickCount) ev.clickCount = m.clickCount
+  try { t.wc.sendInputEvent(ev) } catch (_) { /* 视图销毁竞态 */ }
+}
+function onBeforeMouseEvent(e, m) {
+  if (!FWD_MOUSE_TYPES.has(m.type)) return
+  const t = inputTargetAt(m.x, m.y)
+  if (!t) return
+  e.preventDefault()
+  forwardMouseEvent(t, m)
+  if (m.type === 'mouseDown') {
+    fwdSticky = { kind: t.kind, wc: t.wc }
+    try { t.wc.focus() } catch (_) { /* 视图销毁竞态 */ }
+  } else if (m.type === 'mouseUp') {
+    fwdSticky = null
+  }
+}
+
 // 平台页整帧跳转/崩溃 → 原生内容复位隐藏态（页面恢复后重新驱动 rect/可见性；
 // getState 是权威源，事件丢了无所谓）
 function resetNativeContent() {
+  fwdSticky = null
   tabCtl()?.applyLayout({ visible: false })
   detachSettingsView()
 }
@@ -586,6 +655,35 @@ function registerIpc() {
     return true
   })
 
+  // v2：洞内 wheel 转发桥（页面 listener → IPC；Electron before-mouse-event 不覆盖 wheel，
+  // 符号相反等细节见 docs §6 与 wm-proto 实测）
+  ipcMain.on('native:wheel', (e, msg) => {
+    if (!isPlatformFrame(e)) return
+    const x = Number(msg?.x), y = Number(msg?.y)
+    const dx = Number(msg?.dx) || 0, dy = Number(msg?.dy) || 0
+    if (!Number.isFinite(x) || !Number.isFinite(y) || (!dx && !dy)) return
+    // 命中校验以壳侧为准（settings > active tab）；不在洞内丢弃
+    let t = null
+    const s = settingsInputTarget()
+    if (s && rectHas(s.rect, x, y)) t = s
+    else {
+      const tab = tabInputTarget()
+      if (tab && rectHas(tab.rect, x, y)) t = tab
+    }
+    if (!t) return
+    // DOM deltaY 与 sendInputEvent deltaY 符号相反（实测）；deltaMode=1（行）按 40px 折算
+    const scale = (Number(msg?.mode) || 0) === 1 ? 40 : 1
+    try {
+      t.wc.sendInputEvent({
+        type: 'mouseWheel',
+        x: Math.round(x - t.rect.x), y: Math.round(y - t.rect.y),
+        deltaX: -dx * scale, deltaY: -dy * scale,
+        wheelTicksX: 0, wheelTicksY: -Math.sign(dy),
+        canScroll: true, hasPreciseScrollingDeltas: false,
+      })
+    } catch (_) { /* 视图销毁竞态 */ }
+  })
+
   // 桌宠右键菜单：打开/隐藏对话框（有 agent 时，由渲染进程携带状态）/ 缩小 / 放大 / 关闭
   ipcMain.on('pet:menu', (e, opts) => {
     if (!petWin || e.sender !== petWin.webContents) return
@@ -692,7 +790,7 @@ function createMainWindow(init) {
     backgroundColor: '#1b2a3a',
   })
 
-  // 平台页（恒占满 contentView；session 级 preloads 自动注入 remote-preload.js）
+  // 平台页（恒占满 contentView 且恒最顶；session 级 preloads 自动注入 remote-preload.js）
   platformView = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
@@ -701,9 +799,14 @@ function createMainWindow(init) {
     },
   })
   mainWin.contentView.addChildView(platformView)
+  // v2 反转模型：平台页背景透明——内容区"洞"由页面 mask 挖除，洞底即下层原生视图
+  //（docs §1/§4；页面侧用 mask 而非 clip-path，clip-path 会让采样元素不可命中）
+  platformView.setBackgroundColor('#00000000')
   // 平台页 zoom 硬钉 1（Electron 44 setZoomMode）：nativeWin 坐标契约
   //（CSS px = DIP，zoom 恒等映射）由框架保证，不依赖“页面未启用 zoom”的约定
   platformView.webContents.setZoomMode('disabled')
+  // v2 输入路由：平台页在最顶承接全部输入；命中洞 → preventDefault + 转发原生视图（docs §6）
+  platformView.webContents.on('before-mouse-event', onBeforeMouseEvent)
   // 平台页 target=_blank → 系统浏览器
   platformView.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)

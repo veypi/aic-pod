@@ -17,10 +17,14 @@ Electron Main (Node, main.js)
  │    发行物内置：scripts/sync-cua.mjs 按 desktop/cua.json 固定版本 + sha256 同步到
  │    vendor/cua → resources/cua，main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP；
  │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
- ├─ BaseWindow（frameless）主窗口：平台页恒满窗 + 原生内容池（OS 原生窗口内容，
- │    设计唯一源 = aic/docs/os_native_windows.md）——AI browser 标签与「本地配置」
- │    设置视图（WebContentsView）由平台页 OS 窗口占位元素经 nativeWin 桥驱动贴位，
- │    隐藏 = z 序回落平台页之下（遮挡隐藏，隐藏态 CDP 截图照常可用）
+ ├─ BaseWindow（frameless）主窗口：平台页恒满窗且恒最顶（背景透明，画面全部由页面
+ │    自绘） + 原生内容池（OS 原生窗口内容 v2 反转模型，设计唯一源 =
+ │    aic/docs/os_native_windows.md）——AI browser 标签与「本地配置」设置视图
+ │    （WebContentsView）恒在平台页之下，由平台页 OS 窗口占位元素经 nativeWin 桥
+ │    驱动贴位；可见性 = 页面整页 mask 开洞（撤洞即隐藏），隐藏 = 撤洞 + 输入禁用
+ │    （视图恒挂树，隐藏态 CDP 截图照常可用）；洞内输入由主进程
+ │    `before-mouse-event` 命中转发（sticky 拖拽捕获 + 焦点转移），wheel 走页面
+ │    listener → IPC `native:wheel` 桥（Electron before-mouse-event 不覆盖 wheel）
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
