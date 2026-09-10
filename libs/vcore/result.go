@@ -11,9 +11,12 @@ import (
 )
 
 // Result 是指令输出（§2.2）：Content 为文本正文，Attrs 为结构化元数据。
+// json tag 是 RTC 直连帧协议的线上契约（libs/rtc fschan 直接 json.Marshal
+// 本类型）——页面端按小写键解析；缺 tag 时 Go 产出大写键，页面静默丢空
+//（2026-09-10 实网事故：Go 侧消费方反序列化大小写不敏感，仅 JS 侧可见）。
 type Result struct {
-	Content string
-	Attrs   map[string]string
+	Content string            `json:"content"`
+	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
 func newResult(action, path string) *Result {

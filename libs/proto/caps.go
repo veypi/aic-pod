@@ -20,6 +20,16 @@ type Caps struct {
 	DeviceInfo    *DeviceInfo `json:"device_info,omitempty"`
 	FS            FSCaps      `json:"fs"`
 	Exec          ExecCaps    `json:"exec"`
+	// Mgmt 本地管理面声明（RTC 直连，2026-09-10）：仅 rtc 开关开启时上报；
+	// 服务端缓存并透出给 owner 页面（/api/hosts），页面据此发起 WebRTC 直连。
+	Mgmt          *MgmtCaps   `json:"mgmt,omitempty"`
+}
+
+// MgmtCaps 是本地管理面声明。Code 为本地校验码（与本地管理 API 的 x-aic-code
+// 同源，RTC DataChannel 鉴权帧复用）；RTC 标记 RTC 应答能力已开启。
+type MgmtCaps struct {
+	Code string `json:"code"`
+	RTC  bool   `json:"rtc,omitempty"`
 }
 
 // DeviceInfo 是 host 设备信息（连接时上报，用户不可编辑）。

@@ -17,9 +17,15 @@ import (
 	"github.com/veypi/aic-pod/libs/vcore"
 )
 
-// handleMsg 处理一条工具请求（§6.2 host 端验证规范，必须实现）：
+// handleMsg 处理一条入站消息：rtc.in 信令路由到 RTC 服务（不参与验签流程——
+// 信令身份由 NATS 权限模型保证，DataChannel 另有 code 鉴权帧）；
+// 其余按工具请求处理（§6.2 host 端验证规范）：
 // 验签 → deadline 过期拒绝 → nonce 窗口去重 → granted_level 纵深检查 → 分发。
 func (c *Client) handleMsg(msg *nats.Msg) {
+	if strings.HasSuffix(msg.Subject, ".rtc.in") {
+		c.handleRTCSignal(msg.Data)
+		return
+	}
 	resp := c.dispatch(context.Background(), msg.Subject, msg.Data)
 	if resp == nil {
 		return

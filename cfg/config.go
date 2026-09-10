@@ -63,6 +63,11 @@ type Options struct {
 	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
 	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
 	Code string `json:"code" yaml:"code" desc:"local api secret code (empty = random per process)"`
+	// RTC 直连应答开关（WebRTC DataChannel，2026-09-10）：开启后 host 作为
+	// 应答方接受 owner 页面发起的 RTC 直连（信令经 NATS，数据面 UDP/DTLS），
+	// 并在 caps 的 mgmt 字段上报 Code 供服务端缓存、owner 页面鉴权使用；
+	// 关闭则不上报 mgmt、不应答 rtc.in 信令。
+	RTC bool `json:"rtc" yaml:"rtc" default:"true" desc:"answer WebRTC direct links from owner pages (default true)"`
 
 	// 三域授权模型（fs/net/ssh × policy/deny/allow）。统一判定式：
 	// deny 命中 → 拒，除非存在更具体的 allow（具体度优先，同精度 deny 胜）；
@@ -161,7 +166,7 @@ var Global = NewOptions()
 
 // NewOptions 返回带默认值的配置实例（Code 留空，由 Load/LoadFile 生成）。
 func NewOptions() *Options {
-	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/"}
+	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/", RTC: true}
 }
 
 // 授权策略取值（fs_policy/net_policy/ssh_policy 的合法值）。

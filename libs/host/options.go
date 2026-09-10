@@ -27,6 +27,8 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 		Version:     version,
 		ExecTimeout: timeout,
 		NoSandbox:   o.NoSandbox,
+		Code:        o.Code,
+		RTC:         o.RTC,
 		OnLog:       onLog,
 	}, nil
 }

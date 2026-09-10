@@ -120,6 +120,25 @@ func ParseToolReqSubject(subject string) (uid, host, tool, sid string, err error
 	return parts[1], strings.TrimPrefix(parts[3], HostIDPrefix), parts[4], parts[6], nil
 }
 
+// ---- RTC 信令 subject（2026-09-10，WebRTC 直连，§6.1 扩展） ----
+
+// RtcInSubject RTC 信令入向（页面 → 设备）：u.{uid}.h.host_{host_id}.rtc.in
+// host 端通配 inbox（HostInboxSubject）天然覆盖；前端 JWT pub allow
+//（u.{uid}.>）覆盖，pub 方向不受 FrontendDenyPattern 限制。
+func RtcInSubject(uid, hostID string) (string, error) {
+	if !validSeg(uid) || !validSeg(hostID) {
+		return "", fmt.Errorf("proto: invalid uid/hostID segment")
+	}
+	return fmt.Sprintf("u.%s.h.%s.rtc.in", uid, hostSeg(hostID)), nil
+}
+
+// RtcOutSubject RTC 信令出向（设备 → 页面）：u.{uid}.h.{host_id}.{cred_ver}.rtc
+// 与 caps/presence 同族（bare host_id 段）——不在前端 JWT sub deny（host_ 前缀
+// 通配）范围内，页面可订阅；host JWT pub allow 需显式放行（natsauth）。
+func RtcOutSubject(uid, hostID string, credVer uint64) (string, error) {
+	return connSubject(uid, hostID, credVer, "rtc")
+}
+
 // PageQueueGroup 是 page 端同会话多 tab 的 queue group（§6.1 v4）：page-{sid}。
 // subject 已按 sid 定向（只有注册了该会话的 tab 订阅）；同 sid 多 tab 时
 // 同组 NATS 恰好投递一个成员——防多 tab 重复执行（Request 只取第一个响应，

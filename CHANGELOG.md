@@ -17,6 +17,27 @@
 
 ### 新增
 
+- **RTC 直连应答（2026-09-10，§6.4）**：新增 `libs/rtc`——owner 页面与设备的
+  WebRTC DataChannel 直连（pion/webrtc v4 集成，纯 Go 无 cgo）。host 为纯应答方：
+  `proto.Caps` 新增 `Mgmt{code,rtc}`（cfg `rtc` 开关，默认 true；关则不上报、
+  不应答）；信令入向复用通配 inbox（`u.{uid}.h.host_{id}.rtc.in`，dispatch
+  按后缀路由进 rtc 服务），出向 `u.{uid}.h.{id}.{ver}.rtc`；单 UDP mux（随机
+  端口，防火墙友好）+ mDNS QueryOnly（解析浏览器 `.local` 化名候选）+
+  60s 建连看门狗；DataChannel("fs") 鉴权帧（code 与本地管理 API x-aic-code
+  同源，5 次失败锁 1 分钟）+ fs 帧协议（全 JSON 文本帧，32KB 内联阈值，
+  48KB chunk 流式，8MB 发送高水位 backpressure）；fs 执行体复用 vcore.RunFS
+  （granted=9 本地控制台信任级，fsauth 三域 deny/allow 照常生效）。
+  环路对测 9 例（误码拒绝/鉴权+内联/64KB 流式结果重组/80KB 流式写注回/
+  通道关闭 PC 回收/readbin 内联与流式精确往返、区间透传、错误帧）。
+- **readbin 二进制字节出口（2026-09-10 同批）**：帧协议新增 `readbin` op
+  （直连控制台私有，不属于 fs 指令集）——`vcore.ReadBin`（新，libs/vcore/
+  readbin.go：字节区间读 + fsauth 同一判定实例 + 单次上限 256MB）+ base64
+  文本帧回送（bin:true + attrs{mime,size,total}，超 32KB 走 chunk 流）；
+  供前端预览/下载大二进制（视频等）。同批修复实网首测暴露的 P1：
+  `vcore.Result` 补 json tag（缺 tag 时 Go 序列化出大写键 Content/Attrs，
+  页面按小写解析静默丢空——Go 对测反序列化大小写不敏感、JS mock 用小写，
+  双双漏检；rtc_test 加线上契约断言防回归）与 P2 加固（fs 通道关闭即回收
+  PC，此前未 authed 连接永不回收；连接数上限 16 防信令面洪泛）。
 - **桌面端主窗口 A/B 左右分区**（`desktop/main.js` + `electron-adapter.mjs`，新增
   `divider.html` / `divider-preload.js`）：A = 平台页常驻左侧；B 区（右）默认收起，
   AI browser 标签创建时自动展开（标签从全遮挡隐藏改为 B 区可见），最后一个标签关闭

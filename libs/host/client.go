@@ -9,6 +9,7 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/aic-pod/libs/vcore"
 )
 
@@ -36,6 +38,8 @@ type Options struct {
 	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
 	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
 	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
+	Code        string        // 本地校验码（caps mgmt 上报；RTC DataChannel 鉴权帧同源）
+	RTC         bool          // RTC 直连应答开关（cfg.Options.RTC）：关则不上报 mgmt、不应答信令
 	OnLog       func(format string, args ...any)
 }
 
@@ -55,6 +59,7 @@ type Client struct {
 	policy    *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
 	netPol    *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
 	sshPol    *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	rtcSvc    *rtc.Service                 // RTC 直连应答服务（opts.RTC 且 Code 非空时启动）
 	logf      func(string, ...any)
 }
 
@@ -171,11 +176,22 @@ func (c *Client) Connect() error {
 	c.logf("listening on %s", inbox)
 
 	go c.heartbeatLoop()
+
+	// RTC 直连应答服务（2026-09-10）：信令走现有通配 inbox，失败不阻断主连接。
+	if c.opts.RTC && c.opts.Code != "" {
+		if err := c.startRTC(); err != nil {
+			c.logf("rtc disabled: %v", err)
+		}
+	}
 	return nil
 }
 
-// Close 优雅关闭：取消订阅 → 断开 NATS。
+// Close 优雅关闭：关闭 RTC 服务 → 取消订阅 → 断开 NATS。
 func (c *Client) Close() error {
+	if c.rtcSvc != nil {
+		c.rtcSvc.Close()
+		c.rtcSvc = nil
+	}
 	if c.nc != nil {
 		c.nc.Close()
 		c.nc = nil
@@ -213,6 +229,72 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 		return c.Connect()
 	}
 	return nil
+}
+
+// ---- RTC 直连应答（2026-09-10，libs/rtc） ----
+
+// startRTC 启动 RTC 应答服务：信令出向发布到 RtcOutSubject（natsauth host JWT
+// pub allow 已放行），fs 执行体为本地控制台信任级。幂等（重连不重复启动——
+// UDP mux 与 PeerConnection 生命周期独立于 NATS 连接）。
+func (c *Client) startRTC() error {
+	if c.rtcSvc != nil {
+		return nil
+	}
+	hostname, _ := os.Hostname()
+	svc, err := rtc.New(rtc.Config{
+		Code:     c.opts.Code,
+		HostID:   c.hostID,
+		Hostname: hostname,
+		Version:  c.opts.Version,
+		Send: func(sig *proto.RtcSignal) {
+			if c.nc == nil {
+				return
+			}
+			subj, err := proto.RtcOutSubject(c.uid, c.hostID, c.credVer)
+			if err != nil {
+				return
+			}
+			data, _ := json.Marshal(sig)
+			c.nc.Publish(subj, data)
+		},
+		RunFS:   c.runFSLocal,
+		ReadBin: c.readBinLocal,
+		Logf:    c.logf,
+	})
+	if err != nil {
+		return err
+	}
+	c.rtcSvc = svc
+	return nil
+}
+
+// handleRTCSignal 处理一条 rtc.in 信令（dispatch.go handleMsg 路由过来）。
+func (c *Client) handleRTCSignal(data []byte) {
+	if c.rtcSvc == nil {
+		return
+	}
+	var sig proto.RtcSignal
+	if err := json.Unmarshal(data, &sig); err != nil {
+		return
+	}
+	c.rtcSvc.HandleSignal(&sig)
+}
+
+// runFSLocal 是 RTC 直连通道的 fs 执行体：code 鉴权通过 = 本地控制台信任级
+//（granted=9，不再出现审批；fsauth 三域 deny/allow 照常生效，deny 恒拒不可绕过）。
+// sid 为空：无会话临时 grant 视图（与 run_tool 直发同语义）。
+func (c *Client) runFSLocal(ctx context.Context, raw json.RawMessage) (*vcore.Result, error) {
+	env := c.newEnv("", "")
+	env.Granted = 9
+	return vcore.RunFS(ctx, env, raw)
+}
+
+// readBinLocal 是 RTC 直连通道 readbin op 的执行体（2026-09-10，预览/下载
+// 大二进制的字节出口）：与 runFSLocal 同信任级、同 fsauth 判定实例。
+func (c *Client) readBinLocal(path string, off, length int64) ([]byte, string, int64, error) {
+	env := c.newEnv("", "")
+	env.Granted = 9
+	return vcore.ReadBin(env, path, off, length)
 }
 
 // ---- caps v2 上报（§6.3） ----
@@ -306,9 +388,19 @@ func (c *Client) buildCaps() *proto.Caps {
 		DeviceType:    c.opts.DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
+		Mgmt:          c.buildMgmt(),
 		FS:            proto.FSCaps{},                  // actions=null = 全部 8 个
 		Exec:          proto.ExecCaps{Commands: decls}, // 统一命令声明表
 	}
+}
+
+// buildMgmt 构造本地管理面声明：仅 RTC 开关开启且持有校验码时上报
+//（服务端以 mgmt 存在性判定设备直连能力，页面据此发起 RTC 直连）。
+func (c *Client) buildMgmt() *proto.MgmtCaps {
+	if !c.opts.RTC || c.opts.Code == "" {
+		return nil
+	}
+	return &proto.MgmtCaps{Code: c.opts.Code, RTC: true}
 }
 
 func (c *Client) publishCaps(nc *nats.Conn) {
