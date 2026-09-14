@@ -17,6 +17,9 @@
   `leader-grab.js`；新增 `browser-sync` 目标并接入三平台打包；打包后 `check-asar.mjs` 校验各入口相对
   require/import 均存在于 asar + `resources/backend` 后端二进制存在，不通过即构建失败。本地全链路验证：
   asar 含 `leader-grab.js` 与 `vendor/**`、校验通过。
+- **check-asar.mjs 兼容 Windows 反斜杠路径**（`desktop/scripts/check-asar.mjs`）：@electron/asar 的
+  listFiles 以 `path.join` 构建条目（Windows `\` 分隔、posix `/`），归一化统一为 posix `/` 形式 +
+  空集合防护（此前 Windows 打包后校验误报「入口未进包」，其余平台正常）。
 
 ### 变更
 
