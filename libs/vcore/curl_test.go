@@ -2,10 +2,16 @@ package vcore
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/vigo/contrib/ufs"
 )
 
 // TestDropUnknownFlags 锁定 curl 宽松 flag 语义：未知 flag 剥离（不报错），
@@ -235,5 +241,66 @@ func TestCurlUserAgentAndMaxTime(t *testing.T) {
 		if _, err := Run(context.Background(), env, "curl", []string{"--max-time", bad, "https://example.com"}); err == nil {
 			t.Errorf("--max-time %s: expected error", bad)
 		}
+	}
+}
+
+// strategyVFS 模拟 cloud GatedFS 的写分级拒：写方法返回同一策略错误实例。
+type strategyVFS struct {
+	ufs.FS
+	err error
+}
+
+func (v strategyVFS) MkdirAll(p string, perm os.FileMode) error { return v.err }
+func (v strategyVFS) Create(name string) (ufs.File, error)      { return nil, v.err }
+
+// TestExecVFSErrStrategyKept 锁定 execVFSErr/fsVFSErr：策略类错误（Approval/
+// Denied）保型上抛，其余归一为指令错误——审批/拒绝语义不能被拍平成执行错误。
+func TestExecVFSErrStrategyKept(t *testing.T) {
+	ae := &proto.ApprovalError{Reason: "fs: write requires fs level 3 for /u/u1/f.bin"}
+	got := execVFSErr("curl", ae, "%s", ae)
+	var gotA *proto.ApprovalError
+	if !errors.As(got, &gotA) || gotA != ae {
+		t.Errorf("Approval 应保型: got %v", got)
+	}
+	// 包装链中的策略错误同样保型（提取根错误）
+	wrapped := fmt.Errorf("ctx: %w", ae)
+	got = execVFSErr("curl", wrapped, "%s", wrapped)
+	if !errors.As(got, &gotA) || gotA != ae {
+		t.Errorf("wrapped Approval 应保型: got %v", got)
+	}
+	de := &proto.DeniedError{Reason: "deny"}
+	got = fsVFSErr("rm", de, "%s", de)
+	var gotD *proto.DeniedError
+	if !errors.As(got, &gotD) || gotD != de {
+		t.Errorf("Denied 应保型: got %v", got)
+	}
+	// 非策略错误：照常归一为 ExecError
+	ioErr := fmt.Errorf("disk broke")
+	got = execVFSErr("curl", ioErr, "cannot create %s: %s", "/x", ioErr)
+	var execE *proto.ExecError
+	if !errors.As(got, &execE) || !strings.Contains(execE.Error(), "cannot create /x: disk broke") {
+		t.Errorf("非策略错误应归一为 ExecError: %v", got)
+	}
+}
+
+// TestCurlOutputStrategyErrorKept 集成：curl -o 的 VFS 写被策略拒绝（GatedFS
+// 写分级）时，Run 返回保型的 *proto.ApprovalError（而非拍平的 ExecError）——
+// cloud 内联审批流依赖类型判定（aic procs 转 NeedApprovalError → waiting）。
+func TestCurlOutputStrategyErrorKept(t *testing.T) {
+	ae := &proto.ApprovalError{Reason: "fs: write requires fs level 3 for /sessions/s1/a.txt"}
+	env := &Env{
+		VFS:     strategyVFS{FS: NewMemVFS(), err: ae},
+		Workdir: "/sessions/s1",
+		Fetcher: FetchFunc(func(ctx context.Context, req HTTPReq) (io.ReadCloser, int64, error) {
+			return io.NopCloser(strings.NewReader("hello")), 5, nil
+		}),
+		Tasks:  testTaskRunner{},
+		TaskID: "t1",
+		Roots:  []string{"/"},
+	}
+	_, err := Run(context.Background(), env, "curl", []string{"-o", "/sessions/s1/a.txt", "https://example.com"})
+	var gotA *proto.ApprovalError
+	if !errors.As(err, &gotA) || gotA != ae {
+		t.Fatalf("curl -o 策略错误应保型上抛, got %v", err)
 	}
 }

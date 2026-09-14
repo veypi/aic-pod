@@ -117,7 +117,7 @@ func jsonWrite(env *Env, path string, v any) (int, error) {
 		return 0, err
 	}
 	if err := env.VFS.WriteFile(abs, data, 0o644); err != nil {
-		return 0, execErr("json", "%s: %v", path, err)
+		return 0, execVFSErr("json", err, "%s: %v", path, err)
 	}
 	return len(data), nil
 }

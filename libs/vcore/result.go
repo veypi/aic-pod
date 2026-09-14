@@ -128,3 +128,21 @@ func execErr(cmd, format string, args ...any) *proto.ExecError {
 func fsErr(action, format string, args ...any) *proto.ExecError {
 	return &proto.ExecError{Tool: proto.ToolFS, Action: action, Reason: fmt.Sprintf(format, args...)}
 }
+
+// execVFSErr / fsVFSErr 包装 VFS 操作错误为指令错误：错误链含策略类错误
+// （proto.ApprovalError / proto.DeniedError）时保型上抛——审批/拒绝语义不能被
+// 拍平（cloud 内联路径 GatedFS 的写分级兜底依赖它进入审批流）；其余按
+// {cmd}: {原因}（§5.4）/ fs {action}: {原因}（§2.3）归一。
+func execVFSErr(cmd string, vfsErr error, format string, args ...any) error {
+	if se := proto.StrategyError(vfsErr); se != nil {
+		return se
+	}
+	return execErr(cmd, format, args...)
+}
+
+func fsVFSErr(action string, vfsErr error, format string, args ...any) error {
+	if se := proto.StrategyError(vfsErr); se != nil {
+		return se
+	}
+	return fsErr(action, format, args...)
+}

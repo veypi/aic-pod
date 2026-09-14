@@ -62,7 +62,7 @@ func fsRm(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		}
 	}
 	if err := env.VFS.RemoveAll(abs); err != nil {
-		return nil, fsErr("rm", "%s", err)
+		return nil, fsVFSErr("rm", err, "%s", err)
 	}
 	r := newResult("rm", abs)
 	r.Content = fmt.Sprintf("removed %s", abs)
@@ -121,10 +121,10 @@ func fsCp(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 			return nil, fsErr("cp", "cannot read source %s: %s", src, err)
 		}
 		if err := env.VFS.MkdirAll(dirOf(dst), 0o755); err != nil {
-			return nil, fsErr("cp", "%s", err)
+			return nil, fsVFSErr("cp", err, "%s", err)
 		}
 		if err := env.VFS.WriteFile(dst, data, 0o644); err != nil {
-			return nil, fsErr("cp", "cannot write destination %s: %s", dst, err)
+			return nil, fsVFSErr("cp", err, "cannot write destination %s: %s", dst, err)
 		}
 	}
 	r := newResult("cp", dst)
@@ -135,7 +135,7 @@ func fsCp(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 
 func copyDir(vfs ufs.FS, src, dst string) error {
 	if err := vfs.MkdirAll(dst, 0o755); err != nil {
-		return fsErr("cp", "cannot create directory %s: %s", dst, err)
+		return fsVFSErr("cp", err, "cannot create directory %s: %s", dst, err)
 	}
 	entries, err := vfs.ReadDir(src)
 	if err != nil {
@@ -153,7 +153,7 @@ func copyDir(vfs ufs.FS, src, dst string) error {
 				return fsErr("cp", "cannot read %s: %s", s, err)
 			}
 			if err := vfs.WriteFile(d, data, 0o644); err != nil {
-				return fsErr("cp", "cannot write %s: %s", d, err)
+				return fsVFSErr("cp", err, "cannot write %s: %s", d, err)
 			}
 		}
 	}
@@ -187,10 +187,10 @@ func fsMv(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsErr("mv", "destination %s already exists", dst)
 	}
 	if err := env.VFS.MkdirAll(dirOf(dst), 0o755); err != nil {
-		return nil, fsErr("mv", "%s", err)
+		return nil, fsVFSErr("mv", err, "%s", err)
 	}
 	if err := env.VFS.Rename(src, dst); err != nil {
-		return nil, fsErr("mv", "cannot move %s to %s: %s", src, dst, err)
+		return nil, fsVFSErr("mv", err, "cannot move %s to %s: %s", src, dst, err)
 	}
 	r := newResult("mv", dst)
 	r.Attrs["source_path"] = src

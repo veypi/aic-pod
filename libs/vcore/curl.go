@@ -285,11 +285,11 @@ func curlToFile(ctx context.Context, env *Env, req HTTPReq, dst string, maxSizeM
 	defer body.Close()
 
 	if err := env.VFS.MkdirAll(dirOf(abs), 0o755); err != nil {
-		return nil, execErr("curl", "%s", err)
+		return nil, execVFSErr("curl", err, "%s", err)
 	}
 	f, err := env.VFS.Create(abs)
 	if err != nil {
-		return nil, execErr("curl", "cannot create %s: %s", abs, err)
+		return nil, execVFSErr("curl", err, "cannot create %s: %s", abs, err)
 	}
 	maxBytes := int64(maxSizeMB) << 20
 	n, copyErr := io.Copy(f, io.LimitReader(body, maxBytes+1))
@@ -306,7 +306,7 @@ func curlToFile(ctx context.Context, env *Env, req HTTPReq, dst string, maxSizeM
 	}
 	if copyErr != nil {
 		_ = env.VFS.RemoveAll(abs)
-		return nil, execErr("curl", "write %s: %s", abs, copyErr)
+		return nil, execVFSErr("curl", copyErr, "write %s: %s", abs, copyErr)
 	}
 	r := newResult("curl", abs)
 	r.Content = fmt.Sprintf("downloaded %s to %s (%d bytes)", req.URL, abs, n)
