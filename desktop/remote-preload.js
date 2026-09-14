@@ -73,6 +73,18 @@ if (isLocal) {
       // 设计见 aic/docs/os_native_windows.md §6）
       mouse: (m) => ipcRenderer.send('native:mouse', m || {}),
       wheel: (m) => ipcRenderer.send('native:wheel', m || {}),
+      // leader 键抓取（docs §6）：页面同步 leader 集合（页面为配置唯一源，改键跟随；
+      // 未同步 = 壳不抓取）；native:keys = leader 会话进入事件（原生内容聚焦时壳侧
+      // 吞下的 leader 按下）→ 页面合成事件走既有 keymap/编排链路，此后物理键由平台页
+      // 原生接收；focus = 平台页保留键盘焦点（launcher 等需要输入的动作，leader 释放
+      // 后不自动交还内容视图）
+      setLeader: (mods) => ipcRenderer.invoke('native:leader', Array.isArray(mods) ? mods.map((m) => String(m)) : []),
+      onKeys: (fn) => {
+        const h = (e, ev) => fn(ev)
+        ipcRenderer.on('native:keys', h)
+        return () => ipcRenderer.removeListener('native:keys', h)
+      },
+      focus: () => ipcRenderer.invoke('native:focus'),
       // 标签集变化（全量推送）；返回取消函数
       onChanged: (fn) => {
         const h = (e, st) => fn(st)

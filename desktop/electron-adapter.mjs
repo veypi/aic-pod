@@ -55,6 +55,7 @@ const MAX_TABS = 50; // 标签数上限（防失控）
  *   platformView: 平台页视图（z 序基准：隐藏态置顶遮挡 tabs）
  *   onChanged(state): 标签集变化推送（{tabs:[{id,title,url,loading}], activeTabId}，全量）
  *   onRestack(): tabs/platformView z 序重建后回调（main.js 用于恢复 settings 最顶）
+ *   onTabView(wc): 新标签视图创建回调（main.js 用于挂 leader 键抓取；adapter 不感知语义）
  */
 export function createElectronAdapter(host) {
   if (!host || !host.win) throw new Error("electron adapter requires host.win");
@@ -211,6 +212,7 @@ export function createElectronAdapter(host) {
       },
     });
     const wc = view.webContents;
+    host.onTabView?.(wc); // 壳侧 leader 键抓取挂载（main.js；壳能力，adapter 不感知语义）
     const tabId = wc.id;
     tabs.set(tabId, { view, winId: host.win.id });
     attachView(view);

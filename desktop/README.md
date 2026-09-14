@@ -21,9 +21,11 @@ Electron Main (Node, main.js)
  │    自绘） + 原生内容池（OS 原生窗口内容 v2 反转模型，设计唯一源 =
  │    aic/docs/os_native_windows.md）——AI browser 标签与「本地配置」设置视图
  │    （WebContentsView）恒在平台页之下，由平台页 OS 窗口占位元素经 nativeWin 桥
- │    驱动贴位；洞 = 内容区（背景层 `body::before` mask + 内容元素透明；遮罩/弹窗
- │    直接叠画、不隐藏内容）；输入资格由页面侧 DOM 判定（elementsFromPoint）→ IPC
- │    `native:mouse / native:wheel` → 主进程复核 + 坐标翻译下发（含拖拽捕获 + 焦点转移）
+ │    驱动贴位；洞 = 内容区（背景层 mask + 内容元素透明；遮罩/弹窗直接叠画、不隐藏
+ │    内容）；输入资格由页面侧 DOM 判定（elementsFromPoint）→ IPC
+ │    `native:mouse / native:wheel` → 主进程复核 + 坐标翻译下发（含拖拽捕获 + 焦点
+ │    转移）；原生内容聚焦时 leader 键由壳侧抓取（`native:leader / native:keys`，
+ │    OS 布局快捷键保持可用，见下文「leader 键抓取」）
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
@@ -33,6 +35,15 @@ Electron Main (Node, main.js)
 Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢占（否则走系统
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
 键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
+
+leader 键抓取（设计 = aic/docs/os_native_windows.md §6）：原生内容
+（AI 标签 / 设置视图）持有键盘焦点时平台页收不到 keydown——壳对每个内容 view 挂
+`before-input-event`（`leader-grab.js` 纯判定）：leader 集合精确命中 → 该键不进内容、
+经 `native:keys` 转平台页合成 KeyboardEvent（复用页面 keymap/编排链路）并把键盘焦点
+交接平台页；会话期间物理键全由平台页原生接收，leader 释放后焦点自动交还来源内容视图
+（launcher 等经 `native:focus` 保留焦点）。leader 集合由页面经 `native:leader` 同步
+（改键跟随，未同步 = 不抓取）。不做逐键转发的原因（Chromium 抑制 handled keyDown 后的
+keyUp/char，壳侧观测不到释放）见 docs §6。
 
 ## 开发
 
