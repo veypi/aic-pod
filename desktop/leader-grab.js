@@ -1,7 +1,7 @@
 /* leader-grab.js — leader 键抓取/会话判定（纯逻辑，node:test 覆盖）
  *
  * 背景（设计唯一源 aic/docs/os_native_windows.md §6）：平台页恒最顶且背景透明，
- * 原生内容（AI 标签池 / 设置 hostView）在其下；点击进洞后壳侧 wc.focus() 把键盘
+ * 原生内容（AI 标签池）在其下；点击进洞后壳侧 wc.focus() 把键盘
  * 焦点交给原生内容，平台页收不到 keydown——leader 布局快捷键（编排 / launcher /
  * 窗口动作）随之失效。
  *

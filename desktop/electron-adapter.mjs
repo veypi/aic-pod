@@ -19,14 +19,14 @@
  *     tabControl.applyLayout({rect, visible})；rect = 占位元素 getBoundingClientRect
  *     （CSS px = DIP，contentView 相对——platformView 恒满窗且位于 (0,0)，zoom=1）。
  *   - 可见性由页面 mask 开洞表达（页面侧 wincontent.js）；壳侧不再翻转 z 序：
- *     tabs 恒在 [settings, platformView] 之下，仅做 bounds 同步 + 成员重排。
+ *     tabs 恒在 platformView 之下，仅做 bounds 同步 + 成员重排。
  *     隐藏（visible=false）= 撤洞 + 输入禁用；视图恒挂树，compositor surface 保持，
  *     隐藏态 CDP 截图不受影响。禁 detach / 零尺寸 bounds / 屏外坐标；bounds 保持最后有效值。
- *   - z 序不变量（底→顶）：[…tabs（active 恒在 tabs 最顶）, settings, platformView]。
- *     池成员重排（建/关/切激活）后经 onRestack 回调 main.js 抬回 settings/platform。
+ *   - z 序不变量（底→顶）：[…tabs（active 恒在 tabs 最顶）, platformView]。
+ *     池成员重排（建/关/切激活）后经 onRestack 回调 main.js 抬回 platform。
  *   - activeTabId = 可视激活（用户点标签/新建驱动）；AI 的 current tab 在 core
  *     store 里（browser tab N 只切命令目标），不动可视激活（不抢焦点语义）。
- *   - poolState()：主进程输入路由读取活动 tab 的洞 rect（见 main.js onBeforeMouseEvent）。
+ *   - poolState()：主进程输入路由读取活动 tab 的洞 rect（见 main.js native:mouse/wheel 转发）。
  *
  * currentSessionDir 由 browser-tool 在每次调用前设置（串行链保证无交叉）——
  * 下载产物的落盘目录（Go 后端下发的会话工作区）。
@@ -52,9 +52,9 @@ const MAX_TABS = 50; // 标签数上限（防失控）
 /**
  * host（main.js 注入，见 startBrowserServer）：
  *   win: BaseWindow 主窗口
- *   platformView: 平台页视图（z 序基准：隐藏态置顶遮挡 tabs）
+ *   platformView: 平台页视图（z 序基准：恒最顶，洞由页面 mask 表达）
  *   onChanged(state): 标签集变化推送（{tabs:[{id,title,url,loading}], activeTabId}，全量）
- *   onRestack(): tabs/platformView z 序重建后回调（main.js 用于恢复 settings 最顶）
+ *   onRestack(): tabs/platformView z 序重建后回调（main.js 用于恢复 platform 最顶）
  *   onTabView(wc): 新标签视图创建回调（main.js 用于挂 leader 键抓取；adapter 不感知语义）
  */
 export function createElectronAdapter(host) {
@@ -157,9 +157,9 @@ export function createElectronAdapter(host) {
     );
   }
 
-  // 成员重排（v2）：tabs 池内 active 恒最顶；重排后由 onRestack 抬回 settings/platform
-  //（不变量：底→顶 […tabs, settings, platformView]）。先摘后挂（已挂载视图重复
-  // addChildView 会失败）；settings/platform 不在本序内。
+  // 成员重排（v2）：tabs 池内 active 恒最顶；重排后由 onRestack 抬回 platform
+  //（不变量：底→顶 […tabs, platformView]）。先摘后挂（已挂载视图重复
+  // addChildView 会失败）；platform 不在本序内。
   function restackTabs() {
     const cv = contentView();
     const active = tabs.get(activeTabId)?.view || null;
@@ -180,7 +180,7 @@ export function createElectronAdapter(host) {
     }
     if (!force) return;
     restackTabs();
-    try { host.onRestack?.(); } catch { /* settings 未建 */ }
+    try { host.onRestack?.(); } catch { /* platform 未就绪 */ }
   }
 
   function state() {

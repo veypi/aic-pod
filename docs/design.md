@@ -75,9 +75,9 @@ aic-pod/
 |------|------|
 | **语言** | Node（主进程）+ Go（后端二进制） |
 | **目标平台** | Windows / macOS / Linux |
-| **形态** | 启动：loading → spawn 后端（AIC_PORT_FILE 握手）→ 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + ivec.ai），平台页经 window.aicDesktop 直调本地 API（端口/code 不出主进程，IPC handler 校验 senderFrame host） |
+| **形态** | 启动：loading → spawn 后端（AIC_PORT_FILE 握手）→ 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + 默认域名与旧域名 ivec.ai），平台页经 window.aicDesktop 直调本地 API（端口/code 不出主进程，IPC handler 校验 senderFrame host） |
 | **能力** | 与 cli 相同（exec/fs/ssh/scp，沙箱 + 三域授权）；另有壳 provider `browser`（Electron CDP）与 `cua`（cua-driver MCP 桥接，原生 GUI 自动化，内置发行物随包分发） |
-| **本地页面** | 仅 /settings 配置页（系统边框设置窗口 / 未配置时主窗口），托盘「本地配置」入口；设置保存后探测并跳 {host}/hosts |
+| **本地页面** | 仅 /settings 配置页（独立系统边框配置窗口：托盘「本地配置」直开，平台不可达首配时自动打开）；设置保存后探测并跳 {host}/hosts |
 | **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
 | **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 host 注册 |
 
@@ -219,7 +219,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
   **显式 flag > 环境变量 > 配置文件（LoadConfig 填充默认值）> 结构体默认**
 - flag：`-host` / `-key` / `-work_dir` / `-exec_timeout` / `-home_path`（json tag 即 flag 名）
 - env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT` / `HOME_PATH`（字段名大写，无前缀）
-- 配置键：`host`（平台地址，默认 https://ivec.ai）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）、`code`（本地 API 校验码，空 = 进程级随机）、`rtc`（RTC 直连应答开关，默认 true；关闭则 caps 不上报 mgmt、不应答 rtc.in 信令）
+- 配置键：`host`（平台地址，默认 https://ivec-ai.com）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）、`code`（本地 API 校验码，空 = 进程级随机）、`rtc`（RTC 直连应答开关，默认 true；关闭则 caps 不上报 mgmt、不应答 rtc.in 信令）
 - 三域授权键（vigo/flags 自动注册 flag/env，env 名 = json tag 大写）：
   `fs_policy`/`fs_deny`/`fs_allow`、`net_policy`/`net_deny`/`net_allow`、`ssh_policy`/`ssh_deny`/`ssh_allow`；
   隐藏项 `no_sandbox`（全局跳过 exec 沙箱，仅配置文件/flag/env 可改，本地管理 API 不暴露）

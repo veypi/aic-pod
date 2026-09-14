@@ -226,7 +226,7 @@
     <div class="sub">本机客户端配置 · 平台不可达时依然可用</div>
     <div class="status"><span class="dot" id="sdot" ref="sdot"></span><span id="stext" ref="stext">检查中…</span></div>
     <label>平台地址 (host)</label>
-    <input id="host" ref="host" placeholder="https://ivec.ai">
+    <input id="host" ref="host" placeholder="https://ivec-ai.com">
     <label>凭证 (key)</label>
     <div class="row">
       <input id="key" ref="key" placeholder="host key">
@@ -428,7 +428,7 @@
 
   // 归一平台地址（补 scheme + 去尾斜杠）
   normalizeHost = (raw) => {
-    let h = (raw || 'https://ivec.ai').trim();
+    let h = (raw || 'https://ivec-ai.com').trim();
     if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(h)) h = 'https://' + h;
     return h.replace(/\/+$/, '');
   };
@@ -476,7 +476,7 @@
     refreshStatus();
   };
 
-  // 内嵌桌面端 hostView 时提供「关闭」（浏览器直开/主视图整窗形态无 aicDesktop.closeSettings → 不渲染）。
+  // 桌面端独立配置窗口提供「关闭」（浏览器直开无 aicDesktop.closeSettings → 不渲染）。
   // 声明式渲染：setup 在 DOM 编译前执行、$refs 不可用（vhtml 契约），桥条件只能走 $data 标记 + 模板 v-if
   //（2026-09-10 事故：setup 里直接改 $refs.btnClose.style 导致按钮恒隐藏）。
   canClose = !!(window.aicDesktop && window.aicDesktop.closeSettings);

@@ -5,25 +5,25 @@
 //
 //	Electron Main (Node)
 //	 ├─ 启动：主窗口先加载本地 loading.html → spawn Go 后端（AIC_PORT_FILE 握手）
-//	 │    → 读配置 host → 探测 {host}/root.html → 跳转平台页 or 本地 /settings
+//	 │    → 读配置 host → 探测 {host}/root.html → 跳转平台页 or 打开本地配置窗口
 //	 │    → 启动 browser 壳通道（browser-tool.js，共享插件 core + Electron CDP
 //	 │      适配器）并向 Go 后端注册 provider（caps 出现 browser）
 //	 ├─ 平台页（{host}/ 顶层页面）：session.registerPreloadScript 注入 remote-preload.js
 //	 │    （host 白名单过滤后暴露 window.aicDesktop：api 转发/窗口控制/外链/桌宠
-//	 │    + nativeWin 原生内容桥；本地 127.0.0.1 页面只给设置子集）
-//	 ├─ 原生内容池（v2 反转模型）：AI 工作区标签（WebContentsView 池，adapter 持有）+
-//	 │    设置视图（hostView，懒创建保活）——恒在平台页之下；rect/可见性唯一驱动源 =
-//	 │    平台页 OS 窗口占位元素（native:layout / native:host-layout）；洞 = 页面
-//	 │    内容区（遮罩/弹窗直接叠画，不隐藏内容），洞内输入由页面命中判定后经 IPC
+//	 │    + nativeWin 原生内容桥）
+//	 ├─ 原生内容池（v2 反转模型）：AI 工作区标签（WebContentsView 池，adapter 持有）
+//	 │    ——恒在平台页之下；rect/可见性唯一驱动源 = 平台页 OS 窗口占位元素
+//	 │    （native:layout）；洞 = 页面内容区（遮罩/弹窗直接叠画，不隐藏内容），
+//	 │    洞内输入由页面命中判定后经 IPC
 //	 │    （native:mouse / native:wheel）交由主进程翻译转发；原生内容聚焦时 leader 键
 //	 │    由壳侧抓取（leader 会话焦点交接：进入事件 native:keys 转平台页、释放后焦点
 //	 │    交还，OS 布局快捷键保持可用，leader-grab.js）
-//	 ├─ 本地设置页：平台不可达时主视图整窗加载（首配）；平台在线时经托盘
-//	 │    「本地配置」→ native:open-host → 平台 OS 开 /local/desktop 窗口贴位
+//	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload；不依赖平台页）：托盘
+//	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
 //	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
 //
 // 安全：所有 IPC handler 校验 event.senderFrame.url 的 host——
-// 平台能力（local:api/window:*/pet:*/native:*）仅白名单 host（配置 host + ivec.ai）可调；
+// 平台能力（local:api/window:*/pet:*/native:*）仅白名单 host（配置 host + 默认与旧平台域名）可调；
 // 设置能力（platform:check/open、settings:close）仅 127.0.0.1 本地页面可调。端口/code 不出主进程。
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut } = require('electron')
 const { spawn } = require('child_process')
@@ -45,14 +45,16 @@ const trayIcon = process.platform === 'darwin'
   : path.join(__dirname, 'assets', 'tray.png')
 let petSize = 100 // 桌宠窗口边长（右键菜单缩放 50–400，随 pet-pos.json 持久化）
 const probeTimeout = 5000 // {host}/root.html 探测超时
-const DEFAULT_HOST = 'https://ivec.ai'
+const DEFAULT_HOST = 'https://ivec-ai.com'
+// LEGACY_HOSTS：旧平台域名（ivec.ai 现 301 至 ivec-ai.com），作为受信任 host 保留，
+// 兼容旧配置与跳转后的页面 origin。
+const LEGACY_HOSTS = ['ivec.ai']
 
 let mainWin = null // 主窗口（BaseWindow：平台页 + 原生内容池视图）
 let platformView = null // 平台页视图（恒占满 contentView；原生内容的 z 序基准）
 let aiBrowser = null // browser 壳通道（adapter.tabControl = 原生内容池控制面）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
-let settingsView = null // 设置 hostView（WebContentsView，独立 partition + settings-preload；摘除保活）
-let hostRect = null // 设置视图最后一次有效 rect（content 相对 DIP；隐藏不清零）
+let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
 let tray = null
 let backend = null
 let quitting = false
@@ -164,11 +166,12 @@ async function start() {
   setStep('正在检测平台 ' + host + ' …')
   const reachable = await probeRoot(host)
 
-  // 3. 跳转：平台可达 → host + homePath；否则本地 /settings 配置（主视图整窗）
+  // 3. 跳转：平台可达 → host + homePath；否则停留 loading 提示 + 独立本地配置窗口（首配）
   if (reachable) {
     loadMain(host.replace(/\/+$/, '') + homePath)
   } else {
-    loadMainLocal('/settings')
+    setStep('平台不可达——请在「本地配置」窗口中检查地址后重试')
+    openSettings()
   }
 
   try {
@@ -278,8 +281,8 @@ async function setupBrowserProvider() {
               }
             } catch (_) { /* 渲染器重建中 */ }
           },
-          // tab 池重排后恢复 z 序不变量 [tabs…, settings, platform]（docs §4.4）
-          onRestack: () => stackTop(),
+          // tab 池重排后恢复 z 序不变量 [tabs…, platform]（docs §4.4）
+          onRestack: () => raisePlatform(),
           // 新标签视图创建：挂 leader 键抓取（原生内容聚焦时 OS 布局快捷键可用，docs §6）
           onTabView: (wc) => attachLeaderGrab(wc),
         },
@@ -304,7 +307,7 @@ async function setupBrowserProvider() {
 }
 
 // ---- 白名单（注入与 IPC 校验共用） ----
-let allowedHostsCache = [DEFAULT_HOST.replace(/^https?:\/\//, '')]
+let allowedHostsCache = [DEFAULT_HOST.replace(/^https?:\/\//, ''), ...LEGACY_HOSTS]
 function computeAllowedHosts(platform) {
   const list = []
   const add = (u) => {
@@ -315,6 +318,9 @@ function computeAllowedHosts(platform) {
   }
   add(platform)
   add(DEFAULT_HOST)
+  for (const h of LEGACY_HOSTS) {
+    if (!list.includes(h)) list.push(h)
+  }
   return list
 }
 
@@ -327,7 +333,7 @@ function rememberPlatformHost(url) {
   } catch (e) { /* 非法 URL 忽略 */ }
 }
 
-// 校验 IPC 调用方 frame 是否平台白名单（host ∈ 配置 host / ivec.ai）
+// 校验 IPC 调用方 frame 是否平台白名单（host ∈ 配置 host / 默认与旧平台域名）
 function isPlatformFrame(event) {
   try {
     const h = new URL(event.senderFrame.url).host
@@ -404,83 +410,13 @@ function handleCmd(line, conn) {
 const tabCtl = () => aiBrowser?.adapter?.tabControl || null
 const emptyState = () => ({ tabs: [], activeTabId: null })
 
-// rect 数值校验 + clamp 进 content 区（docs §4.4）；非法 → null
-function clampRect(r) {
-  if (!r || typeof r !== 'object' || !mainWin || mainWin.isDestroyed()) return null
-  let { x, y, w, h } = r
-  x = Number(x); y = Number(y); w = Number(w); h = Number(h)
-  if (![x, y, w, h].every(Number.isFinite)) return null
-  const [cw, ch] = mainWin.getContentSize()
-  x = Math.max(0, Math.min(Math.round(x), Math.max(0, cw - 2)))
-  y = Math.max(0, Math.min(Math.round(y), Math.max(0, ch - 2)))
-  w = Math.max(0, Math.min(Math.round(w), cw - x))
-  h = Math.max(0, Math.min(Math.round(h), ch - y))
-  return { x, y, width: w, height: h }
-}
-
-// 设置 hostView 贴位：懒创建（首次有 rect 时建）；隐藏 = 摘除保活（webContents 存活，
-// 表单状态保留）；settings 恒最顶（onRestack 恢复）
-function applyHostLayout(rect, visible) {
-  if (rect) {
-    const r = clampRect(rect)
-    if (r) hostRect = r
-  }
-  const show = !!(visible && hostRect && hostRect.width >= 2 && hostRect.height >= 2)
-  if (!show) { detachSettingsView(); return }
-  if (!mainWin || mainWin.isDestroyed()) return
-  const v = ensureSettingsView()
-  const cv = mainWin.contentView
-  if (!cv.children.includes(v)) cv.addChildView(v)
-  v.setBounds(hostRect)
-  raisePlatform() // v2：平台页恒最顶（设置视图挂其下，docs §4.4）
-}
-
-function ensureSettingsView() {
-  if (settingsView && !settingsView.webContents.isDestroyed()) return settingsView
-  settingsView = new WebContentsView({
-    webPreferences: {
-      partition: 'settings',
-      preload: path.join(__dirname, 'settings-preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  })
-  settingsView.webContents.on('destroyed', () => { settingsView = null })
-  attachLeaderGrab(settingsView.webContents) // 设置视图同机制（原生内容聚焦时的 leader 抓取）
-  settingsView.webContents.loadURL(`http://127.0.0.1:${localPort}/settings?code=${encodeURIComponent(localCode)}`)
-  return settingsView
-}
-
-// 摘除保活（设置页无后台渲染/CDP 需求，detach 即隐藏）
-function detachSettingsView() {
-  if (!settingsView || !mainWin || mainWin.isDestroyed()) return
-  const cv = mainWin.contentView
-  if (cv.children.includes(settingsView)) cv.removeChildView(settingsView)
-}
-
-function destroySettingsView() {
-  detachSettingsView()
-  if (settingsView && !settingsView.webContents.isDestroyed()) settingsView.webContents.close()
-  settingsView = null
-}
-
-// v2 z 序不变量（底→顶）：[…tabs, settings, platform]——platform 恒最顶（docs §4.4）。
-// tabs 由 adapter 重排（onRestack 回调），本函数把 settings/platform 抬回顶部。
+// v2 z 序不变量（底→顶）：[…tabs, platform]——platform 恒最顶（docs §4.4）。
+// tabs 由 adapter 重排（onRestack 回调），本函数把 platform 抬回顶部。
 function raisePlatform() {
   if (!mainWin || mainWin.isDestroyed() || !platformView) return
   const cv = mainWin.contentView
   if (cv.children.includes(platformView)) cv.removeChildView(platformView)
   cv.addChildView(platformView)
-}
-function stackTop() {
-  if (!mainWin || mainWin.isDestroyed()) return
-  const cv = mainWin.contentView
-  if (settingsView && !settingsView.webContents.isDestroyed() && cv.children.includes(settingsView)) {
-    cv.removeChildView(settingsView)
-    cv.addChildView(settingsView)
-  }
-  raisePlatform()
 }
 
 // ---- v2 输入转发：页面侧命中判定 → IPC → 此处翻译下发（docs §6） ----
@@ -489,26 +425,16 @@ function stackTop() {
 // 坐标复核（首帧命中；拖动捕获期放行越界坐标）+ sendInputEvent + 焦点转移。
 const rectHas = (r, x, y) => !!r && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 
-// 输入目标（settings 恒在 tabs 之上）；null = 无洞/不可见
-function settingsInputTarget() {
-  if (!settingsView || settingsView.webContents.isDestroyed()) return null
-  if (!mainWin || mainWin.isDestroyed() || !mainWin.contentView.children.includes(settingsView)) return null
-  if (!hostRect || hostRect.width < 2 || hostRect.height < 2) return null
-  return { kind: 'settings', wc: settingsView.webContents, rect: hostRect }
-}
+// 输入目标（原生内容池活动 tab）；null = 无洞/不可见
 function tabInputTarget() {
   const st = tabCtl()?.poolState?.()
   return st ? { kind: 'tab', wc: st.wc, rect: st.rect } : null
-}
-function inputTargetOf(msg) {
-  return msg?.target === 'settings' ? settingsInputTarget() : tabInputTarget()
 }
 
 // 平台页整帧跳转/崩溃 → 原生内容复位隐藏态（页面恢复后重新驱动 rect/可见性；
 // getState 是权威源，事件丢了无所谓）
 function resetNativeContent() {
   tabCtl()?.applyLayout({ visible: false })
-  detachSettingsView()
   cancelLeaderSession()
 }
 
@@ -590,25 +516,39 @@ function watchLeaderRelease() {
   platformView.webContents.on('blur', () => cancelLeaderSession())
 }
 
-// 托盘「本地配置」：平台页在线 → 通知平台 OS 开 /local/desktop 窗口（hostView 贴位）；
-// 平台不可达（首配等）→ 主视图整窗加载本地设置页
-function openHostPanel() {
-  focusMain()
-  try {
-    const h = new URL(platformView?.webContents.getURL() || '').host
-    if (h && allowedHostsCache.includes(h)) {
-      platformView.webContents.send('native:open-host', { kind: 'settings' })
-      return
-    }
-  } catch (_) { /* 未加载/非法 URL */ }
-  loadMainLocal('/settings')
+// 本地配置 = 独立设置窗口（系统边框）。不依赖平台页/主窗状态——平台或主窗异常
+// 时仍可打开改基本配置；单例（已开则 show+focus），关闭即销毁、重开重载。
+function openSettings() {
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    settingsWin.show()
+    settingsWin.focus()
+    return
+  }
+  settingsWin = new BrowserWindow({
+    width: 760,
+    height: 640,
+    frame: true,
+    webPreferences: {
+      partition: 'settings',
+      preload: path.join(__dirname, 'settings-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+  settingsWin.loadURL(`http://127.0.0.1:${localPort}/settings?code=${encodeURIComponent(localCode)}`)
+  settingsWin.on('closed', () => { settingsWin = null })
+}
+
+function closeSettings() {
+  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close()
 }
 
 // ---- IPC ----
 function registerIpc() {
-  // 白名单下发（remote-preload 顶层 sendSync）：平台 host 列表 + 本地服务源（host:port）
+  // 白名单下发（remote-preload 顶层 sendSync）：平台 host 列表
   ipcMain.on('allowed:hosts', (e) => {
-    e.returnValue = { hosts: allowedHostsCache, local: localPort ? `127.0.0.1:${localPort}` : '' }
+    e.returnValue = allowedHostsCache
   })
 
   // 本地 API 转发（平台页 → 本地服务，code 由主进程持有）
@@ -692,25 +632,17 @@ function registerIpc() {
     return tabCtl()?.getState() || emptyState()
   })
 
-  // 布局推送：rect=null/visible=false → 隐藏（z 序回落）；rect 非空才更新（bounds 保持最后有效值）
+  // 布局推送：rect=null/visible=false → 撤洞 + 输入禁用；rect 非空才更新（bounds 保持最后有效值）
   ipcMain.handle('native:layout', (e, st) => {
     if (!isPlatformFrame(e)) return false
     tabCtl()?.applyLayout({ rect: st?.rect ?? null, visible: !!(st && st.visible) })
     return true
   })
 
-  // 设置 hostView 布局（kind 仅 'settings'）：懒创建/贴位/摘除保活
-  ipcMain.handle('native:host-layout', (e, st) => {
-    if (!isPlatformFrame(e)) return false
-    if (!st || st.kind !== 'settings') return false
-    applyHostLayout(st.rect ?? null, !!st.visible)
-    return true
-  })
-
   // v2：洞内输入转发（页面侧命中判定 → IPC → 此处翻译下发；docs §6）
   ipcMain.on('native:mouse', (e, msg) => {
     if (!isPlatformFrame(e)) return
-    const t = inputTargetOf(msg)
+    const t = tabInputTarget()
     if (!t || t.wc.isDestroyed()) return
     const type = String(msg?.type || '')
     const map = { mousedown: 'mouseDown', mouseup: 'mouseUp', mousemove: 'mouseMove', contextmenu: 'contextMenu' }
@@ -730,7 +662,7 @@ function registerIpc() {
   // deltaY 符号相反，deltaMode=1（行）按 40px 折算——wm-proto 实测）
   ipcMain.on('native:wheel', (e, msg) => {
     if (!isPlatformFrame(e)) return
-    const t = inputTargetOf(msg)
+    const t = tabInputTarget()
     if (!t || t.wc.isDestroyed()) return
     const x = Number(msg?.x), y = Number(msg?.y)
     const dx = Number(msg?.dx) || 0, dy = Number(msg?.dy) || 0
@@ -805,19 +737,14 @@ function registerIpc() {
     if (!/^https?:\/\//.test(u)) return false
     rememberPlatformHost(u)
     loadMain(u)
-    // 不关闭设置视图：配置页内任何操作（保存/获取）都不得让配置页消失
+    // 不关闭配置窗口：配置页内任何操作（保存/获取）都不得让配置页消失
     return true
   })
 
-  // 设置视图关闭（hostView 模式：设置页「关闭」按钮触发）→ 销毁视图 + 通知平台页关窗口
+  // 本地配置窗口关闭（设置页「关闭」按钮触发）
   ipcMain.handle('settings:close', (e) => {
     if (!isLocalFrame(e)) return false
-    destroySettingsView()
-    try {
-      if (platformView && !platformView.webContents.isDestroyed()) {
-        platformView.webContents.send('native:host-closed', { kind: 'settings' })
-      }
-    } catch (_) { /* 渲染器重建中 */ }
+    closeSettings()
     return true
   })
 }
@@ -917,7 +844,7 @@ function createMainWindow(init) {
 }
 
 // ---- 主窗口布局 ----
-// 平台页恒满窗；原生内容（tabs/settings）的 bounds 由平台页经桥推送
+// 平台页恒满窗；原生内容（tabs）的 bounds 由平台页经桥推送
 //（content 相对坐标，主窗口 resize 后平台页重排自会重推，壳侧不推算）。
 function layoutMain() {
   if (!mainWin || mainWin.isDestroyed()) return
@@ -932,10 +859,6 @@ function loadMain(url) {
   mainWin?.focus()
 }
 
-function loadMainLocal(pathname) {
-  loadMain(`http://127.0.0.1:${localPort}/${pathname}?code=${encodeURIComponent(localCode)}`)
-}
-
 function setStep(text) {
   platformView?.webContents.executeJavaScript(`window.__setStep && window.__setStep(${JSON.stringify(text)})`).catch(() => { })
 }
@@ -946,7 +869,7 @@ function createTray() {
   tray.setToolTip('AIC Desktop')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开', click: () => focusMain() },
-    { label: '本地配置', click: () => openHostPanel() },
+    { label: '本地配置', click: () => openSettings() },
     { label: '打开配置目录', click: () => openConfigDir() },
     { type: 'separator' },
     { label: '退出', click: () => { quitting = true; app.quit() } },

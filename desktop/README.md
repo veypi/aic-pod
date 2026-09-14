@@ -19,13 +19,15 @@ Electron Main (Node, main.js)
  │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
  ├─ BaseWindow（frameless）主窗口：平台页恒满窗且恒最顶（背景透明，画面全部由页面
  │    自绘） + 原生内容池（OS 原生窗口内容 v2 反转模型，设计唯一源 =
- │    aic/docs/os_native_windows.md）——AI browser 标签与「本地配置」设置视图
- │    （WebContentsView）恒在平台页之下，由平台页 OS 窗口占位元素经 nativeWin 桥
+ │    aic/docs/os_native_windows.md）——AI browser 标签（WebContentsView）
+ │    恒在平台页之下，由平台页 OS 窗口占位元素经 nativeWin 桥
  │    驱动贴位；洞 = 内容区（背景层 mask + 内容元素透明；遮罩/弹窗直接叠画、不隐藏
  │    内容）；输入资格由页面侧 DOM 判定（elementsFromPoint）→ IPC
  │    `native:mouse / native:wheel` → 主进程复核 + 坐标翻译下发（含拖拽捕获 + 焦点
  │    转移）；原生内容聚焦时 leader 键由壳侧抓取（`native:leader / native:keys`，
  │    OS 布局快捷键保持可用，见下文「leader 键抓取」）
+ ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，settings-preload；托盘「本地配置」
+ │    直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
@@ -37,7 +39,7 @@ DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInpu
 键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
 
 leader 键抓取（设计 = aic/docs/os_native_windows.md §6）：原生内容
-（AI 标签 / 设置视图）持有键盘焦点时平台页收不到 keydown——壳对每个内容 view 挂
+（AI 标签）持有键盘焦点时平台页收不到 keydown——壳对每个内容 view 挂
 `before-input-event`（`leader-grab.js` 纯判定）：leader 集合精确命中 → 该键不进内容、
 经 `native:keys` 转平台页合成 KeyboardEvent（复用页面 keymap/编排链路）并把键盘焦点
 交接平台页；会话期间物理键全由平台页原生接收，leader 释放后焦点自动交还来源内容视图

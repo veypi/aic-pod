@@ -1,32 +1,18 @@
 // remote-preload.js — 注入 defaultSession 全部 frame（Electron 35+ session.registerPreloadScript）。
-// 按 frame 来源分两支（端口/code 由主进程持有，页面完全无感）：
-//   - 平台白名单 host（配置 host + https://ivec.ai）：完整能力（api 转发/窗口控制/
-//     外链/桌宠 + nativeWin 原生内容桥——OS 原生窗口内容协议，设计见
-//     aic/docs/os_native_windows.md §3）。
-//   - 本地设置页（127.0.0.1:<本地服务端口>，精确 host:port 匹配——平台开发态
-//     常用 localhost:4000 同机不同端口，按 hostname 判会误吞平台页）：仅设置
-//     子集（checkPlatform/openPlatform），不给 nativeWin/closeSettings（hostView
-//     内嵌形态由 settings-preload 提供，走独立 partition 的 view 级 preload）。
+// 仅平台白名单 host（配置 host + 默认域名与旧域名）：完整能力（api 转发/窗口控制/
+// 外链/桌宠 + nativeWin 原生内容桥——OS 原生窗口内容协议，设计见
+// aic/docs/os_native_windows.md §3）。
+// 本地设置页不在本 preload 范围：独立配置窗口走 settings-preload（独立 partition）。
 const { contextBridge, ipcRenderer } = require('electron')
 
-// 白名单 + 本地源（主进程下发；allowed:hosts 返回 {hosts, local}，local = 本地服务 host:port）
-let allowedMeta = { hosts: [], local: '' }
+// 白名单（主进程下发；allowed:hosts 返回平台 host 数组）
+let allowedHosts = []
 try {
   const m = ipcRenderer.sendSync('allowed:hosts')
-  if (m && Array.isArray(m.hosts)) allowedMeta = m
+  if (Array.isArray(m)) allowedHosts = m
 } catch (e) { /* 忽略 */ }
 
-const isLocal = !!allowedMeta.local && location.host === allowedMeta.local
-
-if (isLocal) {
-  contextBridge.exposeInMainWorld('aicDesktop', {
-    isDesktop: true,
-    // 探测 {host}/root.html 是否可达（主进程 net 请求，无 CORS 限制）
-    checkPlatform: (host) => ipcRenderer.invoke('platform:check', host),
-    // 主窗口跳转平台 {url}
-    openPlatform: (url) => ipcRenderer.invoke('platform:open', url),
-  })
-} else if (allowedMeta.hosts.includes(location.host)) {
+if (allowedHosts.includes(location.host)) {
   contextBridge.exposeInMainWorld('aicDesktop', {
     isDesktop: true,
     // 本地 API 转发（主进程带 code 请求本地服务，方法名区分 GET/POST）
@@ -67,8 +53,6 @@ if (isLocal) {
       navigateTab: (id, url) => ipcRenderer.invoke('native:tab-navigate', id, String(url || '')),
       // {rect:{x,y,w,h}|null, visible:boolean}：rect=null/visible=false → 隐藏
       layout: (st) => ipcRenderer.invoke('native:layout', st),
-      // {kind:'settings', rect, visible}：设置 hostView 贴位（懒创建/摘除保活）
-      hostLayout: (st) => ipcRenderer.invoke('native:host-layout', st),
       // v2：洞内输入转发（页面侧命中判定 → 壳侧坐标翻译 + sendInputEvent + 焦点转移；
       // 设计见 aic/docs/os_native_windows.md §6）
       mouse: (m) => ipcRenderer.send('native:mouse', m || {}),
@@ -90,18 +74,6 @@ if (isLocal) {
         const h = (e, st) => fn(st)
         ipcRenderer.on('native:changed', h)
         return () => ipcRenderer.removeListener('native:changed', h)
-      },
-      // 托盘「本地配置」→ 平台页开设置窗口；返回取消函数
-      onOpenHost: (fn) => {
-        const h = (e, msg) => fn(msg)
-        ipcRenderer.on('native:open-host', h)
-        return () => ipcRenderer.removeListener('native:open-host', h)
-      },
-      // 设置页「关闭」→ 平台页关设置窗口；返回取消函数
-      onHostClosed: (fn) => {
-        const h = (e, msg) => fn(msg)
-        ipcRenderer.on('native:host-closed', h)
-        return () => ipcRenderer.removeListener('native:host-closed', h)
       },
     },
   })

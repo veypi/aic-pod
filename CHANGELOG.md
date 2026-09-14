@@ -5,6 +5,27 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## 未发布 — 2026-09-14
+
+### 变更
+
+- **本地配置回归独立窗口：不再依赖平台页/主窗状态**（`desktop/main.js` +
+  `desktop/remote-preload.js` + `desktop/settings-preload.js` +
+  `desktop/electron-adapter.mjs`；平台侧配套在 aic 仓 `ui/layout/os.html` +
+  `ui/page/local/`；设计唯一源 = aic/docs/os_native_windows.md）：此前「本地配置」在
+  主窗口内以 hostView 贴位渲染——托盘入口在平台页在线时经 `native:open-host` 通知
+  平台页开 `/local/desktop` OS 窗口（配置可见性挂在平台页窗口模型上），平台不可达时
+  整窗导航到本地设置页；平台页卡死/异常时配置进不去。改为独立设置窗口
+  （BrowserWindow，系统边框，独立 partition + settings-preload，单例、关闭即销毁）：
+  托盘「本地配置」直开，平台不可达首配时自动弹出（主窗停留 loading 提示）；不依赖
+  平台页/主窗状态，主服务出问题也能改基本配置。同时删除主窗内 hostView 全链路：
+  `applyHostLayout / ensureSettingsView / detachSettingsView / destroySettingsView /
+  settingsInputTarget / clampRect`、`native:host-layout` IPC、
+  `native:open-host / native:host-closed` 通知、z 序不变量收敛为 [tabs…, platformView]；
+  `remote-preload` 删本地设置页分支与 `hostLayout/onOpenHost/onHostClosed`
+  （`allowed:hosts` 只下发平台 host 数组）；`settings:close` 变为关窗口。设置页
+  「获取」（探测 + 主窗跳 /hosts、配置窗保留）与「关闭」按钮行为不变。
+
 ## v0.6.4 — 2026-09-14
 
 ### 修复
