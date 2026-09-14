@@ -222,6 +222,46 @@ func TestSeatbeltDenyAfterWriteAllow(t *testing.T) {
 // 之后追加 allow（SBPL 后匹配覆盖先匹配，与 deny 压过写白名单同一机制）；
 // 写级才发 write allow（read-only 不发）；.git 写保护在覆盖规则之后输出（恒优先）；
 // 无覆盖条目时零新增规则。
+// 系统 CA 只读放行（2026-09-11）：readAllow 在 deny/override 之后输出
+// (allow file-read*) 且写级下也绝不输出 file-write*（系统 CA 写放行 =
+// 自定义信任根注入，必须杜绝）。
+func TestSeatbeltSystemCAReadAllow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("seatbelt only")
+	}
+	argv := []string{"curl", "https://example.com"}
+	ca := []string{"/etc/ssl/cert.pem", "/opt/homebrew/etc/ca-certificates/**"}
+	wantAllow := `(allow file-read* (regex ` + sbplString(globToSBPLRegex(ca[0])) + `))`
+
+	// 写级：allow 在 deny 之后（SBPL 后匹配覆盖先匹配），且无对应写放行。
+	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true,
+		deny: []string{"**/*.pem"}, readAllow: ca})
+	profile := ww[2]
+	denyIdx := strings.Index(profile, `(deny file-read* (regex "^(.*)?/[^/]*\\.pem$"))`)
+	allowIdx := strings.Index(profile, wantAllow)
+	if denyIdx < 0 || allowIdx < 0 || allowIdx < denyIdx {
+		t.Fatalf("CA read allow must come after deny (denyIdx=%d allowIdx=%d): %s", denyIdx, allowIdx, profile)
+	}
+	if !strings.Contains(profile, `(allow file-read* (regex `+sbplString(globToSBPLRegex(ca[1]))+`))`) {
+		t.Fatalf("missing CA dir read allow: %s", profile)
+	}
+	if strings.Contains(profile, `(allow file-write* (regex `+sbplString(globToSBPLRegex(ca[0]))+`))`) {
+		t.Fatalf("CA read allow must not come with file-write* allow: %s", profile)
+	}
+
+	// read-only 同样放行（两种 level 都只有只读规则）。
+	ro := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, readAllow: ca})
+	if !strings.Contains(ro[2], wantAllow) {
+		t.Fatalf("read-only profile missing CA read allow: %s", ro[2])
+	}
+
+	// 无 readAllow 时不输出任何 CA 规则（零值安全）。
+	plain := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true})
+	if strings.Contains(plain[2], "cert.pem") {
+		t.Fatalf("profile without readAllow must not emit CA rules: %s", plain[2])
+	}
+}
+
 func TestSeatbeltDenyOverride(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix path semantics")

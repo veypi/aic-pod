@@ -188,7 +188,8 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
 			deny: opts.DenyPaths, override: opts.DenyOverride, fsOpen: opts.FsOpen,
-			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+			readAllow: fsauth.SystemCAReadPatterns(),
+			netOpen:   opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})
 		if err != nil {
 			f.Close()

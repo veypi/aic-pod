@@ -136,16 +136,17 @@ var (
 // confineSpec 是一次沙箱包装的完整输入（三域授权模型快照 + 等级/工作区/argv）。
 // 快照语义：每次 Start 读当次值（set_config/grant 动态生效），已启动进程不回溯。
 type confineSpec struct {
-	level    int             // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
-	workdir  string          // 进程 cwd；兼作 workspace-write 的可写根
-	extra    []string        // 追加可写根（nil = 仅基础白名单）
-	argv     []string        // 被包装命令
-	deny     []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
-	override []string        // deny 覆盖展开模式（fsauth.DenyOverridePatterns 快照：fs_allow 裸路径→root/**、通配原样）
-	fsOpen   bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
-	netOpen  bool            // net_policy=open：不加网络规则
-	netDeny  []netauth.Entry // net_deny 快照（恒优先于 allow）
-	netAllow []netauth.Entry // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
+	level     int             // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
+	workdir   string          // 进程 cwd；兼作 workspace-write 的可写根
+	extra     []string        // 追加可写根（nil = 仅基础白名单）
+	argv      []string        // 被包装命令
+	deny      []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
+	override  []string        // deny 覆盖展开模式（fsauth.DenyOverridePatterns 快照：fs_allow 裸路径→root/**、通配原样）
+	readAllow []string        // 系统 CA 只读放行模式（fsauth.SystemCAReadPatterns 快照；恒只读，见 seatbeltArgs）
+	fsOpen    bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
+	netOpen   bool            // net_policy=open：不加网络规则
+	netDeny   []netauth.Entry // net_deny 快照（恒优先于 allow）
+	netAllow  []netauth.Entry // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
 }
 
 // Confine 将 argv 包装为沙箱执行形态（返回替换 argv；windows 的实际
@@ -257,7 +258,13 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string)
 	}
 	// deny 隔离覆盖（§5.10）：后挂载优先（bwrap 后绑定覆盖前绑定），
 	// 追加在全部 bind 之后；read-only 与 workspace-write 同隔离。
-	args = append(args, bwrapDenyArgs(spec.deny, spec.override)...)
+	// readAllow（系统 CA）并入覆盖判定：deny 实例化当前不涉系统路径
+	//（** 开头 $HOME 锡定 + 字面表）——并入为对齐/未来防护。
+	overrides := spec.override
+	if len(spec.readAllow) > 0 {
+		overrides = append(append([]string{}, spec.override...), spec.readAllow...)
+	}
+	args = append(args, bwrapDenyArgs(spec.deny, overrides)...)
 	return append(append(args, "--"), spec.argv...)
 }
 
@@ -521,6 +528,16 @@ func seatbeltArgs(spec confineSpec) []string {
 		if spec.level >= proto.LevelWrite {
 			forms = append(forms, "(allow file-write* (regex "+re+"))")
 		}
+	}
+	// 系统公共 CA 只读放行（2026-09-11）：deny 通用表 **/*.pem 会命中
+	// /etc/ssl/cert.pem 等公共信任锚，沙箱内 curl/node 等因无法加载证书
+	// 而 https 全断（实测：stat/读被拒 → curl(77)）。恒只读——**绝不输出
+	// file-write* allow**（写系统 CA 目录 = 自定义信任根注入）。
+	for _, pat := range spec.readAllow {
+		if pat == "" {
+			continue
+		}
+		forms = append(forms, "(allow file-read* (regex "+sbplString(globToSBPLRegex(pat))+"))")
 	}
 	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {

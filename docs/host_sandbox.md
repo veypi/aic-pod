@@ -446,3 +446,16 @@ fs 域 policy=open = 写除 fs_deny 全放（2 级，不再逐次审批）：fsa
 ### 12.6 测试
 
 netauth 向量（ParseEntry 归一/通配主机拒绝/Allowed 三判定式/内建 loopback+deny 反杀/temp grant 会话隔离/DenyHit 重叠语义/cfg Reconcile/policy 归一）；seatbelt 网络段形态断言（loopback deny 落地、非 loopback deny 不输出、port=* 跳过）；bwrap unshare-net/fs_open bind 形态；Spawn 四用例（嵌套沙箱环境优雅跳过）；grant argv 解析 + runGrant 域路由/deny 拒绝/temp 生效（旧 grant_apply 裸路径形态必须报错）；ssh splitSSHPort/sshResolve（ssh -G 离线向量）；scp parseSCPArgv（flag 白名单/-P 两形态）/splitSCPOperand（盘符与斜杠序分类）；host buildCurlArgv。全量 go test + 三端交叉编译（linux/windows/freebsd）绿。
+
+### 12.7 系统 CA 只读放行（2026-09-11）
+
+**触发**：沙箱内 curl（默认 CA=/etc/ssl/cert.pem）全失败（error 77）——实测：deny 通用表 `**/*.pem` 命中系统公共 CA bundle（`stat`/读被拒），而网络层完全正常（DNS/TCP/http/`-k` https/loopback 均通）。同类影响一切依赖系统 CA 的 CLI（wget、系统 git-https 等）；node/npm 因自带内置 CA 不受影响。
+
+**修复**：新增**只读**放行通道（不并入 DenyOverride——后者随写级追加 `file-write*`，而写系统 CA 目录 = 自定义信任根注入，必须只读）：
+
+- `fsauth.SystemCAReadPatterns()`（平台清单：darwin `/etc/ssl/cert.pem`、`/etc/ssl/certs/**`、Homebrew `openssl@*`/`ca-certificates`（arm64/intel 双前缀）；linux `/etc/ssl/certs/**`、`/etc/pki/**`、`/usr/share/ca-certificates/**`；windows nil）——与 deny 同口径双形态展开（canonicalPattern + 字面，seatbelt 规范化路径两态命中）；
+- `confineSpec.readAllow`（Start/Spawn 组装时内置填入，不经 StartOptions——沙箱后端系统豁免）；
+- darwin seatbelt：deny/override 之后追加 `(allow file-read* (regex ...))`，**恒不输出 file-write***；
+- linux bwrap：并入 `coveredByOverride`（当前 no-op——deny 实例化对 `**` 开头模式 $HOME 锚定，系统路径本不在覆盖内；并入为对齐/未来防护）。
+
+**验证**：seatbelt 形态断言（`TestSeatbeltSystemCAReadAllow`：allow 在 deny 之后、写级也无 write allow、零值无输出）+ `TestSystemCAReadPatterns` 平台清单（含 canonical 形态）；行为实测：沙箱内 `curl https://…`（默认 CA）直 200。
