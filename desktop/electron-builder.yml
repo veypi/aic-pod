@@ -6,6 +6,7 @@ directories:
   buildResources: assets
 files:
   - main.js
+  - leader-grab.js
   - browser-tool.mjs
   - electron-adapter.mjs
   - loading.html

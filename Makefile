@@ -98,32 +98,40 @@ desktop-deps:
 cua-sync:
 	cd $(DESKTOP_DIR) && node scripts/sync-cua.mjs
 
+# browser 共享代码同步（vendor/browser；npm prestart/predist 之外，CI 直调
+# electron-builder 打包时也须先同步，否则 vendor/browser 不进包）
+browser-sync:
+	cd $(DESKTOP_DIR) && node scripts/sync-browser.mjs
+
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version cua-sync
+.PHONY: backend-bin desktop-deps desktop-version cua-sync browser-sync
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
 # macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	$(MAKE) desktop-version backend-bin cua-sync
+	$(MAKE) desktop-version backend-bin cua-sync browser-sync
 	@arch=$$(echo $* | sed 's/amd64/x64/'); \
 	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
+	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@echo "→ $(BIN_DIR)/aic-desktop-mac-$*.dmg"
 
 # Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	$(MAKE) desktop-version backend-bin cua-sync
+	$(MAKE) desktop-version backend-bin cua-sync browser-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --win
+	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@test -f $(BIN_DIR)/win-unpacked/resources/backend/aic-backend.exe || { echo "✗ 打包缺 resources/backend/aic-backend.exe（backend-bin 命名回归？）"; exit 1; }
 	@echo "→ $(BIN_DIR)/aic-desktop-win-$*.exe"
 
 # Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	$(MAKE) desktop-version backend-bin cua-sync
+	$(MAKE) desktop-version backend-bin cua-sync browser-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --linux
+	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"
 
 
