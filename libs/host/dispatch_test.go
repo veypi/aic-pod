@@ -261,7 +261,7 @@ func TestParseWSURL(t *testing.T) {
 		base      string
 		proxyPath string
 	}{
-		{"wss://ivec.ai/api/nc", "wss://ivec.ai", "/api/nc"},
+		{"wss://ivec-ai.com/api/nc", "wss://ivec-ai.com", "/api/nc"},
 		{"ws://host/path", "ws://host", "/path"},
 		{"wss://host", "wss://host", ""},
 		{"ws://host:8080/a/b", "ws://host:8080", "/a/b"},

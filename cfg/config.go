@@ -23,7 +23,7 @@ import (
 )
 
 // DefaultHost 是默认平台地址。
-const DefaultHost = "https://ivec.ai"
+const DefaultHost = "https://ivec-ai.com"
 
 // Version 客户端版本：Makefile -X github.com/veypi/aic-pod/cfg.Version 注入 git
 // 版本，未注入时以此兑底。发版只改本变量与 browser/manifest.json（无 v 前缀）。
@@ -48,7 +48,7 @@ var DeviceType = "cli"
 //
 // 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
 type Options struct {
-	Host        string `json:"host" yaml:"host" default:"https://ivec.ai" desc:"platform address (NATS endpoint inferred)"`
+	Host        string `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
 	Key         string `json:"key" yaml:"key" desc:"binding credential key (from platform device page)"`
 	WorkDir     string `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: system temp dir)"`
 	ExecTimeout string `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`

@@ -102,7 +102,7 @@ host 端处理规范：验签 → deadline 过期拒绝 → nonce 窗口去重 �
 | 参数 | 默认值 | 必填 | 说明 |
 |---|---|---|---|
 | `key` | | ✅ | AIC 环境凭证 |
-| `host` | `https://ivec.ai` | | 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义） |
+| `host` | `https://ivec-ai.com` | | 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义） |
 | `background` | `true` | | 后台模式：AI 在独立标签页操作（普通窗口，共享登录态），创建 `active:false` 不抢焦点，绝不占用用户当前页面 |
 | `incognito` | `false` | | 隐私模式：AI 在独立无痕窗口操作（不共享 cookie/登录态），与用户主窗口完全隔离 |
 | `autoConnect` | `true` | | 启动后自动连接 |

@@ -71,9 +71,11 @@ var (
 )
 
 // defaultOrigins 是默认允许跨域访问本地服务的平台源。
+// ivec.ai 为旧平台域名（现 301 至 ivec-ai.com）：过渡期保留信任。
 // "null" 为嵌入式设置窗口（旧 wails SetHTML 场景，origin 为 null）——受 code 校验保护。
 func defaultOrigins() []string {
 	return []string{
+		"https://ivec-ai.com",
 		"https://ivec.ai",
 		"http://localhost:4000",
 		"http://127.0.0.1:4000",

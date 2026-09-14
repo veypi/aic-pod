@@ -18,7 +18,7 @@ const natsPath = "/api/nc"
 //
 // 例：
 //
-//	https://ivec.ai                  → wss://ivec.ai/api/nc
+//	https://ivec-ai.com              → wss://ivec-ai.com/api/nc
 //	http://localhost:4000            → ws://localhost:4000/api/nc
 //	http://127.0.0.1:4000/rses/aiv   → ws://127.0.0.1:4000/rses/aiv/api/nc
 func ResolveNATSURL(hostURL string) string {

@@ -19,7 +19,7 @@ const disconnectBtn = document.getElementById("disconnect-btn");
 async function populateForm() {
   const s = await loadSettings();
   document.getElementById("key").value = s.key || "";
-  document.getElementById("host").value = s.host || "https://ivec.ai";
+  document.getElementById("host").value = s.host || "https://ivec-ai.com";
   document.getElementById("autoConnect").checked = s.autoConnect !== false;
   document.getElementById("background").checked = s.background !== false;
   document.getElementById("incognito").checked = s.incognito || false;
@@ -34,7 +34,7 @@ connForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const settings = await loadSettings();
   settings.key = document.getElementById("key").value.trim();
-  settings.host = document.getElementById("host").value.trim() || "https://ivec.ai";
+  settings.host = document.getElementById("host").value.trim() || "https://ivec-ai.com";
   await saveSettings(settings);
   showStatus(statusEl, "设置已保存 ✓", "success");
 });

@@ -50,7 +50,7 @@ COPY dist/aic-cli-linux-${TARGETARCH} /usr/local/bin/aic
 RUN mkdir -p /workspace
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   SHELL=/bin/bash \
-  HOST=https://ivec.ai \
+  HOST=https://ivec-ai.com \
   NO_SANDBOX=true \
   WORK_DIR=/workspace \
   EXEC_TIMEOUT=30m

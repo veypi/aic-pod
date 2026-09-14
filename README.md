@@ -24,7 +24,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 | 环境变量 | CLI flag | 配置键 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `KEY` | `-key` | `key` | | 绑定凭证（必填），从 AIC 平台获取 |
-| `HOST` | `-host` | `host` | `https://ivec.ai` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
+| `HOST` | `-host` | `host` | `https://ivec-ai.com` | 平台地址（可带路径前缀，如 `http://127.0.0.1:4000/rses/aiv`；NATS 端点由此推断） |
 | `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 | `HOME_PATH` | `-home_path` | `home_path` | `/` | 桌面端默认打开地址（host 后的路径，如 `/`、`/a`） |
@@ -105,7 +105,7 @@ docker run -d \
   -e KEY="<key>" \
   -e WORK_DIR=/workspace \
   -e EXEC_TIMEOUT=30m \
-  -e HOST=https://ivec.ai \
+  -e HOST=https://ivec-ai.com \
   -v /host/workspace:/workspace \
   veypi/aic-pod:latest
 ```
@@ -150,7 +150,7 @@ make build-browser   # → dist/aic-browser.zip
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `key` | | 环境凭证，从 AIC 平台获取 |
-| `url` | `wss://ivec.ai/api/nc` | 服务端地址 |
+| `url` | `wss://ivec-ai.com/api/nc` | 服务端地址 |
 | `deviceName` | 系统 hostname | 设备名 |
 | `autoConnect` | `true` | 启动后自动连接 |
 | `background` | `true` | 后台模式，新窗口不抢夺焦点 |

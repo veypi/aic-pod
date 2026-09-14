@@ -7,12 +7,12 @@ import (
 )
 
 func TestOptionsOf(t *testing.T) {
-	o := cfg.Options{Host: "https://ivec.ai", Key: "c"}
+	o := cfg.Options{Host: "https://ivec-ai.com", Key: "c"}
 	opts, err := optionsOf(o, "cli", "v0.0.1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Host != "https://ivec.ai" || opts.Key != "c" || opts.DeviceType != "cli" {
+	if opts.Host != "https://ivec-ai.com" || opts.Key != "c" || opts.DeviceType != "cli" {
 		t.Fatalf("options = %+v", opts)
 	}
 	if opts.ExecTimeout.String() != "30m0s" {

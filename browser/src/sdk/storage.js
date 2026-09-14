@@ -6,7 +6,7 @@
 
 const DEFAULTS = {
   key: "",
-  host: "https://ivec.ai", // 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义）
+  host: "https://ivec-ai.com", // 平台地址（NATS 端点由此推断，与 cli/desktop 同一语义）
   background: true,
   incognito: false,
   autoConnect: true,

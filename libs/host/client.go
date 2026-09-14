@@ -30,7 +30,7 @@ import (
 
 // Options 客户端配置。
 type Options struct {
-	Host        string        // 平台地址（如 https://ivec.ai，可带路径前缀），NATS 端点据此推断
+	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
 	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname

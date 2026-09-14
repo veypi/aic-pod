@@ -120,13 +120,13 @@ func TestPublicDir(t *testing.T) {
 
 func TestHostsURL(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"", "https://ivec.ai/hosts"},
-		{"https://ivec.ai", "https://ivec.ai/hosts"},
+		{"", "https://ivec-ai.com/hosts"},
+		{"https://ivec-ai.com", "https://ivec-ai.com/hosts"},
 		{"http://localhost:4000", "http://localhost:4000/hosts"},
 		{"http://localhost:4000/", "http://localhost:4000/hosts"},
 		{"http://127.0.0.1:4000/rses/aiv", "http://127.0.0.1:4000/rses/aiv/hosts"},
-		{"https://ivec.ai/hosts", "https://ivec.ai/hosts"},
-		{"ivec.ai", "https://ivec.ai/hosts"},
+		{"https://ivec-ai.com/hosts", "https://ivec-ai.com/hosts"},
+		{"ivec-ai.com", "https://ivec-ai.com/hosts"},
 		{"http://x:1/?q=1", "http://x:1/hosts"},
 	}
 	for _, c := range cases {
@@ -139,12 +139,12 @@ func TestHostsURL(t *testing.T) {
 
 func TestHomeURL(t *testing.T) {
 	cases := []struct{ host, home, want string }{
-		{"", "", "https://ivec.ai/"},
-		{"https://ivec.ai", "", "https://ivec.ai/"},
-		{"https://ivec.ai", "/a", "https://ivec.ai/a"},
+		{"", "", "https://ivec-ai.com/"},
+		{"https://ivec-ai.com", "", "https://ivec-ai.com/"},
+		{"https://ivec-ai.com", "/a", "https://ivec-ai.com/a"},
 		{"http://localhost:4000/", "/", "http://localhost:4000/"},
 		{"http://127.0.0.1:4000/rses/aiv", "/agents", "http://127.0.0.1:4000/rses/aiv/agents"},
-		{"ivec.ai", "/a", "https://ivec.ai/a"},
+		{"ivec-ai.com", "/a", "https://ivec-ai.com/a"},
 		{"http://x:1/?q=1", "/a", "http://x:1/a"},
 	}
 	for _, c := range cases {

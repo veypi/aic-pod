@@ -432,7 +432,7 @@ func TestGrepTree(t *testing.T) {
 		"- [0] AXWindow \"主窗口\" [actions=[raise]]\n" +
 		"    - [1] AXToolbar\n" +
 		"      - [2] AXButton (返回) [actions=[press]]\n" +
-		"      - [3] AXTextField = \"ivec.ai\" (地址和搜索栏) [actions=[press]]\n" +
+		"      - [3] AXTextField = \"ivec-ai.com\" (地址和搜索栏) [actions=[press]]\n" +
 		"  - [4] AXWebArea\n" +
 		"    - [5] AXStaticText = \"无关内容\"\n" +
 		"    - [6] AXButton (搜索) [actions=[press]]\n"

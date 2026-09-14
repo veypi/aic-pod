@@ -145,7 +145,7 @@ func TestLocalAPICORS(t *testing.T) {
 	initTestAPI(t)
 	// 白名单 origin 预检 → 204 + PNA 头
 	q, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get_config", cfg.Global.Port()), nil)
-	q.Header.Set("Origin", "https://ivec.ai")
+	q.Header.Set("Origin", "https://ivec-ai.com")
 	resp, err := http.DefaultClient.Do(q)
 	if err != nil {
 		t.Fatal(err)
@@ -154,11 +154,22 @@ func TestLocalAPICORS(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("cors preflight: got %d, want 204", resp.StatusCode)
 	}
-	if resp.Header.Get("Access-Control-Allow-Origin") != "https://ivec.ai" {
+	if resp.Header.Get("Access-Control-Allow-Origin") != "https://ivec-ai.com" {
 		t.Fatalf("missing allow-origin: %q", resp.Header.Get("Access-Control-Allow-Origin"))
 	}
 	if resp.Header.Get("Access-Control-Allow-Private-Network") != "true" {
 		t.Fatalf("missing PNA header")
+	}
+	// 旧域名（ivec.ai 现 301 至 ivec-ai.com）：过渡期同样放行
+	q3, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get_config", cfg.Global.Port()), nil)
+	q3.Header.Set("Origin", "https://ivec.ai")
+	resp3, err := http.DefaultClient.Do(q3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNoContent || resp3.Header.Get("Access-Control-Allow-Origin") != "https://ivec.ai" {
+		t.Fatalf("legacy origin: got %d allow=%q, want 204 / https://ivec.ai", resp3.StatusCode, resp3.Header.Get("Access-Control-Allow-Origin"))
 	}
 	// 非白名单 origin → 403
 	q2, _ := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/api/get_config", cfg.Global.Port()), nil)

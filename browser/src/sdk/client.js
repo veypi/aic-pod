@@ -83,7 +83,7 @@ function withTimeout(p, ms, msg) {
 // resolveNatsURL 由平台地址推导 NATS WebSocket 端点（与 Go libs/host/natsurl.go 同一语义）：
 // http→ws、https→wss、ws/wss 保留；无 scheme 补 https；host 可带路径前缀。
 export function resolveNatsURL(host) {
-  let h = (host || "").trim() || "https://ivec.ai";
+  let h = (host || "").trim() || "https://ivec-ai.com";
   if (!h.includes("://")) h = "https://" + h;
   const u = new URL(h);
   let scheme = u.protocol.slice(0, -1); // 去冒号
@@ -95,7 +95,7 @@ export function resolveNatsURL(host) {
 
 // platformURL 由平台地址推导平台页面地址（http/https 页面入口，保留路径前缀）。
 export function platformURL(host) {
-  let h = (host || "").trim() || "https://ivec.ai";
+  let h = (host || "").trim() || "https://ivec-ai.com";
   if (!h.includes("://")) h = "https://" + h;
   const u = new URL(h);
   let scheme = u.protocol;
