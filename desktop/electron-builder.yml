@@ -34,7 +34,11 @@ mac:
   target: dmg
   icon: assets/icon.png
   category: public.app-category.productivity
-  # 测试版未签名：跳过 codesign/notarize（用户右键打开）
+  # 测试版不做 Developer ID 签名/公证：identity: null 跳过 electron-builder 自带签名，
+  # 改由 afterPack 钩子对 .app 做 ad-hoc 深签（scripts/after-pack-adhoc-sign.js）——
+  # 下载打开提示从「已损坏」（需 xattr 清隔离）变为「未验证开发者」（可在系统设置 →
+  # 隐私与安全性 → 仍要打开）。直接 identity: "-" 会踩 electron-builder 26 的 ad-hoc
+  # 相机/麦克风失效坑（electron-builder#9529），故用打包后深签。
   identity: null
   # 麦克风使用声明：缺失时 macOS 对 getUserMedia 静默返回无声轨（不报错、只出 -91dB 静音）
   extendInfo:
@@ -50,4 +54,6 @@ linux:
   icon: assets/icon.png
   category: Utility
   maintainer: veypi <i@veypi.com>
+# 打包钩子：macOS ad-hoc 深签（见 mac 段注释；其他平台 no-op）
+afterPack: scripts/after-pack-adhoc-sign.js
 npmRebuild: false
