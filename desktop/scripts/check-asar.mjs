@@ -55,8 +55,18 @@ if (!asarPath || !fs.existsSync(asarPath)) {
   process.exit(1);
 }
 
-// ---- asar 条目集合（@electron/asar 返回以 / 开头的路径） ----
-const entries = new Set(asar.listPackage(asarPath).map((p) => (p.startsWith("/") ? p : "/" + p)));
+// ---- asar 条目集合 ----
+// @electron/asar 的 listFiles 用 path.join 拼条目路径：Windows 为反斜杠分隔
+// （\main.js），posix 为 / 分隔——统一归一为 / 前缀的 posix 形式再比对。
+const normEntry = (p) => {
+  const s = String(p).replace(/\\/g, "/");
+  return s.startsWith("/") ? s : "/" + s;
+};
+const entries = new Set(asar.listPackage(asarPath).map(normEntry));
+if (!entries.size) {
+  console.error(`[check-asar] ✗ ${asarPath} 条目列表为空（asar 解析异常？）`);
+  process.exit(1);
+}
 
 // ---- 入口文件与其相对 require/import 逐条解析 ----
 const ENTRIES = ["main.js", "browser-tool.mjs", "electron-adapter.mjs"];
