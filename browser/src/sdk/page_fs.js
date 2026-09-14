@@ -656,7 +656,7 @@ export class PageFS {
   }
 
   // ---- 前端操作对象接口（get/put/ls/rm/mkdir/mv/home/search/resolve）----
-  // 面向前端程序的操作对象接口（$mod.$page_fs 直接使用，page_exec 不再包装）。
+  // 面向前端程序的操作对象接口（$fs / 扩展端调用方直接使用，page_exec 不再包装）。
   // 底层方法 readRaw/writeBlob/writeText/list/stat/walk/remove/has 保留
   // （fsops 等内部使用，与 cloud_fs 无对应关系）。
   //
@@ -683,9 +683,14 @@ export class PageFS {
     return { ok: true, ...raw };
   }
 
-  // put 整写（覆写，父目录自动创建）：string 文本 / Blob 二进制通吃。
+  // put 整写（覆写，父目录自动创建）：string 文本 / Blob 二进制通吃；
+  // ArrayBuffer/TypedArray 归一为 Blob 走字节写入（2026-09-12 修：此前
+  // 落入 String() 分支字节损坏）。
   // 返回 {ok, path, bytes}（与 cloud_fs.put 一致）。
   async put(path, content, ctx = {}) {
+    if (content instanceof ArrayBuffer || ArrayBuffer.isView(content)) {
+      content = new Blob([content]);
+    }
     if (content instanceof Blob) {
       const r = await this.writeBlob(path, content, ctx);
       return { ok: true, path: r.path, bytes: r.size };
@@ -790,14 +795,24 @@ export class PageFS {
     return "/";
   }
 
-  // search 本地文件名搜索（walk 全量 + 子串匹配），返回 {ok, path, rows}。
-  async search(path, query, ctx = {}) {
+  // Recursive filename-only search; directory names and content never match.
+  async search(path, opts = {}, ctx = {}) {
+    const {searchOptions, filenameMatches} = await import('./file_search.js');
+    const {glob, limit, depth: maxDepth} = searchOptions(opts);
     const abs = this._path(path, ctx);
-    const all = await this.walk(abs, ctx);
-    const q = String(query || "").toLowerCase();
-    const rows = all
-      .filter((it) => it.path.toLowerCase().includes(q))
-      .slice(0, 40);
+    const rows = [];
+    const visit = async (dir, depth) => {
+      const listing = await this.list(dir, ctx);
+      for (const it of listing.items) {
+        if (rows.length >= limit) return;
+        const name = it.path.split('/').pop();
+        if (name.startsWith('.')) continue;
+        if (it.dir) {
+          if (!maxDepth || depth < maxDepth) await visit(it.path, depth + 1);
+        } else if (filenameMatches(name, glob)) rows.push(it);
+      }
+    };
+    await visit(abs, 1);
     return { ok: true, path: abs, rows };
   }
 

@@ -206,7 +206,7 @@ let searchTimer = null;
 fileSearchEl.addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    searchQuery = fileSearchEl.value.trim().toLowerCase();
+    searchQuery = fileSearchEl.value.trim();
     if (searchQuery) runSearch(searchQuery);
     else renderTree(currentPath);
   }, 200);
@@ -216,7 +216,10 @@ async function runSearch(q) {
   const fs = await ensureFs();
   const results = [];
   try {
-    const r = await fs.search("/", q);
+    // 结构化 search 契约（2026-09-12 同步新签名）：查询转 basename glob
+    // （*q*），大小写敏感、仅匹配文件名；特殊字符按 shortcut_fs 同款映射为 '?'。
+    const glob = "*" + String(q).replace(/[\/\\\[\]{}]/g, "?") + "*";
+    const r = await fs.search("/", { glob, limit: SEARCH_LIMIT });
     for (const it of r.rows) {
       if (it.dir) continue;
       results.push(it);
