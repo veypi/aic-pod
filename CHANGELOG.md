@@ -5,6 +5,29 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## v0.6.4 — 2026-09-14
+
+### 修复
+
+- **桌面端打包补全：leader-grab.js 白名单 / vendor/browser 同步 / asar 校验**（`desktop/electron-builder.yml` +
+  `Makefile` + `desktop/scripts/check-asar.mjs`（新））：v0.6.3 桌面包两处遗漏——① files 白名单漏了新增的
+  `leader-grab.js`（main.js 启动即 `require('./leader-grab')`，缺失则主进程崩溃）；② Makefile 的 `desktop-*`
+  只跑 cua-sync、未跑 sync-browser（npm predist 钩子对 CI 直调 electron-builder 不生效），`vendor/browser`
+  未进包（`browser-tool.mjs` 静态 import 其 core，桌面端 browser 能力注册失败）。修复：白名单补
+  `leader-grab.js`；新增 `browser-sync` 目标并接入三平台打包；打包后 `check-asar.mjs` 校验各入口相对
+  require/import 均存在于 asar + `resources/backend` 后端二进制存在，不通过即构建失败。本地全链路验证：
+  asar 含 `leader-grab.js` 与 `vendor/**`、校验通过。
+
+### 变更
+
+- **macOS 包 ad-hoc 深签**（`desktop/scripts/after-pack-adhoc-sign.js`（新）+ `desktop/electron-builder.yml`）：
+  `identity: null` 跳过后由 afterPack 钩子对 .app 做 `codesign --force --deep --sign -`（绕开 electron-builder 26
+  直接 ad-hoc 的相机/麦克风失效坑，electron-builder#9529）。效果（本地 quarantine 模拟实测）：下载打开提示从
+  「已损坏，无法打开」（只能 xattr 清隔离）变为「未打开——Apple 无法验证」（点「完成」后在 系统设置 →
+  隐私与安全性 → 仍要打开 放行）。彻底免放行仍需 Developer ID 签名 + 公证。
+
+> 注：v0.6.3 的桌面安装包（mac/win/linux）因上述遗漏不可用（启动崩溃），请改用 v0.6.4。
+
 ## v0.6.3 — 2026-09-14
 
 ### 破坏性变更
