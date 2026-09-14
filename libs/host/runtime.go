@@ -41,6 +41,12 @@ func Start(o cfg.Options) error {
 	rtMu.Lock()
 	rtClient = c
 	rtMu.Unlock()
+	// 启动窗口期对账：壳 provider（desktop browser 等）的 register 可能先于本
+	// 会话就绪到达（rtClient 未赋值，注册只进了进程级注册表），此处补并入命令表，
+	// 有变化则补发 caps（否则平台侧一直看不到该能力——2026-09-12 实测事故）。
+	if c.syncProviders() && c.nc != nil {
+		c.publishCaps(c.nc)
+	}
 	return nil
 }
 

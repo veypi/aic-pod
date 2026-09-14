@@ -70,6 +70,13 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => { quitting = true })
 }
 
+// ---- 后端子进程回收（will-quit → SIGTERM → Go 优雅退出） ----
+// 注册在启动流程最前：除正常退出外，spawn 超时/启动中途失败等提前 app.quit() 的
+// 路径同样要回收子进程（原先注册在 start() 末尾，这些路径漏 kill 会留下孤儿后端）。
+app.on('will-quit', () => {
+  if (backend && !backend.killed) backend.kill('SIGTERM')
+})
+
 // ---- 应用菜单 ----
 // mac 保留应用/编辑/视图菜单（Cmd+Q / Cmd+C+V / 开发者工具）；win/linux frameless 无菜单栏。
 // 应用菜单第一项不用 role:'appMenu'——dev 模式（npm start）下其 label 取进程 bundle 名
@@ -166,11 +173,6 @@ async function start() {
   } catch (err) {
     console.error('[tray] create failed:', err.message)
   }
-
-  // 应用退出时停止后端（SIGTERM → Go 优雅退出）
-  app.on('will-quit', () => {
-    if (backend && !backend.killed) backend.kill('SIGTERM')
-  })
 }
 
 // ---- 内置 cua-driver（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----

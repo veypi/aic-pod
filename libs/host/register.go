@@ -80,6 +80,11 @@ func providerDecls() []proto.CommandDecl {
 func (c *Client) addProvider(decl proto.CommandDecl) {
 	c.cmdsMu.Lock()
 	defer c.cmdsMu.Unlock()
+	c.addProviderLocked(decl)
+}
+
+// addProviderLocked 无锁版本（调用方须持 c.cmdsMu）。
+func (c *Client) addProviderLocked(decl proto.CommandDecl) {
 	if _, ok := c.cmdByName[decl.Name]; ok {
 		// 覆盖：替换 cmds 中的同名条目
 		for i := range c.cmds {
@@ -93,6 +98,29 @@ func (c *Client) addProvider(decl proto.CommandDecl) {
 	}
 	c.cmds = append(c.cmds, decl)
 	c.cmdByName[decl.Name] = decl
+}
+
+// syncProviders 把进程级 provider 注册表并入本会话命令表，返回是否有变化。
+//
+// 启动窗口期对账：壳的 register 请求可能先于会话就绪到达（runtime.Start 中
+// rtClient 尚未赋值），彼时只更新了进程级注册表、未进已构建的命令表；若之后
+// 直接发布 caps（Connect 尾部）就会漏掉该能力（2026-09-12 desktop browser
+// 注册竞态：平台侧 caps 缺 browser，exec 被判未声明拒绝）。
+func (c *Client) syncProviders() bool {
+	decls := providerDecls()
+	if len(decls) == 0 {
+		return false
+	}
+	c.cmdsMu.Lock()
+	defer c.cmdsMu.Unlock()
+	changed := false
+	for _, d := range decls {
+		if _, ok := c.cmdByName[d.Name]; !ok {
+			changed = true
+		}
+		c.addProviderLocked(d)
+	}
+	return changed
 }
 
 // ---- 壳本地通道（127.0.0.1 TCP 换行 JSON） ----

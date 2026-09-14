@@ -144,3 +144,56 @@ func TestRunViaShell(t *testing.T) {
 		t.Errorf("unreachable channel: %+v", resp2)
 	}
 }
+
+// 启动窗口期对账（syncProviders）：先建会话、后到达的 register 经对账补入命令表。
+func TestSyncProvidersStartupReconcile(t *testing.T) {
+	decl, ok := vcore.Decl("browser")
+	if !ok {
+		t.Fatal("vcore browser decl missing")
+	}
+	// 清干净后建会话：此刻进程注册表无 browser → 命令表不含 browser。
+	providersMu.Lock()
+	delete(providers, "browser")
+	providersMu.Unlock()
+	c, _ := testClient(t)
+	if _, ok := c.cmdByName["browser"]; ok {
+		t.Fatal("precondition: browser should be absent before register")
+	}
+
+	// 模拟壳注册在会话就绪前到达（rtClient 未赋值 → 只写进程级注册表）。
+	if err := RegisterProvider(Provider{Decl: decl, Run: func(context.Context, string, *proto.ToolRequest, []string) *proto.ToolResponse {
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		providersMu.Lock()
+		delete(providers, "browser")
+		providersMu.Unlock()
+	})
+
+	// 对账：补入命令表（changed=true）；重复调用幂等（无变化）。
+	if !c.syncProviders() {
+		t.Fatal("syncProviders should report change")
+	}
+	if _, ok := c.cmdByName["browser"]; !ok {
+		t.Fatal("browser missing from command table after reconcile")
+	}
+	if c.syncProviders() {
+		t.Fatal("syncProviders should be idempotent (no change on second call)")
+	}
+
+	// caps 构造包含 browser（desc/level 与 vcore 元数据同源）。
+	found := false
+	for _, v := range c.buildCaps().Exec.Commands {
+		if v.Name == "browser" {
+			found = true
+			if v.RequiredLevel != 2 {
+				t.Errorf("browser decl level = %d, want 2", v.RequiredLevel)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("caps missing browser after reconcile")
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	pod "github.com/veypi/aic-pod"
 	"github.com/veypi/aic-pod/cfg"
@@ -76,6 +77,12 @@ func runCmd() error {
 	}
 	defer pod.Stop()
 
+	// desktop 形态（Electron 壳 spawn）：父进程消失即自行退出——壳被强杀/崩溃时
+	// 不会走 will-quit 回收，子进程若无自检会滞留为孤儿（2026-09 实测事故）。
+	if cfg.DeviceType == "desktop" {
+		go exitWhenParentGone()
+	}
+
 	// 带 code 的引导链接：本地壳页面（header + iframe 平台页，与桌面同一体验）
 	link := fmt.Sprintf("http://127.0.0.1:%d/?code=%s", cfg.Global.Port(), url.QueryEscape(cfg.Global.Code))
 	logv.Info().Msgf("aic %s (host=%s)", cfg.Version, cfg.Global.Host)
@@ -93,4 +100,21 @@ func runCmd() error {
 	<-sig
 	logv.Info().Msg("shutting down...")
 	return nil
+}
+
+// exitWhenParentGone 轮询父进程是否消失（进程被 launchd 收养后 ppid 变化即视为
+// 消失），是则停止服务并退出。仅 desktop 形态启用：cli 常驻用法不受影响；
+// Windows 无 ppid 收养语义，检查不触发（保持原行为）。
+func exitWhenParentGone() {
+	ppid := os.Getppid()
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if os.Getppid() == ppid {
+			continue
+		}
+		logv.Warn().Msg("parent process gone — exiting")
+		pod.Stop()
+		os.Exit(0)
+	}
 }
