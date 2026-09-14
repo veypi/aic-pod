@@ -311,6 +311,52 @@ test("screenshot 无 fs 后端报错", async () => {
   assert.match(r.error, /fs backend not available/);
 });
 
+test("screenshot 超 600KB 页内压缩后附 image_data（image_compressed 备注）", async () => {
+  const puts = [];
+  const myCtx = {
+    ...ctx,
+    fs: { put: async (p, blob) => { puts.push({ p, size: blob.size }); return { path: p, bytes: blob.size }; } },
+  };
+  const ad = makeAdapter();
+  const big = Buffer.alloc(601 * 1024, 7).toString("base64");
+  ad.cdp.send = async (tabId, method, params) => {
+    ad._state.calls.cdpSend.push({ tabId, method, params });
+    if (method === "Page.captureScreenshot") return { data: big };
+    return {};
+  };
+  // 页内压缩经 evalIn 执行：预置压缩结果（800x600 q60 → 300000 bytes）
+  ad._state.evalResults.push({ b64: "QQ==", width: 800, height: 600, quality: 60, bytes: 300000 });
+  const h = createBrowserHandler(ad);
+  await h(ctx, { argv: ["open", "https://example.com"] });
+  const r = await h(myCtx, { argv: ["screenshot"] });
+  assert.equal(puts[0].size, 601 * 1024); // 原图仍整幅落盘（压缩只作用于 image_data）
+  assert.equal(r.attrs.image_data, "data:image/jpeg;base64,QQ==");
+  assert.equal(
+    r.attrs.image_compressed,
+    "615424 bytes → image/jpeg 800x600 quality 60 (300000 bytes)",
+  );
+  assert.equal(ad._state.evalResults.length, 0); // 压缩确实走了 evalIn 通道
+});
+
+test("screenshot 页内压缩失败降级仅 path（content 显式提示）", async () => {
+  const myCtx = {
+    ...ctx,
+    fs: { put: async (p, blob) => ({ path: p, bytes: blob.size }) },
+  };
+  const ad = makeAdapter();
+  ad.cdp.send = async (tabId, method) =>
+    method === "Page.captureScreenshot" ? { data: Buffer.alloc(601 * 1024, 7).toString("base64") } : {};
+  ad.evalIn = async () => {
+    throw new Error("Cannot access contents of the page");
+  };
+  const h = createBrowserHandler(ad);
+  await h(ctx, { argv: ["open", "https://example.com"] });
+  const r = await h(myCtx, { argv: ["screenshot"] });
+  assert.equal(r.attrs.image_data, undefined);
+  assert.match(r.attrs.path, /^\/screenshot\/screenshot-.*\.jpg$/);
+  assert.match(r.content, /image_data skipped: Cannot access contents of the page/);
+});
+
 // ---- eval ----
 
 test("eval 走 CDP Runtime.evaluate（awaitPromise/returnByValue）", async () => {

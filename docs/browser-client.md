@@ -73,9 +73,10 @@
 - `exec.commands`：统一命令声明表（§5.1）——恒声明 `commands` + 注册命令 `browser`
   （required_level=2 Write，stateful 串行，与 Go vcore meta.go 同源）
   + fs 8 action（read/write/edit/ls/rg/cp/mv/rm，分级与 Go levels.go 对齐，操作扩展 PageFS）；
-- §2.2 图片投递收敛：`browser screenshot` 落本 host 的 fs（`/screenshot/`，
-  IndexedDB Blob 存储），不返回 image_data；agent 需要看图时用 `fs.read`（1host=本 host_id）
-  按 attrs.path 读取——只有 fs.read 能把图片带进消息。
+- §2.2 图片投递：`browser screenshot` 原图落本 host 的 fs（`/screenshot/`，IndexedDB Blob
+  存储），同时以 `image_data` 附返回（服务端统一落盘直接投喂模型视觉，无需再 fs.read）；
+  超 600KB 端内先阶梯压缩为 JPEG（与 cua/read 同算法，§2.2 投递标准），压缩失败才降级
+  仅 path——需要原图时用 `fs.read`（1host=本 host_id）按 attrs.path 读取。
 
 ### 工具流量（§6.1 v4，subject 带 sid 段定向）
 
@@ -134,7 +135,7 @@ caps 声明见上文（required_level=2，stateful）。
 | `get` | `<what> [sel]` | 页面信息：text/html/title/url/value/attr/count/box/styles |
 | `network` | `[id\|requests] [--filter f] [--type t] [--method m] [--status n] [--limit n] [--clear]` | 网络请求列表/详情（页内 fetch/XHR 拦截器，环形 500 条） |
 | `read` | `[url]` | 提取可读文本（省略 url = 当前页；上限 100KB 截断） |
-| `screenshot` | `[--quality N]` | JPEG 截图落本 host fs `/screenshot/`（CDP Page.captureScreenshot；fs.read 读图） |
+| `screenshot` | `[--quality N] [--full]` | JPEG 截图落本 host fs `/screenshot/`（CDP Page.captureScreenshot）；结果附 `image_data`（超 600KB 端内阶梯压缩，直接投喂视觉），无需 fs.read |
 | `snapshot` | `[-i] [-c] [-d N] [-s sel]` | a11y 树快照（@ref 代次机制，见 §5.6.1/§5.6.2） |
 | `tab` | `[new\|list\|close [N]\|N]` | 工作区内标签页管理（1 基序号，不激活不抢焦点） |
 | `wait` | `<sel\|ms>` `[--url g] [--load l] [--fn js] [--text t] [--download f]` | 等待条件（默认 30s） |
@@ -239,7 +240,7 @@ background.js
 | 核心技术 | 共享 browser core + Electron CDP（webContents.debugger） | 共享 browser core + chrome.tabs/scripting/debugger |
 | 核心工具 | exec（统一命令声明表 + 壳注册 browser）、fs | browser 指令 + fs 8 action（PageFS） |
 | browser 接线 | 壳通道（127.0.0.1 TCP 换行 JSON + token）→ provider 注册进 caps | SW 内直接注册 |
-| 输出重定向 | 写入系统临时目录日志文件 | browser screenshot 落 PageFS（/screenshot/），其余直接返回 content |
+| 输出重定向 | 写入系统临时目录日志文件 | browser screenshot 落 PageFS（/screenshot/）并附 image_data，其余直接返回 content |
 | 权限等级 | exec 分级（curl/json=2 起、browser=2），fs=1 | browser=2，fs read/ls/rg=1、write/edit/cp/mv/rm=2 |
 | 密钥派生 | Go crypto/hmac + hkdf | Web Crypto API (SubtleCrypto) |
 | NATS 连接 | nats.go | @nats-io/nats-core（bundled ESM） |

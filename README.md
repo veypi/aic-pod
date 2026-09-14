@@ -180,7 +180,7 @@ make build-browser   # → dist/aic-browser.zip
 | `get` | 获取页面信息 (text/html/title/url/value/attr/count/box/styles) |
 | `network` | 查看网络请求（页内 fetch/XHR 拦截器） |
 | `read` | 提取页面可读文本 |
-| `screenshot` | 截图（CDP Page.captureScreenshot） |
+| `screenshot` | 截图（CDP；结果附 image_data，超 600KB 端内阶梯压缩） |
 | `snapshot` | a11y tree 快照（生成 @ref 用于元素定位） |
 | `tab` | 标签页管理 (new/list/close/<N>) |
 | `wait` | 等待条件 (selector/ms/--url/--load/--text/--fn/--download) |

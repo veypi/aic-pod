@@ -56,6 +56,59 @@ const FLAG_SETS = {
 
 const READ_MAX_BYTES = 100 * 1024; // §5.5：read 上限 100K 字节
 const NETWORK_LIMIT_DEFAULT = 100; // §5.5：network 列表默认截断 100
+const IMAGE_DATA_MAX_BYTES = 600 * 1024; // §2.2：image_data 投递标准（压缩阈值）
+
+// ---- 截图 image_data 压缩（§2.2 投递标准：超 600KB 端内先压到 600KB） ----
+//
+// 经 adapter.evalIn 注入页面主世界执行：desktop 主进程与扩展 SW 都无 canvas
+// （主进程无 DOM、SW 无 document），页面环境是两端能力的公共交集；算法与
+// vcore image.go / sdk/page_fs.js 一致（原尺寸质量 80/60/40 → 0.5 倍逐级缩
+// 尺寸，输出 JPEG、白底）。本函数会被 toString 序列化注入，不得引用模块作用域。
+async function compressScreenshotInPage(b64, maxBytes) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const bmp = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+  const makeCanvas = (w, h) => {
+    if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(w, h);
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    return c;
+  };
+  const toJpeg = (canvas, quality) => {
+    if (typeof canvas.convertToBlob === "function") {
+      return canvas.convertToBlob({ type: "image/jpeg", quality });
+    }
+    return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+  };
+  let scale = 1;
+  for (let i = 0; i < 6; i++) {
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    for (const q of [80, 60, 40]) {
+      const canvas = makeCanvas(w, h);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff"; // JPEG 无透明通道，先铺白底
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(bmp, 0, 0, w, h);
+      const out = await toJpeg(canvas, q / 100);
+      if (out && out.size <= maxBytes) {
+        bmp.close?.();
+        const ob = new Uint8Array(await out.arrayBuffer());
+        let s = "";
+        const CHUNK = 0x8000;
+        for (let k = 0; k < ob.length; k += CHUNK) {
+          s += String.fromCharCode.apply(null, ob.subarray(k, k + CHUNK));
+        }
+        return { b64: btoa(s), width: w, height: h, quality: q, bytes: out.size };
+      }
+    }
+    scale *= 0.5;
+  }
+  bmp.close?.();
+  throw new Error(`image still exceeds ${maxBytes} bytes after downscaling`);
+}
 
 // ---- main entry ----
 // 指令集 v2：作为 exec 虚拟指令接入，data = {action: "browser", argv: [subcommand, ...args]}。
@@ -666,15 +719,26 @@ export function createBrowserHandler(adapter) {
     const shot = await cdpScreenshot(tab.id, quality, pa.bools["full"]);
     const name = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
     const out = await ctx.fs.put(`/screenshot/${name}`, shot.blob);
-    // §2.2（2026-09-08 通用化）：browser 截图也返回 image_data（data URI），
-    // 服务端统一落盘投喂模型视觉输入，无需再 fs.read；限制 1MB 原始字节
-    // （base64 约 1.4M 字符），超限降级为仅 path（fs.read 读图），不阻断截图本身。
+    // §2.2（与 cua snapshot --png / fs.read 同标准）：原图落盘 + 结果附
+    // image_data（data URI）直接投喂模型视觉，无需再 fs.read；超 600KB 先在
+    // 页内阶梯压缩到投递标准（与 vcore image.go / page_fs.js 同算法），
+    // 压缩失败才降级仅 path（content 显式提示，不静默丢图）。
     const attrs = { action: "screenshot", path: out.path };
-    if (shot.b64 && shot.b64.length <= 1_400_000) {
-      attrs.image_data = `data:image/jpeg;base64,${shot.b64}`;
+    let skipNote = "";
+    try {
+      let b64 = shot.b64;
+      if (shot.blob.size > IMAGE_DATA_MAX_BYTES) {
+        const c = await execInTab(tab.id, compressScreenshotInPage, [shot.b64, IMAGE_DATA_MAX_BYTES]);
+        if (!c?.b64) throw new Error("compress returned no data");
+        b64 = c.b64;
+        attrs.image_compressed = `${shot.blob.size} bytes → image/jpeg ${c.width}x${c.height} quality ${c.quality} (${c.bytes} bytes)`;
+      }
+      attrs.image_data = `data:image/jpeg;base64,${b64}`;
+    } catch (e) {
+      skipNote = `\nimage_data skipped: ${e.message} (read the saved file via fs.read)`;
     }
     return {
-      content: `✓ Screenshot saved to ${out.path} (${out.bytes} bytes)`,
+      content: `✓ Screenshot saved to ${out.path} (${out.bytes} bytes)${skipNote}`,
       attrs,
     };
   }

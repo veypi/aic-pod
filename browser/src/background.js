@@ -149,7 +149,7 @@ Supported (13):
   get <what> [sel]            text / html / title / url / value / attr <sel> <name> / count / box / styles
   network [id|requests] [--filter s] [--type t] [--method m] [--status n] [--limit n] [--clear]
                               List / detail network requests (id or "requests" = list)
-  screenshot [--quality N] [--full]  Save JPEG to this host's fs (/screenshot/); also returns image_data
+  screenshot [--quality N] [--full]  Save JPEG to this host's fs (/screenshot/); result also carries image_data (compressed to ≤600KB when needed)
   snapshot [-i] [-c] [-d N] [-s sel]  Accessibility tree with @refs (stale refs require re-snapshot)
   tab <new|list|close|N>      Manage tabs inside the AI workspace (never activates/steals focus)
   wait <sel|ms> [--url g] [--load l] [--fn js] [--text t] [--download f]
