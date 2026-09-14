@@ -5,110 +5,25 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
-## 未发布 — 2026-09-13
+## v0.6.3 — 2026-09-14
 
-### 新增
+### 破坏性变更
 
-- **原生窗口 leader 键抓取（会话焦点交接）：焦点在原生内容时 OS 布局快捷键保持可用**
-  （`desktop/main.js` + `desktop/leader-grab.js`（新，含 `leader-grab.test.js`）+
-  `desktop/electron-adapter.mjs` + `desktop/remote-preload.js`；平台侧配套在 aic 仓
-  `ui/layout/os.html`；设计唯一源 = aic/docs/os_native_windows.md §6）：
-  此前点击进原生内容（AI 标签 / 设置 hostView）后壳侧 `wc.focus()` 把键盘焦点整体交给
-  内容，平台页收不到 keydown，leader（编排模式 / launcher / 窗口动作）全部失效（v1 起
-  已知行为）。现壳对每个原生内容 view 挂 `before-input-event`：leader 集合（页面经
-  `native:leader` 同步，默认空 = 不抓取、旧平台页自然降级）精确命中 → preventDefault
-  （该键不进内容）+ 经 `native:keys` 转平台页合成 `KeyboardEvent`（复用既有 keymap/编排
-  链路）+ 键盘焦点临时交接平台页；会话期间物理键全由平台页原生接收，leader 释放（壳在
-  平台页侧 keyUp 判定）→ 焦点自动交还来源内容视图（launcher 等经 `native:focus` 保留
-  焦点）。**不做逐键转发的原因**：Chromium 对被处理（handled）的 keyDown 会连带抑制其后
-  所有 keyUp/char（`render_widget_host_impl.cc` 的 `suppress_events_until_keydown_`），
-  壳侧观测不到 leader 释放、编排退出必然卡死（Electron issue #37336 官方确认 intended）
-  —— 焦点交接后释放是平台页上的真实事件，该限制自然绕开。中止清理：应用失焦 / 平台页
-  reload 或崩溃 / 平台焦点被用户移走。已知代价：与 leader 集合精确相等的组合（默认 Alt）
-  在原生内容中不再可用（macOS Option+←/→ 词跳转 / Option 字符输入等）；leader 可在设置
-  改键规避；多修饰键 leader 的前置分量先落内容（集合完成才起交接）。
-- 验证：`node --check` 全绿；`leader-grab.test.js` 5 例全绿（normMods / modsOfInput 两端
-  归一 / leaderHit 进入判定 / leaderReleased 释放判定 / 载荷）；`vhtml check`（aic 仓
-  os.html）OK。
-- 生效：桌面端重启后生效（main.js/preload 改动）；平台页随 aic 仓热更新。
-
-## 未发布 — 2026-09-12
-
-### 修复
-
-- **壳 provider 注册竞态：启动窗口期注册丢失导致 caps 缺 browser**（`libs/host/runtime.go` +
-  `libs/host/register.go`）：register 请求可能先于会话就绪到达（`rtClient` 尚未赋值），
-  彼时只更新进程级 provider 注册表、未并入已构建的命令表，Connect 尾部发布的 caps
-  因此缺少 browser（平台判 exec browser 未声明而拒绝）。修复：Start 在 `rtClient`
-  赋值后对账一次（`syncProviders`），有变化补发 caps。实测依据：09-12 17:39 日志
-  `provider/register`(200) → `connected to NATS` → `caps published (14 commands)`。
-- **后端子进程孤儿看门狗**（`cli/main.go`）：desktop 形态（Electron 壳 spawn）下父进程
-  被强杀/崩溃时不会走 will-quit 清理，子进程滞留为孤儿；新增父进程看门狗（轮询 ppid，
-  消失即自行退出）。仅 desktop 形态启用，cli 常驻用法不受影响（Windows 无此语义不触发）。
-- **main.js will-quit 回收注册提前**（`desktop/main.js`）：杀后端子进程的 will-quit
-  原先注册在 start() 末尾，spawn 超时/启动中途失败等提前退出路径漏 kill 留下孤儿；
-  改为启动流程最前注册（幂等）。
-- **browser 扩展 page_fs.js 与平台侧恢复逐字节同步**（`browser/src/sdk/page_fs.js` +
-  `browser/src/sdk/file_search.js`（新）+ `browser/options/files.js`）：两副本自 09-06
-  起漂移——平台侧 search() 已重构为 file_search basename glob 契约（glob/limit/depth、
-  仅匹配文件名、大小写敏感），扩展侧仍是旧 walk+子串签名；本次恢复 `cmp` 逐字节一致，
-  扩展 options 搜索改用结构化签名 `search("/", {glob, limit})`（查询转 `*q*` glob，
-  特殊字符映射 '?' 与 shortcut_fs 同款）。`node --test`（扩展）127 例全绿。
-
-> 排查背景：09-10/11 桌面端 UI 测试期由 exec 沙箱内反复启动测试实例（每轮 spawn 一个
-> 后端），测试替换时漏回收；且沙箱下读不了 config.yaml（无 key 不连平台）、写不了
-> 日志（lumberjack 轮转 rename 被拒）——累计残留 5 个测试实例后端（完全隐形、占端口
-> 空转），09-12 已逐一排查清除。
-
-### 变更
-
-- **browser screenshot 对齐 §2.2 图片投递标准：超 600KB 端内阶梯压缩后附 image_data**
-  （`browser/src/tools/browser/core.js`）：此前仅按 base64 长度硬阈值（1.4M 字符）判断，
-  超限直接降级仅 path，与 aic 规范「≤600KB 端内压缩」不符。现与 vcore image.go /
-  page_fs.js 同算法（质量 80/60/40 → 0.5 倍逐级缩尺寸，JPEG、白底）在页面环境经
-  evalIn 压缩（desktop 主进程/扩展 SW 均无 canvas 的公共交集），结果附 `image_data` +
-  `image_compressed` 备注（格式与 cua snapshot --png / fs.read 一致）；压缩失败才降级仅
-  path 并在 content 显式提示（不静默丢图）。原图仍整幅落 `/screenshot/`。单测
-  （core.test.js）/文档（browser-client.md、background.js help、README）同步。
-- **RTC 直连新增 writebin 二进制字节入口（与 readbin 对称，2026-09-12）**：帧协议新增
-  直连控制台私有 op `writebin`（不属于 fs 指令集）——载荷 = 文件字节 base64（≤frameInlineLimit
-  随 head `text` 内联，超限 `stream:true` + chunk×N + end 重组解码），执行体 =
-  `vcore.WriteBin`（新 `libs/vcore/writebin.go`：Resolve→CheckPath→CheckPolicy write 级
-  （deny 恒拒）、MkdirAll 0o755、0o644 整文件覆写、256MB 上限），host client 以同信任级
-  （granted=9）接线。用途：平台 `$fs.put` 的二进制内容（PNG/zip 等）经此落盘（页面侧此前
-  文本化导致二进制损坏，平台侧配套修复）。验证：`rtc_test.go` 新增内联/流式/错误帧四例 +
-  `writebin_test.go` 四例；`go test ./libs/vcore ./libs/rtc` 全绿。
-
-## 未发布 — 2026-09-11
-
-### 修复
-
-- **策略错误保型上抛：cloud 内联执行链的审批/拒绝不再被拍平**（`libs/proto/errors.go` +
-  `libs/vcore/{result,curl,fileops,json,write}.go`）：执行链在把 VFS 错误归一为 exec/fs
-  指令错误（`%s` 拍文案）之前，先经新增的 `proto.StrategyError` 提取 `*proto.ApprovalError` /
-  `*proto.DeniedError` 并保型上抛——审批/拒绝语义靠类型判定（StateOf / 信封 / 审批流），
-  拍平即降级为普通执行错误。背景：cloud 内联执行没有 host 信封通道（StateOf→NeedApproval
-  转换只在 host 侧），GatedFS 写分级兜底依赖 proto 类型判定进入审批流——此前 curl -o /
-  json / fs write 等遇 3 级写区报「fs: write requires fs level 3」却不弹审批。修复：
-  `execVFSErr` / `fsVFSErr` 接入 curl -o、fs write/edit/cp/mv/rm、json（host 信封路径与
-  cloud 内联路径两条语义现各自接全）。验证：`go test ./libs/proto ./libs/vcore` 全绿
-  （保型（含 wrapped 链）/ 非策略归一 / curl -o 集成三组新用例）。
-- **沙箱放行系统 CA 只读：修复沙箱内 curl error 77**（`libs/fsauth/sysca*.go`（新）+
-  `libs/exec_procs/{exec_procs,sandbox,spawn}.go`；文档 `docs/host_sandbox.md` §12.7）：
-  deny 通用表 `**/*.pem` 的意图是私钥/凭证，但同样命中系统公共 CA bundle——沙箱内 curl
-  等因无法加载证书 https 全断（stat/读被拒，error 77；网络层本身正常，`-k` 可绕）。
-  新增**只读**放行通道：`fsauth.SystemCAReadPatterns()`（darwin：`/etc/ssl/cert.pem`、
-  `/etc/ssl/certs/**`、Homebrew `openssl@*`/`ca-certificates`（arm64/intel 双前缀）；
-  linux：发行版 CA 目录；windows nil；与 deny 同口径 canonical+字面双形态）→
-  `confineSpec.readAllow` → darwin seatbelt 在 deny/override 之后追加 `(allow file-read*)`，
-  恒不输出 `file-write*`（写系统 CA = 自定义信任根注入）；linux bwrap 并入覆盖判定
-  （当前 no-op，对齐防护）。验证：seatbelt 形态断言（allow 在 deny 后 / 写级无 write
-  allow / 零值无输出）+ 平台清单用例 + 沙箱内 `curl https://…`（默认 CA）直 200。
-
-## 未发布 — 2026-09-10
-
-### 变更（破坏性）
-
+- **OS 原生窗口内容 P0：B 区/A/B 分区整体删除**（`desktop/main.js` +
+  `desktop/electron-adapter.mjs` + `desktop/remote-preload.js` +
+  `desktop/settings-preload.js` + `desktop/README.md`，删 `divider.html` /
+  `divider-preload.js`；设计唯一源 = aic/docs/os_native_windows.md）：主窗口
+  回到平台页恒满窗；AI browser 标签与「本地配置」设置视图（WebContentsView
+  原生内容池）改由平台页 OS 窗口占位元素经新增 `window.aicDesktop.nativeWin`
+  桥驱动贴位（rect/可见性唯一驱动源 = 渲染器；`native:state/tab-create/
+  tab-close/tab-activate/tab-navigate/layout/host-layout` IPC 全走
+  isPlatformFrame 白名单），隐藏 = z 序回落平台页之下（遮挡隐藏，隐藏态 CDP
+  截图语义不变）。标签页 window.open 拦截转新标签（不再弹裸 BrowserWindow）；
+  标题/URL/loading 经 `native:changed` 全量推平台页标签条。托盘「本地配置」：
+  平台在线 → `native:open-host` → 平台 OS 开 `/local/desktop` 窗口贴位；
+  平台不可达 → 主视图整窗加载本地设置页（remote-preload 本地分支给
+  checkPlatform/openPlatform）。平台页整帧跳转/渲染进程崩溃 → 原生内容复位
+  隐藏态。remote-preload 重构为平台白名单/本地 127.0.0.1 双分支。
 - **OS 原生窗口内容 v2 反转模型**（`desktop/main.js` + `desktop/electron-adapter.mjs` +
   `desktop/remote-preload.js` + `desktop/README.md`；平台侧配套在 aic 仓
   `ui/os/wincontent.js` + `ui/layout/os.html`；设计唯一源 = aic/docs/os_native_windows.md）：
@@ -142,64 +57,6 @@
   `body::before` 兼容分支）；②新增「祖先层逐层挖洞」（`data-native-cut` + 逐层 mask，
   自动覆盖 `div[vsrc]` 等所有会绘制的中间层）。带真实会话隔离实例真机验证：设置表单/
   网页内容均透过洞正常显示；真实点击分别落入设置视图与网页标签（计数均验证）。
-
-## 未发布 — 2026-09-09
-
-### 变更（破坏性）
-
-- **OS 原生窗口内容 P0：B 区/A/B 分区整体删除**（`desktop/main.js` +
-  `desktop/electron-adapter.mjs` + `desktop/remote-preload.js` +
-  `desktop/settings-preload.js` + `desktop/README.md`，删 `divider.html` /
-  `divider-preload.js`；设计唯一源 = aic/docs/os_native_windows.md）：主窗口
-  回到平台页恒满窗；AI browser 标签与「本地配置」设置视图（WebContentsView
-  原生内容池）改由平台页 OS 窗口占位元素经新增 `window.aicDesktop.nativeWin`
-  桥驱动贴位（rect/可见性唯一驱动源 = 渲染器；`native:state/tab-create/
-  tab-close/tab-activate/tab-navigate/layout/host-layout` IPC 全走
-  isPlatformFrame 白名单），隐藏 = z 序回落平台页之下（遮挡隐藏，隐藏态 CDP
-  截图语义不变）。标签页 window.open 拦截转新标签（不再弹裸 BrowserWindow）；
-  标题/URL/loading 经 `native:changed` 全量推平台页标签条。托盘「本地配置」：
-  平台在线 → `native:open-host` → 平台 OS 开 `/local/desktop` 窗口贴位；
-  平台不可达 → 主视图整窗加载本地设置页（remote-preload 本地分支给
-  checkPlatform/openPlatform）。平台页整帧跳转/渲染进程崩溃 → 原生内容复位
-  隐藏态。remote-preload 重构为平台白名单/本地 127.0.0.1 双分支。
-
-### 修复
-
-- **header 全屏按钮无效：创建窗口时显式传 `fullscreen: false` 毒化 NSWindow**（
-  `desktop/main.js`）：macOS frameless BaseWindow 创建时传 `fullscreen: false`
-  → 之后 `setFullScreen(true)` 恒 no-op（Electron 33.4.11 最小复现：显式 false
-  2/2 失败、不传该键 2/2 正常）。改为只在启动即全屏时传 `fullscreen: true`。
-  排查路径：渲染侧探针确认 IPC/白名单全通且 1.5s 延迟后 `isFullScreen()` 仍
-  false → 同二进制隔离实验逐项二分（maximise/子 view/resize 监听/加载内容均
-  无关）→ 唯一定位到创建选项。
-- **remote-preload 本地分支误吞平台页**（`desktop/remote-preload.js` +
-  `desktop/main.js`）：本地设置页判定原先按 hostname（`127.0.0.1|localhost`），
-  平台开发态跑在 localhost:4000 时被误判为本地页——只暴露设置子集，窗口控制/
-  nativeWin 全部缺失（症状：header 窗口按钮渲染但点击无效、AI 建标签不开窗、
-  托盘本地配置无反应）。改为按主进程下发的精确 host:port（`allowed:hosts` 下发
-  形态改 `{hosts, local}`）；`isLocalFrame` 同步收紧为 `127.0.0.1:<port>`。
-- **视图菜单三个 role 在 BaseWindow 上崩溃**（`desktop/main.js`）：
-  `role:reload/toggleDevTools/togglefullscreen` 找 `focusedWindow().webContents`，
-  BaseWindow 无 webContents → undefined 异常（点「开发者工具」报错）。改为显式
-  handler（platformView.reload / toggleDevTools / mainWin.setFullScreen）。
-
-- **本地配置页：授权区样式丢失 + 操作会关闭页面**（`ui/page/settings.html` +
-  `desktop/main.js` + `desktop/settings-preload.js`）：三域授权编辑器
-  （renderAuth/listEl）是运行时 DOM，组件样式默认选择器只命中编译期节点
-  （[vrefof]）→ 选择器统一加 `body ` 前缀走作用域穿透；「保存」不再跳转
-  （只落盘/按需绑定/原地提示），「更新」改名「获取」且打开平台页不再关闭
-  设置视图，删除「返回平台」（桌面 A/B 同窗后多余）。
-- **Windows 桌面端 Alt+Space 弹系统菜单**（`desktop/main.js`）：Alt+Space 走系统
-  DefWindowProc 弹窗口菜单（还原/最小化/最大化/关闭），且 WM_SYSKEYDOWN 被系统消费——
-  页面收不到 keydown，应用内 launcher 快捷键（keymap 默认 leader=Alt + space）失效。
-  现窗口聚焦期间 RegisterHotKey 抢占该组合（系统不再弹菜单），命中后把 Space 键回注
-  平台页，走页面既有 keymap（改键位跟随）；失焦即注销；桌宠窗聚焦时仅吞掉。
-- **设置页「关闭」按钮恒隐藏：setup 阶段碰 $refs**（`ui/page/settings.html`）：
-  按钮显示逻辑原先写在 `<script setup>` 里 `$refs.btnClose.style.display = ''`——
-  vhtml 契约 setup 在 DOM 编译前执行、`$refs` 尚不可用，该行失效 → 按钮恒
-  display:none（hostView 内「关闭」从未可见；关闭链路 closeSettings → 销毁视图
-  + host-closed → 关 OS 窗口因此从未生效）。改为声明式：setup 只放 `canClose`
-  布尔标记（桥存在性判断），模板 `v-if` 渲染。
 
 ### 新增
 
@@ -248,6 +105,129 @@
   居中布局超高会截顶）。后端九键 API 此前已就绪，本次纯前端接入。
 - **cua cursor 子命令**（`libs/host/cua.go` + `libs/vcore/{meta,levels}.go`）：`cua cursor on|off|state|motion|theme <id>` 控制 agent 光标浮层——驱动 MCP `set_agent_cursor_enabled` / `get_agent_cursor_state` / `set_agent_cursor_motion` / `set_agent_cursor_theme` 的 argv 面（motion 参数经未知 flag 透传）。背景：Windows 上浮层是覆盖整个虚拟屏的透明点击穿透分层窗口，cua 操作后残留导致全系统鼠标指针闪烁（cua-driver 0.25.0，同类症状 openai/codex#34340）；host 的 cua-driver MCP 子进程常驻复用、浮层不随操作销毁，`cua cursor off` 是无摩擦止血入口。
 - **cua 声明基线 Write(2) → Read(1)**（`libs/vcore/meta.go` Decl）：声明层不设 Write 地板，读类子命令动态降级不再被 max(声明, 动态) 吃掉（对齐 git/json）；cursor 全子命令 = Read(1)。写/危险动作仍由 cuaRequired 动态提升。
+- **原生窗口 leader 键抓取（会话焦点交接）：焦点在原生内容时 OS 布局快捷键保持可用**
+  （`desktop/main.js` + `desktop/leader-grab.js`（新，含 `leader-grab.test.js`）+
+  `desktop/electron-adapter.mjs` + `desktop/remote-preload.js`；平台侧配套在 aic 仓
+  `ui/layout/os.html`；设计唯一源 = aic/docs/os_native_windows.md §6）：
+  此前点击进原生内容（AI 标签 / 设置 hostView）后壳侧 `wc.focus()` 把键盘焦点整体交给
+  内容，平台页收不到 keydown，leader（编排模式 / launcher / 窗口动作）全部失效（v1 起
+  已知行为）。现壳对每个原生内容 view 挂 `before-input-event`：leader 集合（页面经
+  `native:leader` 同步，默认空 = 不抓取、旧平台页自然降级）精确命中 → preventDefault
+  （该键不进内容）+ 经 `native:keys` 转平台页合成 `KeyboardEvent`（复用既有 keymap/编排
+  链路）+ 键盘焦点临时交接平台页；会话期间物理键全由平台页原生接收，leader 释放（壳在
+  平台页侧 keyUp 判定）→ 焦点自动交还来源内容视图（launcher 等经 `native:focus` 保留
+  焦点）。**不做逐键转发的原因**：Chromium 对被处理（handled）的 keyDown 会连带抑制其后
+  所有 keyUp/char（`render_widget_host_impl.cc` 的 `suppress_events_until_keydown_`），
+  壳侧观测不到 leader 释放、编排退出必然卡死（Electron issue #37336 官方确认 intended）
+  —— 焦点交接后释放是平台页上的真实事件，该限制自然绕开。中止清理：应用失焦 / 平台页
+  reload 或崩溃 / 平台焦点被用户移走。已知代价：与 leader 集合精确相等的组合（默认 Alt）
+  在原生内容中不再可用（macOS Option+←/→ 词跳转 / Option 字符输入等）；leader 可在设置
+  改键规避；多修饰键 leader 的前置分量先落内容（集合完成才起交接）。
+- 验证：`node --check` 全绿；`leader-grab.test.js` 5 例全绿（normMods / modsOfInput 两端
+  归一 / leaderHit 进入判定 / leaderReleased 释放判定 / 载荷）；`vhtml check`（aic 仓
+  os.html）OK。
+- 生效：桌面端重启后生效（main.js/preload 改动）；平台页随 aic 仓热更新。
+
+### 变更
+
+- **browser screenshot 对齐 §2.2 图片投递标准：超 600KB 端内阶梯压缩后附 image_data**
+  （`browser/src/tools/browser/core.js`）：此前仅按 base64 长度硬阈值（1.4M 字符）判断，
+  超限直接降级仅 path，与 aic 规范「≤600KB 端内压缩」不符。现与 vcore image.go /
+  page_fs.js 同算法（质量 80/60/40 → 0.5 倍逐级缩尺寸，JPEG、白底）在页面环境经
+  evalIn 压缩（desktop 主进程/扩展 SW 均无 canvas 的公共交集），结果附 `image_data` +
+  `image_compressed` 备注（格式与 cua snapshot --png / fs.read 一致）；压缩失败才降级仅
+  path 并在 content 显式提示（不静默丢图）。原图仍整幅落 `/screenshot/`。单测
+  （core.test.js）/文档（browser-client.md、background.js help、README）同步。
+- **RTC 直连新增 writebin 二进制字节入口（与 readbin 对称，2026-09-12）**：帧协议新增
+  直连控制台私有 op `writebin`（不属于 fs 指令集）——载荷 = 文件字节 base64（≤frameInlineLimit
+  随 head `text` 内联，超限 `stream:true` + chunk×N + end 重组解码），执行体 =
+  `vcore.WriteBin`（新 `libs/vcore/writebin.go`：Resolve→CheckPath→CheckPolicy write 级
+  （deny 恒拒）、MkdirAll 0o755、0o644 整文件覆写、256MB 上限），host client 以同信任级
+  （granted=9）接线。用途：平台 `$fs.put` 的二进制内容（PNG/zip 等）经此落盘（页面侧此前
+  文本化导致二进制损坏，平台侧配套修复）。验证：`rtc_test.go` 新增内联/流式/错误帧四例 +
+  `writebin_test.go` 四例；`go test ./libs/vcore ./libs/rtc` 全绿。
+
+### 修复
+
+- **header 全屏按钮无效：创建窗口时显式传 `fullscreen: false` 毒化 NSWindow**（
+  `desktop/main.js`）：macOS frameless BaseWindow 创建时传 `fullscreen: false`
+  → 之后 `setFullScreen(true)` 恒 no-op（Electron 33.4.11 最小复现：显式 false
+  2/2 失败、不传该键 2/2 正常）。改为只在启动即全屏时传 `fullscreen: true`。
+  排查路径：渲染侧探针确认 IPC/白名单全通且 1.5s 延迟后 `isFullScreen()` 仍
+  false → 同二进制隔离实验逐项二分（maximise/子 view/resize 监听/加载内容均
+  无关）→ 唯一定位到创建选项。
+- **remote-preload 本地分支误吞平台页**（`desktop/remote-preload.js` +
+  `desktop/main.js`）：本地设置页判定原先按 hostname（`127.0.0.1|localhost`），
+  平台开发态跑在 localhost:4000 时被误判为本地页——只暴露设置子集，窗口控制/
+  nativeWin 全部缺失（症状：header 窗口按钮渲染但点击无效、AI 建标签不开窗、
+  托盘本地配置无反应）。改为按主进程下发的精确 host:port（`allowed:hosts` 下发
+  形态改 `{hosts, local}`）；`isLocalFrame` 同步收紧为 `127.0.0.1:<port>`。
+- **视图菜单三个 role 在 BaseWindow 上崩溃**（`desktop/main.js`）：
+  `role:reload/toggleDevTools/togglefullscreen` 找 `focusedWindow().webContents`，
+  BaseWindow 无 webContents → undefined 异常（点「开发者工具」报错）。改为显式
+  handler（platformView.reload / toggleDevTools / mainWin.setFullScreen）。
+
+- **本地配置页：授权区样式丢失 + 操作会关闭页面**（`ui/page/settings.html` +
+  `desktop/main.js` + `desktop/settings-preload.js`）：三域授权编辑器
+  （renderAuth/listEl）是运行时 DOM，组件样式默认选择器只命中编译期节点
+  （[vrefof]）→ 选择器统一加 `body ` 前缀走作用域穿透；「保存」不再跳转
+  （只落盘/按需绑定/原地提示），「更新」改名「获取」且打开平台页不再关闭
+  设置视图，删除「返回平台」（桌面 A/B 同窗后多余）。
+- **Windows 桌面端 Alt+Space 弹系统菜单**（`desktop/main.js`）：Alt+Space 走系统
+  DefWindowProc 弹窗口菜单（还原/最小化/最大化/关闭），且 WM_SYSKEYDOWN 被系统消费——
+  页面收不到 keydown，应用内 launcher 快捷键（keymap 默认 leader=Alt + space）失效。
+  现窗口聚焦期间 RegisterHotKey 抢占该组合（系统不再弹菜单），命中后把 Space 键回注
+  平台页，走页面既有 keymap（改键位跟随）；失焦即注销；桌宠窗聚焦时仅吞掉。
+- **设置页「关闭」按钮恒隐藏：setup 阶段碰 $refs**（`ui/page/settings.html`）：
+  按钮显示逻辑原先写在 `<script setup>` 里 `$refs.btnClose.style.display = ''`——
+  vhtml 契约 setup 在 DOM 编译前执行、`$refs` 尚不可用，该行失效 → 按钮恒
+  display:none（hostView 内「关闭」从未可见；关闭链路 closeSettings → 销毁视图
+  + host-closed → 关 OS 窗口因此从未生效）。改为声明式：setup 只放 `canClose`
+  布尔标记（桥存在性判断），模板 `v-if` 渲染。
+- **策略错误保型上抛：cloud 内联执行链的审批/拒绝不再被拍平**（`libs/proto/errors.go` +
+  `libs/vcore/{result,curl,fileops,json,write}.go`）：执行链在把 VFS 错误归一为 exec/fs
+  指令错误（`%s` 拍文案）之前，先经新增的 `proto.StrategyError` 提取 `*proto.ApprovalError` /
+  `*proto.DeniedError` 并保型上抛——审批/拒绝语义靠类型判定（StateOf / 信封 / 审批流），
+  拍平即降级为普通执行错误。背景：cloud 内联执行没有 host 信封通道（StateOf→NeedApproval
+  转换只在 host 侧），GatedFS 写分级兜底依赖 proto 类型判定进入审批流——此前 curl -o /
+  json / fs write 等遇 3 级写区报「fs: write requires fs level 3」却不弹审批。修复：
+  `execVFSErr` / `fsVFSErr` 接入 curl -o、fs write/edit/cp/mv/rm、json（host 信封路径与
+  cloud 内联路径两条语义现各自接全）。验证：`go test ./libs/proto ./libs/vcore` 全绿
+  （保型（含 wrapped 链）/ 非策略归一 / curl -o 集成三组新用例）。
+- **沙箱放行系统 CA 只读：修复沙箱内 curl error 77**（`libs/fsauth/sysca*.go`（新）+
+  `libs/exec_procs/{exec_procs,sandbox,spawn}.go`；文档 `docs/host_sandbox.md` §12.7）：
+  deny 通用表 `**/*.pem` 的意图是私钥/凭证，但同样命中系统公共 CA bundle——沙箱内 curl
+  等因无法加载证书 https 全断（stat/读被拒，error 77；网络层本身正常，`-k` 可绕）。
+  新增**只读**放行通道：`fsauth.SystemCAReadPatterns()`（darwin：`/etc/ssl/cert.pem`、
+  `/etc/ssl/certs/**`、Homebrew `openssl@*`/`ca-certificates`（arm64/intel 双前缀）；
+  linux：发行版 CA 目录；windows nil；与 deny 同口径 canonical+字面双形态）→
+  `confineSpec.readAllow` → darwin seatbelt 在 deny/override 之后追加 `(allow file-read*)`，
+  恒不输出 `file-write*`（写系统 CA = 自定义信任根注入）；linux bwrap 并入覆盖判定
+  （当前 no-op，对齐防护）。验证：seatbelt 形态断言（allow 在 deny 后 / 写级无 write
+  allow / 零值无输出）+ 平台清单用例 + 沙箱内 `curl https://…`（默认 CA）直 200。
+- **壳 provider 注册竞态：启动窗口期注册丢失导致 caps 缺 browser**（`libs/host/runtime.go` +
+  `libs/host/register.go`）：register 请求可能先于会话就绪到达（`rtClient` 尚未赋值），
+  彼时只更新进程级 provider 注册表、未并入已构建的命令表，Connect 尾部发布的 caps
+  因此缺少 browser（平台判 exec browser 未声明而拒绝）。修复：Start 在 `rtClient`
+  赋值后对账一次（`syncProviders`），有变化补发 caps。实测依据：09-12 17:39 日志
+  `provider/register`(200) → `connected to NATS` → `caps published (14 commands)`。
+- **后端子进程孤儿看门狗**（`cli/main.go`）：desktop 形态（Electron 壳 spawn）下父进程
+  被强杀/崩溃时不会走 will-quit 清理，子进程滞留为孤儿；新增父进程看门狗（轮询 ppid，
+  消失即自行退出）。仅 desktop 形态启用，cli 常驻用法不受影响（Windows 无此语义不触发）。
+- **main.js will-quit 回收注册提前**（`desktop/main.js`）：杀后端子进程的 will-quit
+  原先注册在 start() 末尾，spawn 超时/启动中途失败等提前退出路径漏 kill 留下孤儿；
+  改为启动流程最前注册（幂等）。
+- **browser 扩展 page_fs.js 与平台侧恢复逐字节同步**（`browser/src/sdk/page_fs.js` +
+  `browser/src/sdk/file_search.js`（新）+ `browser/options/files.js`）：两副本自 09-06
+  起漂移——平台侧 search() 已重构为 file_search basename glob 契约（glob/limit/depth、
+  仅匹配文件名、大小写敏感），扩展侧仍是旧 walk+子串签名；本次恢复 `cmp` 逐字节一致，
+  扩展 options 搜索改用结构化签名 `search("/", {glob, limit})`（查询转 `*q*` glob，
+  特殊字符映射 '?' 与 shortcut_fs 同款）。`node --test`（扩展）127 例全绿。
+
+> 排查背景：09-10/11 桌面端 UI 测试期由 exec 沙箱内反复启动测试实例（每轮 spawn 一个
+> 后端），测试替换时漏回收；且沙箱下读不了 config.yaml（无 key 不连平台）、写不了
+> 日志（lumberjack 轮转 rename 被拒）——累计残留 5 个测试实例后端（完全隐形、占端口
+> 空转），09-12 已逐一排查清除。
 
 ### 工具链：Electron 33.4.11 → 44.3.0（2026-09-10）
 
