@@ -6,7 +6,7 @@
 // 页面（任意浏览器/手机，含 https 平台页）经 NATS 信令与 host 建立
 // RTCPeerConnection，数据面为 DataChannel（DTLS 强制加密 + UDP host
 // candidate LAN 直连）——不受浏览器混合内容/PNA 限制，无需 CA 证书
-//（身份锚点 = 经认证信令通道交换的 SDP 指纹）。
+// （身份锚点 = 经认证信令通道交换的 SDP 指纹）。
 //
 // 链路：页面 offer → u.{uid}.h.host_{id}.rtc.in（host 通配 inbox 覆盖）→
 // 本服务应答 answer/candidate → u.{uid}.h.{id}.{ver}.rtc → ICE 连通检查 →
@@ -48,7 +48,11 @@ type Config struct {
 	// 视图，同信任级）。返回 (字节, mime, 文件总字节数)；区间与上限约束由
 	// vcore.ReadBin 保证（含 deny 恒拒）。
 	ReadBin func(path string, off, length int64) ([]byte, string, int64, error)
-	Logf  func(format string, args ...any)
+	// WriteBin 是 writebin op 的执行体（host client 注入：vcore.WriteBin + fsauth
+	// 视图，同信任级，2026-09-12 与 ReadBin 对称的写方向）。返回写入字节数；
+	// 权限/上限约束由 vcore.WriteBin 保证（含 deny 恒拒）。
+	WriteBin func(path string, data []byte) (int, error)
+	Logf     func(format string, args ...any)
 }
 
 // Service 是 RTC 应答服务：单 UDP mux（随机端口，全部 PeerConnection 复用，
@@ -78,8 +82,8 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Code == "" {
 		return nil, fmt.Errorf("rtc: code is empty")
 	}
-	if cfg.Send == nil || cfg.RunFS == nil || cfg.ReadBin == nil {
-		return nil, fmt.Errorf("rtc: Send, RunFS and ReadBin are required")
+	if cfg.Send == nil || cfg.RunFS == nil || cfg.ReadBin == nil || cfg.WriteBin == nil {
+		return nil, fmt.Errorf("rtc: Send, RunFS, ReadBin and WriteBin are required")
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
 	if err != nil {

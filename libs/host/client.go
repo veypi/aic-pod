@@ -257,9 +257,10 @@ func (c *Client) startRTC() error {
 			data, _ := json.Marshal(sig)
 			c.nc.Publish(subj, data)
 		},
-		RunFS:   c.runFSLocal,
-		ReadBin: c.readBinLocal,
-		Logf:    c.logf,
+		RunFS:    c.runFSLocal,
+		ReadBin:  c.readBinLocal,
+		WriteBin: c.writeBinLocal,
+		Logf:     c.logf,
 	})
 	if err != nil {
 		return err
@@ -281,7 +282,7 @@ func (c *Client) handleRTCSignal(data []byte) {
 }
 
 // runFSLocal 是 RTC 直连通道的 fs 执行体：code 鉴权通过 = 本地控制台信任级
-//（granted=9，不再出现审批；fsauth 三域 deny/allow 照常生效，deny 恒拒不可绕过）。
+// （granted=9，不再出现审批；fsauth 三域 deny/allow 照常生效，deny 恒拒不可绕过）。
 // sid 为空：无会话临时 grant 视图（与 run_tool 直发同语义）。
 func (c *Client) runFSLocal(ctx context.Context, raw json.RawMessage) (*vcore.Result, error) {
 	env := c.newEnv("", "")
@@ -295,6 +296,15 @@ func (c *Client) readBinLocal(path string, off, length int64) ([]byte, string, i
 	env := c.newEnv("", "")
 	env.Granted = 9
 	return vcore.ReadBin(env, path, off, length)
+}
+
+// writeBinLocal 是 RTC 直连通道 writebin op 的执行体（2026-09-12，写方向的
+// 原始字节入口，host fs put 二进制内容用）：与 runFSLocal 同信任级、同 fsauth
+// 判定实例。
+func (c *Client) writeBinLocal(path string, data []byte) (int, error) {
+	env := c.newEnv("", "")
+	env.Granted = 9
+	return vcore.WriteBin(env, path, data)
 }
 
 // ---- caps v2 上报（§6.3） ----
@@ -395,7 +405,7 @@ func (c *Client) buildCaps() *proto.Caps {
 }
 
 // buildMgmt 构造本地管理面声明：仅 RTC 开关开启且持有校验码时上报
-//（服务端以 mgmt 存在性判定设备直连能力，页面据此发起 RTC 直连）。
+// （服务端以 mgmt 存在性判定设备直连能力，页面据此发起 RTC 直连）。
 func (c *Client) buildMgmt() *proto.MgmtCaps {
 	if !c.opts.RTC || c.opts.Code == "" {
 		return nil

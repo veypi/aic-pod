@@ -10,6 +10,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/aic-pod/libs/vcore"
 )
 
 // fsChannelLabel 是 fs 数据通道的协商标签（页面 createDataChannel("fs")）。
@@ -27,6 +28,10 @@ const fsChannelLabel = "fs"
 //	      {id, op:"readbin", args{path, off?, len?}}——readbin 是直连控制台私有
 //	      op（2026-09-10，不属于 fs 指令集）：原始字节的唯一出口，供预览/下载
 //	      大二进制（视频等）；执行体 = vcore.ReadBin（fsauth 同一判定实例）。
+//	      {id, op:"writebin", args{path, size?}}——writebin 是写方向私有 op
+//	      （2026-09-12，与 readbin 对称）：text/chunk 载荷 = 文件字节的 base64
+//	      （≤inlineLimit 随 head 内联 text；超限 stream:true + chunk×N + end），
+//	      设备端重组解码后经 vcore.WriteBin 整文件落盘（fsauth write 级判定）。
 //	响应：{id, op:"result", ok:true, data:{content,attrs}}（≤inlineLimit 内联）；
 //	      超限则 stream:true + chunk×N + end（data 为重组后的 JSON 文本）；
 //	      错误：{op:"result", ok:false, error, state}（state = proto.StateOf）。
@@ -66,8 +71,9 @@ type fsFrame struct {
 
 // streamBuf 是一个请求/响应的 chunk 重组缓冲。
 type streamBuf struct {
-	args json.RawMessage // fs 请求头携带的参数（不含 content）
+	args json.RawMessage // 请求头携带的参数（fs 不含 content；writebin 为 args{path}）
 	buf  []byte
+	bin  bool // writebin 流：end 时走 executeWriteBin（base64 解码）而非 fs 注回
 }
 
 // fsChannel 是一个已协商 DataChannel 的服务状态机。
@@ -140,6 +146,16 @@ func (ch *fsChannel) onFrame(f *fsFrame) {
 	case "readbin":
 		// 直连控制台私有 op（非 fs 指令集）：参数恒小载荷，无流式请求形态
 		go ch.executeBin(f.ID, f.Args)
+	case "writebin":
+		// 写方向私有 op（2026-09-12）：text 内联载荷，或先收 head（stream:true）
+		// 再 chunk×N + end（载荷 = 文件字节 base64）
+		if f.Stream {
+			ch.mu.Lock()
+			ch.streams[f.ID] = &streamBuf{args: f.Args, bin: true}
+			ch.mu.Unlock()
+			return
+		}
+		go ch.executeWriteBin(f.ID, f.Args, f.Text)
 	case "chunk":
 		ch.mu.Lock()
 		if sb, ok := ch.streams[f.ID]; ok {
@@ -152,6 +168,10 @@ func (ch *fsChannel) onFrame(f *fsFrame) {
 		delete(ch.streams, f.ID)
 		ch.mu.Unlock()
 		if !ok {
+			return
+		}
+		if sb.bin {
+			go ch.executeWriteBin(f.ID, sb.args, string(sb.buf))
 			return
 		}
 		go ch.execute(f.ID, injectContent(sb.args, string(sb.buf)))
@@ -243,6 +263,55 @@ func (ch *fsChannel) executeBin(id string, raw json.RawMessage) {
 		}
 	}
 	_ = ch.sendFrame(&fsFrame{ID: id, Op: "end"})
+}
+
+// ---- writebin（2026-09-12，直连控制台私有 op，写方向，与 readbin 对称） ----
+
+// writebinArgs 是 writebin op 的参数：path 必填；size = 文件字节数（信息位，
+// 供设备端预检；最终以解码后字节为准）。
+type writebinArgs struct {
+	Path string `json:"path"`
+	Size int64  `json:"size,omitempty"`
+}
+
+// executeWriteBin 把 base64 文本载荷解码为原始字节整写入文件（vcore.WriteBin，
+// fsauth write 级判定照常；deny 恒拒）。载荷内联（head.text ≤inlineLimit）或
+// 流式（stream:true 先到 + chunk×N + end，重组后整体解码）两种形态。
+func (ch *fsChannel) executeWriteBin(id string, raw json.RawMessage, b64 string) {
+	var a writebinArgs
+	if err := json.Unmarshal(raw, &a); err != nil || a.Path == "" {
+		_ = ch.sendFrame(&fsFrame{ID: id, Op: "result", OK: false, Error: "writebin: invalid args (path required)"})
+		return
+	}
+	if a.Size > vcore.MaxWriteBinBytes {
+		_ = ch.sendFrame(&fsFrame{ID: id, Op: "result", OK: false,
+			Error: fmt.Sprintf("writebin: size %d exceeds max %d", a.Size, vcore.MaxWriteBinBytes)})
+		return
+	}
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		_ = ch.sendFrame(&fsFrame{ID: id, Op: "result", OK: false, Error: "writebin: bad base64 payload"})
+		return
+	}
+	n, err := ch.svc.cfg.WriteBin(a.Path, data)
+	if err != nil {
+		_ = ch.sendFrame(&fsFrame{ID: id, Op: "result", OK: false,
+			Error: err.Error(), State: string(proto.StateOf(err))})
+		return
+	}
+	payload, err := json.Marshal(&vcore.Result{
+		Content: fmt.Sprintf("wrote file: %s (%d bytes)", a.Path, n),
+		Attrs: map[string]string{
+			"bytes": fmt.Sprint(n),
+			"size":  fmt.Sprint(n),
+			"path":  a.Path,
+		},
+	})
+	if err != nil {
+		_ = ch.sendFrame(&fsFrame{ID: id, Op: "result", OK: false, Error: fmt.Sprintf("marshal result: %v", err)})
+		return
+	}
+	_ = ch.sendFrame(&fsFrame{ID: id, Op: "result", OK: true, Data: payload})
 }
 
 // injectContent 把流式重组的 content 注回 fs 参数（write action 的大载荷）。

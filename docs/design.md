@@ -31,7 +31,7 @@ aic-pod/
 │   ├── fsauth/           # 文件授权：fs 域判定（policy/deny/allow、内置根、会话临时 grant、env 清洗）
 │   ├── netauth/          # 网络授权：net 域出站闸（deny/allow、localhost 内建、沙箱网络规则）
 │   ├── rtc/              # WebRTC 直连应答（2026-09-10）：单 UDP mux + mDNS 解析 + DataChannel
-│   │                     #   鉴权帧 + fs 帧协议 + readbin 二进制字节出口（预览/下载，见 design.md「协议」节）
+│   │                     #   鉴权帧 + fs 帧协议 + readbin/writebin 二进制字节出入口（预览/下载/二进制写入，见 design.md「协议」节）
 │   └── exec_procs/       # 子进程统一托管：沙箱包装（seatbelt/bwrap/受限令牌）+ 日志落盘 +
 │                         #   请求超时自动后台化 + bg_list/bg_wait/bg_kill + 进程组终止
 │
@@ -193,7 +193,7 @@ c.RegisterCommand(proto.CommandDecl{
 | `libs/host` | host agent 运行时：NATS 连接（TokenHandler 动态签发连接 token）/重连（republish caps）/认证失败处理、caps v2 发布、20s 心跳、请求分发（验签→deadline→nonce 去重→granted_level 纵深检查）、统一命令声明表构建、fs/exec/browser/bg_* 路由、配置模型（Config/解析链/原子持久化）、Runner（host 会话生命周期，cli/desktop 共用）。 |
 | `libs/vcore` | 虚拟指令引擎：命令声明表与分级表同包维护（meta.go/levels.go）、curl/json 等虚拟指令与 fs 8 action 实现、git/browser/cua/ssh/scp 元数据与动态分级、OS VFS 适配接口（OSVFS/memvfs）、argv 双层解析、图片尺寸/压缩。 |
 | `libs/fsauth` | 文件授权：fs 域判定（policy/deny/allow 匹配、内置根、会话级临时 grant、沙箱 deny 模式展开、env 敏感变量清洗）。 |
-| `libs/rtc` | RTC 直连应答（2026-09-10）：pion/webrtc 集成——单 UDP mux、mDNS QueryOnly、信令处理（offer/answer/trickle）、DataChannel 鉴权帧、fs 帧协议服务（chunk 流式 + backpressure）+ readbin 二进制字节出口（vcore.ReadBin，预览/下载用）。 |
+| `libs/rtc` | RTC 直连应答（2026-09-10）：pion/webrtc 集成——单 UDP mux、mDNS QueryOnly、信令处理（offer/answer/trickle）、DataChannel 鉴权帧、fs 帧协议服务（chunk 流式 + backpressure）+ readbin/writebin 二进制字节出入口（vcore.ReadBin/WriteBin，预览/下载与二进制写入用）。 |
 | `libs/netauth` | 网络授权：net 域出站判定（deny 恒优先于 allow、localhost 内建、具体度排序、沙箱网络规则生成）。 |
 | `libs/exec_procs` | 子进程统一托管 + 沙箱：seatbelt/bubblewrap/受限令牌包装（按等级选 profile、env 清洗、资源限制、网络闸，无可用后端 fail-closed）、stdout+stderr 合并落盘、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
 | `api` | 本地管理 API：包级 Router（security 中间件 + common.JsonResponse/JsonErrorResponse 统一响应），127.0.0.1 随机端口 + local_code 通道（端点 ping/get_config/set_config/bind/unbind/get_status/get_log/start/stop + /settings 设置页静态资源）；host 会话生命周期自持（libs/host Runner，Init(deviceType, version) 创建，Start 时自动连接已绑定设备）；外链由壳页面处理（Electron 系统浏览器 IPC / 浏览器壳新标签，平台页 local_handler 拦截后 postMessage 转交）；有效配置读写 cfg.Global，get_log 读日志文件尾部。 |
@@ -243,7 +243,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 - 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req.{sid}`（工具请求，§6.1 v4——sid 段定向，信封 SessionID 一致；run_tool 无会话直发用 manual 占位）
 - 即时发布 CAPS → 定时心跳（20s）→ 单订阅 inbox（`u.{uid}.h.host_{host_id}.>`）→ 验签执行 → req-reply 回复
 
-**RTC 直连（2026-09-10，§6.4）**：owner 页面与设备的 WebRTC DataChannel 直连（https 页面不受混合内容限制——非 HTTP 子资源，UDP+DTLS，身份锚点 = 认证信令交换的 SDP 指纹，无需 CA 证书）。host 为纯应答方：caps 上报 `mgmt{code, rtc:true}`（服务端缓存 `mgmt_code` 透出 owner 域）；信令入向复用通配 inbox（`rtc.in`），出向 `u.{uid}.h.{host_id}.{cred_ver}.rtc`（natsauth pub allow 放行）；`libs/rtc` 单 UDP mux（随机端口）+ mDNS QueryOnly（解析浏览器 `.local` 化名候选）+ 鉴权帧（code，5 次失败锁 1 分钟）+ fs 帧协议（vcore.RunFS 复用，granted=9 本地控制台信任级，fsauth deny 照常生效）+ `readbin` 二进制字节出口（vcore.ReadBin，256MB 上限，预览/下载视频等大文件用）。
+**RTC 直连（2026-09-10，§6.4）**：owner 页面与设备的 WebRTC DataChannel 直连（https 页面不受混合内容限制——非 HTTP 子资源，UDP+DTLS，身份锚点 = 认证信令交换的 SDP 指纹，无需 CA 证书）。host 为纯应答方：caps 上报 `mgmt{code, rtc:true}`（服务端缓存 `mgmt_code` 透出 owner 域）；信令入向复用通配 inbox（`rtc.in`），出向 `u.{uid}.h.{host_id}.{cred_ver}.rtc`（natsauth pub allow 放行）；`libs/rtc` 单 UDP mux（随机端口）+ mDNS QueryOnly（解析浏览器 `.local` 化名候选）+ 鉴权帧（code，5 次失败锁 1 分钟）+ fs 帧协议（vcore.RunFS 复用，granted=9 本地控制台信任级，fsauth deny 照常生效）+ `readbin`/`writebin` 二进制字节出入口（vcore.ReadBin/WriteBin，256MB 上限，预览/下载与二进制写入用）。
 
 ## 外部扩展
 

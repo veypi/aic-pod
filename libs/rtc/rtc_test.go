@@ -19,7 +19,8 @@ import (
 
 // 环路对测：进程内 pion offerer（模拟页面）+ Service 应答方，走真实
 // UDP/DataChannel 全链路——信令路由、鉴权帧（正/误）、内联结果、
-// 流式结果（>inlineLimit 重组）、流式写（chunk 重组注回 content）。
+// 流式结果（>inlineLimit 重组）、流式写（chunk 重组注回 content）、
+// readbin/writebin 二进制通道对测。
 
 // testClient 是页面侧的最小帧客户端。
 type testClient struct {
@@ -30,7 +31,7 @@ type testClient struct {
 	waiters  map[string]chan *fsFrame // 终态帧投递（result/auth_ok/auth_err）
 	streams  map[string]*strings.Builder
 	heads    map[string]*fsFrame // 流式响应的 head 帧（attrs/bin 标记经 end 带出）
-	files    map[string][]byte // readbin 桩的文件集
+	files    map[string][]byte   // readbin 桩的文件集
 	lastAuth *fsFrame
 }
 
@@ -48,6 +49,22 @@ func (tc *testClient) putFile(path string, data []byte) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	tc.files[path] = data
+}
+
+// getFile 取（writebin 桩写入后的）文件字节副本。
+func (tc *testClient) getFile(path string) []byte {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return append([]byte(nil), tc.files[path]...)
+}
+
+// serveWriteBin 是注入 Service 的 writebin 桩：把解码后的字节存入 files
+// （写盘语义由 vcore.WriteBin 用例覆盖，通道层只验载荷精确与路由）。
+func (tc *testClient) serveWriteBin(path string, data []byte) (int, error) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.files[path] = append([]byte(nil), data...)
+	return len(data), nil
 }
 
 // serveReadBin 是注入 Service 的 readbin 桩：从 files 按区间取字节（复刻
@@ -77,8 +94,8 @@ func setup(t *testing.T, code string, runFS func(context.Context, json.RawMessag
 	tc := newTestClient()
 	svc, err := New(Config{
 		Code: code, HostID: "host_test", Hostname: "testbox", Version: "v0.0.0-test",
-		Send: func(*proto.RtcSignal) {}, // 建连前由下方回调替换为直路由
-		RunFS: runFS, ReadBin: tc.serveReadBin, Logf: func(string, ...any) {},
+		Send:  func(*proto.RtcSignal) {}, // 建连前由下方回调替换为直路由
+		RunFS: runFS, ReadBin: tc.serveReadBin, WriteBin: tc.serveWriteBin, Logf: func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatalf("rtc New: %v", err)
@@ -500,5 +517,106 @@ func TestRTCReadBinConcurrent(t *testing.T) {
 	}
 	if respA.Attrs["size"] != fmt.Sprint(len(a)) || respB.Attrs["size"] != fmt.Sprint(len(b)) {
 		t.Fatalf("attrs: A=%+v B=%+v", respA.Attrs, respB.Attrs)
+	}
+}
+
+// ---- writebin 通道对测（2026-09-12）：内联/流式 base64 精确还原、错误帧 ----
+
+// callWriteBin 发 writebin 请求（>inlineLimit 自动走 chunk 流）并等结果帧。
+func (tc *testClient) callWriteBin(t *testing.T, id, path string, payload []byte) *fsFrame {
+	t.Helper()
+	b64 := base64.StdEncoding.EncodeToString(payload)
+	rawArgs, _ := json.Marshal(map[string]any{"path": path, "size": len(payload)})
+	head := map[string]any{"id": id, "op": "writebin", "args": json.RawMessage(rawArgs)}
+	stream := len(b64) > frameInlineLimit
+	if stream {
+		head["stream"] = true
+	} else {
+		head["text"] = b64
+	}
+	ch := tc.register(id)
+	raw, _ := json.Marshal(head)
+	tc.sendFrame(t, raw)
+	if stream {
+		for seq, off := 0, 0; off < len(b64); seq, off = seq+1, off+frameChunkSize {
+			end := off + frameChunkSize
+			if end > len(b64) {
+				end = len(b64)
+			}
+			cf, _ := json.Marshal(fsFrame{ID: id, Op: "chunk", Seq: seq, Text: b64[off:end]})
+			tc.sendFrame(t, cf)
+		}
+		ef, _ := json.Marshal(fsFrame{ID: id, Op: "end"})
+		tc.sendFrame(t, ef)
+	}
+	return tc.await(t, ch)
+}
+
+func TestRTCWriteBinInline(t *testing.T) {
+	_, tc := setup(t, "secret-code", stubRunFS(false))
+	tc.auth(t, "secret-code")
+	payload := []byte{0x89, 0x50, 0x4E, 0x47, 0x00, 0xFE, 0xFF} // PNG 魔数头 + 不可打印字节
+	resp := tc.callWriteBin(t, "w1", "/out.png", payload)
+	if !resp.OK {
+		t.Fatalf("writebin failed: %s", resp.Error)
+	}
+	// 线上契约断言（同 call()）：result 载荷必须含小写 "content" 键
+	if !strings.Contains(string(resp.Data), `"content"`) {
+		t.Fatalf("wire contract broken: writebin result must carry lowercase \"content\" key, got: %s", resp.Data)
+	}
+	if got := tc.getFile("/out.png"); !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch: got %v want %v", got, payload)
+	}
+	var res vcore.Result
+	if err := json.Unmarshal(resp.Data, &res); err != nil {
+		t.Fatalf("unmarshal writebin result: %v", err)
+	}
+	if res.Attrs["bytes"] != fmt.Sprint(len(payload)) || res.Attrs["path"] != "/out.png" {
+		t.Fatalf("attrs: %+v", res.Attrs)
+	}
+}
+
+func TestRTCWriteBinStreamed(t *testing.T) {
+	_, tc := setup(t, "secret-code", stubRunFS(false))
+	tc.auth(t, "secret-code")
+	payload := make([]byte, 100<<10) // 100KB 全字节值循环 → base64 远超 inlineLimit
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	resp := tc.callWriteBin(t, "w2", "/big.bin", payload)
+	if !resp.OK {
+		t.Fatalf("writebin failed: %s", resp.Error)
+	}
+	if got := tc.getFile("/big.bin"); !bytes.Equal(got, payload) {
+		t.Fatalf("streamed payload mismatch: got %d bytes", len(got))
+	}
+}
+
+func TestRTCWriteBinBadBase64(t *testing.T) {
+	_, tc := setup(t, "secret-code", stubRunFS(false))
+	tc.auth(t, "secret-code")
+	ch := tc.register("w3")
+	rawArgs, _ := json.Marshal(map[string]any{"path": "/x.bin"})
+	raw, _ := json.Marshal(fsFrame{ID: "w3", Op: "writebin", Args: rawArgs, Text: "!!!"})
+	tc.sendFrame(t, raw)
+	resp := tc.await(t, ch)
+	if resp.OK || !strings.Contains(resp.Error, "base64") {
+		t.Fatalf("want base64 error frame, got %+v", resp)
+	}
+	if got := tc.getFile("/x.bin"); got != nil {
+		t.Fatalf("bad payload must not write: %v", got)
+	}
+}
+
+func TestRTCWriteBinInvalidArgs(t *testing.T) {
+	_, tc := setup(t, "secret-code", stubRunFS(false))
+	tc.auth(t, "secret-code")
+	ch := tc.register("w4")
+	rawArgs, _ := json.Marshal(map[string]any{})
+	raw, _ := json.Marshal(fsFrame{ID: "w4", Op: "writebin", Args: rawArgs, Text: "AAAA"})
+	tc.sendFrame(t, raw)
+	resp := tc.await(t, ch)
+	if resp.OK || !strings.Contains(resp.Error, "invalid args") {
+		t.Fatalf("want invalid args frame, got %+v", resp)
 	}
 }
