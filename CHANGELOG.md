@@ -5,7 +5,7 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
-## 未发布 — 2026-09-14
+## v0.6.5 — 2026-09-15
 
 ### 变更
 
@@ -25,6 +25,36 @@
   `remote-preload` 删本地设置页分支与 `hostLayout/onOpenHost/onHostClosed`
   （`allowed:hosts` 只下发平台 host 数组）；`settings:close` 变为关窗口。设置页
   「获取」（探测 + 主窗跳 /hosts、配置窗保留）与「关闭」按钮行为不变。
+
+- **windows 盘符虚拟根 + 路径归一收口（行为变更）**（`libs/host/osvfs.go` 重设计 +
+  `libs/proto/path.go` + `libs/vcore/{env,ls,rg}.go` + `libs/fsauth/fsauth.go` +
+  `libs/host/dispatch.go`；设计 = aic/docs/instruction_sets_v2.md §2.1.1 盘符路径一节，
+  实施记录 = docs/host_sandbox.md §13）：win host 的 `/` 从「当前盘根」改为虚拟挂载
+  根（`ls /` = 盘符列表、不递归；`rg /` 拒绝；`/` 上文件操作与非盘符绝对路径报错）；
+  规范形 `C:/…`（盘符字母大写，裸 `C:` = 盘符根）；输入容错归一（`C:\…`、
+  `/C:/…`、`//C:` 多斜杠前缀 → `C:/…`）收口于 `proto.NormalizeDrivePath` 单一纯函数
+  （`ResolvePath` 主入口 + `OSVFS.winToOS` 执行层兜底共用——绝对路径先 `path.Clean`
+  折叠多斜杠再判盘符形，归一结果中 `//C:`、`/C:` 形态不存在）；`rm /`/`mv /`
+  与盘符根全部命中根保护（补 `rm /` 删当前盘根漏洞；`//C:` 多斜杠曾绕过等值比较——
+  规则层见 `/C:`、执行层见 `C:\`，归一共用后消除）；`fsauth.canonical` 裸盘符按盘根
+  展开。测试：proto 向量（含多斜杠前缀）/ winToOS 纯函数向量 / vcore 虚拟根行为 /
+  fsauth 裸盘符 / `rm /`、`//C:` 绕过回归向量；darwin 全绿 + windows/linux 交叉编译
+  通过，真机行为待 win 验证。
+
+- **worker 保活窗口 + 本地配置窗原地重载**（`desktop/main.js`；平台侧配套 = aic 仓
+  `ui/worker-keep.html`，go:embed——**发布顺序：先平台后桌面**，否则保活页 404 静默
+  失效）：平台页是 nc SharedWorker 的唯一客户端，平台页刷新（Cmd+R）会销毁 worker/WS
+  使整条 nc 通道冷启动；新增隐藏常驻窗口 `keepWorkerAlive` 加载平台根路径
+  `/worker-keep.html`（同 URL 共享同一 SharedWorker 实例并持端口），worker/WS 跨平台页
+  刷新保持存活；渲染进程崩溃原地重载、网络级失败 10s 重试（重试前比对当前期望地址，
+  防切换平台后旧定时器拉回旧地址）。bind/unbind 成功后 `reloadSettingsIfOpen` 原地重载
+  本地配置窗（展示 pod 侧最新凭证/连接状态）。
+
+- **默认平台地址迁移至 ivec-ai.com**（`cfg/config.go` 默认值 + `Dockerfile` + `README` +
+  浏览器扩展设置页 + browser SDK 兜底；本地 API CORS 信任名单与 desktop 平台白名单
+  保留旧域 `ivec.ai` 兼容）：WS 握手不跟 301（旧域 301 重定向会使 NATS wss 握手报
+  `invalid websocket connection`），默认 host 必须直连 `ivec-ai.com`；纯默认值替换，
+  不做旧配置迁移。
 
 ## v0.6.4 — 2026-09-14
 
