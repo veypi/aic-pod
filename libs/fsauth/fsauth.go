@@ -35,6 +35,8 @@ package fsauth
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -355,13 +357,27 @@ func compileDeny(pats []string) []string {
 // Canonical 导出 canonical（包外少量场景用：grant fs 落盘幂等比较等）。
 func Canonical(p string) string { return canonical(p) }
 
+// bareDriveRe 匹配裸盘符形态（"C:"）。
+var bareDriveRe = regexp.MustCompile(`^[A-Za-z]:$`)
+
+// isBareDrive 报告 p 是否为 windows 裸盘符（非 windows 恒 false——posix 上
+// "C:" 是普通相对路径名，不做特殊处理）。
+func isBareDrive(p string) bool {
+	return runtime.GOOS == "windows" && bareDriveRe.MatchString(p)
+}
+
 // canonical 展开符号链接到真实文件系统身份：EvalSymlinks 逐级向父目录回退
 // （目标不存在时展开最近存在祖先，剩余路径原样拼接——写新文件场景）。
 // 反斜杠归一为 /（匹配器统一斜杠语义）。
 // 递归到文件系统根基（/ 或 C:\）时直接返回原路径：根基无可展开项，且
 // TrimSuffix 根基分隔符得空串/盘符，继续递归会退化成相对路径（"./x" 或
 // 盘符相对形态），使绝对路径判定脱离绝对口径。
+// windows 裸盘符（"C:"）先补为盘根（"C:\"）再展开：EvalSymlinks 对裸盘符
+// 是盘符当前目录语义，权限判定必须按盘根口径（与 ProtectRoots 的 "C:" 可比）。
 func canonical(p string) string {
+	if isBareDrive(p) {
+		p += `\`
+	}
 	p = filepath.Clean(p)
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return filepath.ToSlash(r)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -204,6 +206,78 @@ func normLsNode(v any) {
 		nj, _ := items[j].(map[string]any)["name"].(string)
 		return ni < nj
 	})
+}
+
+// winToOS 固定向量（纯函数，跨平台可测）：盘符规范形 → Windows OS 路径。
+func TestWinToOSVectors(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"C:", `C:\`},  // 裸盘符 = 盘符根（严格语义）
+		{"C:/", `C:\`}, // 盘根斜杠形
+		{"C:/x/y", `C:\x\y`},
+		{`C:\x`, `C:\x`}, // 反斜杠容错
+		{"/C:", `C:\`},   // 前导斜杠+盘符形兑底
+		{"/C:/x", `C:\x`},
+		{`/C:\x`, `C:\x`},
+		{"c:/x", `C:\x`}, // 盘符字母大写
+		{"c:", `C:\`},
+		{"//C:", `C:\`}, // 多斜杠前缀（共用 proto.NormalizeDrivePath 归一）
+		{"//C:/x", `C:\x`},
+		{"///C:/x", `C:\x`},
+		{"C://x", `C:\x`}, // 盘符形内部多斜杠折叠
+	}
+	for _, c := range cases {
+		got, err := winToOS(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("winToOS(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+	// 虚拟根与非盘符绝对路径 / 相对路径一律报错
+	for _, in := range []string{"/", "/x", "/C:foo", "rel", ""} {
+		if _, err := winToOS(in); err == nil {
+			t.Errorf("winToOS(%q) should fail", in)
+		}
+	}
+	if _, err := winToOS("/"); !errors.Is(err, errVirtualRoot) {
+		t.Errorf("winToOS(\"/\") err = %v, want errVirtualRoot", err)
+	}
+}
+
+// 虚拟根节点：ReadDir 条目为合成目录（Info 非 nil、size/mtime 零值）。
+func TestDriveEntries(t *testing.T) {
+	entries := driveEntries([]string{"C:", "D:"})
+	if len(entries) != 2 || entries[0].Name() != "C:" || entries[1].Name() != "D:" {
+		t.Fatalf("entries = %v", entries)
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Type()&fs.ModeDir == 0 {
+			t.Errorf("%s should be dir", e.Name())
+		}
+		fi, err := e.Info()
+		if err != nil || fi == nil || !fi.IsDir() || fi.Size() != 0 {
+			t.Errorf("%s Info = %v, %v", e.Name(), fi, err)
+		}
+		if fi != nil && fi.ModTime().Unix() != 0 {
+			t.Errorf("%s ModTime = %v, want unix 0", e.Name(), fi.ModTime())
+		}
+	}
+	root := virtualDir("/")
+	if root.Name() != "/" || !root.IsDir() {
+		t.Errorf("virtual root = %v", root)
+	}
+}
+
+// filesystemRoots：windows 追加虚拟根 "/"（rm / 必须拒）；非 windows 恒 ["/"]。
+func TestFilesystemRoots(t *testing.T) {
+	roots := filesystemRoots()
+	if runtime.GOOS == "windows" {
+		if roots[len(roots)-1] != "/" || roots[0] != "C:" {
+			t.Fatalf("windows roots = %v, want [C: … /]", roots)
+		}
+	} else if len(roots) != 1 || roots[0] != "/" {
+		t.Fatalf("roots = %v", roots)
+	}
 }
 
 // subVFS 将逻辑绝对路径重写到子树下的测试适配（避免污染真实文件系统）。

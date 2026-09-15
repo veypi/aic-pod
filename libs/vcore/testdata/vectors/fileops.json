@@ -65,6 +65,22 @@
       "expectError": "rm: cannot remove root directory C:"
     },
     {
+      "name": "rm virtual root protection",
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "/", "recursive": true},
+      "protectRoots": ["C:", "/"],
+      "files": {},
+      "expectError": "rm: cannot remove root directory /"
+    },
+    {
+      "name": "rm drive root protection (multi-slash input normalized)",
+      "cmd": "fs",
+      "params": {"action": "rm", "path": "//C:", "recursive": true},
+      "protectRoots": ["C:", "/"],
+      "files": {},
+      "expectError": "rm: cannot remove root directory C:"
+    },
+    {
       "name": "cp file",
       "cmd": "fs",
       "params": {"action": "cp", "src": "/a.txt", "dst": "/b.txt"},
@@ -154,6 +170,22 @@
       "protectRoots": ["/users/u1"],
       "files": {"/users/u1/a.txt": "a"},
       "expectError": "mv: cannot move root directory /users/u1"
+    },
+    {
+      "name": "mv virtual root protection",
+      "cmd": "fs",
+      "params": {"action": "mv", "src": "/", "dst": "/elsewhere"},
+      "protectRoots": ["C:", "/"],
+      "files": {},
+      "expectError": "mv: cannot move root directory /"
+    },
+    {
+      "name": "mv drive root protection (multi-slash input normalized)",
+      "cmd": "fs",
+      "params": {"action": "mv", "src": "//C:", "dst": "/elsewhere"},
+      "protectRoots": ["C:", "/"],
+      "files": {},
+      "expectError": "mv: cannot move root directory C:"
     }
   ]
 }

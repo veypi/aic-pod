@@ -175,6 +175,15 @@ var skipDirs = map[string]bool{
 	".next": true, ".nuxt": true, "coverage": true, ".turbo": true, ".output": true,
 }
 
+// checkRgVirtualRoot 拒绝从虚拟挂载根（windows 盘符列表根）发起的 rg：
+// 递归遍历全部盘符无界（rgWalk 无节点上限），必须指定盘符路径。
+func checkRgVirtualRoot(env *Env, abs string) error {
+	if env.VirtualRoot && abs == "/" {
+		return fsErr("rg", `path "/" is a virtual drive list on this host; specify a drive path (e.g. C:/)`)
+	}
+	return nil
+}
+
 func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	// glob：! 前缀 = 排除 glob（合法）；** 仍受限（跨目录语义不实现）
 	for _, g := range p.Glob {
@@ -230,6 +239,9 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	abs, err := env.Resolve(target)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
+	}
+	if err := checkRgVirtualRoot(env, abs); err != nil {
+		return nil, err
 	}
 	if err := env.CheckPath("rg", abs); err != nil {
 		return nil, err
@@ -291,7 +303,7 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 			if next > 0 {
 				next--
 			}
-			if err := rgWalkDepth(ctx, env, dir+"/"+name, globs, hidden, fn, next); err != nil {
+			if err := rgWalkDepth(ctx, env, joinSub(dir, name), globs, hidden, fn, next); err != nil {
 				return err
 			}
 			continue
@@ -300,7 +312,7 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 			continue
 		}
 		if globOK(globs, name) {
-			fn(dir + "/" + name)
+			fn(joinSub(dir, name))
 		}
 	}
 	return nil
@@ -342,6 +354,9 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	abs, err := env.Resolve(target)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
+	}
+	if err := checkRgVirtualRoot(env, abs); err != nil {
+		return nil, err
 	}
 	if err := env.CheckPath("rg", abs); err != nil {
 		return nil, err

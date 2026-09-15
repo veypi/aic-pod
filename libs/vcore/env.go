@@ -27,6 +27,10 @@ type Env struct {
 	// ProtectRoots 是 rm/mv 的根目录硬保护列表（§5.4：cloud 会话空间根 / 物理 host 文件系统根）。
 	// 命中返回 DeniedError，不可审批绕过。
 	ProtectRoots []string
+	// VirtualRoot 为 true 时 VFS 根 "/" 是虚拟挂载列表（windows 盘符根）：
+	// ls 根层挂载条目不递归（仅显示，进入需显式 ls 该盘符，防 tree 默认深度
+	// 递归进全部盘符）；rg 拒绝 path="/"（遍历全部盘符无界，须指定盘符路径）。
+	VirtualRoot bool
 	// Fetcher 是 curl 的 HTTP 获取器（SSRF 等策略由引入方注入）；nil = curl 不可用。
 	Fetcher Fetcher
 	// Tasks 是托管任务运行器（curl 无 -o 等长输出/长耗时指令）：输出落盘日志、

@@ -178,6 +178,7 @@ func (c *Client) newEnv(sid, workdir string) *vcore.Env {
 		VFS:          OSVFS{},
 		Workdir:      workdir,
 		ProtectRoots: filesystemRoots(),
+		VirtualRoot:  runtime.GOOS == "windows",        // windows "/" = 盘符挂载列表（虚拟根）
 		Fetcher:      shellCurlFetcher{c: c, sid: sid}, // 外部 http(s) 走真 curl + 统一沙箱（net 域出站闸）
 		ImageData:    true,                             // host 端图片经 image_data 返回（§2.2）
 		Policy:       c.policy.View(sid),

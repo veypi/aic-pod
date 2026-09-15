@@ -38,6 +38,15 @@ var lsSkipDirs = map[string]bool{
 	".next": true, ".nuxt": true, "coverage": true, ".turbo": true, ".output": true,
 }
 
+// joinSub 拼接子路径：dir 以 / 结尾（根 "/"）时不重复分隔符——
+// 否则 windows 虚拟根下会拼出 "//C:" 非法路径。
+func joinSub(dir, name string) string {
+	if strings.HasSuffix(dir, "/") {
+		return dir + name
+	}
+	return dir + "/" + name
+}
+
 type lsEntry struct {
 	Name    string     `json:"name"`
 	Dir     bool       `json:"dir"`
@@ -112,7 +121,12 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		items = []lsEntry{} // 截断早退也输出 []（与 JS 端恒数组一致）
 	}
 	sortLsEntries(items)
-	isRepo, branch := gitRepoInfo(env, abs)
+	// 虚拟挂载根（win 盘符列表）顶层同样跳过 .git 探测——"/.git" 在 win 为非法路径
+	//（buildLsDir 内已按 atVirtualRoot 跳过条目级探测，此处兜顶层）
+	isRepo, branch := false, ""
+	if !(env.VirtualRoot && abs == "/") {
+		isRepo, branch = gitRepoInfo(env, abs)
+	}
 	out := lsDirOut{Branch: branch, Cwd: abs, Dir: true, IsRepo: isRepo, Items: items, Truncated: st.truncated}
 	b, _ := json.Marshal(out)
 	r.Content = string(b)
@@ -144,18 +158,22 @@ func buildLsDir(ctx context.Context, env *Env, dir string, remain int, all bool,
 		if !all && name[0] == '.' {
 			continue
 		}
-		full := dir + "/" + name
+		full := joinSub(dir, name)
 		var size, mt int64
 		if fi, _ := e.Info(); fi != nil {
 			size, mt = fi.Size(), fi.ModTime().Unix()
 		}
 		ent := lsEntry{Name: name, Dir: e.IsDir(), Size: size, ModTime: mt}
-		if ent.Dir {
+		// 虚拟根（windows 盘符挂载列表）的根层条目 = 盘符：不做 .git 探测，
+		// 也不递归（tree 默认深度会递归进全部盘符，IO 无界且必撞节点上限）——
+		// 仅显示，进入需显式 ls 该盘符。
+		atVirtualRoot := env.VirtualRoot && dir == "/"
+		if ent.Dir && !atVirtualRoot {
 			ent.IsRepo, ent.Branch = gitRepoInfo(env, full)
 		}
 		st.count++
 		if e.IsDir() {
-			skipDescend := lsSkipDirs[name]
+			skipDescend := lsSkipDirs[name] || atVirtualRoot
 			if remain > 1 && !skipDescend && !st.truncated {
 				sub := buildLsDir(ctx, env, full, remain-1, all, st)
 				ent.Items = &sub // 已展开（空目录为 []），与"未展开省略 items"区分

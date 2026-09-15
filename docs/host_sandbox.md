@@ -459,3 +459,18 @@ netauth 向量（ParseEntry 归一/通配主机拒绝/Allowed 三判定式/内�
 - linux bwrap：并入 `coveredByOverride`（当前 no-op——deny 实例化对 `**` 开头模式 $HOME 锚定，系统路径本不在覆盖内；并入为对齐/未来防护）。
 
 **验证**：seatbelt 形态断言（`TestSeatbeltSystemCAReadAllow`：allow 在 deny 之后、写级也无 write allow、零值无输出）+ `TestSystemCAReadPatterns` 平台清单（含 canonical 形态）；行为实测：沙箱内 `curl https://…`（默认 CA）直 200。
+
+## 13. 实施记录：windows 盘符虚拟根 + 路径归一收口（2026-09-15）
+
+**背景问题**：旧模型 win host 的 `/` = 当前盘根，多盘只能靠 `C:/D:/…` 绝对路径直达；前端树路径把盘符段拼出 `/C:/…`，host 端盘符识别失效（`toOS` 拼出 `\C:\…` 非法路径）——链接点开必失败；且 `rm /` 不命中任何根保护（`toOS("/")` = 当前盘根 RemoveAll）。
+
+**路径模型（重新设计，无兼容包袱）**：
+
+- **规范形 = `C:/…`**（正斜杠 + 盘符冒号，盘符字母大写；裸 `C:` = 盘符根，严格语义）——与 exec/PowerShell 输出同形，AI 在 exec/fs 间复制零翻译。`C:foo` 盘符相对形态不是盘符路径（proto 归为相对路径）；
+- **`/` = 虚拟挂载根**：`OSVFS.ReadDir("/")` 返回盘符挂载列表（`C:`、`D:`…，合成 `virtualDir` 条目，size/mtime 零值）、`Stat("/")` 返回合成目录信息；其余操作作用于 `/` 报 `errVirtualRoot`；非盘符绝对路径（`/x`）一律报错——「当前盘根」语义不复存在；
+- **归一收口 = 单一纯函数共用**：`proto.NormalizeDrivePath`（纯语法三端一致：`/C:`、`/C:/…`、`C:\…` → 盘符规范形 + 盘符字母大写；绝对路径先 `path.Clean` 折叠多斜杠再判盘符形——`//C:`、`///C:/x` 归一后不存在；`driveRe` 扩为 `^[A-Za-z]:([\\/]|$)` 支持裸盘符）——`ResolvePath` 主入口与 `OSVFS.winToOS` 执行层兜底共用本函数，双端结果一致、不按 GOOS 分叉（§2.1.1）；
+- **vcore.Env.VirtualRoot**（host 注入 `runtime.GOOS == "windows"`）：ls 根层盘符条目不递归、不做 .git 探测（仅显示，进入需显式 `ls C:`——tree 默认深度递归进全部盘符必撞节点上限）；rg 拒绝 `path="/"`（内容搜索与文件列举两模式同拒，提示用盘符路径）；
+- **根保护**：`filesystemRoots()` win = 盘符根列表 + `"/"`（`rm /`、`mv /` 命中 DeniedError）；多斜杠前缀（`//C:`）曾绕过等值比较（规则层见 `/C:`、执行层见 `C:\`）——归一共用后消除，回归向量锁定；`fsauth.canonical` 裸盘符先补盘根（`C:` → `C:\`）再 EvalSymlinks（裸盘符的盘符当前目录语义不适用于权限判定）；
+- **前端收口**（aic/ui/assets/libs）：`hfs.js resolvePath` 树路径 `/C:/…` → 物理 `C:/…`；`fs.js full()` 为树路径唯一拼接点——物理路径无前导斜杠（盘符 items path `C:/…/name`）时补回，所有端共用兜底。
+
+**测试**：proto 归一向量（裸盘符/前导斜杠/大小写/盘符相对形态）；`winToOS` 纯函数向量 + 虚拟根条目（跨平台）；vcore 虚拟根行为（ls 不递归 + rg 拒绝 + 盘符路径正常）；fsauth 裸盘符 canonical；hfs/fs 前端单测（归一 + items 物理形 + full() 收口）。windows 真机行为（盘符探测、ReadDir/Stat 合成节点）由 win host 验证。
