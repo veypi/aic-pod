@@ -55,6 +55,8 @@ let platformView = null // 平台页视图（恒占满 contentView；原生内�
 let aiBrowser = null // browser 壳通道（adapter.tabControl = 原生内容池控制面）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
 let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
+let keepWin = null // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
+let keepExpectedUrl = '' // keepWin 当前期望地址（did-fail-load 延迟重试的竞态护栏）
 let tray = null
 let backend = null
 let quitting = false
@@ -544,6 +546,14 @@ function closeSettings() {
   if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close()
 }
 
+// 绑定/解绑完成后：若本地配置窗口开着，原地重载（等价「重新打开这个界面」，
+// 展示 pod 侧最新凭证/连接状态）——配置页只在打开时取数，需要主进程这一推。
+function reloadSettingsIfOpen() {
+  try {
+    if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.reload()
+  } catch (_) { /* 窗口销毁竞态 */ }
+}
+
 // ---- IPC ----
 function registerIpc() {
   // 白名单下发（remote-preload 顶层 sendSync）：平台 host 列表
@@ -567,6 +577,8 @@ function registerIpc() {
       const r = await fetch(`http://127.0.0.1:${localPort}/api/${m}`, init)
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`)
+      // 平台页完成绑定/解绑 → 本地配置窗口（若开着）原地重载
+      if (m === 'bind' || m === 'unbind') reloadSettingsIfOpen()
       return d
     } catch (e) {
       throw new Error(e.message || String(e))
@@ -855,8 +867,49 @@ function layoutMain() {
 function loadMain(url) {
   if (!platformView) return
   platformView.webContents.loadURL(url)
+  keepWorkerAlive(url) // 保活窗口跟随平台地址：持 nc SharedWorker 端口，平台页刷新不再销毁 worker/WS
   mainWin?.show()
   mainWin?.focus()
+}
+
+// ---- worker 保活窗口 ----
+// nc 通道由 SharedWorker 持有（ui/assets/libs/nc.js → nc.worker.js，同源同 URL 共享同一实例），
+// 其生命周期 = 最后一个客户端端口断开即销毁。桌面端平台页是唯一客户端：平台页刷新（Cmd+R）
+// 会让 worker 连同 WS 一起销毁、整条 nc 通道冷启动。本窗口常驻加载 {base}/worker-keep.html
+//（该页仅 new SharedWorker 同 URL 并持端口），使 worker/WS 跨平台页刷新保持存活。
+// 部署依赖：平台需已提供该静态页（aic/ui/worker-keep.html，go:embed——先重启平台再重启本应用）。
+function keepWorkerAlive(base) {
+  // 保活页固定在平台根（go:embed 静态页位于根路径）——拼在 home_path 之后
+  //（非 / 时）会 404 且 HTTP 错误不触发 did-fail-load，保活静默失效
+  const url = new URL('/worker-keep.html', base).href
+  keepExpectedUrl = url
+  if (keepWin && !keepWin.isDestroyed()) {
+    if (keepWin.webContents.getURL() !== url) keepWin.loadURL(url)
+    return
+  }
+  keepWin = new BrowserWindow({
+    show: false,
+    skipTaskbar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false, // 隐藏常驻页不节流（端口活性本不依赖计时器，防御性开关）
+    },
+  })
+  keepWin.on('closed', () => { keepWin = null })
+  // 渲染进程崩溃 → 原地重载恢复（保活窗口消亡 = worker 回到“刷新即死”）
+  keepWin.webContents.on('render-process-gone', () => {
+    try { if (keepWin && !keepWin.isDestroyed()) keepWin.webContents.reload() } catch (_) { /* 忽略 */ }
+  })
+  // 网络级加载失败（如平台暂不可达）→ 10s 后重试（-3=ERR_ABORTED 除外，属正常打断）；
+  // 重试前比对当前期望地址——等待期间可能经设置窗切换平台地址，防旧定时器把保活窗拉回旧平台
+  keepWin.webContents.on('did-fail-load', (_e, code, _desc, failedUrl, isMainFrame) => {
+    if (isMainFrame && code !== -3) setTimeout(() => {
+      if (keepWin && !keepWin.isDestroyed() && keepExpectedUrl === failedUrl) keepWin.loadURL(failedUrl)
+    }, 10000)
+  })
+  keepWin.loadURL(url)
 }
 
 function setStep(text) {
