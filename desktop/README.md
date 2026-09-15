@@ -26,8 +26,11 @@ Electron Main (Node, main.js)
  │    `native:mouse / native:wheel` → 主进程复核 + 坐标翻译下发（含拖拽捕获 + 焦点
  │    转移）；原生内容聚焦时 leader 键由壳侧抓取（`native:leader / native:keys`，
  │    OS 布局快捷键保持可用，见下文「leader 键抓取」）
+ ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
+ │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
+ │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
  ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，settings-preload；托盘「本地配置」
- │    直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态
+ │    直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；bind/unbind 成功后原地重载
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 

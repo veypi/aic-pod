@@ -116,7 +116,7 @@ aic-pod/
 
 cua / browser / ssh / scp 属宿主体外或独立通道能力，不进 exec 沙箱，各自受目标闸与等级表控制。
 
-## 指令模型（指令集 v2.5）
+## 指令模型（指令集 v2.6）
 
 协议与指令语义以 aic 仓库 `docs/instruction_sets_v2.md` 为权威，本仓库实现并维护同源表（meta/levels）。
 
@@ -231,7 +231,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 
 ## 协议
 
-所有客户端遵循同一套 AIC Env 协议（指令集 v2.5）。协议唯一权威：
+所有客户端遵循同一套 AIC Env 协议（指令集 v2.6）。协议唯一权威：
 
 - `libs/proto`（subject/信封/签名，含固定向量测试）
 - aic 仓库 `docs/instruction_sets_v2.md` §6（host 协议规范：连接认证、caps v2、工具请求验签/防重放/纵深检查、错误模型）

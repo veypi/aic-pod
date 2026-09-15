@@ -29,7 +29,7 @@
 > desktop 端（Electron CDP）共享同一份 core（同步进 `desktop/vendor/`）。
 > 不再依赖/对齐任何外部 CLI（agent-browser 已彻底移除）。
 
-## 协议（指令集 v2）
+## 协议（指令集 v2.6）
 
 > 与 [aic docs/instruction_sets_v2.md](../aic/docs/instruction_sets_v2.md) §6 对齐，
 > 协议层实现见 `src/sdk/proto.js`（subject/信封/caps 纯函数，Go 侧 `libs/proto` 零漂移，
@@ -48,7 +48,7 @@
 {
   "host_id": "<host_id>",
   "credential_ver": 1,
-  "agent_version": "v0.5.5",
+  "agent_version": "v0.6.5",
   "device_type": "browser",
   "device_info": { "os": "Chrome", "arch": "browser", "num_cpu": 18 },
   "fs": { "actions": ["read", "write", "edit"] },
@@ -172,7 +172,7 @@ browser/
 │   │   └── nats/                 # @nats-io/nats-core (复制自 aic/ui)
 │   │       └── ...
 │   │
-│   ├── sdk/                      # AIC 客户端 SDK（指令集 v2.5）
+│   ├── sdk/                      # AIC 客户端 SDK（指令集 v2.6）
 │   │   ├── proto.js              # 协议层：subject/信封/caps v2 纯函数（Go libs/proto 零漂移）
 │   │   ├── proto.test.js         # subject/caps 固定向量（node --test）
 │   │   ├── crypto.js             # HKDF + HMAC-SHA256 (Web Crypto API)
