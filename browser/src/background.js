@@ -129,7 +129,12 @@ function connect(settings) {
     const c = new AICClient({
       key: settings.key,
       host: settings.host || "https://ivec-ai.com",
-            deviceType: "browser",
+      executionPolicy: settings.executionPolicy,
+      saveExecutionPolicy: async (policy) => {
+        const current = await loadSettings();
+        await saveSettings({...current,executionPolicy:policy});
+      },
+      deviceType: "browser",
       // 版本以 manifest.json 为单一来源，上报格式 va.b.c（服务端主版本门禁）
       version: "v" + chrome.runtime.getManifest().version,
       onLog: (fmt, ...args) => console.log(`[aic-browser] ${fmt}`, ...args),

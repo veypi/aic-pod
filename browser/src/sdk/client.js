@@ -17,6 +17,7 @@ import { wsconnect, errors as natsErrors } from "../lib/nats/nats-core.js";
 import { deriveKeys } from "./crypto.js";
 import { generateConnectTokenRaw, verifyToolRequestSig } from "./auth.js";
 import { hostInboxSubject, parseToolReqSubject, parseRequest, buildCaps, TOOL_FS, TOOL_EXEC, Level } from "./proto.js";
+import { ExecutionPolicy } from "./execution_policy.js";
 import { PageFS } from "./page_fs.js";
 import { HistoryStore } from "./history.js";
 
@@ -107,6 +108,11 @@ export function platformURL(host) {
 export class AICClient {
   constructor(options) {
     this.opts = options;
+    // This is executor-local policy, never supplied by tool requests.
+    this.executionPolicy = new ExecutionPolicy(options.executionPolicy || {
+      fs_policy:"deny",fs_deny:[],fs_allow:["/"],exec_policy:"deny",exec_deny:[],exec_allow:["*"]
+    });
+    this.sessionGrants = new Map();
     this.nc = null;           // NATS connection
     this.kTool = null;        // K_tool key for request verification
     this.hostID = null;
@@ -123,6 +129,9 @@ export class AICClient {
       handler: () => ({ content: this._commandsJSON(), attrs: { action: "commands" } }),
       stateful: false,
       backgroundable: false,
+    });
+    this.registerCommand('grant', 4, (ctx,data)=>this._grant(ctx.sessionID,data.argv), {
+      desc:'request local fs or exec access', help:'grant fs|exec <path|command> [--temp|--permanent]', stateful:true,
     });
     this.chains = new Map();   // stateful 命令串行链（对齐 Go vcore/browser mutex 语义）
     this.nonceCache = new Map(); // 防重放：nonce → deadline ms
@@ -183,7 +192,7 @@ export class AICClient {
 
     // fs 后端：与 page 端同一套 PageFS 代码（OPFS 本地单根），
     // 扩展 origin 独立 → 与页面 OPFS 物理隔离，按 host_id 寻址（§4.5）。
-    this.fs = new PageFS();
+    this.fs = new PageFS(undefined, this.executionPolicy);
 
     this.logf("starting aic-browser v%s [%s/%s] (host=%s)", version, deviceType, deviceName, hostID);
 
@@ -273,6 +282,7 @@ export class AICClient {
    */
   async close() {
     this.closed = true;
+    this.sessionGrants.clear();
     this._connected = false;
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -292,6 +302,7 @@ export class AICClient {
       for await (const s of status) {
         switch (s.type) {
           case "disconnect":
+            this.sessionGrants.clear();
             this.logf("NATS disconnected");
             break;
           case "reconnect":
@@ -433,7 +444,7 @@ export class AICClient {
     }
     this.nonceCache.set(req.nonce, deadlineMs || now + 600_000);
 
-    // 4. granted_level 纵深检查（§2.4：host 端按 caps 声明再自检，不足 waiting 转审批）
+    // 4. granted_level 纵深检查（§2.4：host 端按 caps 声明再自检，不足返回权限错误）
     if (tool === TOOL_FS) {
       await this._handleFsRequest(msg, req, sid);
       return;
@@ -445,6 +456,10 @@ export class AICClient {
       return;
     }
 
+    if (execData.action === "_session_end" && req.granted_level === 9 && sid) {
+      this.sessionGrants.delete(sid);
+      this._respond(msg,{msg_id:req.msg_id,state:"completed",content:"session grants cleared"});return;
+    }
     const cmd = this.commands.get(execData.action);
     if (!cmd) {
       this._respond(msg, {
@@ -454,12 +469,14 @@ export class AICClient {
       return;
     }
 
+    try { this._policyFor(sid).checkExec(execData.action); } catch (err) {
+      this._respond(msg,{msg_id:req.msg_id,state:"error",error:err.message}); return;
+    }
     if (req.granted_level < cmd.requiredLevel) {
       const reason = `exec ${execData.action} requires level ${cmd.requiredLevel} (granted ${req.granted_level})`;
-      this.logf("tool request waiting approval: %s (msg=%s)", reason, req.msg_id);
+      this.logf("tool request denied: %s (msg=%s)", reason, req.msg_id);
       this._respond(msg, {
-        msg_id: req.msg_id, state: "waiting",
-        need_approval: { reason },
+        msg_id: req.msg_id, state: "error", error: reason,
       });
       return;
     }
@@ -470,11 +487,13 @@ export class AICClient {
       grantedLevel: req.granted_level,
       sessionID: sid,
       msgID: req.msg_id,
-      fs: this.fs, // PageFS 实例（browser screenshot 等本地产出物落盘，§2.2）
+      fs: this._fsFor(sid), // PageFS 实例（browser screenshot 等本地产出物落盘，§2.2）
     };
 
     const run = async () => {
       try {
+        this._policyFor(sid).checkExec(execData.action);
+        ctx.fs = this._fsFor(sid);
         // handler 超时保护（2026-08-06）：MV3 SW 在执行中被 Chrome 回收时 pending
         // promise 永不 resolve → 单条挂起会卡死 stateful 串行链，后续所有指令全部
         // 超时。50s 覆盖正常操作（open 15s / wait 30s / eval 30s / download 30s），
@@ -514,14 +533,15 @@ export class AICClient {
       this._respond(msg, { msg_id: req.msg_id, state: "error", error: "invalid fs data: malformed JSON" });
       return;
     }
+    const fs = this._fsFor(sid);
     const action = String(params.action || "").toLowerCase();
     let required = FS_REQUIRED[action] ?? Level.DANGER;
     // rm recursive 删非空目录动态提升 Danger（与 Go FSRequiredIn 同源）
     if (action === "rm" && params.recursive && params.path) {
       try {
-        const st = await this.fs.stat(params.path);
+        const st = await fs.stat(params.path);
         if (st && st.dir) {
-          const l = await this.fs.list(params.path);
+          const l = await fs.list(params.path);
           if ((l.items || []).length > 0) required = Level.DANGER;
         }
       } catch (_) {
@@ -530,19 +550,49 @@ export class AICClient {
     }
     if (req.granted_level < required) {
       const reason = `fs ${action || "?"} requires level ${required} (granted ${req.granted_level})`;
-      this.logf("fs request waiting approval: %s (msg=%s)", reason, req.msg_id);
+      this.logf("fs request denied: %s (msg=%s)", reason, req.msg_id);
       this._respond(msg, {
-        msg_id: req.msg_id, state: "waiting",
-        need_approval: { reason },
+        msg_id: req.msg_id, state: "error", error: reason,
       });
       return;
     }
     try {
-      const out = await this.fs.run(params);
+      const out = await fs.run(params);
       this._respond(msg, buildResponse(req.msg_id, out));
     } catch (err) {
       this._respond(msg, { msg_id: req.msg_id, state: "error", error: err.message });
     }
+  }
+
+  _policyFor(sid) {
+    const c=structuredClone(this.executionPolicy.config), grants=this.sessionGrants.get(sid)||{};
+    c.exec_allow.push('commands','grant',...(grants.exec||[]));
+    c.fs_allow.push(...(grants.fs||[]));
+    return new ExecutionPolicy(c);
+  }
+  _fsFor(sid) { return new PageFS(this.fs?._rootProvider,this._policyFor(sid)); }
+  async _grant(sid,argv=[]) {
+    const args=argv.filter(x=>x!=='--temp'&&x!=='--permanent');
+    if(!sid || args.length!==2 || !['fs','exec'].includes(args[0]) || argv.some(x=>x.startsWith('--')&&!['--temp','--permanent'].includes(x))) throw new Error('grant fs|exec <path|command> [--temp|--permanent]');
+    const [domain,target]=args, permanent=argv.includes('--permanent');
+    if(domain==='fs' && (!target.startsWith('/') || target.startsWith('ro:') || /[?*]/.test(target))) throw new Error('grant fs requires an absolute OPFS path');
+    if(domain==='exec' && !this.commands.has(target)) throw new Error('grant exec requires a registered command');
+    const test=structuredClone(this.executionPolicy.config);
+    test[domain+'_policy']='open';
+    const check=new ExecutionPolicy(test);
+    if(domain==='fs') check.checkFs(target,true); else check.checkExec(target);
+    if(permanent) {
+      if(!this.opts.saveExecutionPolicy) throw new Error('permanent grants are not supported by this host');
+      const config=structuredClone(this.executionPolicy.config);
+      if(!config[domain+'_allow'].includes(target))config[domain+'_allow'].push(target);
+      await this.opts.saveExecutionPolicy(config);
+      this.executionPolicy=new ExecutionPolicy(config);
+    } else {
+      const grants=this.sessionGrants.get(sid)||{fs:[],exec:[]};
+      if(!grants[domain].includes(target))grants[domain].push(target);
+      this.sessionGrants.set(sid,grants);
+    }
+    return {content:`granted ${domain} ${target} (${permanent?'permanent':'session'})`};
   }
 
   /** _enqueue 将任务追加到指定指令的串行链尾（前序失败不阻断后续）。 */
@@ -570,6 +620,10 @@ export class AICClient {
   }
 
   _respond(msg, resp) {
+    if(resp.state==='waiting') {
+      resp={...resp,state:'rejected',error:resp.need_approval?.reason || resp.error || 'permission denied by host execution policy'};
+      delete resp.need_approval;
+    }
     // 回填终态（pending → completed/error/...），经串行队列保证在 add 之后
     if (resp.msg_id) {
       this._histQ = this._histQ

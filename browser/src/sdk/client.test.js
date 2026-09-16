@@ -43,7 +43,7 @@ test("caps: 恒声明 commands（level=1, desc/help 与 vcore meta.go 同源）+
   assert.equal(getPublished().subj, "u.uid01.h.host_test01.1.caps");
 
   const names = caps.exec.commands.map((c) => c.name);
-  assert.deepEqual(names, ["commands", "browser"], "恒声明 commands 应位于注册命令之前");
+  assert.deepEqual(names, ["commands", "grant", "browser"], "恒声明 commands 应位于注册命令之前");
 
   const cmd = caps.exec.commands.find((c) => c.name === "commands");
   assert.equal(cmd.level, 1, "commands 基础等级 = Read(1)");
@@ -57,6 +57,7 @@ test("commands 自答: {name, desc} 视图（§5.2，不含 level/help）", () =
   assert.deepEqual(JSON.parse(out.content), {
     commands: [
       { name: "commands", desc: "discover available commands on a target" },
+      { name: "grant", desc: "request local fs or exec access" },
       { name: "browser", desc: "control a web browser (native; only on browser-extension/desktop hosts)" },
     ],
   });
@@ -87,4 +88,41 @@ test("platformURL: http/https 页面入口，保留路径前缀", () => {
   assert.equal(platformURL("http://localhost:4000/"), "http://localhost:4000");
   assert.equal(platformURL("ws://localhost:4000"), "http://localhost:4000");
   assert.equal(platformURL("http://127.0.0.1:4000/rses/aiv"), "http://127.0.0.1:4000/rses/aiv");
+});
+
+
+import {ExecutionPolicy} from './execution_policy.js';
+import {canonicalToolReqSigInput} from './auth.js';
+import {hmacSHA256B64} from './crypto.js';
+
+test('signed host requests reject locally without waiting; grants are session scoped',async()=>{
+ const {client}=makeClient();
+ let called=0;
+ client.commands.get('browser').handler=async()=>{called++;return {content:'ok'}};
+ client.executionPolicy=new ExecutionPolicy({fs_policy:'deny',fs_allow:[],fs_deny:['/blocked'],exec_policy:'deny',exec_allow:[],exec_deny:[]});
+ client.kTool='test-signing-key';
+ client._recordHistory=()=>{};client._historyStore.updateState=async()=>{};
+ const send=async(sid,action,argv=[],level=9)=>{
+  const req={msg_id:crypto.randomUUID(),session_id:sid,tool:'exec',data:JSON.stringify({action,argv}),granted_level:level,nonce:crypto.randomUUID(),deadline:new Date(Date.now()+60000).toISOString()};
+  req.sig=await hmacSHA256B64(client.kTool,await canonicalToolReqSigInput(req,client.hostID));
+  let response;
+  await client._handleToolRequest({subject:`u.uid01.h.host_host_test01.exec.req.${sid}`,data:new TextEncoder().encode(JSON.stringify({...req,data:JSON.parse(req.data)})),respond:data=>{response=JSON.parse(new TextDecoder().decode(data))}});
+  assert.notEqual(response.state,'waiting');return response;
+ };
+ assert.equal((await send('s1','browser')).state,'error');assert.equal(called,0);
+ assert.equal((await send('s1','grant',['exec','browser'],3)).state,'error');
+ assert.equal((await send('s1','grant',['exec','browser'])).state,'completed');
+ assert.equal((await send('s1','browser')).state,'completed');assert.equal(called,1);
+ assert.equal((await send('s2','browser')).state,'error');
+ assert.equal((await send('s1','grant',['fs','/blocked'])).state,'error');
+ await send('s1','_session_end');
+ assert.equal((await send('s1','browser')).state,'error');
+});
+
+test('a failed permanent grant never changes effective policy',async()=>{
+ const {client}=makeClient();
+ client.executionPolicy=new ExecutionPolicy({fs_policy:'deny',fs_allow:[],exec_policy:'deny',exec_allow:[]});
+ client.opts.saveExecutionPolicy=async()=>{throw new Error('disk full')};
+ await assert.rejects(()=>client._grant('s1',['exec','browser','--permanent']),/disk full/);
+ assert.throws(()=>client._policyFor('s1').checkExec('browser'),/permission denied/);
 });

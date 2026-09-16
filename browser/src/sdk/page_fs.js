@@ -28,6 +28,7 @@
 // ls 的 git 基本探测（§4.5）：目录下 .git 为目录 → is_repo=true + branch（读 .git/HEAD），
 // 仅徽标用途无 git 语义（git 操作仅 cloud）。
 
+import { pageExecutionPolicy } from "./execution_policy.js";
 import { runFsOps } from "./fsops.js";
 
 const MAX_CONTENT_BYTES = 128 << 10; // 128KB（§2.5，三端一致）
@@ -339,7 +340,8 @@ function fsPathErr(action, abs, e, kind) {
 export class PageFS {
   // 无参构造：单根存储（OPFS 根），不依赖用户/会话。
   // rootProvider 供测试注入（内存实现）；缺省 navigator.storage.getDirectory。
-  constructor(rootProvider) {
+  constructor(rootProvider, policy = pageExecutionPolicy()) {
+    this.policy = policy;
     this._rootProvider = rootProvider || defaultRootProvider;
     this._rootResult = null; // {root} | {err:true}，惰性且失败缓存（平台错误不恢复）
   }
@@ -360,6 +362,7 @@ export class PageFS {
 
   // _readFileBytes：整读文件为字节（文本/二进制统一；文本由调用方解码）。
   async _readFileBytes(abs, action) {
+    this.policy.checkFs(abs, false);
     if (abs === "/") throw fsErr(action, `${abs}: is a directory`);
     const root = await this._root(action);
     const parts = splitPath(abs);
@@ -382,6 +385,7 @@ export class PageFS {
 
   // _writeFileBytes：整写文件字节（覆写，父目录自动创建）。
   async _writeFileBytes(abs, bytes, action) {
+    this.policy.checkFs(abs, true);
     if (abs === "/") throw fsErr(action, `${abs}: is a directory`);
     const root = await this._root(action);
     const parts = splitPath(abs);
@@ -772,6 +776,7 @@ export class PageFS {
 
   // mkdir 显式建目录（OPFS 真实目录，父目录自动创建；已存在幂等）。
   async mkdir(path, ctx = {}) {
+    this.policy.checkFs(this._path(path, ctx), true);
     const abs = this._path(path, ctx);
     const root = await this._root("mkdir");
     const parts = splitPath(abs);
@@ -885,6 +890,7 @@ export class PageFS {
   // size/lastModified（目录无元数据 → size undefined/mtime undefined）。
   // 目录不存在时返回空列表（与 $fs 前端接口的历史行为一致，存在性由 stat 判定）。
   async list(path, ctx = {}) {
+    this.policy.checkFs(this._path(path, ctx), false);
     const abs = this._path(path, ctx);
     const root = await this._root("list");
     const parts = splitPath(abs);
@@ -929,6 +935,7 @@ export class PageFS {
   // 本地根 / 恒存在（有效目录）；均不存在返回 null
   // （与 vcore Stat 语义对齐：不存在报错由调用方处理）。
   async stat(path, ctx = {}) {
+    this.policy.checkFs(this._path(path, ctx), false);
     const abs = this._path(path, ctx);
     if (abs === "/") {
       return { path: abs, dir: true, size: 0, mtime: undefined };
@@ -975,6 +982,7 @@ export class PageFS {
   // 目录真实存在（含空目录）；不做隐藏/skip 过滤——过滤是
   // 指令语义（fsops.js），fs 层只提供原始树。
   async walk(path, ctx = {}) {
+    this.policy.checkFs(this._path(path, ctx), false);
     const abs = this._path(path, ctx);
     const root = await this._root("walk");
     const parts = splitPath(abs);
@@ -1015,6 +1023,11 @@ export class PageFS {
   // removeEntry(recursive) 参数，全基线 API）。items = 删除条目数（含目录，
   // 对齐 vcore countEntries）。本地根 / 禁止删除。
   async remove(path, ctx = {}) {
+ if (ctx.recursive && (await this.stat(path, ctx))?.dir) {
+ const tree = await this.walk(path, ctx);
+ for (const item of tree.items || []) this.policy.checkFs(item.path, true);
+ }
+    this.policy.checkFs(this._path(path, ctx), true);
     const abs = this._path(path, ctx);
     if (abs === "/") throw fsErr("rm", "cannot remove root");
     const root = await this._root("rm");
