@@ -30,7 +30,7 @@ func spawnOrSkip(t *testing.T, m *Manager, ctx context.Context, opts StartOption
 // 见 host_sandbox.md 嵌套限制）。
 func TestSpawnEcho(t *testing.T) {
 	m := NewManager(time.Minute)
-	sp := spawnOrSkip(t, m, context.Background(), StartOptions{
+	sp := spawnOrSkip(t, m, context.Background(), StartOptions{FsOpen: true, NetOpen: true,
 		Exec:  []string{"sh", "-c", "printf hello"},
 		Level: proto.LevelRead,
 	})
@@ -49,7 +49,7 @@ func TestSpawnEcho(t *testing.T) {
 // 非零退出：Body 读至 EOF 时返回带 stderr 摘要的错误（而非 io.EOF）。
 func TestSpawnExitError(t *testing.T) {
 	m := NewManager(time.Minute)
-	sp := spawnOrSkip(t, m, context.Background(), StartOptions{
+	sp := spawnOrSkip(t, m, context.Background(), StartOptions{FsOpen: true, NetOpen: true,
 		Exec:  []string{"sh", "-c", "echo out; echo boom-err >&2; exit 3"},
 		Level: proto.LevelRead,
 	})
@@ -66,7 +66,7 @@ func TestSpawnExitError(t *testing.T) {
 // Abort：提前终止（大输出场景调用方中止），Abort 幂等。
 func TestSpawnAbort(t *testing.T) {
 	m := NewManager(time.Minute)
-	sp := spawnOrSkip(t, m, context.Background(), StartOptions{
+	sp := spawnOrSkip(t, m, context.Background(), StartOptions{FsOpen: true, NetOpen: true,
 		Exec:  []string{"sh", "-c", "yes"},
 		Level: proto.LevelRead,
 	})
@@ -85,7 +85,7 @@ func TestSpawnAbort(t *testing.T) {
 func TestSpawnCtxCancel(t *testing.T) {
 	m := NewManager(time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
-	sp := spawnOrSkip(t, m, ctx, StartOptions{
+	sp := spawnOrSkip(t, m, ctx, StartOptions{FsOpen: true, NetOpen: true,
 		Exec:  []string{"sh", "-c", "sleep 30"},
 		Level: proto.LevelRead,
 	})

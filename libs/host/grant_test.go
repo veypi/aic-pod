@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -92,5 +93,40 @@ func TestRunGrantTarget(t *testing.T) {
 	// 旧 grant_apply 裸路径形态 → error（域缺失）而非误判
 	if r = c.runGrant("s1", "m5", []string{"/tmp/x"}); r.State != proto.StateError {
 		t.Fatalf("legacy bare-path form state = %s, want error", r.State)
+	}
+}
+
+func TestExecGrantIsLocalAndRevokedBySignedSessionEnd(t *testing.T) {
+	saved := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	defer func() { cfg.Global = saved }()
+	cfg.Global.ExecPolicy = cfg.PolicyDeny
+	cfg.Global.ExecDeny = []string{"bash"}
+	c, _ := testClient(t)
+	if c.execAllowed("s1", "json") {
+		t.Fatal("ungranted command allowed")
+	}
+	if !c.execAllowed("s1", "grant") {
+		t.Fatal("local grant unavailable")
+	}
+	if r := c.grantExec("s1", "m1", "bash", false); r.State != proto.StateRejected {
+		t.Fatalf("deny overridden: %+v", r)
+	}
+	if r := c.grantExec("s1", "m2", "json", false); r.State != proto.StateCompleted {
+		t.Fatalf("grant failed: %+v", r)
+	}
+	if !c.execAllowed("s1", "json") || c.execAllowed("s2", "json") {
+		t.Fatal("grant crossed session boundary")
+	}
+	c.netPol.Configure("deny", nil, nil)
+	c.sshPol.Configure("deny", nil, nil)
+	c.netPol.Grant("s1", netauth.Entry{Host: "example.com", Port: "443"})
+	c.sshPol.Grant("s1", netauth.Entry{Host: "example.com", Port: "22"})
+	r := c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec", map[string]any{"action": "_session_end"}, 9))
+	if r.State != proto.StateCompleted {
+		t.Fatalf("cleanup failed: %+v", r)
+	}
+	if c.execAllowed("s1", "json") || c.netPol.Allowed("s1", "example.com", 443) || c.sshPol.Allowed("s1", "example.com", 22) {
+		t.Fatal("temporary grant survived session clear")
 	}
 }

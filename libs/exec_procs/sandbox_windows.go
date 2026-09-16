@@ -329,6 +329,9 @@ func probeBackend() sandboxBackend {
 // DACL（deny ACE 会影响宿主机全部进程）；文件级读拒绝需额外 per-call
 // 质询（能力 SID 只对白名单目录有权限），成本/工程比不适合当前阶段。
 func planConfined(spec confineSpec) (launchPlan, error) {
+	if err := validateProcessPolicy(spec, "windows"); err != nil {
+		return launchPlan{}, err
+	}
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(spec.level)
 	}

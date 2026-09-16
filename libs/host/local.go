@@ -42,20 +42,21 @@ func (c *Client) runProcess(ctx context.Context, sid, msgID, display string, arg
 	logPath := filepath.Join(sessionWorkDir(sid), ".exec", msgID+".log")
 	netDeny, netAllow := c.netPol.Snapshot(sid)
 	res, err := c.procs.Start(ctx, exec_procs.StartOptions{
-		ID:           fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
-		Command:      strings.TrimSpace(display + " " + strings.Join(argv[1:], " ")),
-		LogPath:      logPath,
-		Workdir:      workdir,
-		Exec:         argv,
-		Level:        level,
-		NoSandbox:    noSandbox,
-		WriteRoots:   c.policy.WriteRootsFor(sid),     // fs 域：cfg fs_allow + 临时 grant
-		DenyPaths:    c.policy.DenyPatterns(),         // fs 域 deny 名单（默认表 + cfg fs_deny）
-		DenyOverride: c.policy.DenyOverridePatterns(), // fs 域 allow 覆盖 deny（fs_allow 显式条目）
-		FsOpen:       c.policy.OpenMode(),             // fs_policy=open 快照
-		NetOpen:      c.netPol.OpenMode(),             // net_policy=open 快照
-		NetDeny:      netDeny,                         // net 域 deny/allow 快照（含内建 localhost:*）
-		NetAllow:     netAllow,
+		ID:         fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
+		Command:    strings.TrimSpace(display + " " + strings.Join(argv[1:], " ")),
+		LogPath:    logPath,
+		Workdir:    workdir,
+		Exec:       argv,
+		Level:      level,
+		NoSandbox:  noSandbox,
+		WriteRoots: c.policy.WriteRootsFor(sid), // fs 域：cfg fs_allow + 临时 grant
+		DenyPaths:  c.policy.DenyPatterns(),     // fs 域 deny 名单（默认表 + cfg fs_deny）
+		ReadPaths:  c.policy.ReadPatternsFor(sid),
+		WritePaths: c.policy.WritePatternsFor(sid),
+		FsOpen:     c.policy.OpenMode(), // fs_policy=open 快照
+		NetOpen:    c.netPol.OpenMode(), // net_policy=open 快照
+		NetDeny:    netDeny,             // net 域 deny/allow 快照（含内建 localhost:*）
+		NetAllow:   netAllow,
 	})
 	if err != nil {
 		return errResp(msgID, err.Error())

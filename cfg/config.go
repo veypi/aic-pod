@@ -8,18 +8,20 @@ package cfg
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"github.com/veypi/aic-pod/libs/policy"
+	"gopkg.in/yaml.v3"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 
 	"github.com/rs/zerolog"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
-	"gopkg.in/yaml.v3"
 )
 
 // DefaultHost 是默认平台地址。
@@ -69,79 +71,23 @@ type Options struct {
 	// 关闭则不上报 mgmt、不应答 rtc.in 信令。
 	RTC bool `json:"rtc" yaml:"rtc" default:"true" desc:"answer WebRTC direct links from owner pages (default true)"`
 
-	// 三域授权模型（fs/net/ssh × policy/deny/allow）。统一判定式：
-	// deny 命中 → 拒，除非存在更具体的 allow（具体度优先，同精度 deny 胜）；
-	// policy=open → 未命中 deny 一律放；policy=deny → 仅 allow 放行。
-	//   - fs：读默认开（deny 除外）；写 policy=deny 时仅内建可写根（工作区/临时区/
-	//     会话区/缓存/公共区）+ fs_allow + 临时 grant，policy=open 时除 fs_deny 全可写。
-	//     **fs_allow 显式条目压过 fs_deny**（allow 覆盖 deny）：裸路径覆盖其子树，
-	//     带通配条目按 glob 精确匹配（如 `**/.env` 只放 .env）；内建便利根与临时
-	//     grant 不压（它们是写便利不是信任声明——公共区的 browser cookie 库、
-	//     缓存/工作区里的 .env/*.pem/*.key 仍受保护）；deny 恒为读写双拒且不可审批
-	//   - net：exec 沙箱内子进程出站（vcore curl 经 shell curl 同样进沙箱）。
-	//     默认 open（2026-09-07 用户定：deny 默认会让 apt/wget/git clone 等工具链全断，
-	//     deny 作锁定模式选用——内核层只支持 localhost-only 粗粒度（darwin seatbelt
-	//     实测 host 必须为 */localhost；linux bwrap 全有/全无），deny 模式下非
-	//     loopback 白名单条目内核按 *:port 粗放行 + curl 虚拟指令工具层按 host:port
-	//     精判）；内建默认 allow localhost:*（具体端口 net_deny 可反杀——具体度优先）
-	//   - ssh：ssh 一级工具目标闸（独立通道：ssh 免沙箱执行，net 规则不作用于它）
-	// 具体度：host 恒精确匹配（不支持通配主机），端口数字 > *；同精度 deny 胜。
-	// 内存即时生效（fsauth/netauth 每次判定/每次沙箱 Start 读当前值），
-	// set_config 与 grant <域> <目标> --permanent 动态改（落点即对应 allow 列表）。
-	FsPolicy  string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write default stance: deny (builtin roots + fs_allow only) | open (all except fs_deny)"`
-	FsDeny    []string `json:"fs_deny" yaml:"fs_deny" desc:"denied path globs (no read/write, not approval-able; overridden by explicit fs_allow entries)"`
-	FsAllow   []string `json:"fs_allow" yaml:"fs_allow" desc:"explicit allow entries: writable + deny override — bare path covers its subtree, glob entry matches exactly (e.g. **/.env); overrides fs_deny"`
-	NetPolicy string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
-	NetDeny   []string `json:"net_deny" yaml:"net_deny" desc:"denied outbound targets host:port (always wins over allow)"`
-	NetAllow  []string `json:"net_allow" yaml:"net_allow" desc:"allowed outbound targets host:port (builtin localhost:*; bare host = all ports)"`
-	SshPolicy string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
-	SshDeny   []string `json:"ssh_deny" yaml:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
-	SshAllow  []string `json:"ssh_allow" yaml:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
+	// Execution policies: deny first, then operation-covering allow, then default.
+	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
+	ExecDeny   []string `json:"exec_deny" yaml:"exec_deny" desc:"denied registered command names or *"`
+	ExecAllow  []string `json:"exec_allow" yaml:"exec_allow" desc:"allowed registered command names or *"`
+	FsPolicy   string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs default stance: deny (allow only) | open (all except fs_deny)"`
+	FsDeny     []string `json:"fs_deny" yaml:"fs_deny" desc:"denied path globs (always deny reads and writes)"`
+	FsAllow    []string `json:"fs_allow" yaml:"fs_allow" desc:"allowed paths: read/write by default; ro: prefix grants read only"`
+	NetPolicy  string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
+	NetDeny    []string `json:"net_deny" yaml:"net_deny" desc:"denied outbound targets host:port (always wins over allow)"`
+	NetAllow   []string `json:"net_allow" yaml:"net_allow" desc:"allowed outbound targets host:port (builtin localhost:*; bare host = all ports)"`
+	SshPolicy  string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
+	SshDeny    []string `json:"ssh_deny" yaml:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
+	SshAllow   []string `json:"ssh_allow" yaml:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
 
 	// 进程级运行时态（unexported，不参与序列化/落盘）：
 	port     int  // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
 	codeAuto bool // Code 为本次进程随机生成（Save 时跳过落盘）
-}
-
-// UnmarshalYAML 接受两种键形态：yaml tag（snake_case，与 json tag/本地 API 同名，
-// 文档与 Save 落盘形态）与结构体默认键（小写字段名，2026-09-09 之前的落盘形态）。
-// 同名字段以 yaml tag 形态优先（显式键胜出）；两种形态都兼容意味着历史配置文件
-// （fspolicy/fsdeny/workdir 等）不会因格式切换而失效，Save 后自愈为新形态。
-// 坏文件/未知键由 yaml 层忽略（LoadFile 仅 warn，不阻断启动）。
-func (o *Options) UnmarshalYAML(value *yaml.Node) error {
-	type alias Options // 别名不继承本方法，避免递归
-	var a alias
-	if err := value.Decode(&a); err != nil {
-		return err
-	}
-	*o = Options(a)
-	var raw map[string]yaml.Node
-	if err := value.Decode(&raw); err != nil {
-		return err
-	}
-	rv := reflect.ValueOf(o).Elem()
-	rt := rv.Type()
-	for i := 0; i < rt.NumField(); i++ {
-		f := rt.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		tag := strings.Split(f.Tag.Get("yaml"), ",")[0]
-		if tag == "" || tag == "-" {
-			continue
-		}
-		if _, ok := raw[tag]; ok {
-			continue // snake_case 形态已生效
-		}
-		node, ok := raw[strings.ToLower(f.Name)]
-		if !ok {
-			continue
-		}
-		if err := node.Decode(rv.Field(i).Addr().Interface()); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Port 返回本地管理 API 监听端口（未启动为 0）。
@@ -169,7 +115,7 @@ func NewOptions() *Options {
 	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/", RTC: true}
 }
 
-// 授权策略取值（fs_policy/net_policy/ssh_policy 的合法值）。
+// 授权策略取值（fs_policy/exec_policy/net_policy/ssh_policy 的合法值）。
 const (
 	PolicyDeny = "deny" // 仅 allow 放行
 	PolicyOpen = "open" // 除 deny 全放
@@ -193,6 +139,7 @@ func (o *Options) Normalize() {
 		o.Host = DefaultHost
 	}
 	o.HomePath = o.NormalizedHomePath()
+	o.ExecPolicy = NormalizePolicy(o.ExecPolicy, PolicyOpen)
 	o.FsPolicy = NormalizePolicy(o.FsPolicy, PolicyDeny)
 	o.NetPolicy = NormalizePolicy(o.NetPolicy, PolicyOpen)
 	o.SshPolicy = NormalizePolicy(o.SshPolicy, PolicyDeny)
@@ -327,7 +274,20 @@ func LoadFile() (*Options, error) {
 	if err != nil {
 		return o, err
 	}
-	flags.LoadCfg(p, o)
+	data, readErr := os.ReadFile(p)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return o, readErr
+	}
+	if readErr == nil {
+		dec := yaml.NewDecoder(strings.NewReader(string(data)))
+		dec.KnownFields(true)
+		if err := dec.Decode(o); err != nil {
+			return o, err
+		}
+	}
+	if err := o.ValidateAuth(); err != nil {
+		return o, err
+	}
 	o.Normalize()
 	if o.Code == "" {
 		o.Code = newCode()
@@ -339,25 +299,30 @@ func LoadFile() (*Options, error) {
 // Load 读取配置文件填充 Global 并返回（损坏文件不阻断启动，见 LoadFile）。
 func Load() (*Options, error) {
 	o, err := LoadFile()
-	Global = o
+	if err == nil {
+		Global = o
+	}
 	return o, err
 }
 
-// authMu 守护授权九键的并发读写：api.SetConfig（用户操作）与
+// authMu 守护执行策略十二键的并发读写：api.SetConfig（用户操作）与
 // host grant --permanent（AI 经审批）两条写入路径共用。
 var authMu sync.RWMutex
 
-// AuthCfg 是三域授权配置快照（policy/deny/allow × fs/net/ssh）。
+// AuthCfg 是四域执行策略快照（policy/deny/allow × fs/exec/net/ssh）。
 type AuthCfg struct {
-	FsPolicy  string
-	FsDeny    []string
-	FsAllow   []string
-	NetPolicy string
-	NetDeny   []string
-	NetAllow  []string
-	SshPolicy string
-	SshDeny   []string
-	SshAllow  []string
+	ExecPolicy string
+	ExecDeny   []string
+	ExecAllow  []string
+	FsPolicy   string
+	FsDeny     []string
+	FsAllow    []string
+	NetPolicy  string
+	NetDeny    []string
+	NetAllow   []string
+	SshPolicy  string
+	SshDeny    []string
+	SshAllow   []string
 }
 
 // AuthSnapshot 返回当前授权配置快照（fsauth/netauth Reconcile 的数据源）。
@@ -366,6 +331,7 @@ func AuthSnapshot() AuthCfg {
 	authMu.RLock()
 	defer authMu.RUnlock()
 	return AuthCfg{
+		ExecPolicy: NormalizePolicy(Global.ExecPolicy, PolicyOpen), ExecDeny: Global.ExecDeny, ExecAllow: Global.ExecAllow,
 		FsPolicy: NormalizePolicy(Global.FsPolicy, PolicyDeny), FsDeny: Global.FsDeny, FsAllow: Global.FsAllow,
 		NetPolicy: NormalizePolicy(Global.NetPolicy, PolicyOpen), NetDeny: Global.NetDeny, NetAllow: Global.NetAllow,
 		SshPolicy: NormalizePolicy(Global.SshPolicy, PolicyDeny), SshDeny: Global.SshDeny, SshAllow: Global.SshAllow,
@@ -377,6 +343,7 @@ func AuthSnapshot() AuthCfg {
 func SetAuth(c AuthCfg) {
 	authMu.Lock()
 	defer authMu.Unlock()
+	Global.ExecPolicy, Global.ExecDeny, Global.ExecAllow = NormalizePolicy(c.ExecPolicy, PolicyOpen), c.ExecDeny, c.ExecAllow
 	Global.FsPolicy, Global.FsDeny, Global.FsAllow = NormalizePolicy(c.FsPolicy, PolicyDeny), c.FsDeny, c.FsAllow
 	Global.NetPolicy, Global.NetDeny, Global.NetAllow = NormalizePolicy(c.NetPolicy, PolicyOpen), c.NetDeny, c.NetAllow
 	Global.SshPolicy, Global.SshDeny, Global.SshAllow = NormalizePolicy(c.SshPolicy, PolicyDeny), c.SshDeny, c.SshAllow
@@ -385,6 +352,7 @@ func SetAuth(c AuthCfg) {
 // AuthFrom 从 Options 取授权快照（SetAuth 的入参装配）。
 func AuthFrom(o *Options) AuthCfg {
 	return AuthCfg{
+		ExecPolicy: o.ExecPolicy, ExecDeny: o.ExecDeny, ExecAllow: o.ExecAllow,
 		FsPolicy: o.FsPolicy, FsDeny: o.FsDeny, FsAllow: o.FsAllow,
 		NetPolicy: o.NetPolicy, NetDeny: o.NetDeny, NetAllow: o.NetAllow,
 		SshPolicy: o.SshPolicy, SshDeny: o.SshDeny, SshAllow: o.SshAllow,
@@ -394,6 +362,9 @@ func AuthFrom(o *Options) AuthCfg {
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。
 // 进程随机生成的 Code 不落盘（codeAuto=true 时跳过该字段）。
 func Save(o *Options) error {
+	if err := o.ValidateAuth(); err != nil {
+		return err
+	}
 	p, err := Path()
 	if err != nil {
 		return err
@@ -412,3 +383,35 @@ func Save(o *Options) error {
 	// DumpCfg 以 0644 创建，凭证敏感改 0600
 	return os.Chmod(p, 0o600)
 }
+
+// ValidateAuth rejects malformed execution rules before they become active.
+func (o *Options) ValidateAuth() error {
+	for _, mode := range []string{o.FsPolicy, o.ExecPolicy, o.NetPolicy, o.SshPolicy} {
+		if mode != "" && mode != PolicyOpen && mode != PolicyDeny {
+			return fmt.Errorf("invalid policy %q", mode)
+		}
+	}
+	if err := policy.ValidateFS(o.FsAllow, true); err != nil {
+		return err
+	}
+	if err := policy.ValidateFS(o.FsDeny, false); err != nil {
+		return err
+	}
+	if err := policy.ValidateExec(o.ExecAllow); err != nil {
+		return err
+	}
+	if err := policy.ValidateExec(o.ExecDeny); err != nil {
+		return err
+	}
+	for _, list := range [][]string{o.NetAllow, o.NetDeny, o.SshAllow, o.SshDeny} {
+		if err := policy.ValidateEntries(list); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LockUpdate serializes local config read-modify-write transactions.
+func LockUpdate() func() { configUpdateMu.Lock(); return configUpdateMu.Unlock }
+
+var configUpdateMu sync.Mutex

@@ -77,7 +77,7 @@ type StartOptions struct {
 	ID      string   // 后台条目 ID（{host}:{sid}:{op_id} 或 msgID）
 	Command string   // 展示名（bg_list）
 	LogPath string   // 输出落盘路径（父目录自动创建）
-	Workdir string   // 进程 cwd（空 = 继承）；兼作沙箱 workspace-write 的可写根
+	Workdir string   // 进程 cwd（空 = 继承），不授予目录权限
 	Exec    []string // argv：Exec[0] = 程序名
 	// Level 是本次调用的授予等级（§2.4/§5.10 沙箱 profile 选择）：
 	// 1 = read-only 沙箱；2/3/4/9 = workspace-write 沙箱；
@@ -106,13 +106,9 @@ type StartOptions struct {
 	// Policy.DenyPatterns()（快照，每次 Start 读当次值）。
 	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
 	DenyPaths []string
-	// DenyOverride 是压过 deny 的展开模式（fs_allow 显式条目）：来源 =
-	// Policy.DenyOverridePatterns()（裸路径条目 → <root>/**，通配条目原样）。
-	// deny 隔离的放行面——darwin 在 deny 规则之后追加 file-read*/file-write*
-	// allow（SBPL 后匹配覆盖先匹配；写级才发 write 规则）；linux 跳过被覆盖
-	// 完整覆盖的覆盖挂载目标（近似层，见 bwrapDenyArgs）。socket connect 不落地
-	// （网络段优先级不随规则序，connect 保持 deny）。nil = 无覆盖。
-	DenyOverride []string
+	// ReadPaths and WritePaths are expanded fs allow patterns; deny always wins.
+	ReadPaths  []string
+	WritePaths []string
 	// FsOpen 是 fs_policy=open 快照：写除 deny 全放（darwin allow file-write*
 	// 打底 / bwrap 整机 rw bind），deny 覆盖仍生效。
 	FsOpen bool
@@ -167,6 +163,12 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		return nil, fmt.Errorf("exec: unknown action %q", opts.Exec[0])
 	}
 
+	if opts.NoSandbox || m.NoSandbox {
+		if err := validateUnconfined(opts); err != nil {
+			return nil, err
+		}
+	}
+
 	logDir := filepath.Dir(opts.LogPath)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("exec: create log dir: %v", err)
@@ -187,9 +189,9 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		var err error
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
-			deny: opts.DenyPaths, override: opts.DenyOverride, fsOpen: opts.FsOpen,
-			readAllow: fsauth.SystemCAReadPatterns(),
-			netOpen:   opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
+			readAllow: opts.ReadPaths, writeAllow: opts.WritePaths,
+			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})
 		if err != nil {
 			f.Close()

@@ -1,111 +1,22 @@
-// Package netauth 是 host:port 目标策略引擎（三域授权模型的 net/ssh 两域共用，
-// 一个包两个实例）：
-//
-//	判定式（与 fsauth 同形；具体度优先，2026-09-09）：
-//	deny 命中 → 拒，除非存在更具体的 allow（端口数字 > *；同精度 deny 胜）；
-//	policy=open → 未命中 deny 一律放；policy=deny → 仅 allow 放行。
-//	临时 grant 不压 deny（只有内建/cfg allow 参与具体度比较——grant 是 AI 经
-//	审批申请的，不应顺带解开显式 deny；需要例外时用户写 cfg）。
-//
-// 条目形态 host:port：host 小写/去尾点归一、IP 经 netip 归一（归一后字符串
-// 相等即匹配，**不支持通配主机**）；port 为数字或 *（全端口）；bare host 归一为
-// host:*。user@ 前缀在解析时剥掉（用户是认证细节，不是网络目标）。
-//
-// net 实例带内建默认 allow localhost:*（loopback 放行——go test/httptest/
-// dev server 的命根子；net_deny localhost:<port> 具体端口仍可反杀——具体度优先）。
-// ssh 实例无内建条目。
-//
-// 配置源 = cfg 授权快照（net_policy/net_deny/net_allow、ssh_policy/ssh_deny/
-// ssh_allow），Reconcile 重载；坏条目整条跳过（与 fsauth 静默风格一致——
-// set_config 侧先用 ValidateEntries 显式校验，运行期不炸）。
-// 临时授权 = Grant(sid)（grant <域> --temp），host 进程内存，重启/跨 session
-// 失效（与 fsauth grant 同生命周期语义，量小重启清零）。
+// Package netauth enforces exact host/port rules for net and ssh. Explicit
+// denies always win; allows and per-session grants may open unmatched targets.
+// Rules come from executor-local configuration, never from runtime approval.
 package netauth
 
 import (
-	"fmt"
-	"net"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/policy"
 )
 
-// Entry 是归一化目标条目（Host 小写/IP 归一，Port 数字串或 *）。
-type Entry struct {
-	Host string
-	Port string
-}
+type Entry = policy.Entry
 
-// String 返回规范形态 host:port。
-func (e Entry) String() string { return e.Host + ":" + e.Port }
-
-// ParseEntry 解析并归一化目标条目：bare host → host:*；剥 user@ 前缀；
-// host 小写/去尾点、IP 经 netip 归一；port 须为 1-65535 或 *。
-// IPv6 须带括号（[::1]:22）；不带括号的多冒号形态按 bare host 处理（port=*）。
-func ParseEntry(s string) (Entry, error) {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:] // 剥 user@（ssh 目标形态 user@host:port）
-	}
-	if s == "" {
-		return Entry{}, fmt.Errorf("empty target")
-	}
-	if strings.IndexFunc(s, func(r rune) bool { return r == '/' || unicode.IsSpace(r) }) >= 0 {
-		return Entry{}, fmt.Errorf("invalid target %q: want host[:port]", s)
-	}
-	host, port := "", ""
-	if strings.HasPrefix(s, "[") {
-		h, p, err := net.SplitHostPort(s)
-		if err != nil {
-			return Entry{}, fmt.Errorf("invalid target %q: %v", s, err)
-		}
-		host, port = h, p
-	} else if strings.Count(s, ":") == 1 {
-		h, p, err := net.SplitHostPort(s)
-		if err != nil {
-			return Entry{}, fmt.Errorf("invalid target %q: %v", s, err)
-		}
-		host, port = h, p
-	} else if strings.Count(s, ":") == 0 {
-		host, port = s, "*"
-	} else {
-		host, port = s, "*" // 不带括号的 bare IPv6
-	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if ip, err := netip.ParseAddr(host); err == nil {
-		host = ip.String()
-	}
-	if host == "" {
-		return Entry{}, fmt.Errorf("invalid target %q: empty host", s)
-	}
-	if strings.Contains(host, "*") {
-		// 通配主机整条拒绝：entryMatch 是归一后字符串相等，* 条目恒惰性
-		//（永不匹配）——静默接受会让用户以为生效（set_config 显式校验语义）。
-		return Entry{}, fmt.Errorf("invalid target %q: wildcard host is not supported (entries match exact hosts only)", s)
-	}
-	if port != "*" {
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return Entry{}, fmt.Errorf("invalid port %q in %q: want 1-65535 or *", port, s)
-		}
-		port = strconv.Itoa(n)
-	}
-	return Entry{Host: host, Port: port}, nil
-}
-
-// ValidateEntries 批量校验条目合法性（set_config 显式校验用；首个非法条目即报错）。
-func ValidateEntries(list []string) error {
-	for _, s := range list {
-		if _, err := ParseEntry(s); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+var ParseEntry = policy.ParseEntry
+var ValidateEntries = policy.ValidateEntries
 
 // Selector 从授权快照选取本实例的（policy, deny, allow）。
 type Selector func(cfg.AuthCfg) (string, []string, []string)
@@ -213,30 +124,20 @@ func (p *Policy) Allowed(sid, host string, port int) bool {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	denyHit, denySpecific := false, false
 	for _, d := range p.deny {
 		if entryMatch(d, q) {
-			denyHit = true
-			if d.Port != "*" {
-				denySpecific = true
-			}
+			return false
 		}
 	}
-	cfgHit, cfgSpecific := false, false
+	cfgHit := false
 	for _, list := range [][]Entry{p.builtin, p.allow} {
 		for _, e := range list {
 			if entryMatch(e, q) {
 				cfgHit = true
-				if e.Port != "*" {
-					cfgSpecific = true
-				}
 			}
 		}
 	}
-	if denyHit {
-		// 具体度优先：只有更具体的 allow（具体端口）能压过端口 * 的 deny。
-		return cfgHit && cfgSpecific && !denySpecific
-	}
+
 	if p.mode == cfg.PolicyOpen {
 		return true
 	}
@@ -271,12 +172,7 @@ func (p *Policy) Snapshot(sid string) (deny, allow []Entry) {
 	allow = append(allow, p.builtin...)
 	allow = append(allow, p.allow...)
 	allow = append(allow, p.grants[sid]...)
-	for _, d := range p.deny {
-		if portNarrowedByAllow(d, p.builtin) || portNarrowedByAllow(d, p.allow) {
-			continue
-		}
-		deny = append(deny, d)
-	}
+	deny = append(deny, p.deny...)
 	return deny, allow
 }
 
@@ -309,3 +205,7 @@ func (p *Policy) List(sid string) []string {
 	}
 	return out
 }
+
+func (p *Policy) DropSession(sid string) { p.mu.Lock(); defer p.mu.Unlock(); delete(p.grants, sid) }
+
+func (p *Policy) ResetTemporary() { p.mu.Lock(); defer p.mu.Unlock(); p.grants = map[string][]Entry{} }

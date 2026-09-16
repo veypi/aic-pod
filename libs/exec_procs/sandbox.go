@@ -1,40 +1,6 @@
-// 进程沙箱（§5.10）：exec 外部进程统一经沙箱包装执行。
-//
-// 规则：未显式免沙箱（StartOptions.NoSandbox）的进程调用一律进沙箱——
-// 审批通过（LevelApproved 9）也不例外：9 只是等级语义，免沙箱唯一通道是
-// 显式 nosandbox（外部请求须经人工审批，required Critical(4) ⇒ 必审批）。
-// level 1 = read-only（除 /dev/null 外不可写）；level 2/3/4/9 = workspace-write
-// （仅工作区 + 常见工具链缓存目录 cacheRoots + 平台临时区 + 公共区 $HOME/.aic 可写）；
-// 0 = 未设置/异常值，按 read-only 兜底。
-// 无可用后端时 fail-closed：拒绝执行，绝不静默裸跑。
-// deny 隔离（2026-09-05）：默认读全开，fsauth deny 表（DenyPatterns）经
-// StartOptions.DenyPaths 生成拒绝规则——darwin seatbelt 文件读写双拒 + unix
-// connect 拒绝（deny file-read*/file-write* regex，另加 network-outbound
-// (remote unix (regex ...))——AF_UNIX connect 不走 file-* 判定，实测 docker.sock
-// 文件操作全被拒而 curl --unix-socket 直通）、linux bwrap 覆盖挂载（文件/
-// socket 读写双拒 / 目录读黑洞＋写入不落地）——fs 与 exec 共用同一份 deny 名单；
-// windows 侧不实现（restricting 集初始化依赖，见 sandbox_windows.go 注释）。
-// allow 覆盖 deny（2026-09-09）：显式 fs_allow 条目经
-// StartOptions.DenyOverride 进入 profile 压过 deny（darwin 后置 allow 规则 /
-// linux 跳过被完整覆盖的覆盖挂载目标）——fs 判定与沙箱同一展开（两侧同源）。
-//
-// 内部指令（fs/curl/json 等）走 vcore VFS + Roots/ProtectRoots 路径收容，
-// 不经过本包（文件效应由路径级权限控制）。
-//
-// 平台后端（planConfined/probeBackend 按构建平台分组实现）：
-//   - linux: bubblewrap（bwrap，需用户命名空间可用），无则 fail-closed；
-//   - darwin: sandbox-exec（Seatbelt，系统自带，deprecated 但仍在）；
-//   - windows: 受限令牌（CreateRestrictedToken）+ ACL 写授权（路径 A：
-//     host 进程内创建令牌，SysProcAttr.Token 注入，无独立 runner）；
-//   - 其他: 无后端，fail-closed（confined 模式拒绝执行）。
-//
-// 资源限制（2026-08-28 补齐，与文件隔离正交）：
-//   - linux: bwrap --rlimit（bwrap 原生，零额外进程）；
-//   - darwin: sh ulimit 包装（Seatbelt 不支持资源限制；RLIMIT 跨 exec 继承）；
-//   - windows: Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256）。
-//
-// 三端同一组上限（resourceLimit* 常量），read-only 与 workspace-write 同限——
-// 此前只有文件隔离，沙箱内命令可无限分配内存/派生进程，实测打爆系统内存死机。
+// Native processes enforce the host execution policy independently of runtime
+// approval. Read/write allow rules are additive, deny always wins, and cwd grants
+// no access. A backend that cannot enforce a rule rejects execution.
 package exec_procs
 
 import (
@@ -136,17 +102,17 @@ var (
 // confineSpec 是一次沙箱包装的完整输入（三域授权模型快照 + 等级/工作区/argv）。
 // 快照语义：每次 Start 读当次值（set_config/grant 动态生效），已启动进程不回溯。
 type confineSpec struct {
-	level     int             // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
-	workdir   string          // 进程 cwd；兼作 workspace-write 的可写根
-	extra     []string        // 追加可写根（nil = 仅基础白名单）
-	argv      []string        // 被包装命令
-	deny      []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
-	override  []string        // deny 覆盖展开模式（fsauth.DenyOverridePatterns 快照：fs_allow 裸路径→root/**、通配原样）
-	readAllow []string        // 系统 CA 只读放行模式（fsauth.SystemCAReadPatterns 快照；恒只读，见 seatbeltArgs）
-	fsOpen    bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
-	netOpen   bool            // net_policy=open：不加网络规则
-	netDeny   []netauth.Entry // net_deny 快照（恒优先于 allow）
-	netAllow  []netauth.Entry // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
+	level      int             // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
+	workdir    string          // 进程 cwd，不授予目录权限
+	extra      []string        // 追加可写根（nil = 仅基础白名单）
+	argv       []string        // 被包装命令
+	deny       []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
+	readAllow  []string        // 展开的可读路径
+	writeAllow []string        // 展开的可写 glob（裸路径由 extra 传入）
+	fsOpen     bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
+	netOpen    bool            // net_policy=open：不加网络规则
+	netDeny    []netauth.Entry // net_deny 快照（恒优先于 allow）
+	netAllow   []netauth.Entry // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
 }
 
 // Confine 将 argv 包装为沙箱执行形态（返回替换 argv；windows 的实际
@@ -177,11 +143,11 @@ func selectBackend() sandboxBackend {
 }
 
 // sandboxUnavailable 构造 fail-closed 错误（命令未执行）。
-// 免沙箱唯一通道是显式 nosandbox 请求（单独人工审批）——审批通过（9）不豁免沙箱（§5.10）。
+// 云端批准不会豁免执行端必须落实的本地策略。
 func sandboxUnavailable(level int) error {
 	return fmt.Errorf(
 		"sandbox: level %d requires confinement but no sandbox backend is usable on this host "+
-			"(install bubblewrap on Linux); the command was NOT run — rerun with nosandbox to run unconfined (separate human approval)", level)
+			"(install bubblewrap on Linux); the command was not run", level)
 }
 
 // ---- linux: bubblewrap（跨平台编译的纯 argv 构建，测试直接引用）----
@@ -226,12 +192,22 @@ func confineRlimits(argv []string) []string {
 
 func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string) []string {
 	// fs_policy=open（写级）：整机只读改整机可写（deny 覆盖挂载仍在后追加，恒优先）。
-	rootBind := []string{"--ro-bind", "/", "/"}
-	if spec.fsOpen && spec.level >= proto.LevelWrite {
-		rootBind = []string{"--bind", "/", "/"}
-	}
 	args := []string{"bwrap"}
-	args = append(args, rootBind...)
+	if spec.fsOpen {
+		flag := "--ro-bind"
+		if spec.level >= proto.LevelWrite {
+			flag = "--bind"
+		}
+		args = append(args, flag, "/", "/")
+	} else {
+		args = append(args, "--tmpfs", "/")
+		for _, pat := range spec.readAllow {
+			root := strings.TrimSuffix(pat, "/**")
+			if _, err := os.Stat(root); err == nil {
+				args = append(args, "--ro-bind", root, root)
+			}
+		}
+	}
 	args = append(args, "--dev", "/dev", "--proc", "/proc", "--die-with-parent")
 	if !spec.netOpen {
 		// net_policy=deny：--unshare-net 全断（新 net ns 仅 loopback 且未配置——
@@ -242,10 +218,7 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string)
 	args = append(args, rlimitArgs()...)
 	if spec.level >= proto.LevelWrite {
 		args = append(args, "--tmpfs", "/tmp")
-		if spec.workdir != "" {
-			args = append(args, "--bind", spec.workdir, spec.workdir)
-		}
-		for _, d := range cacheDirs {
+		for _, d := range append(append([]string{}, cacheDirs...), literalWriteRoots(spec.writeAllow)...) {
 			if d != "" {
 				args = append(args, "--bind", d, d)
 			}
@@ -260,81 +233,23 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string)
 	// 追加在全部 bind 之后；read-only 与 workspace-write 同隔离。
 	// readAllow（系统 CA）并入覆盖判定：deny 实例化当前不涉系统路径
 	//（** 开头 $HOME 锡定 + 字面表）——并入为对齐/未来防护。
-	overrides := spec.override
-	if len(spec.readAllow) > 0 {
-		overrides = append(append([]string{}, spec.override...), spec.readAllow...)
-	}
-	args = append(args, bwrapDenyArgs(spec.deny, overrides)...)
+	args = append(args, bwrapDenyArgs(spec.deny)...)
 	return append(append(args, "--"), spec.argv...)
 }
 
-// bwrapDenyArgs 把 deny 模式实例化为 bwrap 覆盖挂载参数。
-// bwrap 无路径规则引擎，只能挂载覆盖已存在路径：
-//   - 目录 → --tmpfs 覆盖（原内容不可见；写入落入临时 tmpfs 不落地）
-//   - 文件 → --ro-bind /dev/null 覆盖（读得空文件，写被 EROFS 拒绝）
-//
-// 实例化粒度（存在性判定每次 Start 实时执行——新创建文件下次覆盖）：
-//   - 纯字面路径：stat 判定目录/文件；不存在跳过（不可读无害）
-//   - 尾 /**（或 /*）：剥尾段得目录，按目录处理（覆盖整树含未来创建）
-//   - 段内 glob（* ?，无 **）：字面前缀目录 readdir 逐项匹配（filepath.Match
-//     段语义）覆盖；无字面前缀（** 开头）→ $HOME 根级锚定：最后一个非 **
-//     段在 home 直接子级匹配（.ssh 类目录/id_ed25519* 文件/**.key）
-//   - 无法实例化（中间 **、含 [ 字符类语法）→ 跳过：exec 通道无兜底（fsauth
-//     判定层仅约束 fs 工具/VFS，拦不住进程内 cat）；bwrap deny 隔离是近似层，
-//     完整 glob 语义仅 seatbelt。
-//
-// deny 覆盖（fs_allow，2026-09-09）：覆盖挂载目标被 allow 条目完整覆盖时跳过
-// 该目标（见 coveredByOverride）——更窄的覆盖无法用覆盖挂载表达（tmpfs 已遮蔽
-// 原内容），保持覆盖（近似层，与 seatbelt 的精确 allow 规则有已知差异）。
-func bwrapDenyArgs(deny, override []string) []string {
+// bwrapDenyArgs overlays denied paths after allow mounts. Policy validation
+// rejects scopes the mount backend cannot fully enforce before this is called.
+func bwrapDenyArgs(deny []string) []string {
 	var args []string
 	for _, pat := range deny {
 		if pat == "" {
 			continue
 		}
 		for _, p := range denyCoverTargets(pat) {
-			if coveredByOverride(p, override) {
-				continue
-			}
 			args = append(args, overlayArgs(p)...)
 		}
 	}
 	return args
-}
-
-// coveredByOverride 判定 deny 覆盖挂载目标是否被 allow 条目完整覆盖（是则跳过
-// 覆盖，allow 覆盖 deny 在 linux 落地）：
-//   - 普通文件：allow 模式命中该文件本身即整体覆盖（覆盖粒度 = 单文件）；
-//   - 目录：仅当 allow 模式恰为 <target>/**（整棵子树）才跳过——更窄的覆盖无法用
-//     覆盖挂载表达（tmpfs 已遮蔽原内容），保持覆盖（安全方向）；
-//   - unix socket / 设备：恒不跳过——connect 隔离不在 allow 覆盖面内（对齐
-//     seatbelt 不发 network allow 规则，allow 只放行文件读写）。
-func coveredByOverride(target string, override []string) bool {
-	if target == "" || len(override) == 0 {
-		return false
-	}
-	st, err := os.Stat(target)
-	if err != nil {
-		return false
-	}
-	switch {
-	case st.IsDir():
-		for _, e := range override {
-			if e == target+"/**" {
-				return true
-			}
-		}
-		return false
-	case st.Mode().IsRegular():
-		for _, e := range override {
-			if fsauth.MatchPattern(e, target) {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
-	}
 }
 
 // overlayArgs 返回单目标路径的覆盖挂载参数（目录 tmpfs / 普通文件与 unix
@@ -458,39 +373,7 @@ func homeAnchorTargets(pat string) []string {
 // 若 /usr/bin/sandbox-exec 被篡改，攻击者已 root——codex 同策略）。
 const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 
-// seatbeltArgs 构建 sandbox-exec 包装 argv。SBPL 为 allow-default +
-// (deny file-write*) 白名单：read-only 仅放 /dev/null 字面量；
-// workspace-write 追加工作区 + 缓存目录（fsauth.CacheRoots）+ 平台临时区
-// （/private/tmp 与 $TMPDIR）+ 追加根（extra），全部 canonicalize——Seatbelt
-// 匹配 resolved path（/tmp 即 /private/tmp，必须消解后再匹配）；随后对可写根下
-// 的敏感子路径（.git 等）追加 deny 规则（SBPL deny 优先于 allow，覆盖写白名单）。
-// .git 覆盖的保护对象是 bash/rm 等通用命令——git 自身（isGitArgv）豁免，
-// git 写操作的等级由 vcore 子命令分级表承担（§2.4）。
-//
-// deny 追加拒绝规则（fsauth.DenyPatterns 预展开模式，§5.10 deny 隔离）：
-// 每条模式经 globToSBPLRegex 转 SBPL (regex ...) 规则，file-read* 与 file-write*
-// 各出一条读写双拒（修复前仅拒读，纯写打开仍可改写可写根内 deny 文件，实测
-// 2026-09-05；与 linux 覆盖挂载事实行为、fsauth deny=(0,0) 语义对齐），另加一条
-// network-outbound (remote unix (regex ...))——AF_UNIX connect() 不走 file-* 判定
-// （实测 2026-09-05：deny 条目 stat/读/写全拒而 curl --unix-socket 直通，
-// docker.sock = 主机逃逸）；SBPL network 过滤器 (remote unix (regex ...)) 实测可用，
-// 内核对判定路径先规范化（/tmp→/private/tmp symlink 亦命中，实测）。
-// **规则顺序：deny 表在写白名单之后输出**——SBPL 后匹配覆盖先匹配，先输出时
-// 可写根内 deny 条目（工作区的 **/.env / *.key 等）写保护会被 allow subpath
-// 覆盖（.git 覆盖幸存仅因其在白名单后输出；实测修复 2026-09-05）。
-// 字面路径以双形态进入名单（compileDeny 同时输出 canonical 与字面形）：
-// 模式自身是符号链接时（/var/run/docker.sock → 厂商 socket）两形态都须命中。
-// SBPL 无 glob filter，regex 为 POSIX ERE 且对完整路径字符串匹配（子串命中，锚定 ^ 有效）；
-// seatbelt 判定前做路径规范化（大小写变体/.SSH、symlink 跳转均被拒，实测）。字面路径直接 (regex) 亦可用，但统一走转换器保持单一路径。
-//
-// allow 覆盖 deny（fs_allow，2026-09-09）：deny 规则之后逐条追加
-// (allow file-read* (regex ...))，写级（level>=2）再追加 (allow file-write* ...)
-// ——SBPL 后匹配覆盖先匹配，allow 因此压过 deny（与 deny 压过写白名单同一机制）。
-// 覆盖模式已由 fsauth.DenyOverridePatterns 展开为绝对 glob（裸路径条目 → <root>/**，
-// 通配条目原样），作用域由展开本身保证（无需 SBPL 侧过滤）。不发 network-outbound
-// allow 规则：网络段优先级不随规则序（见 seatbeltNetForms 实测纪律），socket
-// connect 保持 deny（allow 只放行文件读写；bwrap 侧 socket 同理不跳过覆盖）。
-// 覆盖规则在 .git 写保护之前输出——.git 保护恒优先，不被 allow 豁免。
+// seatbeltArgs emits explicit read/write scopes, followed by unconditional denies.
 func seatbeltArgs(spec confineSpec) []string {
 	forms := []string{
 		"(version 1)",
@@ -498,13 +381,30 @@ func seatbeltArgs(spec confineSpec) []string {
 		"(deny file-write*)",
 		`(allow file-write* (literal "/dev/null"))`,
 	}
+	if !spec.fsOpen {
+		forms = append(forms, "(deny file-read*)")
+		// dyld opens the root directory as an openat base; this literal rule
+		// permits that directory only, never its descendants.
+		forms = append(forms, `(allow file-read-data (literal "/"))`)
+		// Runtime path traversal needs metadata on ancestors of readable roots.
+		// This grants no directory listing or file contents outside those roots.
+		for _, root := range readAncestors(spec.readAllow) {
+			forms = append(forms, "(allow file-read-metadata (literal "+sbplString(root)+"))")
+		}
+		for _, pat := range spec.readAllow {
+			forms = append(forms, "(allow file-read* (regex "+sbplString(globToSBPLRegex(pat))+"))")
+		}
+	}
 	if spec.level >= proto.LevelWrite {
 		if spec.fsOpen {
 			// fs_policy=open：写全放（deny 表在后输出，恒优先）。
 			forms = append(forms, "(allow file-write*)")
 		} else {
-			for _, root := range writableRoots(spec.workdir, spec.extra) {
+			for _, root := range spec.extra {
 				forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
+			}
+			for _, pat := range spec.writeAllow {
+				forms = append(forms, "(allow file-write* (regex "+sbplString(globToSBPLRegex(pat))+"))")
 			}
 		}
 	}
@@ -517,27 +417,6 @@ func seatbeltArgs(spec confineSpec) []string {
 		forms = append(forms, "(deny file-read* (regex "+re+"))")
 		forms = append(forms, "(deny file-write* (regex "+re+"))")
 		forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
-	}
-	// allow 覆盖 deny：deny 之后追加放行规则（SBPL 后匹配覆盖先匹配）。
-	for _, pat := range spec.override {
-		if pat == "" {
-			continue
-		}
-		re := sbplString(globToSBPLRegex(pat))
-		forms = append(forms, "(allow file-read* (regex "+re+"))")
-		if spec.level >= proto.LevelWrite {
-			forms = append(forms, "(allow file-write* (regex "+re+"))")
-		}
-	}
-	// 系统公共 CA 只读放行（2026-09-11）：deny 通用表 **/*.pem 会命中
-	// /etc/ssl/cert.pem 等公共信任锚，沙箱内 curl/node 等因无法加载证书
-	// 而 https 全断（实测：stat/读被拒 → curl(77)）。恒只读——**绝不输出
-	// file-write* allow**（写系统 CA 目录 = 自定义信任根注入）。
-	for _, pat := range spec.readAllow {
-		if pat == "" {
-			continue
-		}
-		forms = append(forms, "(allow file-read* (regex "+sbplString(globToSBPLRegex(pat))+"))")
 	}
 	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {
@@ -574,7 +453,11 @@ func seatbeltArgs(spec confineSpec) []string {
 //     unix socket）仍在本段之后输出（旧教训不回收）。
 func seatbeltNetForms(spec confineSpec) []string {
 	if spec.netOpen {
-		return nil
+		var forms []string
+		for _, e := range spec.netDeny {
+			forms = append(forms, seatbeltEntryForms(e, "deny")...)
+		}
+		return forms
 	}
 	forms := []string{
 		"(deny network-inbound)",
@@ -788,4 +671,73 @@ func mergeEnv(extra []string) []string {
 		env = append(env, kv)
 	}
 	return append(env, extra...)
+}
+
+// validateProcessPolicy fails before execution when a backend cannot enforce the
+// requested scope. Never approximate host rules by opening all hosts or paths.
+func validateProcessPolicy(spec confineSpec, platform string) error {
+	fail := func(why string) error {
+		return &proto.DeniedError{Reason: "sandbox cannot enforce host policy: " + why}
+	}
+	if platform == "windows" && (!spec.fsOpen || len(spec.deny) > 0 || !spec.netOpen || len(spec.netDeny) > 0) {
+		return fail("this Windows backend does not implement path read restrictions or network rules")
+	}
+	for _, e := range spec.netDeny {
+		if platform != "darwin" || !isLoopbackHost(e.Host) {
+			return fail("selective network deny is unsupported by this backend")
+		}
+	}
+	if !spec.netOpen {
+		for _, e := range spec.netAllow {
+			if platform != "darwin" || !isLoopbackHost(e.Host) {
+				return fail("selective network allow is unsupported by this backend")
+			}
+		}
+	}
+	if platform == "linux" {
+		if len(spec.deny) > 0 {
+			return fail("Linux mount confinement cannot enforce path deny rules")
+		}
+		for _, p := range append(append(append([]string{}, spec.readAllow...), spec.writeAllow...), spec.deny...) {
+			if strings.ContainsAny(strings.TrimSuffix(p, "/**"), "*?[") {
+				return fail("Linux mount confinement cannot enforce this path glob: " + p)
+			}
+		}
+	}
+	return nil
+}
+
+func literalWriteRoots(patterns []string) []string {
+	roots := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		roots = append(roots, strings.TrimSuffix(p, "/**"))
+	}
+	return roots
+}
+
+func validateUnconfined(opts StartOptions) error {
+	if opts.Level < proto.LevelWrite || !opts.FsOpen || len(opts.DenyPaths) > 0 || !opts.NetOpen || len(opts.NetDeny) > 0 {
+		return &proto.DeniedError{Reason: "nosandbox cannot enforce the host execution policy; use sandboxed execution"}
+	}
+	return nil
+}
+
+func readAncestors(patterns []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range patterns {
+		if i := strings.IndexAny(p, "*?"); i >= 0 {
+			p = p[:i]
+		}
+		for p = filepath.Dir(p); p != "."; p = filepath.Dir(p) {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+			if p == "/" {
+				break
+			}
+		}
+	}
+	return out
 }

@@ -21,6 +21,9 @@ type configView struct {
 	WorkDir     string   `json:"work_dir"`
 	ExecTimeout string   `json:"exec_timeout"`
 	HomePath    string   `json:"home_path"`
+	ExecPolicy  string   `json:"exec_policy"`
+	ExecDeny    []string `json:"exec_deny"`
+	ExecAllow   []string `json:"exec_allow"`
 	FsPolicy    string   `json:"fs_policy"`
 	FsDeny      []string `json:"fs_deny"`
 	FsAllow     []string `json:"fs_allow"`
@@ -38,7 +41,8 @@ func GetConfig(x *vigo.X) (*configView, error) {
 	o := effective()
 	a := cfg.AuthSnapshot()
 	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
-		HomePath: o.NormalizedHomePath(),
+		HomePath:   o.NormalizedHomePath(),
+		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
 		FsPolicy: a.FsPolicy, FsDeny: a.FsDeny, FsAllow: a.FsAllow,
 		NetPolicy: a.NetPolicy, NetDeny: a.NetDeny, NetAllow: a.NetAllow,
 		SshPolicy: a.SshPolicy, SshDeny: a.SshDeny, SshAllow: a.SshAllow}, nil
@@ -55,6 +59,9 @@ type SetConfigReq struct {
 	WorkDir     string    `json:"work_dir" src:"json"`
 	ExecTimeout string    `json:"exec_timeout" src:"json"`
 	HomePath    string    `json:"home_path" src:"json"`
+	ExecPolicy  string    `json:"exec_policy" src:"json"`
+	ExecDeny    *[]string `json:"exec_deny" src:"json"`
+	ExecAllow   *[]string `json:"exec_allow" src:"json"`
 	FsPolicy    string    `json:"fs_policy" src:"json"`
 	FsDeny      *[]string `json:"fs_deny" src:"json"`
 	FsAllow     *[]string `json:"fs_allow" src:"json"`
@@ -75,6 +82,8 @@ func validPolicy(s string) bool {
 // 内存态同步 cfg.Global；host/work_dir/exec_timeout 变更经 ApplyConfig 应用
 // （保留会话与 bg 任务，NATS 地址变化时重连）。
 func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
+	unlock := cfg.LockUpdate()
+	defer unlock()
 	if s := strings.TrimSpace(req.ExecTimeout); s != "" {
 		if _, err := time.ParseDuration(s); err != nil {
 			return nil, vigo.ErrInvalidArg.WithString("invalid exec_timeout: " + err.Error())
@@ -82,7 +91,7 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	}
 	// 授权配置显式校验（policy 取值 / net/ssh 条目形态——运行期坏条目静默跳过，
 	// 写入前必须显式报错，否则用户以为生效）
-	if !validPolicy(req.FsPolicy) || !validPolicy(req.NetPolicy) || !validPolicy(req.SshPolicy) {
+	if !validPolicy(req.ExecPolicy) || !validPolicy(req.FsPolicy) || !validPolicy(req.NetPolicy) || !validPolicy(req.SshPolicy) {
 		return nil, vigo.ErrInvalidArg.WithString("invalid policy: want deny | open")
 	}
 	for name, list := range map[string]*[]string{"net_deny": req.NetDeny, "net_allow": req.NetAllow, "ssh_deny": req.SshDeny, "ssh_allow": req.SshAllow} {
@@ -119,6 +128,18 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
 	// 授权九键：policy 空串 = 不改；列表 nil = 不改，非 nil = 整体替换。
 	authChanged := false
+	if req.ExecPolicy != "" {
+		fileCfg.ExecPolicy = req.ExecPolicy
+		authChanged = true
+	}
+	if req.ExecDeny != nil {
+		fileCfg.ExecDeny = *req.ExecDeny
+		authChanged = true
+	}
+	if req.ExecAllow != nil {
+		fileCfg.ExecAllow = *req.ExecAllow
+		authChanged = true
+	}
 	if req.FsPolicy != "" {
 		fileCfg.FsPolicy = req.FsPolicy
 		authChanged = true
@@ -165,6 +186,9 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 		fileCfg.HomePath = "/" // 清空 = 恢复默认首页
 	}
 	fileCfg.Normalize()
+	if err := fileCfg.ValidateAuth(); err != nil {
+		return nil, vigo.ErrInvalidArg.WithError(err)
+	}
 	if err := cfg.Save(fileCfg); err != nil {
 		return nil, vigo.ErrInternalServer.WithError(err)
 	}

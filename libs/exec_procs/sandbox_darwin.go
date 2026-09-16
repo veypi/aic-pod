@@ -31,6 +31,9 @@ func probeBackend() sandboxBackend {
 // Seatbelt（SBPL）不支持资源限制，用 confineRlimits 包一层 /bin/sh（
 // RLIMIT 跨 exec 继承，子进程只能降低不能提高；ulimit 失败即 fail-closed）。
 func planConfined(spec confineSpec) (launchPlan, error) {
+	if err := validateProcessPolicy(spec, "darwin"); err != nil {
+		return launchPlan{}, err
+	}
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(spec.level)
 	}

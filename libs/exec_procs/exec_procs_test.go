@@ -2,6 +2,7 @@ package exec_procs
 
 import (
 	"context"
+	"github.com/veypi/aic-pod/libs/proto"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ func TestStartNormalCompletion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	res, err := m.Start(ctx, StartOptions{
+	res, err := m.Start(ctx, StartOptions{FsOpen: true, NetOpen: true, Level: proto.LevelWrite,
 		ID:      "h1:s1:op1",
 		Command: "printf",
 		LogPath: logPath,
@@ -44,7 +45,7 @@ func TestStartTimeoutBackground(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	res, err := m.Start(ctx, StartOptions{
+	res, err := m.Start(ctx, StartOptions{FsOpen: true, NetOpen: true, Level: proto.LevelWrite,
 		ID:      "h1:s1:op2",
 		Command: "sleep",
 		LogPath: logPath,
@@ -89,7 +90,7 @@ func TestStartTimeoutBackground(t *testing.T) {
 
 func TestStartUnknownProgram(t *testing.T) {
 	m := NewManager(0)
-	_, err := m.Start(context.Background(), StartOptions{
+	_, err := m.Start(context.Background(), StartOptions{FsOpen: true, NetOpen: true, Level: proto.LevelWrite,
 		ID: "x", LogPath: filepath.Join(t.TempDir(), "o.log"),
 		Exec: []string{"definitely-not-a-program-xyz"},
 	})

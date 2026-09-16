@@ -14,6 +14,10 @@ func TestGitRequired(t *testing.T) {
 		want int
 	}{
 		{[]string{"status"}, proto.LevelRead},
+		{[]string{"branch"}, proto.LevelRead},
+		{[]string{"branch", "--list", "feat*"}, proto.LevelRead},
+		{[]string{"branch", "new"}, proto.LevelWrite},
+		{[]string{"branch", "-D", "old"}, proto.LevelDanger},
 		{[]string{"log", "--oneline"}, proto.LevelRead},
 		{[]string{"diff"}, proto.LevelRead},
 		{[]string{"add", "."}, proto.LevelWrite},

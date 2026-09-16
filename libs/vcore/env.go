@@ -73,16 +73,10 @@ func (e *Env) CheckPolicy(op, abs string, write bool) error {
 	if write {
 		need = wr
 	}
-	if need == 0 {
-		return &proto.DeniedError{Reason: fmt.Sprintf(
-			"%s: %s is denied by file policy (deny list, not approval-able; an explicit host fs_allow entry — bare path or glob like **/.env — overrides deny)", op, abs)}
+	if need == 0 || e.Granted < need {
+		return &proto.DeniedError{Reason: fmt.Sprintf("%s: %s is not allowed by host file policy; request access with exec grant fs %s --temp", op, abs, abs)}
 	}
-	if e.Granted >= need {
-		return nil
-	}
-	return &proto.ApprovalError{Reason: fmt.Sprintf(
-		"%s %s requires level %d by file policy (granted %d): approve once, or whitelist via exec grant fs %s --permanent",
-		op, abs, need, e.Granted, abs)}
+	return nil
 }
 
 // Resolve 按 §2.1.1 可解析层展开指令路径参数（proto.ResolvePath 唯一实现）。

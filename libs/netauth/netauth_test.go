@@ -114,15 +114,15 @@ func TestAllowedSpecificity(t *testing.T) {
 	p := New(NetKeys)
 	// 宽 deny + 窄 allow：例外端口放行，其余端口仍拒（deny/open 两模式同效）
 	p.Configure("deny", []string{"bad.com"}, []string{"bad.com:443"})
-	if !p.Allowed("s1", "bad.com", 443) {
-		t.Error("specific allow should override all-port deny")
+	if p.Allowed("s1", "bad.com", 443) {
+		t.Error("deny must win over specific allow")
 	}
 	if p.Allowed("s1", "bad.com", 80) {
 		t.Error("non-excepted port should stay denied")
 	}
 	p.Configure("open", []string{"bad.com"}, []string{"bad.com:443"})
-	if !p.Allowed("s1", "bad.com", 443) {
-		t.Error("open mode: specific allow should override all-port deny")
+	if p.Allowed("s1", "bad.com", 443) {
+		t.Error("open mode: deny must win")
 	}
 	if p.Allowed("s1", "bad.com", 80) {
 		t.Error("open mode: non-excepted port should stay denied")
@@ -150,8 +150,8 @@ func TestAllowedSpecificity(t *testing.T) {
 	// Snapshot 剔除被窄 allow 压过的端口 * deny（具体 deny 与 cfg allow 保留）
 	p.Configure("deny", []string{"bad.com", "other.com:22"}, []string{"bad.com:443"})
 	deny, allow := p.Snapshot("s1")
-	if has(deny, "bad.com", "*") {
-		t.Error("narrowed all-port deny must be dropped from snapshot")
+	if !has(deny, "bad.com", "*") {
+		t.Error("deny must stay in snapshot")
 	}
 	if !has(deny, "other.com", "22") {
 		t.Error("specific deny must stay in snapshot")

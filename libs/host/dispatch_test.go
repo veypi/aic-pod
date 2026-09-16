@@ -98,31 +98,30 @@ func TestDispatchGrantedDepthCheck(t *testing.T) {
 		t.Fatalf("level 0: state = %s needApproval = %v err = %q", resp.State, resp.NeedApproval, resp.Error)
 	}
 
-	// granted=1 执行程序命令（基线 Danger 3）→ waiting 动态审批
+	// granted=1 执行程序命令（基线 Danger 3）→ rejected，执行端不发起审批
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
 		map[string]any{"action": "bash", "argv": []string{"-c", "true"}}, 1))
-	if resp.State != proto.StateWaiting || resp.NeedApproval == nil {
+	if resp.State != proto.StateRejected || resp.NeedApproval != nil {
 		t.Fatalf("program low grant: state = %s needApproval = %v", resp.State, resp.NeedApproval)
 	}
 
-	// nosandbox → required 提升 Critical(4)：granted 3（用户可授予上限）仍 waiting（必审批）
+	// nosandbox → required 提升 Critical(4)：granted 3（用户可授予上限）仍 rejected（云端应先审批）
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
 		map[string]any{"action": "bash", "argv": []string{"-c", "true"}, "nosandbox": true}, 3))
-	if resp.State != proto.StateWaiting || resp.NeedApproval == nil {
+	if resp.State != proto.StateRejected || resp.NeedApproval != nil {
 		t.Fatalf("nosandbox grant 3: state = %s needApproval = %v", resp.State, resp.NeedApproval)
 	}
 
-	// granted=3 执行程序命令 → 放行（true 立即返回）
-	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec",
-		map[string]any{"action": "bash", "argv": []string{"-c", "echo hi"}}, 3))
-	if resp.State != proto.StateCompleted {
-		t.Fatalf("program ok: state = %s err = %q", resp.State, resp.Error)
+	// Approval never exempts a process from local restrictions, even with nosandbox.
+	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec", map[string]any{"action": "bash", "argv": []string{"-c", "echo hi"}, "nosandbox": true}, 9))
+	if resp.State == proto.StateCompleted || resp.State == proto.StateWaiting || !strings.Contains(resp.Error, "host execution policy") {
+		t.Fatalf("nosandbox bypassed host rules: %+v", resp)
 	}
 
-	// fs write granted=1 < required=2 → waiting
+	// fs write granted=1 < required=2 → rejected
 	resp = c.dispatch(context.Background(), "u.u1.s.s1.h.host_test01.fs.req", signedReq(t, c, "fs",
 		map[string]any{"action": "write", "path": "a.txt", "content": "x"}, 1))
-	if resp.State != proto.StateWaiting {
+	if resp.State != proto.StateRejected {
 		t.Fatalf("fs write low grant: state = %s", resp.State)
 	}
 
@@ -284,7 +283,7 @@ func TestParseWSURL(t *testing.T) {
 func TestExecCmdWorkdirFallback(t *testing.T) {
 	wd := t.TempDir()
 	// 该用例验证 workdir 缺省回落机制，与沙箱无关：全局免沙箱隔离环境差异（§5.10）
-	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute, NoSandbox: true})
+	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute})
 	c.hostID = "host_test01"
 
 	// 不带 workdir → bash -c pwd 应返回配置工作区

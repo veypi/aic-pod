@@ -36,7 +36,16 @@ func (c *Client) handleMsg(msg *nats.Msg) {
 }
 
 // dispatch 是请求处理主流程（与 NATS 解耦，可单测）。
-func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *proto.ToolResponse {
+func (c *Client) dispatch(ctx context.Context, subject string, data []byte) (response *proto.ToolResponse) {
+	defer func() {
+		if response != nil && response.State == proto.StateWaiting {
+			response.State = proto.StateRejected
+			if response.NeedApproval != nil {
+				response.Error = response.NeedApproval.Reason
+			}
+			response.NeedApproval = nil
+		}
+	}()
 	var req proto.ToolRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		return &proto.ToolResponse{State: proto.StateError, Error: "invalid request: " + err.Error()}
@@ -70,8 +79,13 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 		return reject(req.MsgID, "duplicate nonce")
 	}
 
+	// Server-only lifecycle command: ordinary tool discovery never advertises it.
+	if req.Tool == proto.ToolExec && req.SessionID != "" && req.GrantedLevel == proto.LevelApproved && actionOf(&req) == "_session_end" {
+		c.dropSessionGrants(req.SessionID)
+		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted, Content: "session grants cleared"}
+	}
 	// 4. granted_level 纵深检查（§2.4 判定分工：host 端按 caps 声明 + 本地规则再自检）
-	//    waiting = 可审批（NeedApproval）；rejected = 不可审批（Error，如 level 0 禁用）
+	//    校验不通过直接拒绝；host 执行策略不返回提权请求。
 	if state, reason := c.checkGranted(&req); state != "" {
 		resp := &proto.ToolResponse{MsgID: req.MsgID, State: state}
 		if state == proto.StateWaiting {
@@ -104,7 +118,7 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) *pro
 // checkGranted 做 granted >= required 数字比较（与 vcore 分级表同源）。
 // required = 声明表 level 与 vcore 动态表（git/browser 子命令、fs rm recursive
 // 删非空目录提升）取高。browser 由壳 provider 注册时才在声明表出现（register.go）。
-// 不足返回 waiting + reason（§6.2：host 端动态审批，服务端置 waiting 等用户审批）。
+// 不足返回 rejected；用户通过单独的 grant 调用申请本地授权。
 func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 	// 0 = 显式禁用：直接拒绝，不可审批绕过（与服务端 procs 同语义，纵深防御）。
 	if req.GrantedLevel == proto.LevelNone {
@@ -143,7 +157,7 @@ func (c *Client) checkGranted(req *proto.ToolRequest) (proto.State, string) {
 		// 未声明命令按 Danger 兜底（后续路由会拒绝，这里只是纵深检查的保守值）
 	}
 	if req.GrantedLevel < required {
-		return proto.StateWaiting, fmt.Sprintf("%s %s requires level %d (granted %d)",
+		return proto.StateRejected, fmt.Sprintf("%s %s requires level %d (granted %d)",
 			req.Tool, actionOf(req), required, req.GrantedLevel)
 	}
 	return "", ""
@@ -211,6 +225,9 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 			Error: fmt.Sprintf("exec: unknown action %q (not declared by this host; run commands to discover available commands)", p.Action)}
 	}
 
+	if !c.execAllowed(sid, p.Action) {
+		return reject(req.MsgID, "exec "+p.Action+" is denied by host exec policy; request access with grant exec "+p.Action+" --temp")
+	}
 	env := c.newEnv(sid, p.Workdir)
 	env.Granted = req.GrantedLevel // Policy 升级判定用（v0.14.5 §2）
 	// 任务托管（curl 无 -o）：输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log，
@@ -341,10 +358,11 @@ func (c *Client) commandsJSON() string {
 func resultToResponse(msgID string, res *vcore.Result, err error) *proto.ToolResponse {
 	if err != nil {
 		state := proto.StateOf(err)
-		resp := &proto.ToolResponse{MsgID: msgID, State: state, Error: err.Error()}
-		if ae, ok := err.(*proto.ApprovalError); ok {
-			resp.NeedApproval = &proto.NeedApproval{Reason: ae.Reason, Preview: ae.Preview}
+		if state == proto.StateWaiting {
+			state = proto.StateRejected
 		}
+		resp := &proto.ToolResponse{MsgID: msgID, State: state, Error: err.Error()}
+
 		return resp
 	}
 	return &proto.ToolResponse{MsgID: msgID, State: proto.StateCompleted,

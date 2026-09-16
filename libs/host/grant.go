@@ -9,10 +9,11 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/netauth"
+	"github.com/veypi/aic-pod/libs/policy"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
-// grant（统一授权申请，三域同形）：
+// grant（统一授权申请，四域同形）：
 //
 //	exec grant fs  <path>        [--temp|--permanent]
 //	exec grant net <host:port>   [--temp|--permanent]
@@ -31,13 +32,15 @@ func (c *Client) runGrant(sid, msgID string, argv []string) *proto.ToolResponse 
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: "exec grant: " + err.Error()}
 	}
 	switch domain {
+	case "exec":
+		return c.grantExec(sid, msgID, target, permanent)
 	case "fs":
 		return c.grantFS(sid, msgID, target, permanent)
 	case "net", "ssh":
 		return c.grantTarget(sid, msgID, domain, target, permanent)
 	}
 	return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-		Error: fmt.Sprintf("exec grant: unknown domain %q (supported: fs, net, ssh)", domain)}
+		Error: fmt.Sprintf("exec grant: unknown domain %q (supported: fs, exec, net, ssh)", domain)}
 }
 
 // grantFS 处理 fs 域：路径写白名单申请（原 grant_apply 语义）。
@@ -49,7 +52,7 @@ func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolRes
 	}
 	if c.policy.DenyHit(abs) {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateRejected,
-			Error: fmt.Sprintf("exec grant fs: %s is in the fs_deny list and cannot be granted (deny entries are not approval-able; add an explicit fs_allow entry in host config — bare path or glob like **/.env — to override)", abs)}
+			Error: fmt.Sprintf("exec grant fs: %s is in the fs_deny list and cannot be granted (remove the deny through local management before granting)", abs)}
 	}
 	scope := "session"
 	if permanent {
@@ -83,7 +86,7 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 	}
 	if pol.DenyHit(e) {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateRejected,
-			Error: fmt.Sprintf("exec grant %s: %s is in the %s_deny list and cannot be granted (deny entries are not approval-able; add a narrower allow entry in host config to override)", domain, e.String(), domain)}
+			Error: fmt.Sprintf("exec grant %s: %s is in the %s_deny list and cannot be granted (remove the deny through local management before granting)", domain, e.String(), domain)}
 	}
 	scope := "session"
 	if permanent {
@@ -127,7 +130,7 @@ func parseGrantArgv(argv []string) (domain, target string, permanent bool, err e
 		}
 	}
 	if domain == "" {
-		return "", "", false, fmt.Errorf("domain is required (usage: grant <fs|net|ssh> <target> [--temp|--permanent])")
+		return "", "", false, fmt.Errorf("domain is required (usage: grant <fs|exec|net|ssh> <target> [--temp|--permanent])")
 	}
 	if strings.TrimSpace(target) == "" {
 		return "", "", false, fmt.Errorf("target is required (usage: grant %s <target> [--temp|--permanent])", domain)
@@ -139,6 +142,8 @@ func parseGrantArgv(argv []string) (domain, target string, permanent bool, err e
 // flag/env 启动覆盖不落盘，与 api.SetConfig 同语义）；幂等（归一化口径下
 // 已存在跳过——macOS /var → /private/var 类 symlink、端口零填充不再产生重复条目）。
 func (c *Client) persistGrant(domain, value string) error {
+	unlock := cfg.LockUpdate()
+	defer unlock()
 	fileCfg, err := cfg.LoadFile()
 	if err != nil {
 		return err
@@ -158,6 +163,11 @@ func (c *Client) persistGrant(domain, value string) error {
 		return s
 	}
 	switch domain {
+	case "exec":
+		if contains(fileCfg.ExecAllow, func(s string) string { return s }) {
+			return nil
+		}
+		fileCfg.ExecAllow = append(fileCfg.ExecAllow, value)
 	case "fs":
 		norm := func(s string) string { return fsauth.Canonical(expandHomeDir(s)) }
 		if contains(fileCfg.FsAllow, norm) {
@@ -210,4 +220,58 @@ func expandHomeDir(p string) string {
 		return filepath.Join(home, strings.TrimPrefix(p, "~/"))
 	}
 	return p
+}
+
+func (c *Client) execAllowed(sid, name string) bool {
+	a := cfg.AuthSnapshot()
+	c.execGrantMu.RLock()
+	allow := append(append([]string{"commands", "grant"}, a.ExecAllow...), c.execGrants[sid]...)
+	c.execGrantMu.RUnlock()
+	return policy.CommandAllowed(a.ExecPolicy, a.ExecDeny, allow, name)
+}
+func (c *Client) grantExec(sid, msgID, name string, permanent bool) *proto.ToolResponse {
+	if err := policy.ValidateExec([]string{name}); err != nil {
+		return reject(msgID, err.Error())
+	}
+	c.cmdsMu.RLock()
+	_, declared := c.cmdByName[name]
+	c.cmdsMu.RUnlock()
+	if !declared {
+		return reject(msgID, "grant exec requires a registered command name")
+	}
+	a := cfg.AuthSnapshot()
+	if !policy.CommandAllowed("open", a.ExecDeny, nil, name) {
+		return reject(msgID, "command is in exec_deny and cannot be granted")
+	}
+	scope := "session"
+	if permanent {
+		if err := c.persistGrant("exec", name); err != nil {
+			return reject(msgID, err.Error())
+		}
+		scope = "permanent"
+	} else {
+		c.execGrantMu.Lock()
+		if c.execGrants == nil {
+			c.execGrants = map[string][]string{}
+		}
+		found := false
+		for _, old := range c.execGrants[sid] {
+			if old == name {
+				found = true
+			}
+		}
+		if !found {
+			c.execGrants[sid] = append(c.execGrants[sid], name)
+		}
+		c.execGrantMu.Unlock()
+	}
+	return &proto.ToolResponse{MsgID: msgID, State: proto.StateCompleted, Content: fmt.Sprintf("granted exec %s (scope=%s)", name, scope)}
+}
+func (c *Client) dropSessionGrants(sid string) {
+	c.policy.DropSession(sid)
+	c.netPol.DropSession(sid)
+	c.sshPol.DropSession(sid)
+	c.execGrantMu.Lock()
+	delete(c.execGrants, sid)
+	c.execGrantMu.Unlock()
 }

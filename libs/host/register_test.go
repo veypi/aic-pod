@@ -87,7 +87,7 @@ func TestProviderRegisterAndDispatch(t *testing.T) {
 	data3 := signedReq(t, c, "exec", map[string]any{
 		"action": "browser", "argv": []string{"click", "@e1"},
 	}, 1)
-	if resp3 := c.dispatch(context.Background(), testSubject, data3); resp3.State != proto.StateWaiting {
+	if resp3 := c.dispatch(context.Background(), testSubject, data3); resp3.State != proto.StateRejected {
 		t.Errorf("click with granted=1 should be waiting (Write): %+v", resp3)
 	}
 }

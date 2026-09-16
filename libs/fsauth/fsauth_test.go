@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -117,98 +116,52 @@ func TestDecideGrading(t *testing.T) {
 	// 白名单：公共区
 	assertGrades(t, p, p.publicDir+"/x.txt", 1, 2)
 	// 其余：1/3
-	assertGrades(t, p, base+"/elsewhere/f.txt", 1, 3)
+	assertGrades(t, p, base+"/elsewhere/f.txt", 0, 0)
 	// deny：/** 语义含根自身——连 ls 目录一并拒
 	setDeny(t, p, base+"/secrets/**")
 	assertGrades(t, p, base+"/secrets/key.pem", 0, 0)
 	assertGrades(t, p, base+"/secrets", 0, 0)
-	assertGrades(t, p, base+"/secrets-sub/x", 1, 3) // 前缀不同名不命中
+	assertGrades(t, p, base+"/secrets-sub/x", 0, 0) // 前缀不同名不命中
 }
 
 // TestDecideAllowOverride：allow 覆盖 deny（两键语义，2026-09-09）——显式 fs_allow
 // 条目压过 deny：裸路径覆盖其子树、通配条目精确匹配（并授予写 2）；内建便利根
 // （工作区/临时区/公共区/缓存/会话区）与临时 grant 不压（安全默认保持权威）。
-func TestDecideAllowOverride(t *testing.T) {
+func TestDenyPrecedesAllAllow(t *testing.T) {
 	base := mkBase(t)
-	ws := filepath.Join(base, "ws")
-	proj := filepath.Join(ws, "proj")
-	other := filepath.Join(base, "other")
-	allowed := filepath.Join(base, "allowed")
-	granted := filepath.Join(base, "granted")
-	mkdir(t, proj, other, allowed, granted)
-	p := newTestPolicy(t, ws)
-	setDeny(t, p, "**/.env", "**/*.pem")
+	p := newTestPolicy(t, "")
+	setDeny(t, p, base+"/secret/**")
+	setAllow(t, p, base)
+	p.Grant("s1", base+"/secret")
+	assertGradesSid(t, p, "s1", base+"/secret/key", 0, 0)
+	assertGrades(t, p, base+"/ordinary", 1, 2)
+	p.openMode = true
+	assertGrades(t, p, base+"/secret/key", 0, 0)
+}
 
-	// 触发点：工作区内的 .env 无差别拒（内建根不压 deny）
-	assertGrades(t, p, proj+"/.env", 0, 0)
-	assertGrades(t, p, proj+"/cert.pem", 0, 0)
-	// 内建便利根同样不压：公共区 / 临时区 / 会话区
-	assertGrades(t, p, p.publicDir+"/.env", 0, 0)
-	assertGrades(t, p, os.TempDir()+"/.env", 0, 0)
-	assertGradesSid(t, p, "s1", p.sessionDir+"/s1/.env", 0, 0)
-	// 临时 grant 不压 deny（grant 是 AI 经审批申请的，不构成信任声明）
-	p.Grant("s1", granted)
-	assertGradesSid(t, p, "s1", granted+"/.env", 0, 0)
-
-	// 通配条目：精确覆盖（只放 .env，同目录 *.pem 仍拒），并授予写 2
-	setAllow(t, p, proj+"/**/.env")
-	assertGrades(t, p, proj+"/.env", 1, 2)
-	assertGrades(t, p, proj+"/sub/.env", 1, 2)
-	assertGrades(t, p, proj+"/cert.pem", 0, 0) // 未覆盖的 deny 条目照旧
-	assertGrades(t, p, other+"/.env", 0, 0)    // 作用域外照旧
-	assertGrades(t, p, ws+"/.env", 0, 0)       // 兄弟目录不在 glob 内
-	assertGrades(t, p, proj+"/main.go", 1, 2)
-
-	// 裸路径条目：覆盖其子树（.env 与 *.pem 都放），同时是写白名单根
-	setAllow(t, p, allowed)
-	assertGrades(t, p, allowed+"/.env", 1, 2)
-	assertGrades(t, p, allowed+"/sub/cert.pem", 1, 2)
-	assertGrades(t, p, proj+"/.env", 0, 0)
-
-	// 多条目：裸路径 + 通配并存；展开快照只含显式条目
-	setAllow(t, p, allowed, proj+"/**/.env")
-	assertGrades(t, p, allowed+"/.env", 1, 2)
-	assertGrades(t, p, proj+"/.env", 1, 2)
-	assertGrades(t, p, proj+"/cert.pem", 0, 0)
-	pats := p.DenyOverridePatterns()
-	if len(pats) != 2 {
-		t.Fatalf("DenyOverridePatterns = %v, want 2 entries (explicit only)", pats)
-	}
-	wantRoot := canonical(allowed) + "/**"
-	wantGlob := canonicalPattern(proj + "/**/.env")
-	for _, want := range []string{wantRoot, wantGlob} {
-		found := false
-		for _, pat := range pats {
-			if pat == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("DenyOverridePatterns missing %q: %v", want, pats)
+func TestReadOnlyAllowAndRevocation(t *testing.T) {
+	base := mkBase(t)
+	p := newTestPolicy(t, "")
+	old := cfg.AuthSnapshot()
+	t.Cleanup(func() { cfg.SetAuth(old) })
+	a := old
+	a.FsPolicy = "deny"
+	a.FsAllow = []string{"ro:" + base + "/read", base + "/write"}
+	cfg.SetAuth(a)
+	p.Reconcile()
+	assertGrades(t, p, base+"/read/file", 1, 0)
+	assertGrades(t, p, base+"/write/file", 1, 2)
+	assertGrades(t, p, base+"/outside/file", 0, 0)
+	for _, root := range p.WriteRootsFor("s1") {
+		if root == base+"/read" {
+			t.Fatal("ro root became writable")
 		}
 	}
-
-	// DenyHit 仍是原始表（grant fs 校验语义：deny 内目标不因 allow 而可 grant）
-	if !p.DenyHit(proj + "/.env") {
-		t.Error("DenyHit must stay raw (no allow override) for grant validation")
-	}
-
-	// 空/未定义变量条目整条跳过
-	setAllow(t, p, "", "  ", "$UNDEFINED_VAR_XYZ/x")
-	if got := p.DenyOverridePatterns(); got != nil {
-		t.Errorf("invalid entries must be skipped, got %v", got)
-	}
-
-	// 根为 "/" 的边界：拼接不得产生 "//"（否则模式整体失配）
-	p2 := newTestPolicy(t, "")
-	setDeny(t, p2, "**/.env")
-	setAllow(t, p2, "/")
-	assertGrades(t, p2, "/etc/proj/.env", 1, 2)
-	for _, pat := range p2.DenyOverridePatterns() {
-		if strings.Contains(pat, "//") {
-			t.Errorf("DenyOverridePatterns must not contain double slash: %q", pat)
-		}
-	}
+	p.Grant("s1", base+"/outside")
+	assertGradesSid(t, p, "s1", base+"/outside/file", 1, 2)
+	assertGradesSid(t, p, "s2", base+"/outside/file", 0, 0)
+	p.DropSession("s1")
+	assertGradesSid(t, p, "s1", base+"/outside/file", 0, 0)
 }
 
 // TestDenyDefaults：平台初始表字面形态自洽（逐条遍历本平台生效表：
@@ -364,19 +317,17 @@ func TestCompileDenyDualForm(t *testing.T) {
 	if !hasLink || !hasReal {
 		t.Fatalf("dual form missing: got %v, want both %q and %q", got, wantLink, wantReal)
 	}
-	// glob 条目单形态（仅 canonical）
-	wantGlob := canonicalPattern(mustExpand(t, globPat))
-	globCount := 0
-	for _, g := range got {
-		if strings.Contains(g, "**") {
-			globCount++
-			if g != wantGlob {
-				t.Fatalf("glob entry must stay single canonical form: got %q want %q", g, wantGlob)
+	// Literal denies cover the entire subtree as well as both symlink spellings.
+	for _, want := range []string{wantReal + "/**", canonicalPattern(mustExpand(t, globPat))} {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
 			}
 		}
-	}
-	if globCount != 1 {
-		t.Fatalf("glob entry count = %d, want 1: %v", globCount, got)
+		if !found {
+			t.Fatalf("missing deny %q: %v", want, got)
+		}
 	}
 }
 
@@ -387,12 +338,12 @@ func TestGrantTemp(t *testing.T) {
 	mkdir(t, ext)
 	p := newTestPolicy(t, "")
 
-	assertGradesSid(t, p, "s1", ext+"/a.txt", 1, 3)
+	assertGradesSid(t, p, "s1", ext+"/a.txt", 0, 0)
 	p.Grant("s1", ext)
 	p.Grant("s1", ext) // 幂等
 	assertGradesSid(t, p, "s1", ext+"/a.txt", 1, 2)
 	// 跨 session 失效
-	assertGradesSid(t, p, "s2", ext+"/a.txt", 1, 3)
+	assertGradesSid(t, p, "s2", ext+"/a.txt", 0, 0)
 
 	// DenyHit：extraDeny 命中 / 界外失配
 	setDeny(t, p, base+"/secrets/**")
@@ -420,10 +371,10 @@ func TestCanonicalSymlinkBypass(t *testing.T) {
 		t.Skip("symlink unavailable:", err)
 	}
 	// 经 link 访问 outside 下的文件 → canonical 后落在 outside（非白名单）→ 1/3
-	assertGrades(t, p, link+"/f.txt", 1, 3)
+	assertGrades(t, p, link+"/f.txt", 0, 0)
 	// link 自身的 canonical 身份 = outside（EvalSymlinks 成功）→ 同样 1/3：
 	// 写 link 即写 outside，权限随真实目标
-	assertGrades(t, p, link, 1, 3)
+	assertGrades(t, p, link, 0, 0)
 	// 白名单内普通文件不受影响
 	assertGrades(t, p, ws+"/f.txt", 1, 2)
 }
@@ -505,7 +456,7 @@ func TestReconcile(t *testing.T) {
 	mkdir(t, custom, secrets)
 	p := newTestPolicy(t, "")
 
-	assertGrades(t, p, custom+"/x", 1, 3)
+	assertGrades(t, p, custom+"/x", 0, 0)
 	saved := cfg.Global
 	defer func() { cfg.Global = saved }()
 	o := cfg.NewOptions()
@@ -519,7 +470,7 @@ func TestReconcile(t *testing.T) {
 	o2 := cfg.NewOptions()
 	cfg.Global = o2
 	p.Reconcile()
-	assertGrades(t, p, secrets+"/x", 1, 3)
+	assertGrades(t, p, secrets+"/x", 0, 0)
 }
 
 func mkdir(t *testing.T, dirs ...string) {

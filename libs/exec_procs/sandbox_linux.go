@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -44,9 +43,8 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 			}
 		}
 	}
-	// 可写 bind 列表：工具链缓存（fsauth.CacheRoots）+ 公共区 $HOME/.aic（publicRoots）
-	// + 追加根（cfg fs_allow/grant fs 临时授权，统一名单）
-	cacheDirs := append(fsauth.CacheRoots(), publicRoots()...)
-	cacheDirs = append(cacheDirs, spec.extra...)
-	return launchPlan{argv: bwrapArgs(spec, cacheDirs, protected)}, nil
+	if err := validateProcessPolicy(spec, "linux"); err != nil {
+		return launchPlan{}, err
+	}
+	return launchPlan{argv: bwrapArgs(spec, spec.extra, protected)}, nil
 }

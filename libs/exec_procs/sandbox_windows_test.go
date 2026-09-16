@@ -165,7 +165,7 @@ func TestWindowsCreateRestrictedTokenFlagMatrix(t *testing.T) {
 func TestWindowsSandboxReadOnlyDeniesWrite(t *testing.T) {
 	ws := t.TempDir()
 	target := filepath.Join(ws, "ro.txt")
-	plan, err := planConfined(confineSpec{level: proto.LevelRead, workdir: ws, argv: writeCmd(target)})
+	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelRead, workdir: ws, argv: writeCmd(target)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -179,42 +179,17 @@ func TestWindowsSandboxReadOnlyDeniesWrite(t *testing.T) {
 }
 
 // workspace-write：写工作区成功；写外部路径被拒；TMP/TEMP 指向私有目录。
-func TestWindowsSandboxWorkspaceWrite(t *testing.T) {
-	ws := t.TempDir()
-	outside := filepath.Join(os.TempDir(), "aic-sb-outside-"+strings.Repeat("x", 8)+".txt")
-	os.Remove(outside)
-	defer os.Remove(outside)
-
-	// 写工作区 → 成功
-	ok := filepath.Join(ws, "ok.txt")
-	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: writeCmd(ok)})
-	if err != nil {
-		t.Fatalf("planConfined: %v", err)
-	}
-	if _, exit := runWithPlan(t, plan, plan.argv, ws); exit != 0 {
-		t.Fatalf("workspace write should succeed")
-	}
-	if _, err := os.Stat(ok); err != nil {
-		t.Fatalf("workspace file missing: %v", err)
-	}
-
-	// 写外部路径 → 拒绝
-	plan2, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: writeCmd(outside)})
-	if err != nil {
-		t.Fatalf("planConfined: %v", err)
-	}
-	if _, exit := runWithPlan(t, plan2, plan2.argv, ws); exit == 0 {
-		t.Fatal("outside write should fail")
-	}
-	if _, err := os.Stat(outside); err == nil {
-		t.Fatal("outside file must not exist")
+func TestWindowsSandboxRejectsUnsupportedReadScope(t *testing.T) {
+	_, err := planConfined(confineSpec{level: 9, workdir: t.TempDir(), argv: []string{"cmd", "/c", "echo ok"}, netOpen: true})
+	if err == nil || !strings.Contains(err.Error(), "cannot enforce") {
+		t.Fatalf("unsupported closed policy must reject: %v", err)
 	}
 }
 
 // TMP/TEMP 注入：受限进程看到的是私有临时目录。
 func TestWindowsSandboxTempEnv(t *testing.T) {
 	ws := t.TempDir()
-	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo TMP=[%TMP%]"}})
+	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo TMP=[%TMP%]"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -227,7 +202,7 @@ func TestWindowsSandboxTempEnv(t *testing.T) {
 // cleanup：进程结束后私有临时目录被删除。
 func TestWindowsSandboxCleanupRemovesTemp(t *testing.T) {
 	ws := t.TempDir()
-	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo %TMP%"}})
+	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo %TMP%"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -286,7 +261,7 @@ func TestWindowsJobLimits(t *testing.T) {
 
 	// planConfined 集成：job 句柄随 plan 返回，子进程 assign 后正常执行
 	ws := t.TempDir()
-	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo ok"}})
+	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo ok"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}

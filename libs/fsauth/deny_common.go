@@ -16,7 +16,7 @@ func denyCommon() []string {
 		"~/.aws/**", "~/.config/gcloud/**", "~/.azure/**",
 		"~/.netrc", "~/.npmrc", "~/.docker/config.json",
 		"~/.claude/**", "~/.config/gh/**", "~/.config/opencode/**", "~/.codex/**", "~/.gnupg/**",
-		"**/.git-credentials", "**/.env", "**/*.pem", "**/*.key",
+		"**/.git-credentials", "**/.env", "~/**/*.pem", "**/*.key",
 		// shell 命令历史（常含粘贴的凭据/密钥）
 		"~/.zsh_history", "~/.bash_history", "~/.python_history", "~/.node_repl_history",
 		// 容器守护进程 socket：connect = 完全控制守护进程 = 主机逃逸

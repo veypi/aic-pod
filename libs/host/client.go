@@ -45,22 +45,24 @@ type Options struct {
 
 // Client 是 host agent 客户端。
 type Client struct {
-	opts      Options
-	nc        *nats.Conn
-	kTool     string
-	hostID    string
-	uid       string
-	credVer   uint64
-	replay    *replayCache
-	cmdsMu    sync.RWMutex                 // cmds/cmdByName：provider 动态注册（register.go）并发保护
-	cmds      []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
-	cmdByName map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
-	procs     *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
-	policy    *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
-	netPol    *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol    *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
-	rtcSvc    *rtc.Service                 // RTC 直连应答服务（opts.RTC 且 Code 非空时启动）
-	logf      func(string, ...any)
+	execGrantMu sync.RWMutex
+	execGrants  map[string][]string
+	opts        Options
+	nc          *nats.Conn
+	kTool       string
+	hostID      string
+	uid         string
+	credVer     uint64
+	replay      *replayCache
+	cmdsMu      sync.RWMutex                 // cmds/cmdByName：provider 动态注册（register.go）并发保护
+	cmds        []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
+	cmdByName   map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
+	procs       *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
+	policy      *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	netPol      *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol      *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	rtcSvc      *rtc.Service                 // RTC 直连应答服务（opts.RTC 且 Code 非空时启动）
+	logf        func(string, ...any)
 }
 
 // New 创建客户端（不连接）。
@@ -142,6 +144,12 @@ func (c *Client) Connect() error {
 		}),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			c.logf("NATS disconnected: %v", err)
+			c.policy.ResetTemporary()
+			c.netPol.ResetTemporary()
+			c.sshPol.ResetTemporary()
+			c.execGrantMu.Lock()
+			c.execGrants = nil
+			c.execGrantMu.Unlock()
 			if isAuthError(err) {
 				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new credential and restart.")
 				go nc.Close()

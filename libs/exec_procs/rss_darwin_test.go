@@ -49,7 +49,7 @@ func TestRssLimitBytes(t *testing.T) {
 // 误杀，exit 0 且输出正确。嵌套沙箱环境（无后端 fail-closed）skip。
 func TestMonitorDoesNotKillNormalProcess(t *testing.T) {
 	m := NewManager(time.Minute)
-	res, err := m.Start(context.Background(), StartOptions{
+	res, err := m.Start(context.Background(), StartOptions{FsOpen: true, NetOpen: true,
 		ID:      "t-rss-ok",
 		Command: "python alloc 200MB",
 		LogPath: filepath.Join(t.TempDir(), "out.log"),

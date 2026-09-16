@@ -202,6 +202,9 @@ func gitRequired(argv []string) int {
 			continue
 		}
 		if lv, ok := gitSubLevels[a]; ok {
+			if a == "branch" && len(argv[i+1:]) > 0 {
+				return branchRequired(argv[i+1:])
+			}
 			// checkout 的 pathspec 形态丢弃工作区未提交修改，不可恢复——
 			// 与 reset 同级 Danger
 			if a == "checkout" && checkoutPathspecLike(argv[i+1:]) {
@@ -335,4 +338,29 @@ func jsonRequired(argv []string) int {
 		return lv
 	}
 	return proto.LevelWrite
+}
+
+// Listing branches is a read; creating a branch writes refs, and destructive
+// branch flags require the danger level before the command reaches an executor.
+func branchRequired(args []string) int {
+	list := false
+	level := proto.LevelRead
+	for _, a := range args {
+		switch a {
+		case "-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy", "--force", "--unset-upstream":
+			return proto.LevelDanger
+		case "--list":
+			list = true
+		case "-a", "-r", "-v", "-vv", "--all", "--remotes", "--verbose", "--show-current":
+		default:
+			if strings.HasPrefix(a, "-") {
+				return proto.LevelDanger
+			}
+			level = proto.LevelWrite
+		}
+	}
+	if list {
+		return proto.LevelRead
+	}
+	return level
 }

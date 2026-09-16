@@ -24,6 +24,11 @@ func (m *Manager) Spawn(ctx context.Context, opts StartOptions) (*Spawned, error
 		return nil, fmt.Errorf("exec: unknown action %q", opts.Exec[0])
 	}
 
+	if opts.NoSandbox || m.NoSandbox {
+		if err := validateUnconfined(opts); err != nil {
+			return nil, err
+		}
+	}
 	plan := launchPlan{}
 	execArgv := opts.Exec
 	confined := !opts.NoSandbox && !m.NoSandbox
@@ -31,9 +36,9 @@ func (m *Manager) Spawn(ctx context.Context, opts StartOptions) (*Spawned, error
 		var err error
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
-			deny: opts.DenyPaths, override: opts.DenyOverride, fsOpen: opts.FsOpen,
-			readAllow: fsauth.SystemCAReadPatterns(),
-			netOpen:   opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
+			readAllow: opts.ReadPaths, writeAllow: opts.WritePaths,
+			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})
 		if err != nil {
 			return nil, err
