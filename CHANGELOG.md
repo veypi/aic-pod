@@ -5,6 +5,39 @@
 `browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
 `make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
 
+## v0.6.6 — 2026-09-16
+
+### 变更
+
+- **四域统一 deny 优先，执行端策略不接受审批提权（行为变更）**（`libs/policy`（新）+
+  `cfg` + `libs/{fsauth,netauth,host,exec_procs,vcore}` + `api`；`docs/host_sandbox.md`
+  重写为执行策略与原生沙箱现状说明）：新增 `libs/policy` 共享原语包（fs_allow 条目
+  解析含 `ro:` 只读前缀、exec/net 条目校验、`CommandAllowed`），cfg/fsauth/netauth/
+  host 单源引用；cfg 新增 exec 域三键（`exec_policy`/`exec_deny`/`exec_allow`，默认
+  open）+ `ValidateAuth` 在 Load/Save/api.SetConfig 前显式校验（坏配置不替换生效
+  快照）+ `LockUpdate` 串行化本地配置读改写；判定收敛为 deny 恒优先（删除「具体度
+  优先 / allow 覆盖 deny」——netauth 端口具体度、fsauth allowHit 覆盖、沙箱
+  DenyOverride 三处同期移除），fs_policy=deny 下未命中 allow 的路径读写双拒（不再
+  回落 3 级审批）；fsauth 新增只读授权（fs_allow `ro:` 前缀）与 RuntimeReadRoots/
+  SystemCAReadPatterns 并入读范围、fs_deny 裸路径展开子树；host 新增 exec 域 grant
+  （`grant exec <cmd> [--temp|--permanent]`）与会话授权生命周期（`_session_end`/
+  NATS 断线/退出清临时授权）；执行端不再发起审批（waiting/NeedApproval 一律收敛
+  rejected）；沙箱 fail-closed：planConfined 前置 validateProcessPolicy、nosandbox
+  仅本地无需 fs/net 约束且授予写级时允许（删除「审批通过免沙箱」通道）；darwin
+  seatbelt 默认 deny file-read* 后按 allow 显式放行、linux bwrap 改空根+只读白名单
+  bind（工作区不再自动成为可写根）；vcore git 子命令分级补 branch（-d/-D/-m/-M/
+  -c/-C/-f 破坏性标志为危险）。
+
+- **浏览器扩展执行策略与 session grant**（`browser/src/sdk/execution_policy.js`（新）+
+  `client.js` + `page_fs.js` + `background.js`）：扩展端 `ExecutionPolicy` 校验
+  fs/exec 的 policy/deny/allow 条目（`ro:` 前缀、命令名形态；pathMatch 支持
+  `*`/`**`/`?` 通配与路径归一），PageFS 读写前经 `checkFs` 判定；`AICClient` 内置
+  `grant` 命令（fs|exec；`--temp` 会话内 / `--permanent` 经 `opts.saveExecutionPolicy`
+  落盘并更新当前策略），会话授权按 sid 存放、断线/close/`_session_end` 清空；fs/exec
+  未授权请求直接 error 与提示（不再回 waiting/need_approval），`_respond` 兜底把
+  waiting 归一为 rejected（删除审批字段）；background.js 接线 `settings.executionPolicy`
+  与 `saveExecutionPolicy` 写回。
+
 ## v0.6.5 — 2026-09-15
 
 ### 变更
