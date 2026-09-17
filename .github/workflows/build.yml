@@ -37,6 +37,10 @@ jobs:
           cache-dependency-path: desktop/package-lock.json
       - name: Install npm dependencies
         run: npm ci --prefix desktop
+      - name: Test UI protocol
+        run: |
+          go test ./protocol/ui
+          npm test --prefix desktop
       - name: Build
         run: make ${{ matrix.target }}
       - name: Upload artifacts
@@ -84,22 +88,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  browser:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Package Chrome Extension
-        run: make build-browser
-      - uses: actions/upload-artifact@v4
-        with:
-          name: browser
-          path: dist/aic-browser.zip
-          retention-days: 7
-
   release:
     name: GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [desktop, cli, browser]
+    needs: [desktop, cli]
     runs-on: ubuntu-latest
     permissions:
       contents: write

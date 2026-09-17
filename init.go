@@ -12,7 +12,6 @@
 //	ui/       静态资源（settings.html 本机设置页）
 //	cli/      命令行版本（aic）
 //	desktop/  Electron 壳（main.js + preload.js）：Chromium 窗口 + Go 后端子进程（cli 二进制）
-//	browser/  Chrome 扩展（纯 JS，MV3）
 package pod
 
 import (

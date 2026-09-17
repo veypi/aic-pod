@@ -15,6 +15,7 @@ import (
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/vcore"
+	"github.com/veypi/aic-pod/protocol/ui"
 )
 
 // handleMsg 处理一条入站消息：rtc.in 信令路由到 RTC 服务（不参与验签流程——
@@ -37,6 +38,8 @@ func (c *Client) handleMsg(msg *nats.Msg) {
 
 // dispatch 是请求处理主流程（与 NATS 解耦，可单测）。
 func (c *Client) dispatch(ctx context.Context, subject string, data []byte) (response *proto.ToolResponse) {
+	var uiDomain string
+	var uiArgv []string
 	defer func() {
 		if response != nil && response.State == proto.StateWaiting {
 			response.State = proto.StateRejected
@@ -44,6 +47,9 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) (res
 				response.Error = response.NeedApproval.Reason
 			}
 			response.NeedApproval = nil
+		}
+		if response != nil && uiDomain != "" {
+			normalizeUIResponse(response, uiDomain, uiArgv)
 		}
 	}()
 	var req proto.ToolRequest
@@ -55,6 +61,19 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) (res
 	// 1. 验签
 	if req.Sig == "" || !proto.VerifyToolRequest(&req, c.hostID, c.kTool) {
 		return reject(req.MsgID, "invalid request signature")
+	}
+
+	if req.Tool == proto.ToolExec {
+		var p struct {
+			Action string   `json:"action"`
+			Argv   []string `json:"argv"`
+		}
+		if json.Unmarshal(req.Data, &p) == nil && (p.Action == "browser" || p.Action == "cua") {
+			uiDomain, uiArgv = p.Action, p.Argv
+			if _, err := ui.Parse(p.Action, p.Argv); err != nil {
+				return uiFailure(req.MsgID, p.Action, p.Argv, err, "error")
+			}
+		}
 	}
 
 	// 2. deadline 必填且未过期（空 = "永不过期"请求，拒绝；格式非法拒绝）
@@ -82,7 +101,21 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) (res
 	// Server-only lifecycle command: ordinary tool discovery never advertises it.
 	if req.Tool == proto.ToolExec && req.SessionID != "" && req.GrantedLevel == proto.LevelApproved && actionOf(&req) == "_session_end" {
 		c.dropSessionGrants(req.SessionID)
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted, Content: "session grants cleared"}
+		cleanup, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		var cleanupErrors []string
+		if err := cuaUI.endSession(cleanup, req.SessionID); err != nil {
+			cleanupErrors = append(cleanupErrors, err.Error())
+		}
+		if p, ok := lookupProvider("browser"); ok && p.EndSession != nil {
+			if err := p.EndSession(cleanup, req.SessionID); err != nil {
+				cleanupErrors = append(cleanupErrors, err.Error())
+			}
+		}
+		if len(cleanupErrors) > 0 {
+			return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: strings.Join(cleanupErrors, "; ")}
+		}
+		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted, Content: "session grants and UI bindings cleared"}
 	}
 	// 4. granted_level 纵深检查（§2.4 判定分工：host 端按 caps 声明 + 本地规则再自检）
 	//    校验不通过直接拒绝；host 执行策略不返回提权请求。
@@ -109,6 +142,9 @@ func (c *Client) dispatch(ctx context.Context, subject string, data []byte) (res
 	case proto.ToolFS:
 		return c.execFS(ctx, &req)
 	case proto.ToolExec:
+		if uiDomain != "" {
+			return c.runUIOnce(ctx, &req, uiDomain, uiArgv, func() *proto.ToolResponse { return c.execCmd(ctx, sid, &req) })
+		}
 		return c.execCmd(ctx, sid, &req)
 	}
 	return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
@@ -234,6 +270,15 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	// 超时自动后台化（与本地命令同一 exec_procs 机制，§5.9）。
 	env.Tasks = &hostTaskRunner{c: c, sid: sid}
 	env.TaskID = req.MsgID
+	if p.Action == "browser" || p.Action == "cua" {
+		operation, err := ui.Parse(p.Action, p.Argv)
+		if err != nil {
+			return uiFailure(req.MsgID, p.Action, p.Argv, err, "error")
+		}
+		if operation.Op == "run" {
+			return c.runUIScript(ctx, sid, req, operation, p.Workdir)
+		}
+	}
 	switch p.Action {
 	case "commands":
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
@@ -262,6 +307,43 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 	case "cua":
 		// cua 一级命令（§5.10：Go 原生桥接 cua-driver MCP 持久子进程）
 		return c.runCua(ctx, sid, req, p.Argv)
+	}
+
+	if p.Action == "browser" {
+		operation, err := ui.Parse("browser", p.Argv)
+		if err != nil {
+			return uiFailure(req.MsgID, "browser", p.Argv, err, "error")
+		}
+		if operation.Op == "upload" {
+			abs, err := env.Resolve(operation.String("file"))
+			if err == nil {
+				err = env.CheckPath("browser upload", abs)
+			}
+			if err == nil {
+				err = env.CheckPolicy("browser upload", abs, false)
+			}
+			if err == nil {
+				var info os.FileInfo
+				info, err = os.Stat(abs)
+				if err == nil && !info.Mode().IsRegular() {
+					err = fmt.Errorf("upload requires a regular file")
+				}
+			}
+			if err != nil {
+				return uiFailure(req.MsgID, "browser", p.Argv, err, "rejected")
+			}
+			for i := 0; i+1 < len(p.Argv); i++ {
+				if p.Argv[i] == "--file" {
+					p.Argv[i+1] = abs
+					break
+				}
+			}
+		}
+		if operation.Op == "download" {
+			if err := env.CheckPolicy("browser download", filepath.Join(sessionWorkDir(sid), ".browser"), true); err != nil {
+				return uiFailure(req.MsgID, "browser", p.Argv, err, "rejected")
+			}
+		}
 	}
 
 	// 壳 provider 命令（desktop browser 等，register.go）：转发壳进程执行

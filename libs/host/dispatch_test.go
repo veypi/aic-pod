@@ -15,6 +15,7 @@ import (
 func testClient(t *testing.T) (*Client, string) {
 	t.Helper()
 	c := New(Options{WorkDir: t.TempDir(), ExecTimeout: time.Minute})
+	c.uiSessionRoot = t.TempDir()
 	c.hostID = "host_test01"
 	c.uid = "u1"
 	c.credVer = 1
@@ -285,6 +286,7 @@ func TestExecCmdWorkdirFallback(t *testing.T) {
 	wd := t.TempDir()
 	// 该用例验证 workdir 缺省回落机制，与沙箱无关：全局免沙箱隔离环境差异（§5.10）
 	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute, NoSandbox: true})
+	c.uiSessionRoot = t.TempDir()
 	c.hostID = "host_test01"
 
 	// 不带 workdir → bash -c pwd 应返回配置工作区

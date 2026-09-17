@@ -1,0 +1,818 @@
+{
+  "protocol": "ui/1",
+  "flags": {
+    "target": "string",
+    "timeout": "duration",
+    "format": "enum:text,json",
+    "after": "enum:none,snapshot,screenshot",
+    "delivery": "enum:background,foreground",
+    "ref": "string",
+    "role": "string",
+    "name": "string",
+    "label": "string",
+    "css": "string",
+    "contains": "bool",
+    "at": "point",
+    "snapshot": "string",
+    "text": "string",
+    "key": "string",
+    "value": "json",
+    "button": "enum:left,right,middle",
+    "count": "enum:1,2",
+    "dx": "number",
+    "dy": "number",
+    "from": "string",
+    "to": "string",
+    "from-at": "point",
+    "to-at": "point",
+    "query": "string",
+    "image": "bool",
+    "full": "bool",
+    "app": "string",
+    "pid": "integer",
+    "x": "number",
+    "y": "number",
+    "width": "positive",
+    "height": "positive",
+    "path": "json",
+    "file": "string",
+    "code": "string",
+    "url": "string",
+    "load": "enum:loading,interactive,complete",
+    "state": "enum:visible,hidden,enabled,disabled",
+    "ms": "integer",
+    "limit": "integer",
+    "filter": "string",
+    "depth": "integer",
+    "interactive": "bool",
+    "theme": "string",
+    "glide-duration-ms": "positive",
+    "reduced-motion": "enum:auto,on,off"
+  },
+  "common_flags": [
+    "target",
+    "timeout",
+    "format"
+  ],
+  "locator_flags": [
+    "ref",
+    "role",
+    "name",
+    "label",
+    "css",
+    "contains",
+    "at",
+    "snapshot"
+  ],
+  "commands": {
+    "help": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [
+        "command?"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Show ui/1 commands or one command schema"
+    },
+    "capabilities": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Discover the implemented commands and locator capabilities"
+    },
+    "target.list": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "app",
+        "pid"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "List targets without selecting or creating one",
+      "domain_overrides": {
+        "browser": {
+          "positions": [],
+          "required": [],
+          "flags": []
+        }
+      }
+    },
+    "target.use": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [
+        "id"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": true,
+      "description": "Bind an exact session target and observe it"
+    },
+    "target.current": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read the session target binding"
+    },
+    "snapshot": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "image",
+        "query",
+        "depth",
+        "interactive"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Observe text and snapshot-bound refs; --image adds a screenshot",
+      "domain_overrides": {
+        "browser": {
+          "positions": [],
+          "required": [],
+          "flags": [
+            "image",
+            "query",
+            "interactive"
+          ]
+        }
+      }
+    },
+    "screenshot": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "full"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Capture an image and its coordinate snapshot"
+    },
+    "read": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [
+        "ref?"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "optional",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read visible text"
+    },
+    "get": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [
+        "field",
+        "ref?"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "optional",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read title/url/text/value/checked/bounds/enabled"
+    },
+    "click": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [],
+      "flags": [
+        "button",
+        "count"
+      ],
+      "locator": "required",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Click an observed element or point"
+    },
+    "fill": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [
+        "text"
+      ],
+      "flags": [
+        "text"
+      ],
+      "locator": "required",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Replace editable text"
+    },
+    "type": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [
+        "text"
+      ],
+      "flags": [
+        "text"
+      ],
+      "locator": "optional",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Insert text at a field or confirmed focus"
+    },
+    "press": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [
+        "key"
+      ],
+      "flags": [
+        "key"
+      ],
+      "locator": "optional",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Press a standard key or chord"
+    },
+    "scroll": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [],
+      "flags": [
+        "dx",
+        "dy"
+      ],
+      "locator": "optional",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Scroll by logical pixel deltas"
+    },
+    "move": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "required",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Move the pointer to an observed element or point"
+    },
+    "set": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [
+        "value"
+      ],
+      "flags": [
+        "value"
+      ],
+      "locator": "required",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Set a typed control value"
+    },
+    "drag": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "from",
+        "to",
+        "from-at",
+        "to-at",
+        "snapshot"
+      ],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Drag between refs or points in one snapshot"
+    },
+    "wait": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "text",
+        "value",
+        "state",
+        "url",
+        "load",
+        "ms"
+      ],
+      "locator": "optional",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Wait for an explicit condition"
+    },
+    "open": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 2,
+      "positions": [
+        "url"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Create a browser tab (URL) or launch a native app (--app)",
+      "domain_overrides": {
+        "cua": {
+          "positions": [],
+          "required": [
+            "app"
+          ],
+          "flags": [
+            "app"
+          ]
+        }
+      }
+    },
+    "navigate": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [
+        "url"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Navigate or close the selected browser target"
+    },
+    "back": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Navigate or close the selected browser target"
+    },
+    "forward": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Navigate or close the selected browser target"
+    },
+    "reload": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Navigate or close the selected browser target"
+    },
+    "close": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Navigate or close the selected browser target"
+    },
+    "network.list": {
+      "domains": [
+        "browser"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "limit",
+        "filter"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read bounded CDP event history"
+    },
+    "network.clear": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Clear captured event history"
+    },
+    "console.list": {
+      "domains": [
+        "browser"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "limit",
+        "filter"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read bounded CDP event history"
+    },
+    "console.clear": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Clear captured event history"
+    },
+    "network.get": {
+      "domains": [
+        "browser"
+      ],
+      "level": 1,
+      "positions": [
+        "id"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read a captured request"
+    },
+    "dialog.accept": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "text"
+      ],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Resolve the selected tab JavaScript dialog"
+    },
+    "dialog.dismiss": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Resolve the selected tab JavaScript dialog"
+    },
+    "upload": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [
+        "file"
+      ],
+      "flags": [
+        "file"
+      ],
+      "locator": "required",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Assign one authorized local file to a file input"
+    },
+    "download": {
+      "domains": [
+        "browser"
+      ],
+      "level": 2,
+      "positions": [
+        "ref?"
+      ],
+      "required": [],
+      "flags": [],
+      "locator": "required",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Arm a download listener then click the element"
+    },
+    "eval": {
+      "domains": [
+        "browser"
+      ],
+      "level": 3,
+      "positions": [],
+      "required": [
+        "code"
+      ],
+      "flags": [
+        "code"
+      ],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Execute page JavaScript (code permission)"
+    },
+    "apps": {
+      "domains": [
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "List native applications"
+    },
+    "menu": {
+      "domains": [
+        "cua"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [
+        "path"
+      ],
+      "flags": [
+        "path"
+      ],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Invoke an exact JSON array menu path"
+    },
+    "window.bounds": {
+      "domains": [
+        "cua"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "flags": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Set and verify the target window geometry"
+    },
+    "activate": {
+      "domains": [
+        "cua"
+      ],
+      "level": 3,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": true,
+      "observe_after": true,
+      "description": "Explicitly activate the target in the foreground"
+    },
+    "clipboard.read": {
+      "domains": [
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Read the system text clipboard"
+    },
+    "clipboard.write": {
+      "domains": [
+        "cua"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [
+        "text"
+      ],
+      "flags": [
+        "text"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Replace the system text clipboard"
+    },
+    "cursor.on": {
+      "domains": [
+        "cua"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Control or inspect the agent cursor display"
+    },
+    "cursor.off": {
+      "domains": [
+        "cua"
+      ],
+      "level": 2,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Control or inspect the agent cursor display"
+    },
+    "cursor.state": {
+      "domains": [
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Control or inspect the agent cursor display"
+    },
+    "doctor": {
+      "domains": [
+        "cua"
+      ],
+      "level": 1,
+      "positions": [],
+      "required": [],
+      "flags": [],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": false,
+      "description": "Inspect the native driver environment"
+    },
+    "run": {
+      "domains": [
+        "browser",
+        "cua"
+      ],
+      "level": 3,
+      "positions": [],
+      "required": [],
+      "flags": [
+        "code",
+        "file"
+      ],
+      "locator": "none",
+      "mutates": false,
+      "observe_after": true,
+      "description": "Execute a JavaScript batch through the shared ui API in a confined host worker; exactly one of --code/--file"
+    }
+  }
+}

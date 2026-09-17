@@ -6,17 +6,18 @@
   "main": "main.js",
   "private": true,
   "scripts": {
-    "prestart": "node scripts/sync-browser.mjs",
     "start": "electron .",
     "cua-sync": "node scripts/sync-cua.mjs",
-    "predist": "node scripts/sync-browser.mjs && node scripts/sync-cua.mjs",
+    "predist": "node scripts/sync-cua.mjs",
     "dist": "electron-builder",
-    "predist:mac": "node scripts/sync-browser.mjs && node scripts/sync-cua.mjs",
+    "predist:mac": "node scripts/sync-cua.mjs",
     "dist:mac": "electron-builder --mac",
-    "predist:win": "node scripts/sync-browser.mjs && node scripts/sync-cua.mjs",
+    "predist:win": "node scripts/sync-cua.mjs",
     "dist:win": "electron-builder --win",
-    "predist:linux": "node scripts/sync-browser.mjs && node scripts/sync-cua.mjs",
-    "dist:linux": "electron-builder --linux"
+    "predist:linux": "node scripts/sync-cua.mjs",
+    "dist:linux": "electron-builder --linux",
+    "test": "node --test ui/*.test.mjs browser/*.test.mjs",
+    "test:browser:live": "electron scripts/test-browser-live.mjs"
   },
   "devDependencies": {
     "electron": "^44.3.0",

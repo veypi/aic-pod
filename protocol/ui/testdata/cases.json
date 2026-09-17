@@ -1,0 +1,921 @@
+[
+  {
+    "domain": "browser",
+    "argv": [
+      "target",
+      "list"
+    ],
+    "op": "target.list",
+    "level": 1
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "snapshot",
+      "--interactive",
+      "--image"
+    ],
+    "op": "snapshot",
+    "level": 1,
+    "args": {
+      "interactive": true,
+      "image": true
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click",
+      "@sabc:e1"
+    ],
+    "op": "click",
+    "level": 2,
+    "args": {},
+    "locator": {
+      "ref": "@sabc:e1"
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "fill",
+      "--role",
+      "textbox",
+      "--name",
+      "邮箱",
+      "--text",
+      "a@b.test"
+    ],
+    "op": "fill",
+    "level": 2,
+    "args": {
+      "text": "a@b.test"
+    },
+    "locator": {
+      "role": "textbox",
+      "name": "邮箱"
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "press",
+      "--key",
+      "ControlOrMeta+A",
+      "--delivery",
+      "foreground"
+    ],
+    "op": "press",
+    "level": 3
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "scroll",
+      "--dy",
+      "-240",
+      "--at",
+      "3",
+      "4",
+      "--snapshot",
+      "sabc"
+    ],
+    "op": "scroll",
+    "level": 2,
+    "args": {
+      "dy": -240
+    },
+    "locator": {
+      "at": [
+        3,
+        4
+      ],
+      "snapshot": "sabc"
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "set",
+      "@sabc:e2",
+      "--value",
+      "true"
+    ],
+    "op": "set",
+    "level": 2,
+    "args": {
+      "value": true
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "wait",
+      "--ms",
+      "100",
+      "--timeout",
+      "1.5s"
+    ],
+    "op": "wait",
+    "level": 1,
+    "args": {
+      "ms": 100
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "drag",
+      "--from-at",
+      "1",
+      "2",
+      "--to-at",
+      "3",
+      "4",
+      "--snapshot",
+      "sabc"
+    ],
+    "op": "drag",
+    "level": 2
+  },
+  {
+    "domain": "browser",
+    "argv": [],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "snapshot",
+      "--timeout",
+      "100"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click",
+      "@e1"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "fill",
+      "@sabc:e1",
+      "--text",
+      "x",
+      "--text",
+      "y"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click",
+      "@sabc:e1",
+      "--css",
+      "#x"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click",
+      "--at",
+      "1",
+      "2"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click",
+      "--name",
+      "x"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "scroll"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "scroll",
+      "--dy",
+      "0x10"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "wait",
+      "--ms",
+      "1",
+      "--text",
+      "x"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "wait",
+      "--state",
+      "visible"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "get",
+      "secret"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "set",
+      "@sabc:e1",
+      "--value",
+      "{}"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "drag",
+      "--from",
+      "@sabc:e1"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "snapshot",
+      "--pid",
+      "3"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "snapshot",
+      "--timeout",
+      "0.5ms"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "snapshot",
+      "--timeout",
+      "301s"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "fill",
+      "@sabc:e1",
+      "--after",
+      "none"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "tabs"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "run",
+      "--code",
+      "x"
+    ],
+    "op": "run",
+    "level": 3,
+    "args": {
+      "code": "x"
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "click",
+      "--help"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "press_key"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "target",
+      "list"
+    ],
+    "op": "target.list",
+    "level": 1
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "snapshot",
+      "--interactive",
+      "--image"
+    ],
+    "op": "snapshot",
+    "level": 1,
+    "args": {
+      "interactive": true,
+      "image": true
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "@sabc:e1"
+    ],
+    "op": "click",
+    "level": 2,
+    "args": {},
+    "locator": {
+      "ref": "@sabc:e1"
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "fill",
+      "--role",
+      "textbox",
+      "--name",
+      "邮箱",
+      "--text",
+      "a@b.test"
+    ],
+    "op": "fill",
+    "level": 2,
+    "args": {
+      "text": "a@b.test"
+    },
+    "locator": {
+      "role": "textbox",
+      "name": "邮箱"
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "press",
+      "--key",
+      "ControlOrMeta+A",
+      "--delivery",
+      "foreground"
+    ],
+    "op": "press",
+    "level": 3
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "scroll",
+      "--dy",
+      "-240",
+      "--at",
+      "3",
+      "4",
+      "--snapshot",
+      "sabc"
+    ],
+    "op": "scroll",
+    "level": 2,
+    "args": {
+      "dy": -240
+    },
+    "locator": {
+      "at": [
+        3,
+        4
+      ],
+      "snapshot": "sabc"
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "set",
+      "@sabc:e2",
+      "--value",
+      "true"
+    ],
+    "op": "set",
+    "level": 2,
+    "args": {
+      "value": true
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "wait",
+      "--ms",
+      "100",
+      "--timeout",
+      "1.5s"
+    ],
+    "op": "wait",
+    "level": 1,
+    "args": {
+      "ms": 100
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "drag",
+      "--from-at",
+      "1",
+      "2",
+      "--to-at",
+      "3",
+      "4",
+      "--snapshot",
+      "sabc"
+    ],
+    "op": "drag",
+    "level": 2
+  },
+  {
+    "domain": "cua",
+    "argv": [],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "snapshot",
+      "--timeout",
+      "100"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "@e1"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "fill",
+      "@sabc:e1",
+      "--text",
+      "x",
+      "--text",
+      "y"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "@sabc:e1",
+      "--css",
+      "#x"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "--at",
+      "1",
+      "2"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "--name",
+      "x"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "scroll"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "scroll",
+      "--dy",
+      "0x10"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "wait",
+      "--ms",
+      "1",
+      "--text",
+      "x"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "wait",
+      "--state",
+      "visible"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "get",
+      "secret"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "set",
+      "@sabc:e1",
+      "--value",
+      "{}"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "drag",
+      "--from",
+      "@sabc:e1"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "snapshot",
+      "--pid",
+      "3"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "snapshot",
+      "--timeout",
+      "0.5ms"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "snapshot",
+      "--timeout",
+      "301s"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "fill",
+      "@sabc:e1",
+      "--after",
+      "none"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "tabs"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "run",
+      "--code",
+      "x"
+    ],
+    "op": "run",
+    "level": 3,
+    "args": {
+      "code": "x"
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "--help"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "press_key"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "open",
+      "https://example.com"
+    ],
+    "op": "open",
+    "level": 2,
+    "args": {
+      "url": "https://example.com"
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "open",
+      "--app",
+      "TextEdit"
+    ],
+    "op": "open",
+    "level": 2,
+    "args": {
+      "app": "TextEdit"
+    }
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "eval",
+      "--code",
+      "document.title"
+    ],
+    "op": "eval",
+    "level": 3
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "menu",
+      "--path",
+      "[\"File\",\"New\"]"
+    ],
+    "op": "menu",
+    "level": 2,
+    "args": {
+      "path": [
+        "File",
+        "New"
+      ]
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "open",
+      "TextEdit"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "target",
+      "list",
+      "--pid",
+      "2"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "snapshot",
+      "--depth",
+      "4"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "click",
+      "--css",
+      "button"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "wait",
+      "--load",
+      "complete"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "wait",
+      "--ref",
+      "@sabc:e1",
+      "--text",
+      "Ready"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "wait",
+      "--role",
+      "button",
+      "--state",
+      "hidden"
+    ],
+    "error": "unsupported"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "set",
+      "--label",
+      "x",
+      "--value",
+      "1e309"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "run"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "run",
+      "--code",
+      ""
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "run",
+      "--file",
+      ""
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "run",
+      "--code",
+      "x",
+      "--file",
+      "x.js"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "browser",
+    "argv": [
+      "run",
+      "--file",
+      "hello.js",
+      "--after",
+      "screenshot"
+    ],
+    "op": "run",
+    "level": 3,
+    "args": {
+      "file": "hello.js"
+    }
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "run"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "run",
+      "--code",
+      ""
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "run",
+      "--file",
+      ""
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "run",
+      "--code",
+      "x",
+      "--file",
+      "x.js"
+    ],
+    "error": "invalid_argument"
+  },
+  {
+    "domain": "cua",
+    "argv": [
+      "run",
+      "--file",
+      "hello.js",
+      "--after",
+      "screenshot"
+    ],
+    "op": "run",
+    "level": 3,
+    "args": {
+      "file": "hello.js"
+    }
+  }
+]

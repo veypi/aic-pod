@@ -24,11 +24,15 @@ import (
 
 	pod "github.com/veypi/aic-pod"
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/uiscript"
 	"github.com/veypi/vigo/flags"
 	"github.com/veypi/vigo/logv"
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == uiscript.WorkerArg {
+		os.Exit(uiscript.Main())
+	}
 	// 子指令：wake = 唤醒桌宠录音（仅 desktop 形态；socket 由 Electron 主进程创建）
 	if len(os.Args) > 1 && os.Args[1] == "wake" {
 		if err := pod.Wake(); err != nil {

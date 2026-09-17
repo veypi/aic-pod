@@ -1,50 +1,10 @@
-/**
- * electron-adapter.mjs — browser core 的 desktop（Electron）宿主适配器 + 原生内容池
- *（OS 原生窗口内容模型，2026-09-10 P0；设计唯一源 = aic/docs/os_native_windows.md）
- *
- * 与 Chrome 插件适配器的映射关系（core.js adapter 契约）：
- *   tabs     → 主窗口内的 WebContentsView（AI 工作区标签页，webContents.id 即 tabId）
- *   windows  → 主窗口本身（BaseWindow）：desktop 无用户窗口概念，AI 工作区标签
- *              经桥协议贴进平台页 OS 的 Browser 窗口内容区
- *   evalIn   → webContents.executeJavaScript（func.toString() + JSON 参数序列化）
- *   cdp      → webContents.debugger（常驻 attach；网络拦截器经
- *              Page.addScriptToEvaluateOnNewDocument 注入，与插件 content script 同源）
- *   downloads→ partition session 的 will-download（产物落会话目录 .browser/）
- *   store    → 主进程内存 Map（Electron 主进程无休眠，工作区状态无需持久化）
- *   settings → 固定 { background: true }（desktop 不提供协作模式：AI 一律在
- *              AI 工作区标签页作业；平台标签页操作有自指风险）
- *
- * 原生内容池（docs §4 硬约束；v2 反转模型）：
- *   - 平台页（OS Browser 窗口占位元素）是 rect/可见性的唯一驱动源：
- *     tabControl.applyLayout({rect, visible})；rect = 占位元素 getBoundingClientRect
- *     （CSS px = DIP，contentView 相对——platformView 恒满窗且位于 (0,0)，zoom=1）。
- *   - 可见性由页面 mask 开洞表达（页面侧 wincontent.js）；壳侧不再翻转 z 序：
- *     tabs 恒在 platformView 之下，仅做 bounds 同步 + 成员重排。
- *     隐藏（visible=false）= 撤洞 + 输入禁用；视图恒挂树，compositor surface 保持，
- *     隐藏态 CDP 截图不受影响。禁 detach / 零尺寸 bounds / 屏外坐标；bounds 保持最后有效值。
- *   - z 序不变量（底→顶）：[…tabs（active 恒在 tabs 最顶）, platformView]。
- *     池成员重排（建/关/切激活）后经 onRestack 回调 main.js 抬回 platform。
- *   - activeTabId = 可视激活（用户点标签/新建驱动）；AI 的 current tab 在 core
- *     store 里（browser tab N 只切命令目标），不动可视激活（不抢焦点语义）。
- *   - poolState()：主进程输入路由读取活动 tab 的洞 rect（见 main.js native:mouse/wheel 转发）。
- *
- * currentSessionDir 由 browser-tool 在每次调用前设置（串行链保证无交叉）——
- * 下载产物的落盘目录（Go 后端下发的会话工作区）。
- */
-
-import { WebContentsView, webContents, session } from "electron";
+/** Electron tab pool plus CDP transport for ui/1. The native content layout is
+ * controlled by the platform renderer; automation never activates the OS window. */
+import { WebContentsView, webContents, session, nativeImage } from "electron";
+import crypto from "node:crypto";
+import { createEventLog } from "./browser/network.mjs";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// 与插件同源的页内网络拦截器（fetch/XHR hook → window.__aic_network_logs）
-const INTERCEPTOR_SRC = fs.readFileSync(
-  path.join(__dirname, "vendor", "browser", "content", "network-interceptor.js"),
-  "utf8",
-);
 
 const BG_PARTITION = "persist:aic-worker"; // AI 工作区（独立存储，不碰平台页默认会话）
 const MAX_TABS = 50; // 标签数上限（防失控）
@@ -69,13 +29,11 @@ export function createElectronAdapter(host) {
   let poolRect = null; // {x,y,width,height}，最后一次有效 rect（隐藏不清零）
   let poolVisible = false;
   let activeTabId = null; // 可视激活标签（内容区显示）
-  // 下载：一次性监听 + 完成历史（searchComplete 数据源）
-  const createdListeners = new Set();
-  const downloadHistory = [];
-  // store（工作区 tab 状态）
-  const storeMap = new Map();
-  // 下载落盘目录（browser-tool 每次调用前设置，串行链保证无交叉）
-  let currentSessionDir = null;
+  // 下载只在显式授权的 download 调用内落盘。
+  const pendingDownloads = new Map();
+  const eventLogs = new Map();
+  const revisions = new Map();
+  const dialogs = new Map(), dialogListeners = new Set();
 
   // ---- 工作区视图基建 ----
 
@@ -83,28 +41,22 @@ export function createElectronAdapter(host) {
     const ses = session.fromPartition(BG_PARTITION);
     if (!ses.__aicDownloadHooked) {
       ses.__aicDownloadHooked = true;
-      ses.on("will-download", (_event, item) => {
-        const dir = path.join(currentSessionDir || fallbackSessionDir(), ".browser");
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-        const savePath = path.join(dir, sanitizeName(item.getFilename()));
-        item.setSavePath(savePath);
-        const rec = { filename: savePath, state: "in_progress" };
-        downloadHistory.push(rec);
-        // 历史只作 searchComplete 数据源，截断防长会话无上限积累
-        if (downloadHistory.length > 100) downloadHistory.splice(0, downloadHistory.length - 100);
-        for (const fn of createdListeners) fn({ filename: savePath });
+      ses.on("will-download", (event, item, wc) => {
+        const pending = pendingDownloads.get(wc?.id);
+        if (!pending) { event.preventDefault(); return; }
+        pendingDownloads.delete(wc.id);
+        fs.mkdirSync(pending.dir, { recursive: true, mode: 0o700 });
+        const name = crypto.randomBytes(8).toString("hex") + "-" + sanitizeName(item.getFilename());
+        const destination = path.join(pending.dir, name);
+        item.setSavePath(destination);
+        pending.item = item;
         item.once("done", (_e, state) => {
-          rec.state = state === "completed" ? "complete" : state;
+          if (state === "completed") pending.resolve({ path: destination, bytes: item.getReceivedBytes(), mime: item.getMimeType() });
+          else pending.reject(new Error(`download ${state}`));
         });
       });
     }
     return ses;
-  }
-
-  // 下载兜底目录（正常路径是 Go 下发的 session_dir；不可得时落用户公共区）
-  // os.homedir() 跨平台（process.env.HOME 在 Windows 未定义）
-  function fallbackSessionDir() {
-    return path.join(os.homedir() || ".", ".aic", "sessions", "_default");
   }
 
   function sanitizeName(name) {
@@ -113,14 +65,26 @@ export function createElectronAdapter(host) {
 
   function attachView(view) {
     const wc = view.webContents;
-    // 常驻 CDP：注入网络拦截器（与插件 content script 同源的 MAIN 世界 document_start）
+    eventLogs.set(wc.id, createEventLog());
+    revisions.set(wc.id, 1);
+    wc.debugger.on("message", (_e, method, params) => {
+      eventLogs.get(wc.id)?.event(method, params);
+      if (method === "Page.javascriptDialogOpening" || method === "Page.javascriptDialogClosed") {
+        const dialog = method.endsWith("Opening") ? {type:params.type,message:params.message,url:params.url,default_prompt:params.defaultPrompt || ""} : null;
+        if (dialog) dialogs.set(wc.id,dialog); else dialogs.delete(wc.id);
+        for (const listener of dialogListeners) listener({tab:wc.id,dialog});
+      }
+      if (method === "DOM.documentUpdated" || method.startsWith("DOM.childNode") || method === "DOM.attributeModified" || method === "DOM.attributeRemoved" || method === "DOM.characterDataModified" || method === "Page.frameNavigated") {
+        revisions.set(wc.id, (revisions.get(wc.id) || 0) + 1);
+      }
+    });
+    wc.debugger.on("detach", () => { attached.delete(wc.id); dialogs.delete(wc.id); revisions.set(wc.id, (revisions.get(wc.id) || 0) + 1); });
     try {
       wc.debugger.attach("1.3");
       attached.add(wc.id);
-      wc.debugger
-        .sendCommand("Page.addScriptToEvaluateOnNewDocument", { source: INTERCEPTOR_SRC })
-        .catch(() => {});
-    } catch { /* debugger 占用等：首个命令时再 attach */ }
+      for (const domain of ["Page", "DOM", "Accessibility", "Network", "Runtime"]) wc.debugger.sendCommand(domain + ".enable").catch(() => {});
+      wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", {enabled:true}).catch(() => {});
+    } catch { /* attach is retried by the first explicit operation */ }
   }
 
   // ---- 内容池：rect 校验 / z 序 / 状态推送 ----
@@ -209,6 +173,7 @@ export function createElectronAdapter(host) {
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
+        backgroundThrottling: false,
       },
     });
     const wc = view.webContents;
@@ -222,13 +187,10 @@ export function createElectronAdapter(host) {
     wc.on("did-start-loading", emitChanged);
     wc.on("did-stop-loading", emitChanged);
     wc.on("render-process-gone", emitChanged); // 崩溃不删标签（用户可原地重载/关闭），只同步状态
-    // core onUpdated 契约（actWait 等加载等待的数据源）
-    wc.on("did-finish-load", () => {
-      for (const fn of updatedListeners) fn(tabId, { status: "complete" });
-    });
     wc.on("destroyed", () => {
       tabs.delete(tabId);
       attached.delete(tabId);
+      eventLogs.delete(tabId); revisions.delete(tabId); dialogs.delete(tabId);
       if (activeTabId === tabId) activeTabId = lastTabId();
       syncZ(true);
       emitChanged();
@@ -271,13 +233,40 @@ export function createElectronAdapter(host) {
     };
   }
 
-  const updatedListeners = new Set();
 
   // ---- adapter 契约 ----
 
   return {
     // browser-tool 每次调用前设置（下载产物落盘目录）
-    setSessionDir(dir) { currentSessionDir = dir || null; },
+    revision(tabId) { return revisions.get(tabId) || 0; },
+    dialog(tabId) { return dialogs.get(tabId); },
+    onDialog(listener) { dialogListeners.add(listener); return () => dialogListeners.delete(listener); },
+    events(tabId) { return eventLogs.get(tabId); },
+    async encodeImage(bytes) {
+      const original = nativeImage.createFromBuffer(bytes);
+      if (original.isEmpty()) throw new Error("invalid screenshot image");
+      const size = original.getSize();
+      if (bytes.length <= 600 * 1024) return { bytes, mime: "image/png", ...size };
+      for (let scale = 1; scale >= 1 / 32; scale /= 2) {
+        const img = original.resize({ width: Math.max(1, Math.round(size.width * scale)) });
+        for (const quality of [80, 60, 40]) {
+          const out = img.toJPEG(quality);
+          if (out.length <= 600 * 1024) return { bytes: out, mime: "image/jpeg", ...img.getSize(), note: `${bytes.length} bytes → image/jpeg ${img.getSize().width}x${img.getSize().height} quality ${quality} (${out.length} bytes)` };
+        }
+      }
+      throw new Error("screenshot exceeds image budget");
+    },
+    async download(tabId, dir, trigger, deadline) {
+      if (pendingDownloads.has(tabId)) throw new Error("download already pending for this tab");
+      let pending;
+      const completed = new Promise((resolve, reject) => { pending = { dir, resolve, reject, item: null }; });
+      // Observe rejection even if triggering the click itself fails.
+      completed.catch(() => {});
+      const timer = setTimeout(() => { pendingDownloads.delete(tabId); pending.item?.cancel(); pending.reject(new Error("download timed out; trigger may have executed")); }, Math.max(1, deadline - Date.now()));
+      pendingDownloads.set(tabId, pending);
+      try { await trigger(); return await completed; }
+      finally { clearTimeout(timer); if (pendingDownloads.get(tabId) === pending) pendingDownloads.delete(tabId); }
+    },
 
     // 内容池控制面（main.js native:* IPC 调用）
     tabControl: {
@@ -309,15 +298,12 @@ export function createElectronAdapter(host) {
     },
 
     tabs: {
-      async active() {
-        throw new Error("coop mode is not available on desktop (AI works in the AI workspace tab)");
-      },
+
       async get(id) {
         return tabOf(Number(id));
       },
       async list(windowId) {
-        if (windowId === undefined) return []; // 协作模式不在 desktop 提供
-        if (String(windowId) !== String(host.win.id)) return [];
+        if (windowId !== undefined && String(windowId) !== String(host.win.id)) return [];
         // core 直接读 t.title/t.url：必须解出对象数组（tabOf 是 async）
         return Promise.all([...tabs.keys()].map((id) => tabOf(id)));
       },
@@ -337,6 +323,8 @@ export function createElectronAdapter(host) {
         if (!entry) return;
         tabs.delete(Number(id));
         attached.delete(Number(id));
+        eventLogs.delete(Number(id));
+        revisions.delete(Number(id));
         if (!entry.view.webContents.isDestroyed()) {
           const cv = contentView();
           if (cv.children.includes(entry.view)) cv.removeChildView(entry.view);
@@ -346,32 +334,6 @@ export function createElectronAdapter(host) {
         syncZ(true);
         emitChanged();
       },
-      onUpdated: {
-        add(fn) { updatedListeners.add(fn); },
-        remove(fn) { updatedListeners.delete(fn); },
-      },
-    },
-
-    windows: {
-      async listNormal() {
-        // desktop 无用户窗口：AI 工作区即主窗口的一个标签页
-        return [{ id: host.win.id, incognito: false }];
-      },
-      async get(id) {
-        if (String(id) !== String(host.win.id)) throw new Error(`window ${id} not found`);
-        return { id, incognito: false };
-      },
-      async createIncognitoUnfocused() {
-        throw new Error("incognito mode is not available on desktop (settings fix background:true)");
-      },
-    },
-
-    async evalIn(tabId, func, args) {
-      const wc = webContents.fromId(Number(tabId));
-      if (!wc) throw new Error(`tab ${tabId} not found`);
-      // 与 chrome.scripting 的 func+args 结构化语义等价：函数体序列化 + JSON 参数
-      const code = `(${func.toString()})(${(args || []).map((a) => JSON.stringify(a)).join(",")})`;
-      return wc.executeJavaScript(code, true);
     },
 
     cdp: {
@@ -386,6 +348,8 @@ export function createElectronAdapter(host) {
           throw new Error(`debugger attach failed: ${e?.message || e}`);
         }
         attached.add(tabId);
+        for (const domain of ["Page", "DOM", "Accessibility", "Network", "Runtime"]) await wc.debugger.sendCommand(domain + ".enable");
+        await wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", {enabled:true});
       },
       async send(tabId, method, params) {
         const wc = webContents.fromId(Number(tabId));
@@ -397,25 +361,5 @@ export function createElectronAdapter(host) {
       async detach() { /* 常驻 attach 语义：detach 为 no-op */ },
     },
 
-    downloads: {
-      onceCreated(fn) {
-        createdListeners.add(fn);
-        return () => createdListeners.delete(fn);
-      },
-      async searchComplete(escapedRegex) {
-        const re = new RegExp(escapedRegex);
-        return downloadHistory.filter((d) => d.state === "complete" && re.test(d.filename));
-      },
-    },
-
-    store: {
-      async get(key) { return storeMap.get(key) ?? null; },
-      async set(key, value) { storeMap.set(key, value ?? null); },
-    },
-
-    async settings() {
-      // desktop 固定后台工作区模式（AI 工作区标签页；不提供协作/无痕开关）
-      return { incognito: false, background: true };
-    },
   };
 }

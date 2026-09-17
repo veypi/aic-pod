@@ -4,7 +4,6 @@
 # 产品：
 #   desktop（主产品，aic-*）     : Electron 壳 + Go 后端子进程（win 托盘 / mac 菜单栏常驻）
 #   cli（aic-cli-*）             : 命令行 host agent
-#   browser（aic-browser.zip）   : Chrome 扩展
 #   docker（veypi/aic-pod）      : 容器内运行 cli
 #
 # 构建产物（dist/）：
@@ -12,10 +11,8 @@
 #   aic-desktop-win-<arch>.exe          desktop windows（NSIS）
 #   aic-desktop-linux-<arch>.AppImage   desktop linux
 #   aic-cli-<os>-<arch>          cli 全平台
-#   aic-browser.zip              Chrome 扩展
 #
 # 版本：desktop 版本 = desktop/package.json（Makefile desktop-version 自动同步 git 版本），
-#       cli 二进制注入 git 版本（ldflags -X cfg.Version），browser 版本 = manifest.json。
 # ==============================================================================
 
 APP_NAME    := aic
@@ -36,10 +33,8 @@ VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "
 WIN_VERSION := $(shell echo $(VERSION) | sed 's/^v//; s/-.*//')
 LDFLAGS    := -s -w -X github.com/veypi/aic-pod/cfg.Version=$(VERSION)
 
-BROWSER_DIR := browser
-BROWSER_OUT := $(BIN_DIR)/aic-browser.zip
 
-.PHONY: build cli-all desktop-all release clean help build-browser \
+.PHONY: build cli-all desktop-all release clean help \
         docker-build docker-build-arm64 docker-push run-docker-test \
         cli-windows-amd64
 # 注意：cli-<os>-<arch> / desktop-<os>-<arch> 等模式目标（cli-%/desktop-%/desktop-darwin-%/...）
@@ -98,22 +93,17 @@ desktop-deps:
 cua-sync:
 	cd $(DESKTOP_DIR) && node scripts/sync-cua.mjs
 
-# browser 共享代码同步（vendor/browser；npm prestart/predist 之外，CI 直调
-# electron-builder 打包时也须先同步，否则 vendor/browser 不进包）
-browser-sync:
-	cd $(DESKTOP_DIR) && node scripts/sync-browser.mjs
-
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version cua-sync browser-sync
+.PHONY: backend-bin desktop-deps desktop-version cua-sync
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
 # macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	$(MAKE) desktop-version backend-bin cua-sync browser-sync
+	$(MAKE) desktop-version backend-bin cua-sync
 	@arch=$$(echo $* | sed 's/amd64/x64/'); \
 	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
@@ -121,7 +111,7 @@ desktop-darwin-%:
 
 # Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	$(MAKE) desktop-version backend-bin cua-sync browser-sync
+	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --win
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@test -f $(BIN_DIR)/win-unpacked/resources/backend/aic-backend.exe || { echo "✗ 打包缺 resources/backend/aic-backend.exe（backend-bin 命名回归？）"; exit 1; }
@@ -129,7 +119,7 @@ desktop-windows-%:
 
 # Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	$(MAKE) desktop-version backend-bin cua-sync browser-sync
+	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --linux
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"
@@ -168,23 +158,14 @@ run-docker-test:
 		$(DOCKER_IMAGE):latest
 
 # ==============================================================================
-# Browser / Release / Clean
+# Release / Clean
 # ==============================================================================
 
-build-browser:
-	@mkdir -p $(BIN_DIR)
-	rm -f $(BROWSER_OUT)
-	cd $(BROWSER_DIR) && zip -r ../$(BROWSER_OUT) . \
-		-x "*.DS_Store" \
-		-x "dist/*" \
-		-x "*.test.js"
-	@echo "→ $(BROWSER_OUT)"
-
-release: cli-all desktop-all build-browser
+release: cli-all desktop-all
 	gh release create $(VERSION) \
 		--title "$(VERSION)" \
 		--generate-notes \
-		$(BIN_DIR)/*
+		$(wildcard $(BIN_DIR)/aic-cli-* $(BIN_DIR)/aic-desktop-*)
 	@echo "→ GitHub release $(VERSION) created"
 
 clean:
@@ -206,5 +187,4 @@ help:
 	@echo "  make docker-push      push docker image"
 	@echo "  make run-docker-test  test docker image locally (auto arch, loads .env)"
 	@echo "  make release          cross-compile (cli + desktop) + Chrome Extension + GitHub release"
-	@echo "  make build-browser    package Chrome Extension → dist/aic-browser.zip"
 	@echo "  make clean            remove $(BIN_DIR)/"

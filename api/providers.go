@@ -41,8 +41,9 @@ func ProviderRegister(x *vigo.X, req *providerRegisterReq) (*OKResp, error) {
 		return nil, vigo.ErrInvalidArg.WithMessage(fmt.Sprintf("no metadata for %q", name))
 	}
 	if err := host.RegisterProvider(host.Provider{
-		Decl: decl,
-		Run:  host.RunViaShell(host.ShellChannel{Addr: addr, Token: req.Token}),
+		Decl:       decl,
+		Run:        host.RunViaShell(host.ShellChannel{Addr: addr, Token: req.Token}),
+		EndSession: host.EndSessionViaShell(host.ShellChannel{Addr: addr, Token: req.Token}),
 	}); err != nil {
 		return nil, fmt.Errorf("register provider: %w", err)
 	}

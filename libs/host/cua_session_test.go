@@ -38,12 +38,14 @@ func TestCuaFakeMcpHelper(t *testing.T) {
 	os.Exit(0) // 直接退出，避免测试框架向 MCP stdout 写额外内容
 }
 
-// TestCuaCallRevivesEndedSession 校验 call 在驱动会话结束后自动 start_session
-// 重建（带显式 session label 时保留同名）并重试一次。
-func TestCuaCallRevivesEndedSession(t *testing.T) {
+func fakeCuaMcp(t *testing.T, resetError bool) (*cuaMcp, string) {
+	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "calls.log")
 	cmd := exec.Command(os.Args[0], "-test.run=TestCuaFakeMcpHelper")
 	cmd.Env = append(os.Environ(), "AIC_FAKE_MCP=1", "AIC_FAKE_MCP_LOG="+logPath)
+	if resetError {
+		cmd.Env = append(cmd.Env, "AIC_FAKE_MCP_RESET_ERROR=1")
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("stdin pipe: %v", err)
@@ -55,52 +57,81 @@ func TestCuaCallRevivesEndedSession(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		cmd.Process.Kill()
 		cmd.Wait()
-	}()
+	})
 
 	m := newCuaMcp("fake", t.Logf)
 	m.mu.Lock()
 	m.cmd, m.stdin, m.alive = cmd, stdin, true
 	m.mu.Unlock()
 	go m.readLoop(stdout)
+	return m, logPath
+}
 
+// A failed action is never replayed; only the next command restores the implicit session.
+func TestCuaCallDoesNotReplayEndedSession(t *testing.T) {
+	m, logPath := fakeCuaMcp(t, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// 1) 带显式 session label：结束后 start_session 应带同名 label。
-	res, err := m.call(ctx, "press_key", map[string]any{"key": "a", "session": "aic-s1"})
-	if err != nil {
-		t.Fatalf("call with session: %v", err)
+	initialEpoch := m.generation
+	if _, err := m.call(ctx, "press_key", map[string]any{"key": "a", "session": "aic-s1"}); err == nil {
+		t.Fatal("ended session must fail without replay")
 	}
-	if len(res.Content) == 0 || res.Content[0].Text != "done" {
-		t.Fatalf("call with session: unexpected result %+v", res)
-	}
-	// 2) 无 session（隐式会话）：start_session 不应带 label。
-	if _, err := m.call(ctx, "press_key", map[string]any{"key": "b"}); err != nil {
-		t.Fatalf("call without session: %v", err)
+	got := strings.Join(readLines(t, logPath), "\n")
+	if got != "press_key aic-s1" {
+		t.Fatalf("unexpected replay: %s", got)
 	}
 
-	got := strings.Join(readLines(t, logPath), "\n")
-	want := strings.Join([]string{
-		"press_key aic-s1",
-		"start_session aic-s1",
-		"press_key aic-s1",
-		"press_key -",
-		"start_session -",
-		"press_key -",
-	}, "\n")
-	if got != want {
-		t.Fatalf("driver call sequence mismatch\n got:\n%s\nwant:\n%s", got, want)
+	previousEpoch := m.generation
+	if previousEpoch == initialEpoch {
+		t.Fatal("session expiration did not invalidate UI bindings")
+	}
+	if _, err := m.callEpoch(ctx, initialEpoch, "press_key", map[string]any{"key": "a"}); err == nil {
+		t.Fatal("expired epoch accepted input")
+	}
+	if _, err := m.call(ctx, "list_apps", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(readLines(t, logPath), "\n"); got != "press_key aic-s1\nstart_session -\nlist_apps -" {
+		t.Fatalf("wrong recovery sequence: %s", got)
+	}
+	if m.generation != previousEpoch {
+		t.Fatal("reset must not rebind old handles")
+	}
+	if m.needsSessionReset {
+		t.Fatal("connection remains expired")
 	}
 }
 
-// fakeMcpMain 极简 MCP server：每个会话名下的首个 press_key 报"会话已结束"，
-// start_session 一律成功，其余调用成功；每次调用把 "name session" 追加到日志。
+func TestCuaRecoveryFailureDoesNotDispatch(t *testing.T) {
+	m, logPath := fakeCuaMcp(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := m.call(ctx, "press_key", map[string]any{"key": "a"}); err == nil {
+		t.Fatal("expected session expiration")
+	}
+	for range 2 {
+		if _, err := m.call(ctx, "list_apps", map[string]any{}); err == nil || !strings.Contains(err.Error(), "session recovery") {
+			t.Fatalf("expected failed recovery: %v", err)
+		}
+	}
+	if got := strings.Join(readLines(t, logPath), "\n"); got != "press_key -\nstart_session -\nstart_session -" {
+		t.Fatalf("dispatched through failed recovery: %s", got)
+	}
+	if !m.needsSessionReset {
+		t.Fatal("forgot unsuccessful recovery")
+	}
+}
+
+// The first press poisons the implicit transport session; all tools then fail
+// until start_session revives it. Each call is recorded to detect replay.
 func fakeMcpMain() {
 	logPath := os.Getenv("AIC_FAKE_MCP_LOG")
 	pressCount := map[string]int{}
+	expired := false
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
@@ -134,11 +165,15 @@ func fakeMcpMain() {
 		}
 		var result string
 		switch {
-		case p.Name == "press_key" && pressCount[sess] == 0:
-			pressCount[sess]++
-			result = `{"content":[{"type":"text","text":"session 'mcp-1-2' has ended; tool call 'press_key' was rejected. Call start_session with this id to revive it before issuing further actions, or use a new session id."}],"isError":true}`
+		case p.Name == "start_session" && os.Getenv("AIC_FAKE_MCP_RESET_ERROR") == "1":
+			result = `{"content":[{"type":"text","text":"driver is unavailable"}],"isError":true}`
 		case p.Name == "start_session":
+			expired = false
 			result = `{"content":[{"type":"text","text":"session ready"}]}`
+		case expired || (p.Name == "press_key" && pressCount[sess] == 0):
+			pressCount[sess]++
+			expired = true
+			result = `{"content":[{"type":"text","text":"session 'mcp-1-2' has ended; tool call 'press_key' was rejected. Call start_session with this id to revive it before issuing further actions, or use a new session id."}],"isError":true}`
 		default:
 			result = `{"content":[{"type":"text","text":"done"}]}`
 		}
@@ -159,28 +194,4 @@ func readLines(t *testing.T, path string) []string {
 		}
 	}
 	return out
-}
-
-// TestCuaLiveSessionRevive 真机集成：显式结束会话制造 "has ended"，验证
-// call 自动 start_session 复活并重试（本机装了 cua-driver 才跑，只读动作）。
-func TestCuaLiveSessionRevive(t *testing.T) {
-	if findCuaDriver() == "" {
-		t.Skip("cua-driver not installed")
-	}
-	initCuaRuntime(t.Logf)
-	if cuaRt == nil {
-		t.Skip("cua runtime not initialized")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	if _, err := cuaRt.call(ctx, "start_session", map[string]any{}); err != nil {
-		t.Fatalf("start_session: %v", err)
-	}
-	if _, err := cuaRt.call(ctx, "end_session", map[string]any{}); err != nil {
-		t.Fatalf("end_session: %v", err)
-	}
-	// 会话已结束：普通动作会被驱动拒绝，call 应自动复活后重试成功。
-	if _, err := cuaRt.call(ctx, "list_apps", map[string]any{}); err != nil {
-		t.Fatalf("call after ended session (revive failed): %v", err)
-	}
 }

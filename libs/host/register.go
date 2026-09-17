@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/aic-pod/protocol/ui"
+	"path/filepath"
 )
 
 // 壳 provider（§5.1 统一命令声明模型的第三类命令来源）：
@@ -22,8 +24,9 @@ import (
 
 // Provider 是一个壳注册命令：声明 + 执行体。
 type Provider struct {
-	Decl proto.CommandDecl
-	Run  ProviderRunFunc
+	Decl       proto.CommandDecl
+	Run        ProviderRunFunc
+	EndSession func(context.Context, string) error
 }
 
 // ProviderRunFunc 执行一次命令调用（语义同 dispatch 的特化分支）：
@@ -134,13 +137,16 @@ type ShellChannel struct {
 
 // ShellRequest 是发往壳通道的请求信封（browser 等 provider 命令共用）。
 type ShellRequest struct {
-	Token       string   `json:"token"`
-	Argv        []string `json:"argv"`
-	MsgID       string   `json:"msg_id"`
-	SessionID   string   `json:"session_id"`
-	SessionDir  string   `json:"session_dir"` // 会话工作区（产物落盘根，Go 计算）
-	GrantedLv   int      `json:"granted_level"`
-	DeadlineRFC string   `json:"deadline"`
+	Token          string   `json:"token"`
+	Argv           []string `json:"argv"`
+	MsgID          string   `json:"msg_id"`
+	SessionID      string   `json:"session_id"`
+	SessionDir     string   `json:"session_dir"` // 会话工作区（产物落盘根，Go 计算）
+	GrantedLv      int      `json:"granted_level"`
+	DeadlineRFC    string   `json:"deadline"`
+	AuthorizedFile string   `json:"authorized_file,omitempty"`
+	DownloadDir    string   `json:"download_dir,omitempty"`
+	Control        string   `json:"control,omitempty"`
 }
 
 // ShellResponse 是壳通道的应答信封（映射回 proto.ToolResponse）。
@@ -163,10 +169,18 @@ func RunViaShell(ch ShellChannel) ProviderRunFunc {
 			deadline = req.Deadline
 			granted = int(req.GrantedLevel)
 		}
+		failure := func(message string, performed any) *proto.ToolResponse {
+			o, err := ui.Parse("browser", argv)
+			if err != nil {
+				return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: message}
+			}
+			r := ui.NewResult(o)
+			r.Fail(ui.Err("transport_failed", message), performed)
+			return uiResponse(msgID, o, r, sessionWorkDir(sid))
+		}
 		conn, err := net.DialTimeout("tcp", ch.Addr, 3*time.Second)
 		if err != nil {
-			return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-				Error: fmt.Sprintf("shell channel dial failed (shell not ready?): %v", err)}
+			return failure(fmt.Sprintf("shell channel dial failed (shell not ready?): %v", err), false)
 		}
 		defer conn.Close()
 		if dl, ok := ctx.Deadline(); ok {
@@ -174,7 +188,22 @@ func RunViaShell(ch ShellChannel) ProviderRunFunc {
 		} else {
 			_ = conn.SetDeadline(time.Now().Add(130 * time.Second))
 		}
+		authorizedFile, downloadDir := "", ""
+		if op, err := ui.Parse("browser", argv); err == nil {
+			if op.Op == "upload" {
+				authorizedFile = op.String("file")
+			}
+			if op.Op == "download" {
+				downloadDir = filepath.Join(sessionWorkDir(sid), ".browser")
+			}
+		}
+		control := ""
+		if req != nil && actionOf(req) == "_session_end" {
+			control = "session_end"
+		}
 		body, _ := json.Marshal(ShellRequest{
+			Control:        control,
+			AuthorizedFile: authorizedFile, DownloadDir: downloadDir,
 			Token:       ch.Token,
 			Argv:        argv,
 			MsgID:       msgID,
@@ -183,23 +212,25 @@ func RunViaShell(ch ShellChannel) ProviderRunFunc {
 			GrantedLv:   granted,
 			DeadlineRFC: deadline,
 		})
-		if _, err := conn.Write(append(body, '\n')); err != nil {
-			return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-				Error: fmt.Sprintf("shell channel write failed: %v", err)}
+		if n, err := conn.Write(append(body, '\n')); err != nil {
+			performed := any(false)
+			if n > 0 {
+				performed = "unknown"
+			}
+			return failure(fmt.Sprintf("shell channel write failed: %v", err), performed)
 		}
 		line, err := bufio.NewReader(conn).ReadString('\n')
 		if err != nil {
-			return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-				Error: fmt.Sprintf("shell channel read failed: %v", err)}
+			return failure(fmt.Sprintf("shell channel read failed: %v", err), "unknown")
 		}
 		var resp ShellResponse
 		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-				Error: fmt.Sprintf("shell channel invalid response: %v", err)}
+			return failure(fmt.Sprintf("shell channel invalid response: %v", err), "unknown")
 		}
 		state := proto.StateCompleted
-		if resp.State == string(proto.StateError) {
-			state = proto.StateError
+		switch proto.State(resp.State) {
+		case proto.StateError, proto.StateRejected, proto.StateWaiting:
+			state = proto.State(resp.State)
 		}
 		return &proto.ToolResponse{
 			MsgID:   msgID,
@@ -208,5 +239,15 @@ func RunViaShell(ch ShellChannel) ProviderRunFunc {
 			Error:   resp.Error,
 			Attrs:   resp.Attrs,
 		}
+	}
+}
+
+func EndSessionViaShell(ch ShellChannel) func(context.Context, string) error {
+	return func(ctx context.Context, sid string) error {
+		r := RunViaShell(ch)(ctx, sid, &proto.ToolRequest{Data: json.RawMessage(`{"action":"_session_end"}`)}, nil)
+		if r.State != proto.StateCompleted {
+			return fmt.Errorf("%s", r.Error)
+		}
+		return nil
 	}
 }

@@ -34,7 +34,7 @@ type Options struct {
 	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname
-	DeviceType  string        // 客户端类型（cli/browser/...），默认 cli
+	DeviceType  string        // 客户端类型（cli/desktop/...），默认 cli
 	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
 	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
 	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
@@ -45,24 +45,27 @@ type Options struct {
 
 // Client 是 host agent 客户端。
 type Client struct {
-	execGrantMu sync.RWMutex
-	execGrants  map[string][]string
-	opts        Options
-	nc          *nats.Conn
-	kTool       string
-	hostID      string
-	uid         string
-	credVer     uint64
-	replay      *replayCache
-	cmdsMu      sync.RWMutex                 // cmds/cmdByName：provider 动态注册（register.go）并发保护
-	cmds        []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
-	cmdByName   map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
-	procs       *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
-	policy      *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
-	netPol      *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol      *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
-	rtcSvc      *rtc.Service                 // RTC 直连应答服务（opts.RTC 且 Code 非空时启动）
-	logf        func(string, ...any)
+	uiSessionRoot string // Optional private artifact root used by embedded runtimes/tests.
+
+	execGrantMu  sync.RWMutex
+	execGrants   map[string][]string
+	opts         Options
+	nc           *nats.Conn
+	kTool        string
+	hostID       string
+	uid          string
+	credVer      uint64
+	replay       *replayCache
+	cmdsMu       sync.RWMutex                 // cmds/cmdByName：provider 动态注册（register.go）并发保护
+	cmds         []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
+	cmdByName    map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
+	procs        *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
+	policy       *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	netPol       *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol       *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	rtcSvc       *rtc.Service                 // RTC 直连应答服务（opts.RTC 且 Code 非空时启动）
+	logf         func(string, ...any)
+	uiScriptExec []string // test worker entry; production re-executes the host binary
 }
 
 // New 创建客户端（不连接）。
@@ -325,7 +328,7 @@ func (c *Client) writeBinLocal(path string, data []byte) (int, error) {
 //     git → level 1（本地凭证天然可用）；ssh/scp → level 3（目标闸独立通道）
 //
 // browser 等壳能力不在此探测——由壳进程经本地 provider 通道动态注册（register.go，
-// desktop/浏览器插件各自实现，agent-browser CLI 依赖已彻底移除）。
+// desktop 实现，agent-browser CLI 依赖已彻底移除）。
 func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 	var cmds []proto.CommandDecl
 	seen := map[string]bool{}

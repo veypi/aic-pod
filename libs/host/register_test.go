@@ -47,7 +47,7 @@ func TestProviderRegisterAndDispatch(t *testing.T) {
 	for _, v := range c.buildCaps().Exec.Commands {
 		if v.Name == "browser" {
 			found = true
-			if v.Desc == "" || v.Help == "" || v.RequiredLevel != 2 {
+			if v.Desc == "" || v.Help == "" || v.RequiredLevel != 1 {
 				t.Errorf("browser decl incomplete: %+v", v)
 			}
 		}
@@ -62,7 +62,7 @@ func TestProviderRegisterAndDispatch(t *testing.T) {
 
 	// 分发：exec browser 路由到 provider
 	data := signedReq(t, c, "exec", map[string]any{
-		"action": "browser", "argv": []string{"snapshot", "-i"},
+		"action": "browser", "argv": []string{"snapshot", "--interactive"},
 	}, 3)
 	resp := c.dispatch(context.Background(), testSubject, data)
 	if resp.State != proto.StateCompleted || resp.Content != "✓ ok" {
@@ -71,7 +71,7 @@ func TestProviderRegisterAndDispatch(t *testing.T) {
 	if gotSid != "s1" {
 		t.Errorf("sid = %q, want s1", gotSid)
 	}
-	if len(gotArgv) != 2 || gotArgv[0] != "snapshot" || gotArgv[1] != "-i" {
+	if len(gotArgv) != 2 || gotArgv[0] != "snapshot" || gotArgv[1] != "--interactive" {
 		t.Errorf("argv = %v", gotArgv)
 	}
 
@@ -85,7 +85,7 @@ func TestProviderRegisterAndDispatch(t *testing.T) {
 	}
 	// 写子命令（click）granted=1 → waiting
 	data3 := signedReq(t, c, "exec", map[string]any{
-		"action": "browser", "argv": []string{"click", "@e1"},
+		"action": "browser", "argv": []string{"click", "@s12:e1"},
 	}, 1)
 	if resp3 := c.dispatch(context.Background(), testSubject, data3); resp3.State != proto.StateRejected {
 		t.Errorf("click with granted=1 should be waiting (Write): %+v", resp3)
@@ -188,8 +188,8 @@ func TestSyncProvidersStartupReconcile(t *testing.T) {
 	for _, v := range c.buildCaps().Exec.Commands {
 		if v.Name == "browser" {
 			found = true
-			if v.RequiredLevel != 2 {
-				t.Errorf("browser decl level = %d, want 2", v.RequiredLevel)
+			if v.RequiredLevel != 1 {
+				t.Errorf("browser decl level = %d, want 1", v.RequiredLevel)
 			}
 		}
 	}
