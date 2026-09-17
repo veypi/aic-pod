@@ -1,9 +1,86 @@
 # Changelog
 
 本仓库 0.x 阶段遵循 SemVer：破坏性变更进位 minor。
-发版只改两处版本位——`cfg/config.go` 的 `Version`（带 `v` 前缀）与
-`browser/manifest.json` 的 `version`（无前缀）；`desktop/package.json` 由
-`make desktop-version` 从 `git describe` 自动同步。更早版本见 GitHub Releases。
+发版改 `cfg/config.go` 的 `Version`（带 `v` 前缀）并在本文新增版本节；
+`desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
+更早版本见 GitHub Releases。
+
+## v0.6.7 — 2026-09-18
+
+### 破坏性变更
+
+- **Chrome 扩展产品整体移除**：删除 `browser/`（MV3 扩展源码、options/popup、
+  扩展端 PageFS/fsops、SDK 与 tools）及全部构建、分发与同步入口——Makefile
+  `build-browser`、CI browser job（Release 不再产出 `aic-browser.zip`）、
+  `desktop/scripts/sync-browser.mjs` 与旧 `vendor/browser` 打包路径；browser
+  能力今后仅由桌面端提供，desktop 不再从扩展同步共享代码。
+
+- **browser / cua 命令全面替换为 ui/1（不兼容旧用法）**：命令、返回、等级与
+  错误语义整体重写，命令与等级的唯一来源 = `protocol/ui/schema.json`（Go/JS
+  双端同读）。旧子命令与返回格式、裸 `@eN`、cua driver 参数透传与旧 `cua run`
+  runner（`libs/host/cua_run.go` + `cua_runner.mjs`）均不兼容；旧 cua 输入法/
+  键码机制（`cua_ime*`）一并删除。打包校验显式拒绝旧扩展代码路径。
+
+### 新增
+
+- **ui/1 统一交互协议（browser 与 cua 共用）**（`protocol/ui`（新）+
+  `desktop/ui/protocol.mjs`（新）+ `libs/host/{ui_script,ui_response,cua_ui}.go`
+  （新）+ `libs/vcore`）：统一目标模型（`target list/use/current`，绑定按会话
+  隔离）、带快照身份的 ref（`@s…:eN`，过期返回 `stale_ref` 不自动换节点）、
+  语义 locator（role/name、label、css、`--at` 图片坐标）与动作集
+  （`open/navigate/snapshot/screenshot/read/get/click/fill/type/press/scroll/move/
+  drag/set/wait/dialog/upload/download/eval` 等）；统一 UiResult——content
+  默认文本分块（`[ui/1]` / `[target]` / `[action]` / `[observation]` /
+  `[data]` / `[artifacts]` / `[warnings]` / `[error]`），`--format json` 同构；
+  默认正文预算 12 KiB，完整结果落会话 `.ui/`，图片经 image_data/落盘通道。
+  动作与观察分离：观察失败保留动作结果（`observation_failed`），效果无法确认
+  返回 `effect_unverified`，断连时 `performed=unknown` 且不自动重试。
+
+- **browser 端独立实现**（`desktop/browser/`（新）+ `desktop/browser-tool.mjs` +
+  `desktop/electron-adapter.mjs`）：直接驱动 Electron CDP；network/console
+  有界采集；`dialog accept/dismiss`（同步弹窗立即返回 `dialog_open` 与
+  `action.performed=unknown`，控制命令返回 `browser_busy`，处理后续行结果在
+  `data.resumed`，不自动接受/取消、不重放输入）；upload/download 经 host 文件
+  授权；`eval` 运行于页面上下文（Danger）。
+
+- **cua 端**：driver 会话过期自动恢复（当次 `session_expired` 不重放动作，下一
+  条命令经同一 MCP 子进程 `start_session` 恢复，旧 target/ref 全部失效）；
+  `apps/open/menu/window bounds/activate/clipboard/cursor/doctor`；原生 AX 与
+  图片坐标两条定位路径，输入效果无法确认时返回 `effect_unverified`。
+
+- **批量脚本 `run --code/--file`**（`libs/uiscript`（新）+ `cli` worker 入口）：
+  browser/cua 注入同一 `ui` API（无 Node/require/fetch/setTimeout，延时用
+  `ui.wait`）；由 host 以一次性纯 Go JS 解释器（goja）子进程执行，经 OS 只读/
+  禁网沙箱启动（`nosandbox` 不豁免）；脚本与文件 ≤512 KiB、整个 run 要求
+  Danger(3)、每步复用单命令调度与权限；限额：并发 4 worker、单脚本 256 步、
+  日志 64 KiB、return 1 MiB、累计步骤结果 8 MiB；错误带 `code/step/result`，
+  步骤结果记录在 `data.steps`。
+
+- **持久执行日志**：host 按 session_id/msg_id 记录已授权 UI 请求——并发重发
+  不重复执行，完成结果重放缓存，崩溃遗留 pending 返回 `outcome_unknown`，同
+  ID 不同参数返回 `request_conflict`。
+
+### 变更
+
+- `libs/vcore` browser/cua 命令元数据与分级重写为 ui/1（Read 观察、Write 交互、
+  Danger 用于 run/eval/activate/foreground）；`api` provider 注册增加 EndSession
+  通道（会话结束释放 UI 绑定与驱动会话）；cli 增加隐藏 worker 子命令入口。
+- 构建与 CI：Makefile 移除 browser 目标，release 仅含 cli+desktop；CI 在打包前
+  运行 `go test ./protocol/ui` 与 `npm test --prefix desktop`；`check-asar` 改为
+  递归校验入口模块的相对 require/import，并校验 `ui/schema.json` 内容。
+- 打包：`electron-builder.yml` files 白名单更新（`browser/**`、`ui/**`；
+  `protocol/ui/schema.json` 复制为 asar 内 `ui/schema.json`）；`desktop/package.json`
+  移除 sync-browser 钩子，新增 `test` / `test:browser:live` 脚本。
+- 文档：新增 `docs/ui-protocol.md`（运行时支持清单与验证入口）与
+  `docs/ui-protocol-proposal.md`（设计记录）；README / desktop/README /
+  design.md / host_sandbox.md 同步更新；删除 `docs/browser-client.md`。
+
+### 测试
+
+- 跨语言固定验收向量（`protocol/ui/testdata/cases.json`）由 Go 与 JS 解析器
+  同跑；`npm test`（98 例）覆盖协议解析、结果渲染与 run 边界；live 验收覆盖
+  真 Chromium CDP（输入、状态、ref 失效、截图、文件、网络/控制台、同步/嵌套/
+  异步弹窗、query 与滚动）与 macOS 原生夹具（含会话恢复与旧 target 拒绝）。
 
 ## v0.6.6 — 2026-09-16
 
