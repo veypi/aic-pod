@@ -9,9 +9,10 @@
 Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：本地 vigo 服务 + NATS host 会话）
  │    └─ 握手：AIC_PORT_FILE 环境变量 → 后端写 {port, code} JSON
- ├─ browser 壳通道（browser-tool.mjs）：browser core（vendor/，与插件同源）
+ ├─ browser 壳通道（browser-tool.mjs）：ui/1 browser core（browser/，直接使用 CDP）
  │    + electron-adapter（webContents.debugger CDP）→ 127.0.0.1 TCP 换行 JSON
  │    → 向 Go 后端注册 provider（/api/provider/register），caps 出现 browser
+ │    browser/cua run 由 Go host 启动独立 JS worker，逐步复用现有命令；不在 Electron 主进程执行脚本
  ├─ cua（本机 GUI 自动化）：Go 后端原生桥接 cua-driver（libs/host/cua.go，
  │    MCP 持久子进程懒启动）；启动探测到 cua-driver 二进制才声明（不经壳通道）；
  │    发行物内置：scripts/sync-cua.mjs 按 desktop/cua.json 固定版本 + sha256 同步到
@@ -55,12 +56,12 @@ keyUp/char，壳侧观测不到释放）见 docs §6。
 ```bash
 # 1. 编译 Go 后端（desktop/bin/aic-backend）
 make backend-bin
-# 2. 安装依赖 + 启动（npm prestart 自动同步 browser 共享代码到 vendor/）
+# 2. 安装依赖 + 启动（browser 源码直接加载，无同步步骤）
 cd desktop && npm install && npm start
 ```
 
 壳页面/平台页改动即时生效（HTTP 服务），main.js/preload.js 改动需重启 electron。
-browser 共享 core 改动（browser/src/tools/browser/）经 npm prestart 同步，需重启 electron。
+browser 代码位于 desktop/browser/；公共 schema 位于 protocol/ui/schema.json，打包时进入 ui/schema.json。改动后需重启 Electron。
 内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
 `npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。
 

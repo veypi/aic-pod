@@ -2,7 +2,7 @@
 
 ## 概述
 
-AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程/插件形式运行在各类终端设备上，通过 NATS over WebSocket 连入 AIC 服务端，将设备上的执行能力（命令执行、文件操作、浏览器控制、原生 GUI 自动化、ssh/scp 转发等）注册为 LLM 可调用的工具。本机能力受三域授权（fs/net/ssh）与进程沙箱两道闸控制（详见 [host_sandbox.md](host_sandbox.md)）。
+AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程形式运行在各类终端设备上，通过 NATS over WebSocket 连入 AIC 服务端，将设备上的执行能力（命令执行、文件操作、浏览器控制、原生 GUI 自动化、ssh/scp 转发等）注册为 LLM 可调用的工具。本机能力受三域授权（fs/net/ssh）与进程沙箱两道闸控制（详见 [host_sandbox.md](host_sandbox.md)）。
 
 每个客户端是**能力代理**——它不决策做什么，只忠实地在本地执行服务端发来的指令并返回结果，同时通过验签确保指令来源可信。
 
@@ -11,7 +11,7 @@ AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程/插件形
 ```
 aic-pod/
 ├── go.mod                # module github.com/veypi/aic-pod
-├── Makefile              # 构建/发版（build/all/build-browser/docker-build/release）
+├── Makefile              # 构建/发版（build/cli-all/desktop-all/docker-build/release）
 ├── Dockerfile            # 容器镜像（ENTRYPOINT ["aic","run"]）
 │
 ├── init.go               # 根包 pod：本地服务装配（Router + Start/Stop）
@@ -39,19 +39,17 @@ aic-pod/
 ├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
 │                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
 │                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
-│                         #   壳 provider：browser-tool.mjs（共享插件 core + Electron CDP）
+│                         #   壳 provider：browser-tool.mjs（desktop/browser/ 独立 ui/1 core + Electron CDP）
 │                         #   内置 cua-driver 发行物（cua.json + scripts/sync-cua.mjs → resources/cua）
-├── browser/              # Chrome MV3 扩展（原生 JS ESM）：Service Worker 运行时、
-│                         #   browser 工具（平台自有指令集：tools/browser/core.js 平台无关核心
-│                         #   + chrome-adapter.js）、page_fs/fsops（与 aic 前端双端同步）
-├── docs/                 # design.md（本文）、host_sandbox.md（沙箱与三域授权）、browser-client.md
+├── protocol/ui/          # ui/1 命令 schema、Go 解析/结果、跨语言验收向量
+├── docs/                 # design.md（本文）、host_sandbox.md（沙箱与三域授权）、ui-protocol.md
 └── dist/                 # 构建产出（make 生成）
 ```
 
 ### 设计原则
 
 - **一个子目录一种客户端**：目录名即客户端身份，不做交叉依赖
-- **核心库按语言分层**：`libs/`（Go）、浏览器端 `browser/src/sdk/`（JS）各自独立，客户端只引入同语言实现
+- **交互协议同源**：Go 和 JS 读取 `protocol/ui/schema.json`；desktop/browser 直接驱动 CDP，原生 cua 由 Go 适配 cua-driver
 - **入口最小化**：客户端目录仅包含入口代码（main.go 等），核心逻辑全部在 libs/api
 - **外部可扩展**：任何人引用 Go libs 即可编写自定义客户端，无需修改本仓库
 
@@ -80,16 +78,6 @@ aic-pod/
 | **本地页面** | 仅 /settings 配置页（独立系统边框配置窗口：托盘「本地配置」直开，平台不可达首配时自动打开）；设置保存后探测并跳 {host}/hosts |
 | **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
 | **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 host 注册 |
-
-### browser — Chrome 扩展
-
-| 维度 | 说明 |
-|------|------|
-| **语言** | 原生 JS（ESM，MV3 Service Worker） |
-| **目标平台** | Chrome（Firefox 未做） |
-| **密钥派生** | Web Crypto API（SubtleCrypto，与 Go 端 HKDF 同语义） |
-| **能力** | browser 指令（DOM 操作、截图、标签页管理，与 desktop 壳通道共享平台无关 core）+ fs 8 action（read/write/edit/ls/rg/cp/mv/rm，操作扩展 PageFS） |
-| **限制** | 浏览器沙箱：无 shell、无系统文件系统 |
 
 ### embedded / mobile — 未来规划（未实现）
 
@@ -143,8 +131,8 @@ cua / browser / ssh / scp 属宿主体外或独立通道能力，不进 exec 沙
 - **恒声明**：核心虚拟指令（`curl`/`json` + `commands`/`bg_list`/`bg_wait`/`bg_kill`，vcore 元数据同源）
 - **fs 指令集**（独立工具，8 action）：`read`/`write`/`edit`/`ls`/`rg`/`cp`/`mv`/`rm`
 - **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；ssh/scp → 独立目标闸（ssh 域 Policy）；cua（cua-driver 二进制）→ 本机 GUI 自动化（§5.10）
-- **壳 provider 注册**：desktop 的 `browser`（Electron CDP 原生实现，与插件共享 core，§5.6）
-- 分级与动态提升（git push/checkout/reset、browser 子命令、cua `--delivery foreground`/`--scope desktop`、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
+- **壳 provider 注册**：desktop 的 `browser`（Electron CDP 原生实现，公共 schema 与 cua 同源，§5.6）
+- 分级与动态提升（git push/checkout/reset、browser 子命令、cua `--delivery foreground`/`activate`、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
 
 ### fs — 文件操作
 
@@ -209,7 +197,7 @@ c, _ := host.Connect(opts)                  // 连接并阻塞
 
 ### TypeScript SDK / Dart SDK — 未来
 
-浏览器端逻辑现位于 `browser/src/sdk/`（JS ESM：client/proto/auth/crypto/page_fs/fsops/history），与 Go libs 语义对齐（subject/信封/签名同源，page_fs.js/fsops.js 与 aic 前端逐字节同步）。独立 TS SDK 与 Dart SDK（Flutter mobile）为未来规划。
+desktop 的 UI 自动化位于 `desktop/browser/`；跨语言命令协议位于 `protocol/ui/`。Chrome 扩展已移除，AIC page 的文件能力继续由平台前端独立维护。
 
 ## 配置体系
 
@@ -223,7 +211,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 - 三域授权键（vigo/flags 自动注册 flag/env，env 名 = json tag 大写）：
   `fs_policy`/`fs_deny`/`fs_allow`、`net_policy`/`net_deny`/`net_allow`、`ssh_policy`/`ssh_deny`/`ssh_allow`；
   隐藏项 `no_sandbox`（全局跳过 exec 沙箱，仅配置文件/flag/env 可改，本地管理 API 不暴露）
-- 发版版本位：只改 `cfg/config.go` 的 `Version`（带 `v` 前缀）与 `browser/manifest.json`（无前缀）；
+- 发版版本位：只改 `cfg/config.go` 的 `Version`（带 `v` 前缀）；
   `desktop/package.json` 由 `make desktop-version` 从 git describe 自动同步
 - NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /api/nc
 - 本地管理 API（api 包 Router）：cli 与 desktop 启动时在 127.0.0.1 随机端口监听，
@@ -268,7 +256,7 @@ c.Connect()
 |------|------|------|
 | **Phase 1** | `libs/` + `api` + `cli`/`desktop` — host agent 运行时、统一命令声明表、配置体系 | 完成 |
 | **Phase 2** | 安全模型 — 三域授权（fs/net/ssh）+ exec 进程沙箱（seatbelt/bwrap/受限令牌） | 完成 |
-| **Phase 3** | `browser` — Chrome MV3 扩展 + desktop 壳通道（core/adapter 拆分，CDP 原生） | 完成 |
+| **Phase 3** | `browser` / `cua` — ui/1 统一协议；desktop CDP 与原生窗口适配 | 已切换；扩展退场 |
 | **Phase 4** | `cua` — 本机 GUI 自动化（cua-driver MCP 桥接，内置发行物随包分发） | 完成 |
 | **Phase 5** | `embedded` — 适配 tinygo、命令白名单、限定目录 | 规划（未开始） |
 | **Phase 6** | `mobile` — Dart/Flutter App | 规划（未开始） |

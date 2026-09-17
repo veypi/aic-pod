@@ -66,7 +66,8 @@ nosandbox 免沙箱执行不再叠加本地 fs/net 策略条件：请求级 nosa
 ```sh
 GOCACHE=/tmp/aic-permission-go-cache go test ./cfg ./libs/policy ./libs/fsauth ./libs/netauth ./libs/vcore ./libs/exec_procs ./libs/host ./api -skip '^TestCuaLive'
 AIC_SANDBOX_PROBE=1 GOCACHE=/tmp/aic-permission-go-cache go test ./libs/exec_procs -run '^TestHostPolicyNativeEnforcement$' -count=1 -v
-node --test browser/src/sdk/client.test.js browser/src/sdk/auth.test.js browser/src/sdk/proto.test.js
+go test ./protocol/ui ./libs/host
+node --test desktop/ui/*.test.mjs desktop/browser/*.test.mjs
 ```
 
 macOS 本轮真实探测覆盖允许读取/写入、只读写入失败、白名单外读取失败、deny 的读写失败，全部使用临时文件。Linux/Windows 本轮完成交叉编译，没有真机执行验证。

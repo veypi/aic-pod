@@ -7,7 +7,6 @@ AIC Pod 客户端 — 部署在 PC/服务器上，通过 NATS WebSocket 连接 A
 |---|---|---|
 | **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser（壳通道）、cua（原生 GUI 自动化） |
 | **cli** | 单二进制 `aic` | exec（沙箱 + 三域授权）、fs、ssh/scp |
-| **browser** | Chrome MV3 扩展 | browser 指令集 + PageFS |
 
 安全模型见 [docs/host_sandbox.md](docs/host_sandbox.md)，架构见 [docs/design.md](docs/design.md)，
 版本变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -122,81 +121,23 @@ docker run -d \
 docker logs -f aic-pod
 ```
 
-## Browser Extension
+## Browser / CUA
 
-将你的 Chrome 浏览器接入 AIC 平台，AI 可以直接操作你的浏览器页面。
+Desktop 提供 ui/1 交互工具：browser 控制 Electron 工作区标签页，cua 控制本机原生窗口。
+两者共用 `target / snapshot / click / fill / type / press / scroll / wait` 及结果格式。
+批量操作使用 `run --code <JavaScript>` 或 `run --file <path>`，两端注入相同 `ui` API；脚本在独立受限进程运行，每一步沿用原命令权限和错误语义。
+普通结果进入 content，图片经 image_data 投递；完整协议与能力边界见 [docs/ui-protocol.md](docs/ui-protocol.md)。
 
-### 安装
-
-**开发模式（本地加载）：**
-
-1. 打开 `chrome://extensions/`
-2. 右上角开启 **开发者模式**
-3. 点击 **加载已解压的扩展程序**
-4. 选择项目中的 `browser/` 目录
-
-**从 zip 安装：**
-
-```bash
-make build-browser   # → dist/aic-browser.zip
+```text
+browser open https://example.com
+browser snapshot
+browser click @s<snapshot>:e1
+cua target list
+cua target use <window-target-id>
+cua snapshot --image
 ```
 
-然后将 `dist/aic-browser.zip` 拖入 `chrome://extensions/` 页面即可。
-
-### 配置
-
-安装后点击扩展图标 → **选项**，填写设置页：
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `key` | | 环境凭证，从 AIC 平台获取 |
-| `url` | `wss://ivec-ai.com/api/nc` | 服务端地址 |
-| `deviceName` | 系统 hostname | 设备名 |
-| `autoConnect` | `true` | 启动后自动连接 |
-| `background` | `true` | 后台模式，新窗口不抢夺焦点 |
-| `incognito` | `false` | 隐私模式，使用无痕窗口（不共享登录态） |
-| `viewport` | `1280 × 720` | 默认视口 |
-| `timeout` | `30s` | 操作默认超时 |
-
-> 与 desktop 客户端不同，浏览器插件直接用你当前 Chrome 的登录状态（cookie/storage），无需额外配置 session。
-
-### 工具能力
-
-插件注册 `browser` 工具（平台自有指令集）：平台无关核心 `browser/src/tools/browser/core.js`
-+ 各端 adapter（插件 `chrome-adapter` / desktop 壳 `electron-adapter`，Electron CDP 原生接入）
-共享同一份 core——插件与 desktop 壳通道指令集一致：
-
-```json
-{ "action": "browser", "argv": ["<subcommand>", "..."] }
-```
-
-| 子命令 | 说明 |
-|---|---|
-| `open` | 打开 URL（AI 工作区标签页） |
-| `click` | 点击元素（CSS 选择器或 @ref） |
-| `close` | 关闭工作区标签页 |
-| `download` | 点击元素触发下载 |
-| `eval` | CDP 执行 JavaScript（DevTools 语义，不受页面 CSP 限制） |
-| `get` | 获取页面信息 (text/html/title/url/value/attr/count/box/styles) |
-| `network` | 查看网络请求（页内 fetch/XHR 拦截器） |
-| `read` | 提取页面可读文本 |
-| `screenshot` | 截图（CDP；结果附 image_data，超 600KB 端内阶梯压缩） |
-| `snapshot` | a11y tree 快照（生成 @ref 用于元素定位） |
-| `tab` | 标签页管理 (new/list/close/<N>) |
-| `wait` | 等待条件 (selector/ms/--url/--load/--text/--fn/--download) |
-| `sleep` | 暂停 |
-
-未列能力（type/fill/press/滚动/导航等）用 `eval <js>` 注入 JS 替代。
-
-### 对比 desktop 客户端
-
-| 维度 | desktop / cli | browser (Extension) |
-|---|---|---|
-| 运行时 | Electron + Go 后端子进程 / 单二进制 | Chrome Service Worker |
-| 核心能力 | `exec`（沙箱 + 三域授权）、`fs`、`ssh`/`scp`；desktop 另有 `browser`（壳通道）与 `cua`（原生 GUI 自动化） | `browser`（浏览器自动化）+ PageFS |
-| 登录态 | 无状态 | 直接用浏览器登录态 |
-| 安装 | 下载安装包 / 二进制 | 加载扩展 |
-| 适用场景 | 本机/服务器运维、桌面自动化 | Web 自动化测试、网页数据采集 |
+Chrome 扩展已移除；desktop browser 直接使用 CDP，不依赖插件代码或同步脚本。
 
 ## 构建
 
@@ -209,7 +150,6 @@ make desktop-darwin-arm64       # desktop macOS → dist/AIC Desktop.app + aic-d
 make desktop-darwin-amd64       # desktop macOS（Intel）
 make desktop-windows-amd64      # desktop Windows exe（需先: brew install mingw-w64）
 make desktop-all                # desktop 全平台（linux desktop 需容器/CI）
-make build-browser              # 打包 Chrome Extension → dist/aic-browser.zip
 make docker-build               # 编译 cli + Docker 镜像
 make docker-push                # 推送镜像
 make release                    # 本地全量构建 + gh release create（需各平台工具链）
@@ -221,8 +161,7 @@ desktop 打包前自动同步内置 cua-driver（`desktop/cua.json` 固定版本
 `npm run cua-sync -- --asset <已下载资产>`。
 
 **发版流程**：推送 tag `v*` 触发 CI（`.github/workflows/build.yml`）构建 desktop 全平台 +
-cli 全平台 + browser zip 并创建 GitHub Release；版本号只改 `cfg/config.go`（带 `v` 前缀）
-与 `browser/manifest.json`（无前缀），`desktop/package.json` 由 `make desktop-version`
+cli 全平台 并创建 GitHub Release；版本号只改 `cfg/config.go`（带 `v` 前缀），`desktop/package.json` 由 `make desktop-version`
 从 git describe 自动同步。
 
 依赖：Node 22+（Electron/electron-builder）、Go（后端二进制 `make backend-bin`）、`go-winres`（windows cli 资源）。
