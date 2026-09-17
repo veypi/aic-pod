@@ -112,10 +112,11 @@ func TestDispatchGrantedDepthCheck(t *testing.T) {
 		t.Fatalf("nosandbox grant 3: state = %s needApproval = %v", resp.State, resp.NeedApproval)
 	}
 
-	// Approval never exempts a process from local restrictions, even with nosandbox.
+	// granted 9（Critical(4) 审批通过）+ nosandbox → 免沙箱直接执行
+	// （2026-09-16 修复：不再叠加本地 fs/net 策略校验）。
 	resp = c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec", map[string]any{"action": "bash", "argv": []string{"-c", "echo hi"}, "nosandbox": true}, 9))
-	if resp.State == proto.StateCompleted || resp.State == proto.StateWaiting || !strings.Contains(resp.Error, "host execution policy") {
-		t.Fatalf("nosandbox bypassed host rules: %+v", resp)
+	if resp.State != proto.StateCompleted || !strings.Contains(resp.Content, "hi") {
+		t.Fatalf("nosandbox with granted 9: state = %s err = %q content = %q", resp.State, resp.Error, resp.Content)
 	}
 
 	// fs write granted=1 < required=2 → rejected
@@ -283,7 +284,7 @@ func TestParseWSURL(t *testing.T) {
 func TestExecCmdWorkdirFallback(t *testing.T) {
 	wd := t.TempDir()
 	// 该用例验证 workdir 缺省回落机制，与沙箱无关：全局免沙箱隔离环境差异（§5.10）
-	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute})
+	c := New(Options{WorkDir: wd, ExecTimeout: time.Minute, NoSandbox: true})
 	c.hostID = "host_test01"
 
 	// 不带 workdir → bash -c pwd 应返回配置工作区

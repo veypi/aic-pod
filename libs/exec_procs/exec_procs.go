@@ -87,10 +87,11 @@ type StartOptions struct {
 	// 注意：LevelApproved(9) 只是「审批通过」的等级语义，不免沙箱——
 	// 免沙箱唯一通道是 NoSandbox。
 	Level int
-	// NoSandbox 是免沙箱执行标记（§5.10），唯二合法来源：
-	//   - 内部调用方（cloud/host 端 browser，由执行环境自身管控）；
+	// NoSandbox 是免沙箱执行标记（§5.10），合法来源：
+	//   - 内部管控调用方（ssh/scp、browser，由执行环境自身管控）；
 	//   - 外部请求显式携带 nosandbox 且经人工审批（required Critical(4)
-	//     ⇒ 必审批；审批本身不免沙箱，仅放行该标记）。
+	//     ⇒ 必审批；审批本身不免沙箱，仅放行该标记）；
+	//   - 全局 no_sandbox 配置（Manager.NoSandbox）。
 	NoSandbox bool
 	// WriteRoots 是追加可写根（统一授权模型 fs 域）：workspace-write
 	//（level>=2）沙箱 bind 白名单成员，与 fsauth 基础白名单（工作区/临时区/
@@ -163,12 +164,6 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 		return nil, fmt.Errorf("exec: unknown action %q", opts.Exec[0])
 	}
 
-	if opts.NoSandbox || m.NoSandbox {
-		if err := validateUnconfined(opts); err != nil {
-			return nil, err
-		}
-	}
-
 	logDir := filepath.Dir(opts.LogPath)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("exec: create log dir: %v", err)
@@ -179,8 +174,9 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (*Result, error)
 	}
 
 	// 沙箱包装（§5.10）：未显式免沙箱（NoSandbox）且全局未禁用（m.NoSandbox）
-	// 的进程调用一律进沙箱——审批通过（9）也不例外，免沙箱只能由显式
-	// nosandbox 请求 + 审批或全局 no_sandbox 配置获得；
+	// 的进程调用一律进沙箱——审批通过（9）也不例外；免沙箱来源 = 显式
+	// nosandbox 请求（经 Critical(4) 审批下发 9）、内部管控调用方（ssh/scp）
+	// 或全局 no_sandbox 配置，不再叠加 fs/net 策略校验（2026-09-16 修复）；
 	// 无可用后端时 fail-closed 返回错误（命令不执行，绝不静默裸跑）。
 	execArgv := opts.Exec
 	var plan launchPlan

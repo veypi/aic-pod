@@ -715,13 +715,6 @@ func literalWriteRoots(patterns []string) []string {
 	return roots
 }
 
-func validateUnconfined(opts StartOptions) error {
-	if opts.Level < proto.LevelWrite || !opts.FsOpen || len(opts.DenyPaths) > 0 || !opts.NetOpen || len(opts.NetDeny) > 0 {
-		return &proto.DeniedError{Reason: "nosandbox cannot enforce the host execution policy; use sandboxed execution"}
-	}
-	return nil
-}
-
 func readAncestors(patterns []string) []string {
 	seen := map[string]bool{}
 	var out []string

@@ -24,11 +24,6 @@ func (m *Manager) Spawn(ctx context.Context, opts StartOptions) (*Spawned, error
 		return nil, fmt.Errorf("exec: unknown action %q", opts.Exec[0])
 	}
 
-	if opts.NoSandbox || m.NoSandbox {
-		if err := validateUnconfined(opts); err != nil {
-			return nil, err
-		}
-	}
 	plan := launchPlan{}
 	execArgv := opts.Exec
 	confined := !opts.NoSandbox && !m.NoSandbox

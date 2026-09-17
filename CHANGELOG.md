@@ -22,8 +22,10 @@
   SystemCAReadPatterns 并入读范围、fs_deny 裸路径展开子树；host 新增 exec 域 grant
   （`grant exec <cmd> [--temp|--permanent]`）与会话授权生命周期（`_session_end`/
   NATS 断线/退出清临时授权）；执行端不再发起审批（waiting/NeedApproval 一律收敛
-  rejected）；沙箱 fail-closed：planConfined 前置 validateProcessPolicy、nosandbox
-  仅本地无需 fs/net 约束且授予写级时允许（删除「审批通过免沙箱」通道）；darwin
+  rejected）；沙箱 fail-closed（沙箱路径）：planConfined 前置 validateProcessPolicy；
+  nosandbox 免沙箱执行不再叠加本地 fs/net 策略校验——请求级经 Critical(4) 审批
+  （granted 9 随签名下发）即执行，ssh/scp 内部管控调用与全局 no_sandbox 配置同属
+  免沙箱来源；darwin
   seatbelt 默认 deny file-read* 后按 allow 显式放行、linux bwrap 改空根+只读白名单
   bind（工作区不再自动成为可写根）；vcore git 子命令分级补 branch（-d/-D/-m/-M/
   -c/-C/-f 破坏性标志为危险）。

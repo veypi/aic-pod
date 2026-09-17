@@ -57,7 +57,7 @@ grant 自身 required=4，先经正常云端审批再修改 host 的对应 allow
 - Linux bubblewrap：关闭策略使用空根和明确绑定的只读/读写目录，不因 workdir 自动绑定目录。bwrap 不能完整表达路径 deny、动态路径 glob 和精确网络目标；存在路径 deny 或其他无法落实的策略时明确返回权限错误。默认配置含凭证 deny，所以当前配置下的原生命令会被拒绝，不能用近似挂载冒充完整保护。
 - Windows：保留受限令牌、ACL 和 Job Object 资源限制。该后端没有实现路径读取限制和网络规则，携带这些规则的原生调用在启动前拒绝；虚拟 fs、net/ssh 的本地检查仍工作。
 
-nosandbox 仅在本地无需 fs/net 约束且授予写级时允许裸跑；受限策略下返回权限错误。无法建立沙箱时也拒绝运行，不提供静默裸跑兜底。
+nosandbox 免沙箱执行不再叠加本地 fs/net 策略条件：请求级 nosandbox 经 dispatch 强制 Critical(4) 人工审批（granted 9 随签名下发）后直接执行；ssh/scp 内部管控调用与全局 no_sandbox 配置同属免沙箱来源。无法建立沙箱时仍拒绝运行（沙箱路径 fail-closed），不提供静默裸跑兜底。
 
 资源限额、进程组终止、后台任务与输出处理保持原有实现。Windows 盘符虚拟根仍通过统一路径模块解析。
 

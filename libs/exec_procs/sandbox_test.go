@@ -74,7 +74,7 @@ func TestConfineConfined(t *testing.T) {
 func TestManagerNoSandboxGlobal(t *testing.T) {
 	m := NewManager(time.Minute)
 	m.NoSandbox = true
-	res, err := m.Start(context.Background(), StartOptions{FsOpen: true, NetOpen: true, Level: proto.LevelWrite,
+	res, err := m.Start(context.Background(), StartOptions{Level: proto.LevelWrite,
 		ID:      "t-global-nosb",
 		Command: "echo hi",
 		LogPath: filepath.Join(t.TempDir(), "out.log"),
@@ -82,6 +82,29 @@ func TestManagerNoSandboxGlobal(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("start with global NoSandbox: %v", err)
+	}
+	if res.ExitCode != 0 || !strings.Contains(res.Content, "hi") {
+		t.Fatalf("result = %+v, want exit 0 with hi", res)
+	}
+}
+
+// 免沙箱不再叠加 fs/net 策略校验（2026-09-16 修复）：受限策略（fs 非 open +
+// deny 非空 + net 非 open）下，granted 9 + NoSandbox 仍直接执行。
+func TestUnconfinedIgnoresPolicy(t *testing.T) {
+	m := NewManager(time.Minute)
+	res, err := m.Start(context.Background(), StartOptions{
+		FsOpen:    false,
+		NetOpen:   false,
+		DenyPaths: []string{"/private/**"},
+		Level:     proto.LevelApproved,
+		NoSandbox: true,
+		ID:        "t-unconfined-restricted",
+		Command:   "echo hi",
+		LogPath:   filepath.Join(t.TempDir(), "out.log"),
+		Exec:      []string{"sh", "-c", "echo hi"},
+	})
+	if err != nil {
+		t.Fatalf("start with nosandbox under restricted policy: %v", err)
 	}
 	if res.ExitCode != 0 || !strings.Contains(res.Content, "hi") {
 		t.Fatalf("result = %+v, want exit 0 with hi", res)
