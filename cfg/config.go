@@ -57,6 +57,9 @@ type Options struct {
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
+	// Browser viewport applies to newly created desktop tabs, independently of display layout.
+	BrowserWidth  int `json:"browser_width" yaml:"browser_width" default:"1280" desc:"browser viewport width in pixels (320-4096)"`
+	BrowserHeight int `json:"browser_height" yaml:"browser_height" default:"720" desc:"browser viewport height in pixels (320-4096)"`
 	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
@@ -112,7 +115,7 @@ var Global = NewOptions()
 
 // NewOptions 返回带默认值的配置实例（Code 留空，由 Load/LoadFile 生成）。
 func NewOptions() *Options {
-	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/", RTC: true}
+	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/", BrowserWidth: 1280, BrowserHeight: 720, RTC: true}
 }
 
 // 授权策略取值（fs_policy/exec_policy/net_policy/ssh_policy 的合法值）。
@@ -139,6 +142,12 @@ func (o *Options) Normalize() {
 		o.Host = DefaultHost
 	}
 	o.HomePath = o.NormalizedHomePath()
+	if o.BrowserWidth < 320 || o.BrowserWidth > 4096 {
+		o.BrowserWidth = 1280
+	}
+	if o.BrowserHeight < 320 || o.BrowserHeight > 4096 {
+		o.BrowserHeight = 720
+	}
 	o.ExecPolicy = NormalizePolicy(o.ExecPolicy, PolicyOpen)
 	o.FsPolicy = NormalizePolicy(o.FsPolicy, PolicyDeny)
 	o.NetPolicy = NormalizePolicy(o.NetPolicy, PolicyOpen)

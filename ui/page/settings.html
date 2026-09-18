@@ -236,6 +236,13 @@
     <input id="work_dir" ref="work_dir" placeholder="留空 = 系统临时目录">
     <label>后台超时 (exec_timeout)</label>
     <input id="exec_timeout" ref="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
+    <label>浏览器分辨率（宽 × 高）</label>
+    <div class="row">
+      <input type="number" min="320" max="4096" step="1" ref="browser_width" aria-label="浏览器宽度" placeholder="1280">
+      <span>×</span>
+      <input type="number" min="320" max="4096" step="1" ref="browser_height" aria-label="浏览器高度" placeholder="720">
+    </div>
+    <div class="sub">默认 1280 × 720，新建标签时生效。页面尺寸固定，显示区域自动等比例缩放。</div>
     <label>默认打开地址 (home_path)</label>
     <input id="home_path" ref="home_path" placeholder="留空 = /（如 /、/a）">
     <div class="auth-title">访问授权</div>
@@ -376,6 +383,8 @@
       $refs.work_dir.value = cfg.work_dir || '';
       $refs.exec_timeout.value = cfg.exec_timeout || '';
       $refs.home_path.value = cfg.home_path || '/';
+      $refs.browser_width.value = cfg.browser_width || 1280;
+      $refs.browser_height.value = cfg.browser_height || 720;
       for (const d of domains) {
         auth[d.key].policy = cfg[d.key + '_policy'] || auth[d.key].policy;
         auth[d.key].deny = cfg[d.key + '_deny'] || [];
@@ -400,7 +409,12 @@
     const exec_timeout = $refs.exec_timeout.value.trim();
     const home_path = $refs.home_path.value.trim();
     try {
-      const body = {host, work_dir, exec_timeout, home_path};
+      const browser_width = Number($refs.browser_width.value || 1280);
+      const browser_height = Number($refs.browser_height.value || 720);
+      if (![browser_width, browser_height].every(n => Number.isInteger(n) && n >= 320 && n <= 4096)) {
+        throw new Error('浏览器宽高必须是 320–4096 之间的整数');
+      }
+      const body = {host, work_dir, exec_timeout, home_path, browser_width, browser_height};
       for (const d of domains) {
         body[d.key + '_policy'] = auth[d.key].policy;
         body[d.key + '_deny'] = auth[d.key].deny;

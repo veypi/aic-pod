@@ -16,23 +16,25 @@ import (
 // configView 是 get_config 的返回视图（含 key——设置窗口需显示当前凭证；
 // 本地 API 受 code 校验保护）。
 type configView struct {
-	Host        string   `json:"host"`
-	Key         string   `json:"key"`
-	WorkDir     string   `json:"work_dir"`
-	ExecTimeout string   `json:"exec_timeout"`
-	HomePath    string   `json:"home_path"`
-	ExecPolicy  string   `json:"exec_policy"`
-	ExecDeny    []string `json:"exec_deny"`
-	ExecAllow   []string `json:"exec_allow"`
-	FsPolicy    string   `json:"fs_policy"`
-	FsDeny      []string `json:"fs_deny"`
-	FsAllow     []string `json:"fs_allow"`
-	NetPolicy   string   `json:"net_policy"`
-	NetDeny     []string `json:"net_deny"`
-	NetAllow    []string `json:"net_allow"`
-	SshPolicy   string   `json:"ssh_policy"`
-	SshDeny     []string `json:"ssh_deny"`
-	SshAllow    []string `json:"ssh_allow"`
+	BrowserWidth  int      `json:"browser_width"`
+	BrowserHeight int      `json:"browser_height"`
+	Host          string   `json:"host"`
+	Key           string   `json:"key"`
+	WorkDir       string   `json:"work_dir"`
+	ExecTimeout   string   `json:"exec_timeout"`
+	HomePath      string   `json:"home_path"`
+	ExecPolicy    string   `json:"exec_policy"`
+	ExecDeny      []string `json:"exec_deny"`
+	ExecAllow     []string `json:"exec_allow"`
+	FsPolicy      string   `json:"fs_policy"`
+	FsDeny        []string `json:"fs_deny"`
+	FsAllow       []string `json:"fs_allow"`
+	NetPolicy     string   `json:"net_policy"`
+	NetDeny       []string `json:"net_deny"`
+	NetAllow      []string `json:"net_allow"`
+	SshPolicy     string   `json:"ssh_policy"`
+	SshDeny       []string `json:"ssh_deny"`
+	SshAllow      []string `json:"ssh_allow"`
 }
 
 // GetConfig 返回当前有效配置（cfg.Global：启动解析值 + 页面写操作同步）。
@@ -41,7 +43,8 @@ func GetConfig(x *vigo.X) (*configView, error) {
 	o := effective()
 	a := cfg.AuthSnapshot()
 	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
-		HomePath:   o.NormalizedHomePath(),
+		HomePath:     o.NormalizedHomePath(),
+		BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
 		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
 		FsPolicy: a.FsPolicy, FsDeny: a.FsDeny, FsAllow: a.FsAllow,
 		NetPolicy: a.NetPolicy, NetDeny: a.NetDeny, NetAllow: a.NetAllow,
@@ -55,22 +58,24 @@ func GetConfig(x *vigo.X) (*configView, error) {
 // （保持现状），非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent
 // 的唯一回撤出口。
 type SetConfigReq struct {
-	Host        string    `json:"host" src:"json"`
-	WorkDir     string    `json:"work_dir" src:"json"`
-	ExecTimeout string    `json:"exec_timeout" src:"json"`
-	HomePath    string    `json:"home_path" src:"json"`
-	ExecPolicy  string    `json:"exec_policy" src:"json"`
-	ExecDeny    *[]string `json:"exec_deny" src:"json"`
-	ExecAllow   *[]string `json:"exec_allow" src:"json"`
-	FsPolicy    string    `json:"fs_policy" src:"json"`
-	FsDeny      *[]string `json:"fs_deny" src:"json"`
-	FsAllow     *[]string `json:"fs_allow" src:"json"`
-	NetPolicy   string    `json:"net_policy" src:"json"`
-	NetDeny     *[]string `json:"net_deny" src:"json"`
-	NetAllow    *[]string `json:"net_allow" src:"json"`
-	SshPolicy   string    `json:"ssh_policy" src:"json"`
-	SshDeny     *[]string `json:"ssh_deny" src:"json"`
-	SshAllow    *[]string `json:"ssh_allow" src:"json"`
+	BrowserWidth  *int      `json:"browser_width" src:"json"`
+	BrowserHeight *int      `json:"browser_height" src:"json"`
+	Host          string    `json:"host" src:"json"`
+	WorkDir       string    `json:"work_dir" src:"json"`
+	ExecTimeout   string    `json:"exec_timeout" src:"json"`
+	HomePath      string    `json:"home_path" src:"json"`
+	ExecPolicy    string    `json:"exec_policy" src:"json"`
+	ExecDeny      *[]string `json:"exec_deny" src:"json"`
+	ExecAllow     *[]string `json:"exec_allow" src:"json"`
+	FsPolicy      string    `json:"fs_policy" src:"json"`
+	FsDeny        *[]string `json:"fs_deny" src:"json"`
+	FsAllow       *[]string `json:"fs_allow" src:"json"`
+	NetPolicy     string    `json:"net_policy" src:"json"`
+	NetDeny       *[]string `json:"net_deny" src:"json"`
+	NetAllow      *[]string `json:"net_allow" src:"json"`
+	SshPolicy     string    `json:"ssh_policy" src:"json"`
+	SshDeny       *[]string `json:"ssh_deny" src:"json"`
+	SshAllow      *[]string `json:"ssh_allow" src:"json"`
 }
 
 // validPolicy 校验 policy 取值（空串 = 不改，合法）。
@@ -84,6 +89,11 @@ func validPolicy(s string) bool {
 func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	unlock := cfg.LockUpdate()
 	defer unlock()
+	for name, size := range map[string]*int{"browser_width": req.BrowserWidth, "browser_height": req.BrowserHeight} {
+		if size != nil && (*size < 320 || *size > 4096) {
+			return nil, vigo.ErrInvalidArg.WithString("invalid " + name + ": must be between 320 and 4096")
+		}
+	}
 	if s := strings.TrimSpace(req.ExecTimeout); s != "" {
 		if _, err := time.ParseDuration(s); err != nil {
 			return nil, vigo.ErrInvalidArg.WithString("invalid exec_timeout: " + err.Error())
@@ -123,6 +133,12 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 			return nil, vigo.ErrInvalidArg.WithString("invalid work_dir: not a directory: " + abs)
 		}
 		wd = abs
+	}
+	if req.BrowserWidth != nil {
+		fileCfg.BrowserWidth = *req.BrowserWidth
+	}
+	if req.BrowserHeight != nil {
+		fileCfg.BrowserHeight = *req.BrowserHeight
 	}
 	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
@@ -200,6 +216,12 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	cfg.Global.WorkDir = fileCfg.WorkDir
 	cfg.Global.ExecTimeout = fileCfg.ExecTimeout
 	cfg.Global.HomePath = fileCfg.HomePath
+	if req.BrowserWidth != nil {
+		cfg.Global.BrowserWidth = fileCfg.BrowserWidth
+	}
+	if req.BrowserHeight != nil {
+		cfg.Global.BrowserHeight = fileCfg.BrowserHeight
+	}
 	o := *cfg.Global
 	mu.Unlock()
 	cfg.SetAuth(cfg.AuthFrom(fileCfg))

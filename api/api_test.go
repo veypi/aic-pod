@@ -358,3 +358,41 @@ func TestLocalAPISetConfigFsAllow(t *testing.T) {
 		t.Fatalf("fs_allow not cleared: %+v", o.FsAllow)
 	}
 }
+
+func TestBrowserViewportConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	initTestAPI(t)
+	read := func(width, height int) {
+		t.Helper()
+		status, body := req(t, "GET", "/api/get_config", cfg.Global.Code, "")
+		var got configView
+		if err := json.Unmarshal([]byte(body), &got); err != nil || status != 200 || got.BrowserWidth != width || got.BrowserHeight != height {
+			t.Fatalf("get viewport = %d %s, want %dx%d", status, body, width, height)
+		}
+	}
+	read(1280, 720)
+	status, body := req(t, "POST", "/api/set_config", cfg.Global.Code, `{"browser_width":1920,"browser_height":1080}`)
+	if status != 200 {
+		t.Fatalf("save viewport: %d %s", status, body)
+	}
+	read(1920, 1080)
+	persisted, err := cfg.LoadFile()
+	if err != nil || persisted.BrowserWidth != 1920 || persisted.BrowserHeight != 1080 {
+		t.Fatalf("persisted viewport: %+v %v", persisted, err)
+	}
+	// Older clients omit these fields; saving another setting must retain them.
+	status, body = req(t, "POST", "/api/set_config", cfg.Global.Code, `{"home_path":"/a"}`)
+	if status != 200 {
+		t.Fatalf("legacy save: %d %s", status, body)
+	}
+	read(1920, 1080)
+	for _, invalid := range []string{`{"browser_width":0}`, `{"browser_height":-1}`, `{"browser_width":4097}`, `{"browser_height":720.5}`} {
+		status, body = req(t, "POST", "/api/set_config", cfg.Global.Code, invalid)
+		if status == 200 {
+			t.Fatalf("accepted invalid viewport %s: %s", invalid, body)
+		}
+		read(1920, 1080)
+	}
+}
