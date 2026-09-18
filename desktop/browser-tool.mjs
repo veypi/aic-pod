@@ -44,7 +44,7 @@ export async function startBrowserServer({ host, log = () => {} } = {}) {
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  server.once('close', () => handler.dispose());
+  server.once('close', () => { handler.dispose(); adapter.dispose(); });
   const port = server.address().port;
   log('[browser] ui/1 channel listening on 127.0.0.1:%d', port);
   return { port, token, server, adapter };

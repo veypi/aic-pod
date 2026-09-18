@@ -18,15 +18,12 @@ Electron Main (Node, main.js)
  │    发行物内置：scripts/sync-cua.mjs 按 desktop/cua.json 固定版本 + sha256 同步到
  │    vendor/cua → resources/cua，main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP；
  │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
- ├─ BaseWindow（frameless）主窗口：平台页恒满窗且恒最顶（背景透明，画面全部由页面
- │    自绘） + 原生内容池（OS 原生窗口内容 v2 反转模型，设计唯一源 =
- │    aic/docs/os_native_windows.md）——AI browser 标签（WebContentsView）
- │    恒在平台页之下，由平台页 OS 窗口占位元素经 nativeWin 桥
- │    驱动贴位；洞 = 内容区（背景层 mask + 内容元素透明；遮罩/弹窗直接叠画、不隐藏
- │    内容）；输入资格由页面侧 DOM 判定（elementsFromPoint）→ IPC
- │    `native:mouse / native:wheel` → 主进程复核 + 坐标翻译下发（含拖拽捕获 + 焦点
- │    转移）；原生内容聚焦时 leader 键由壳侧抓取（`native:leader / native:keys`，
- │    OS 布局快捷键保持可用，见下文「leader 键抓取」）
+ ├─ BaseWindow 主窗口：平台页 WebContentsView，browser 仅以 canvas 画面展示
+ ├─ 离屏 BrowserWindow 标签池：默认固定 1280×720、DPR=1，背景节流关闭
+ │    主窗口缩放/隐藏不改变标签视口；CDP 输入和截图可独立在后台运行
+ │    paint → native:frame → canvas 按 min(宽比,高比) 等比例居中展示（带帧确认背压）
+ │    人工输入由 DOM 命中判定后映射回页面原始坐标，键盘/IME 焦点留在平台
+ │    设计见 aic/docs/os_native_windows.md v3
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
  │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
  │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
@@ -42,14 +39,12 @@ Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢�
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
 键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
 
-leader 键抓取（设计 = aic/docs/os_native_windows.md §6）：原生内容
-（AI 标签）持有键盘焦点时平台页收不到 keydown——壳对每个内容 view 挂
-`before-input-event`（`leader-grab.js` 纯判定）：leader 集合精确命中 → 该键不进内容、
-经 `native:keys` 转平台页合成 KeyboardEvent（复用页面 keymap/编排链路）并把键盘焦点
-交接平台页；会话期间物理键全由平台页原生接收，leader 释放后焦点自动交还来源内容视图
-（launcher 等经 `native:focus` 保留焦点）。leader 集合由页面经 `native:leader` 同步
-（改键跟随，未同步 = 不抓取）。不做逐键转发的原因（Chromium 抑制 handled keyDown 后的
-keyUp/char，壳侧观测不到释放）见 docs §6。
+浏览器分辨率：本地设置中的「浏览器分辨率」默认 1280×720，保存为
+`browser_width` / `browser_height`（各 320–4096）。新建标签读取最新配置，已有标签不变。
+修改 desktop 代码后需重启，并更新平台的 Browser 页面与 `os/browser-viewer.js`。
+
+键盘焦点保留在平台 viewer 中，已有 leader/窗口快捷键先处理，普通输入与中文
+composition 提交转发给离屏页面。原生内容的焦点交接已取消。
 
 ## 开发
 

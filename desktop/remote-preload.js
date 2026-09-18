@@ -44,7 +44,7 @@ if (allowedHosts.includes(location.host)) {
       return () => ipcRenderer.removeListener('pet:cmd', h)
     },
     // ---- nativeWin：OS 原生窗口内容桥（docs §3） ----
-    // 渲染器是 rect/可见性的唯一驱动源；壳只执行贴位与 z 序。getState 为权威源。
+    // rect 只决定画面展示和输入映射；getState 给出标签固定视口。
     nativeWin: {
       getState: () => ipcRenderer.invoke('native:state'),
       createTab: (url) => ipcRenderer.invoke('native:tab-create', String(url || '')),
@@ -53,15 +53,22 @@ if (allowedHosts.includes(location.host)) {
       navigateTab: (id, url) => ipcRenderer.invoke('native:tab-navigate', id, String(url || '')),
       // {rect:{x,y,w,h}|null, visible:boolean}：rect=null/visible=false → 隐藏
       layout: (st) => ipcRenderer.invoke('native:layout', st),
-      // v2：洞内输入转发（页面侧命中判定 → 壳侧坐标翻译 + sendInputEvent + 焦点转移；
-      // 设计见 aic/docs/os_native_windows.md §6）
+      // Fixed-viewport presentation: mouse coordinates are platform CSS pixels;
+      // keyboard/IME focus stays in the viewer, browser input is delivered via CDP.
       mouse: (m) => ipcRenderer.send('native:mouse', m || {}),
       wheel: (m) => ipcRenderer.send('native:wheel', m || {}),
-      // leader 键抓取（docs §6）：页面同步 leader 集合（页面为配置唯一源，改键跟随；
-      // 未同步 = 壳不抓取）；native:keys = leader 会话进入事件（原生内容聚焦时壳侧
-      // 吞下的 leader 按下）→ 页面合成事件走既有 keymap/编排链路，此后物理键由平台页
-      // 原生接收；focus = 平台页保留键盘焦点（launcher 等需要输入的动作，leader 释放
-      // 后不自动交还内容视图）
+      resetInput: () => ipcRenderer.send('native:reset'),
+      inputFocus: (focused) => ipcRenderer.send('native:input-focus', !!focused),
+      key: (m) => ipcRenderer.send('native:key', m || {}),
+      text: (text) => ipcRenderer.send('native:text', text),
+      edit: (command) => ipcRenderer.send('native:edit', command),
+      ackFrame: (seq) => ipcRenderer.send('native:frame-ack', seq),
+      onFrame: (fn) => {
+        const h = (_e, frame) => fn(frame)
+        ipcRenderer.on('native:frame', h)
+        return () => ipcRenderer.removeListener('native:frame', h)
+      },
+      // Shortcut configuration and compatibility hooks for older platform pages.
       setLeader: (mods) => ipcRenderer.invoke('native:leader', Array.isArray(mods) ? mods.map((m) => String(m)) : []),
       onKeys: (fn) => {
         const h = (e, ev) => fn(ev)

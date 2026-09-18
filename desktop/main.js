@@ -1,23 +1,13 @@
 // AIC Desktop — Electron 主进程（纯远程壳：Chromium 渲染平台 + Go 后端子进程）。
 //
-// 架构（2026-09-10 OS 原生窗口内容 v2 反转模型，B 区/A/B 分区整体删除；v1 P0 同日
-// 被取代；设计唯一源 = aic/docs/os_native_windows.md）：
+// 架构（固定视口 browser，设计见 aic/docs/os_native_windows.md）：
 //
-//	Electron Main (Node)
-//	 ├─ 启动：主窗口先加载本地 loading.html → spawn Go 后端（AIC_PORT_FILE 握手）
-//	 │    → 读配置 host → 探测 {host}/root.html → 跳转平台页 or 打开本地配置窗口
-//	 │    → 启动 browser 壳通道（browser-tool.js，共享插件 core + Electron CDP
-//	 │      适配器）并向 Go 后端注册 provider（caps 出现 browser）
-//	 ├─ 平台页（{host}/ 顶层页面）：session.registerPreloadScript 注入 remote-preload.js
-//	 │    （host 白名单过滤后暴露 window.aicDesktop：api 转发/窗口控制/外链/桌宠
-//	 │    + nativeWin 原生内容桥）
-//	 ├─ 原生内容池（v2 反转模型）：AI 工作区标签（WebContentsView 池，adapter 持有）
-//	 │    ——恒在平台页之下；rect/可见性唯一驱动源 = 平台页 OS 窗口占位元素
-//	 │    （native:layout）；洞 = 页面内容区（遮罩/弹窗直接叠画，不隐藏内容），
-//	 │    洞内输入由页面命中判定后经 IPC
-//	 │    （native:mouse / native:wheel）交由主进程翻译转发；原生内容聚焦时 leader 键
-//	 │    由壳侧抓取（leader 会话焦点交接：进入事件 native:keys 转平台页、释放后焦点
-//	 │    交还，OS 布局快捷键保持可用，leader-grab.js）
+// Electron Main (Node)
+//   ├─ spawn Go 后端 → 本地 API 配置/绑定 → 平台页 WebContentsView
+//   ├─ browser provider（browser-tool.mjs）：固定视口离屏 BrowserWindow 标签池
+//   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
+//   ├─ nativeWin 桥：离屏 paint → 平台 canvas 等比例展示 → 帧确认背压
+//   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
 //	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload；不依赖平台页）：托盘
 //	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
 //	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
@@ -30,7 +20,7 @@ const { spawn } = require('child_process')
 const fs = require('fs')
 const net = require('net')
 const path = require('path')
-const { normMods, leaderHit, leaderReleased, keyPayload } = require('./leader-grab')
+const { normMods, leaderHit } = require('./leader-grab')
 
 // ---- 常量 ----
 const isDev = !app.isPackaged
@@ -50,8 +40,8 @@ const DEFAULT_HOST = 'https://ivec-ai.com'
 // 兼容旧配置与跳转后的页面 origin。
 const LEGACY_HOSTS = ['ivec.ai']
 
-let mainWin = null // 主窗口（BaseWindow：平台页 + 原生内容池视图）
-let platformView = null // 平台页视图（恒占满 contentView；原生内容的 z 序基准）
+let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
+let platformView = null // 平台页视图（恒占满 contentView）
 let aiBrowser = null // browser 壳通道（adapter.tabControl = 原生内容池控制面）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
 let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
@@ -66,6 +56,7 @@ let petPosTimer = null // 桌宠位置写盘防抖 timer
 let localPort = 0 // Go 后端本地服务端口
 let localCode = '' // 本地 API 校验码（不出主进程）
 let host = DEFAULT_HOST // 平台地址（配置读取）
+let browserInputFocused = false // 平台 viewer 的键盘输入代理是否聚焦
 
 // ---- 单实例（唯一 ID，第二实例聚焦现有窗口；本地服务端口唯一） ----
 if (!app.requestSingleInstanceLock()) {
@@ -274,7 +265,13 @@ async function setupBrowserProvider() {
       const { port, token, adapter } = await startBrowserServer({
         host: {
           win: mainWin,
-          platformView,
+          getViewport: async () => {
+            const cfg = await getLocalConfig()
+            return { width: cfg?.browser_width, height: cfg?.browser_height }
+          },
+          onFrame: (frame) => {
+            if (platformReady()) platformView.webContents.send('native:frame', frame)
+          },
           // 标签集变化 → 全量推平台页（渲染器以 getState 为权威源，事件只做增量提醒）
           onChanged: (st) => {
             try {
@@ -283,10 +280,6 @@ async function setupBrowserProvider() {
               }
             } catch (_) { /* 渲染器重建中 */ }
           },
-          // tab 池重排后恢复 z 序不变量 [tabs…, platform]（docs §4.4）
-          onRestack: () => raisePlatform(),
-          // 新标签视图创建：挂 leader 键抓取（原生内容聚焦时 OS 布局快捷键可用，docs §6）
-          onTabView: (wc) => attachLeaderGrab(wc),
         },
         log: (f, ...a) => console.log('[browser]', f, ...a),
       })
@@ -407,52 +400,22 @@ function handleCmd(line, conn) {
   reply(delivered ? { ok: true } : { ok: false, error: 'no window alive' })
 }
 
-// ---- 原生内容池（docs §3 桥协议；rect/可见性唯一驱动源 = 平台页 OS 窗口占位元素） ----
+// ---- browser 展示桥：平台提供展示区域，浏览器运行视口独立固定 ----
 
 const tabCtl = () => aiBrowser?.adapter?.tabControl || null
 const emptyState = () => ({ tabs: [], activeTabId: null })
 
-// v2 z 序不变量（底→顶）：[…tabs, platform]——platform 恒最顶（docs §4.4）。
-// tabs 由 adapter 重排（onRestack 回调），本函数把 platform 抬回顶部。
-function raisePlatform() {
-  if (!mainWin || mainWin.isDestroyed() || !platformView) return
-  const cv = mainWin.contentView
-  if (cv.children.includes(platformView)) cv.removeChildView(platformView)
-  cv.addChildView(platformView)
-}
-
-// ---- v2 输入转发：页面侧命中判定 → IPC → 此处翻译下发（docs §6） ----
-// 命中资格在页面（唯一能看 DOM 的一侧）：洞内且该点栈顶为内容元素才转发——被
-// launcher/弹窗/浮窗盖住的部分输入归它们，内容本身不再隐藏。壳侧只做目标解析 +
-// 坐标复核（首帧命中；拖动捕获期放行越界坐标）+ sendInputEvent + 焦点转移。
-const rectHas = (r, x, y) => !!r && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-
-// 输入目标（原生内容池活动 tab）；null = 无洞/不可见
-function tabInputTarget() {
-  const st = tabCtl()?.poolState?.()
-  return st ? { kind: 'tab', wc: st.wc, rect: st.rect } : null
-}
-
-// 平台页整帧跳转/崩溃 → 原生内容复位隐藏态（页面恢复后重新驱动 rect/可见性；
+// 平台页整帧跳转/崩溃 → 停止画面推送（不影响后台 browser；
 // getState 是权威源，事件丢了无所谓）
 function resetNativeContent() {
+  browserInputFocused = false
+  platformView?.webContents.setIgnoreMenuShortcuts(false)
   tabCtl()?.applyLayout({ visible: false })
-  cancelLeaderSession()
 }
 
-// ---- leader 键抓取：原生内容聚焦时 OS 布局快捷键仍可用（docs §6） ----
-// 焦点进原生内容（mouseDown → wc.focus()）后平台页收不到 keydown，leader（编排/
-// launcher/窗口动作）失效。机制 =「leader 会话焦点交接」（2026-09-13，leader-grab.js）：
-// 内容 view 上 leader 集合精确命中 → preventDefault（该键不进内容）+ 合成"按下"事件
-// 经 native:keys 转平台页 + 键盘焦点交接平台页；此后物理键由平台页原生接收（既有
-// keymap/编排链路零改动），平台页上 leader 释放 → 焦点自动交还来源 view（native:focus
-// 可保留焦点，如 launcher）。不做逐键转发：Chromium 会连带抑制被处理 keyDown 之后的
-// 所有 keyUp/char（suppress_events_until_keydown_），壳侧观测不到释放、编排必卡死
-// （Electron issue #37336 官方确认 intended）。
-// leader 集合由页面同步（默认空 = 不抓取，旧平台页自然降级）；平台页未就绪不抓取。
+// Physical keyboard focus stays in the platform viewer, so its existing layout
+// shortcuts receive native events (including leader releases) without handoff.
 let leaderMods = []
-// 当前会话 { fromWc, mods, keep }（至多一个——仅聚焦中的原生内容 view 能触发进入）
-let leaderSession = null
 
 function platformReady() {
   if (!platformView || platformView.webContents.isDestroyed()) return false
@@ -461,61 +424,6 @@ function platformReady() {
   } catch (_) {
     return false
   }
-}
-
-function forwardKeyToPlatform(ev) {
-  try {
-    if (platformView && !platformView.webContents.isDestroyed()) platformView.webContents.send('native:keys', ev)
-  } catch (_) { /* 渲染器重建中 */ }
-}
-
-// 会话开始：吞下进入键（转平台页）+ 键盘焦点交接平台页（后续物理键全由平台页原生接收）
-function startLeaderSession(wc, mods) {
-  leaderSession = { fromWc: wc, mods: [...mods], keep: false }
-  try {
-    if (platformView && !platformView.webContents.isDestroyed()) platformView.webContents.focus()
-  } catch (_) { /* 视图销毁竞态 */ }
-}
-
-// 会话结束：默认把焦点交还来源 view（keep/来源已销毁除外）。延迟到本轮事件循环后执行，
-// 确保平台页当前这枚 keyUp 正常完成派发（页面据此退出编排、落定拖拽）。
-function endLeaderSession() {
-  const s = leaderSession
-  leaderSession = null
-  if (!s || s.keep) return
-  setImmediate(() => {
-    try {
-      if (s.fromWc && !s.fromWc.isDestroyed()) s.fromWc.focus()
-    } catch (_) { /* 视图销毁竞态 */ }
-  })
-}
-
-// 会话中止（应用失焦 / 平台页 reload / 平台焦点被用户移走）：清态，不交还焦点
-function cancelLeaderSession() {
-  leaderSession = null
-}
-
-// 原生内容 view：leader 集合精确命中 → 进入会话（吞掉该键）
-function attachLeaderGrab(wc) {
-  if (!wc || wc.isDestroyed()) return
-  wc.on('before-input-event', (event, input) => {
-    if (!leaderMods.length || leaderSession || !platformReady()) return
-    const mods = leaderHit(input, leaderMods)
-    if (!mods) return
-    event.preventDefault()
-    forwardKeyToPlatform(keyPayload(input, mods))
-    startLeaderSession(wc, mods)
-  })
-}
-
-// 平台页：leader 任一分量抬起（释放）→ 会话结束；焦点被用户移走 → 中止（不再交还）
-function watchLeaderRelease() {
-  if (!platformView || platformView.webContents.isDestroyed()) return
-  platformView.webContents.on('before-input-event', (event, input) => {
-    if (!leaderSession) return
-    if (leaderReleased(input, leaderSession.mods)) endLeaderSession()
-  })
-  platformView.webContents.on('blur', () => cancelLeaderSession())
 }
 
 // 本地配置 = 独立设置窗口（系统边框）。不依赖平台页/主窗状态——平台或主窗异常
@@ -644,56 +552,33 @@ function registerIpc() {
     return tabCtl()?.getState() || emptyState()
   })
 
-  // 布局推送：rect=null/visible=false → 撤洞 + 输入禁用；rect 非空才更新（bounds 保持最后有效值）
+  // 展示布局：只影响画面推送与输入映射，不修改 browser bounds。
   ipcMain.handle('native:layout', (e, st) => {
     if (!isPlatformFrame(e)) return false
-    tabCtl()?.applyLayout({ rect: st?.rect ?? null, visible: !!(st && st.visible) })
+    tabCtl()?.applyLayout({ rect: st?.rect ?? null, visible: !!(st && st.visible), refresh: st?.refresh === true })
     return true
   })
 
-  // v2：洞内输入转发（页面侧命中判定 → IPC → 此处翻译下发；docs §6）
-  ipcMain.on('native:mouse', (e, msg) => {
+  // The platform owns physical focus and IME. Input is mapped into the fixed
+  // browser viewport; no background browser window is ever shown or focused.
+  for (const kind of ['mouse', 'wheel', 'key', 'text', 'edit', 'reset']) {
+    ipcMain.on('native:' + kind, (e, payload) => {
+      if (!isPlatformFrame(e)) return
+      if (kind === 'key' && leaderHit(payload, leaderMods)) return
+      Promise.resolve().then(() => tabCtl()?.input?.[kind](payload)).catch(() => {})
+    })
+  }
+  ipcMain.on('native:input-focus', (e, focused) => {
     if (!isPlatformFrame(e)) return
-    const t = tabInputTarget()
-    if (!t || t.wc.isDestroyed()) return
-    const type = String(msg?.type || '')
-    const map = { mousedown: 'mouseDown', mouseup: 'mouseUp', mousemove: 'mouseMove', contextmenu: 'contextMenu' }
-    if (!map[type]) return
-    const x = Number(msg?.x), y = Number(msg?.y)
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return
-    // 首帧命中复核（拖动捕获期 sticky=true，越界坐标放行）
-    if (!msg?.sticky && !rectHas(t.rect, x, y)) return
-    const ev = { type: map[type], x: Math.round(x - t.rect.x), y: Math.round(y - t.rect.y) }
-    ev.button = ({ 1: 'middle', 2: 'right' })[Number(msg?.button) || 0] || 'left'
-    if (msg?.clickCount) ev.clickCount = Number(msg.clickCount) || 1
-    try { t.wc.sendInputEvent(ev) } catch (_) { /* 视图销毁竞态 */ }
-    if (ev.type === 'mouseDown') { try { t.wc.focus() } catch (_) { /* 视图销毁竞态 */ } }
+    browserInputFocused = !!focused
+    if (!browserInputFocused) e.sender.setIgnoreMenuShortcuts(false)
+  })
+  ipcMain.on('native:frame-ack', (e, seq) => {
+    if (isPlatformFrame(e)) tabCtl()?.acknowledgeFrame(seq)
   })
 
-  // v2：洞内 wheel 转发桥（页面命中判定后经 IPC；DOM deltaY 与 sendInputEvent
-  // deltaY 符号相反，deltaMode=1（行）按 40px 折算——wm-proto 实测）
-  ipcMain.on('native:wheel', (e, msg) => {
-    if (!isPlatformFrame(e)) return
-    const t = tabInputTarget()
-    if (!t || t.wc.isDestroyed()) return
-    const x = Number(msg?.x), y = Number(msg?.y)
-    const dx = Number(msg?.dx) || 0, dy = Number(msg?.dy) || 0
-    if (!Number.isFinite(x) || !Number.isFinite(y) || (!dx && !dy)) return
-    if (!rectHas(t.rect, x, y)) return // 壳侧复核（页面已做栈顶判定）
-    const scale = (Number(msg?.mode) || 0) === 1 ? 40 : 1
-    try {
-      t.wc.sendInputEvent({
-        type: 'mouseWheel',
-        x: Math.round(x - t.rect.x), y: Math.round(y - t.rect.y),
-        deltaX: -dx * scale, deltaY: -dy * scale,
-        wheelTicksX: 0, wheelTicksY: -Math.sign(dy),
-        canScroll: true, hasPreciseScrollingDeltas: false,
-      })
-    } catch (_) { /* 视图销毁竞态 */ }
-  })
-
-  // leader 键抓取（docs §6）：页面同步 leader 集合（页面为配置唯一源，改键跟随）；
-  // native:focus = 需要键盘输入的动作（launcher）请求把键盘焦点交还平台页
+  // 页面仍是快捷键唯一源；leader 校验防止布局命令被误投给 browser。
+  // native:focus 保留桥兼容性（launcher 等动作）。
   ipcMain.handle('native:leader', (e, mods) => {
     if (!isPlatformFrame(e)) return false
     leaderMods = normMods(mods)
@@ -701,7 +586,6 @@ function registerIpc() {
   })
   ipcMain.handle('native:focus', (e) => {
     if (!isPlatformFrame(e)) return false
-    if (leaderSession) leaderSession.keep = true // 平台页要保留键盘（如 launcher 打开，释放后不自动交还）
     if (platformView && !platformView.webContents.isDestroyed()) platformView.webContents.focus()
     return true
   })
@@ -833,14 +717,17 @@ function createMainWindow(init) {
     if (isMainFrame && !isInPlace) resetNativeContent()
   })
   platformView.webContents.on('render-process-gone', resetNativeContent)
-  watchLeaderRelease() // leader 会话释放监听（交接后 leader 释放是平台页上的真实事件）
+  platformView.webContents.on('before-input-event', (_event, input) => {
+    // Only edit accelerators belong to the offscreen page. Keep application
+    // shortcuts (Quit, Hide, reload, DevTools...) available while viewing it.
+    const edit = (input.meta || input.control) && !input.alt && /^[acvxyz]$/i.test(input.key)
+    platformView.webContents.setIgnoreMenuShortcuts(browserInputFocused && edit)
+  })
 
   layoutMain()
   mainWin.on('resize', layoutMain)
   mainWin.on('focus', syncAltSpace)
   mainWin.on('blur', syncAltSpace)
-  // 主窗口失焦（应用级）：leader 会话中止（不交还焦点）
-  mainWin.on('blur', () => cancelLeaderSession())
 
   // BaseWindow 无 ready-to-show（BrowserWindow 专属）：内容 view 创建即直接显示
   if (startFullscreen) mainWin.setFullScreen(true)
@@ -856,8 +743,7 @@ function createMainWindow(init) {
 }
 
 // ---- 主窗口布局 ----
-// 平台页恒满窗；原生内容（tabs）的 bounds 由平台页经桥推送
-//（content 相对坐标，主窗口 resize 后平台页重排自会重推，壳侧不推算）。
+// 这里只改变平台页的尺寸。各 browser 视口永远不跟随主窗口。
 function layoutMain() {
   if (!mainWin || mainWin.isDestroyed()) return
   const [w, h] = mainWin.getContentSize()

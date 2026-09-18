@@ -1,6 +1,8 @@
-/** Electron tab pool plus CDP transport for ui/1. The native content layout is
- * controlled by the platform renderer; automation never activates the OS window. */
-import { WebContentsView, webContents, session, nativeImage } from "electron";
+/** Fixed-size offscreen browser pool. The platform displays frames; its layout
+ * never resizes the browser and automation never activates an OS window. */
+import { BrowserWindow, webContents, session, nativeImage } from "electron";
+import { createBrowserInput } from "./browser/input.mjs";
+import { normalizeViewport, fitViewport } from "./browser/viewport.mjs";
 import crypto from "node:crypto";
 import { createEventLog } from "./browser/network.mjs";
 import fs from "node:fs";
@@ -9,26 +11,22 @@ import path from "node:path";
 const BG_PARTITION = "persist:aic-worker"; // AI 工作区（独立存储，不碰平台页默认会话）
 const MAX_TABS = 50; // 标签数上限（防失控）
 
-/**
- * host（main.js 注入，见 startBrowserServer）：
- *   win: BaseWindow 主窗口
- *   platformView: 平台页视图（z 序基准：恒最顶，洞由页面 mask 表达）
- *   onChanged(state): 标签集变化推送（{tabs:[{id,title,url,loading}], activeTabId}，全量）
- *   onRestack(): tabs/platformView z 序重建后回调（main.js 用于恢复 platform 最顶）
- *   onTabView(wc): 新标签视图创建回调（main.js 用于挂 leader 键抓取；adapter 不感知语义）
- */
+/** host: win (lifetime), getViewport()/viewport (new-tab default),
+ * onChanged(state), onFrame(frame). No browser is attached to the host window. */
 export function createElectronAdapter(host) {
   if (!host || !host.win) throw new Error("electron adapter requires host.win");
-  if (!host.platformView) throw new Error("electron adapter requires host.platformView");
 
-  // 工作区视图注册表：tabId → { view, winId: host.win.id }
+  // tabId → { window, viewport, winId }; windows are always hidden and offscreen.
   const tabs = new Map();
   // 已常驻 attach 的 tabId
   const attached = new Set();
   // ---- 内容池布局状态（渲染器驱动；docs §4）----
   let poolRect = null; // {x,y,width,height}，最后一次有效 rect（隐藏不清零）
   let poolVisible = false;
-  let activeTabId = null; // 可视激活标签（内容区显示）
+  let activeTabId = null; // Presentation selection, independent from the automation target.
+  let frameSeq = 0, pendingFrame = null, dirtyFrame = false;
+  let frameTimer = null;
+  let disposed = false;
   // 下载只在显式授权的 download 调用内落盘。
   const pendingDownloads = new Map();
   const eventLogs = new Map();
@@ -87,71 +85,66 @@ export function createElectronAdapter(host) {
     } catch { /* attach is retried by the first explicit operation */ }
   }
 
-  // ---- 内容池：rect 校验 / z 序 / 状态推送 ----
+  // ---- 展示区域、帧推送与生命周期 ----
 
-  const contentView = () => host.win.contentView;
-
-  // rect 数值校验 + clamp 进 content 区（docs §4.4）；非法 → null（调用方只切 z 不动 bounds）
+  // Preserve the complete presentation rect even when it is partly off screen.
   function sanitizeRect(r) {
     if (!r || typeof r !== "object") return null;
-    let { x, y, w, h } = r;
-    x = Number(x); y = Number(y); w = Number(w); h = Number(h);
-    if (![x, y, w, h].every(Number.isFinite)) return null;
-    const [cw, ch] = host.win.getContentSize();
-    x = Math.max(0, Math.min(Math.round(x), Math.max(0, cw - 2)));
-    y = Math.max(0, Math.min(Math.round(y), Math.max(0, ch - 2)));
-    w = Math.max(0, Math.min(Math.round(w), cw - x));
-    h = Math.max(0, Math.min(Math.round(h), ch - y));
+    const { x, y, w, h } = r;
+    if (![x, y, w, h].every(Number.isFinite) || w < 0 || h < 0) return null;
     return { x, y, width: w, height: h };
   }
 
-  // 未推过 rect 时的回落：全内容区（隐藏态 CDP 截图保持历史语义 = 整窗尺寸）
-  function effectiveRect() {
-    if (poolRect) return poolRect;
-    if (host.win.isDestroyed()) return null;
-    const [w, h] = host.win.getContentSize();
-    return { x: 0, y: 0, width: w, height: h };
-  }
-
   function poolShown() {
-    return !!(
-      poolVisible && poolRect &&
-      poolRect.width >= 2 && poolRect.height >= 2 &&
-      activeTabId != null && tabs.has(activeTabId)
-    );
+    return !!(poolVisible && poolRect && poolRect.width >= 2 && poolRect.height >= 2 && tabs.has(activeTabId));
   }
 
-  // 成员重排（v2）：tabs 池内 active 恒最顶；重排后由 onRestack 抬回 platform
-  //（不变量：底→顶 […tabs, platformView]）。先摘后挂（已挂载视图重复
-  // addChildView 会失败）；platform 不在本序内。
-  function restackTabs() {
-    const cv = contentView();
-    const active = tabs.get(activeTabId)?.view || null;
-    const others = [...tabs.values()].map((t) => t.view).filter((v) => v !== active);
-    const ordered = [...others, ...(active ? [active] : [])];
-    for (const v of ordered) if (cv.children.includes(v)) cv.removeChildView(v);
-    for (const v of ordered) cv.addChildView(v);
+  // At most one frame in flight. Hidden viewers do not accumulate IPC frames.
+  function resetFrame() {
+    clearTimeout(frameTimer); frameTimer = null; pendingFrame = null; dirtyFrame = false;
   }
-
-  // force = 标签集/激活变化（重排）；否则仅 bounds 同步（可见性由页面 mask 表达）
-  function syncZ(force = false) {
-    if (host.win.isDestroyed()) return;
-    const r = effectiveRect();
-    if (r) {
-      for (const { view } of tabs.values()) {
-        if (!view.webContents.isDestroyed()) view.setBounds(r);
-      }
+  function refreshFrame() {
+    resetFrame();
+    const wc = tabs.get(activeTabId)?.window.webContents;
+    if (poolShown() && wc && !wc.isDestroyed()) wc.invalidate();
+  }
+  function acknowledgeFrame(seq) {
+    if (seq !== pendingFrame) return;
+    clearTimeout(frameTimer); frameTimer = null; pendingFrame = null;
+    if (dirtyFrame) {
+      dirtyFrame = false;
+      const wc = tabs.get(activeTabId)?.window.webContents;
+      if (wc && !wc.isDestroyed()) wc.invalidate();
     }
-    if (!force) return;
-    restackTabs();
-    try { host.onRestack?.(); } catch { /* platform 未就绪 */ }
+  }
+  function publishFrame(id, image) {
+    if (disposed || id !== activeTabId || !poolShown() || !host.onFrame ||
+        host.win.isDestroyed() || !host.win.isVisible() || host.win.isMinimized()) return;
+    if (pendingFrame !== null) { dirtyFrame = true; return; }
+    const seq = ++frameSeq;
+    pendingFrame = seq;
+    frameTimer = setTimeout(() => acknowledgeFrame(seq), 1000);
+    frameTimer.unref?.();
+    try { host.onFrame({ tabId: id, seq, ...tabs.get(id).viewport, data: image.toPNG() }); }
+    catch { resetFrame(); }
+  }
+  for (const event of ["show", "restore"]) host.win.on(event, refreshFrame);
+  host.win.once("closed", dispose);
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    resetFrame();
+    for (const event of ["show", "restore"]) host.win.removeListener(event, refreshFrame);
+    host.win.removeListener("closed", dispose);
+    for (const { window } of [...tabs.values()]) if (!window.isDestroyed()) window.destroy();
+    tabs.clear();
   }
 
   function state() {
     const out = [];
-    for (const { view } of tabs.values()) {
-      const wc = view.webContents;
-      out.push({ id: wc.id, title: wc.getTitle(), url: wc.getURL(), loading: wc.isLoading() });
+    for (const { window, viewport } of tabs.values()) {
+      const wc = window.webContents;
+      out.push({ id: wc.id, title: wc.getTitle(), url: wc.getURL(), loading: wc.isLoading(), viewport: { ...viewport } });
     }
     return { tabs: out, activeTabId };
   }
@@ -165,21 +158,27 @@ export function createElectronAdapter(host) {
     return keys.length ? keys[keys.length - 1] : null;
   };
 
-  // 创建 AI 工作区标签页视图（不挂树：成员重排由 syncZ 统一处理，bounds 由 effectiveRect 给）
-  function createView(url) {
-    const view = new WebContentsView({
+  // The only place browser size is assigned. OS layout changes never reach here.
+  function createView(url, viewport) {
+    const view = new BrowserWindow({
+      ...viewport, useContentSize: true, show: false, frame: false,
+      resizable: false, movable: false, focusable: false, skipTaskbar: true,
+      backgroundColor: "#ffffff",
       webPreferences: {
         session: partitionSession(),
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
         backgroundThrottling: false,
+        offscreen: { deviceScaleFactor: 1 },
       },
     });
     const wc = view.webContents;
-    host.onTabView?.(wc); // 壳侧 leader 键抓取挂载（main.js；壳能力，adapter 不感知语义）
+    wc.setFrameRate(30);
+    wc.setVisualZoomLevelLimits(1, 1);
     const tabId = wc.id;
-    tabs.set(tabId, { view, winId: host.win.id });
+    tabs.set(tabId, { window: view, viewport, winId: host.win.id });
+    wc.on("paint", (_event, _dirty, image) => publishFrame(tabId, image));
     attachView(view);
     wc.on("page-title-updated", emitChanged);
     wc.on("did-navigate", emitChanged);
@@ -192,7 +191,7 @@ export function createElectronAdapter(host) {
       attached.delete(tabId);
       eventLogs.delete(tabId); revisions.delete(tabId); dialogs.delete(tabId);
       if (activeTabId === tabId) activeTabId = lastTabId();
-      syncZ(true);
+      refreshFrame();
       emitChanged();
     });
     // 新窗口请求（target=_blank / window.open）→ 转新标签；非 http(s) 协议拒绝
@@ -207,14 +206,17 @@ export function createElectronAdapter(host) {
   }
 
   // tabs.create 的公共内核（adapter 契约与 window.open 转发共用）：新建即可视激活
-  async function tabsCreate({ windowId, url } = {}) {
+  async function tabsCreate({ windowId, url, viewport } = {}) {
     if (windowId !== undefined && String(windowId) !== String(host.win.id)) {
       throw new Error(`window ${windowId} not found`);
     }
     if (tabs.size >= MAX_TABS) throw new Error(`tab limit reached (${MAX_TABS})`);
-    const view = createView(url || "about:blank");
+    const size = normalizeViewport(viewport || (await host.getViewport?.()) || host.viewport);
+    if (disposed || host.win.isDestroyed()) throw new Error("browser pool closed");
+    if (tabs.size >= MAX_TABS) throw new Error(`tab limit reached (${MAX_TABS})`);
+    const view = createView(url || "about:blank", size);
     activeTabId = view.webContents.id;
-    syncZ(true);
+    refreshFrame();
     emitChanged();
     return tabOf(view.webContents.id);
   }
@@ -229,14 +231,24 @@ export function createElectronAdapter(host) {
       windowId: entry.winId,
       title: wc.getTitle(),
       url: wc.getURL(),
-      active: tabId === activeTabId, // 可视激活（docs §3：与 AI current tab 分离）
+      active: tabId === activeTabId,
+      viewport: { ...entry.viewport },
     };
   }
 
 
+  function inputTarget() {
+    if (!poolShown()) return null;
+    const active = tabs.get(activeTabId);
+    if (!active || active.window.webContents.isDestroyed()) return null;
+    return { wc: active.window.webContents, rect: fitViewport(poolRect, active.viewport) };
+  }
+  const input = createBrowserInput(inputTarget);
+
   // ---- adapter 契约 ----
 
   return {
+    dispose,
     // browser-tool 每次调用前设置（下载产物落盘目录）
     revision(tabId) { return revisions.get(tabId) || 0; },
     dialog(tabId) { return dialogs.get(tabId); },
@@ -270,31 +282,31 @@ export function createElectronAdapter(host) {
 
     // 内容池控制面（main.js native:* IPC 调用）
     tabControl: {
-      // 渲染器推送布局：rect 非空才更新（null = 只改可见性，bounds 保持最后有效值）
-      applyLayout({ rect, visible } = {}) {
+      input,
+      // 渲染器只控制展示区域；null 不影响 browser 视口。
+      applyLayout({ rect, visible, refresh = false } = {}) {
+        const wasShown = poolShown();
         if (rect !== undefined && rect !== null) {
           const r = sanitizeRect(rect);
           if (r) poolRect = r;
         }
         if (typeof visible === "boolean") poolVisible = visible;
-        syncZ(false);
+        if (!poolVisible) input.reset();
+        if (refresh || wasShown !== poolShown()) refreshFrame();
       },
+      acknowledgeFrame,
       setActive(id) {
         const tid = Number(id);
         if (!tabs.has(tid)) return;
+        input.reset();
         activeTabId = tid;
-        syncZ(true);
+        refreshFrame();
         emitChanged();
       },
       hasWorkTabs: () => tabs.size > 0,
       getState: state,
-      // v2 输入路由（main.js）：活动 tab 的洞（可见才返回）；null = 该处无洞
-      poolState() {
-        if (!poolShown()) return null;
-        const active = tabs.get(activeTabId);
-        if (!active || active.view.webContents.isDestroyed()) return null;
-        return { wc: active.view.webContents, rect: poolRect };
-      },
+      // 可见图片的 contain 区域（留白不接收输入）。
+      poolState: inputTarget,
     },
 
     tabs: {
@@ -307,9 +319,9 @@ export function createElectronAdapter(host) {
         // core 直接读 t.title/t.url：必须解出对象数组（tabOf 是 async）
         return Promise.all([...tabs.keys()].map((id) => tabOf(id)));
       },
-      async create({ windowId, url, active }) {
+      async create({ windowId, url, active, viewport }) {
         void active; // 标签页语义：不激活窗口焦点（可视激活由 activeTabId 承担）
-        return tabsCreate({ windowId, url });
+        return tabsCreate({ windowId, url, viewport });
       },
       async update(id, props) {
         const wc = webContents.fromId(Number(id));
@@ -325,13 +337,9 @@ export function createElectronAdapter(host) {
         attached.delete(Number(id));
         eventLogs.delete(Number(id));
         revisions.delete(Number(id));
-        if (!entry.view.webContents.isDestroyed()) {
-          const cv = contentView();
-          if (cv.children.includes(entry.view)) cv.removeChildView(entry.view);
-          entry.view.webContents.close(); // 触发 'destroyed'（map 已删，回调幂等）
-        }
+        if (!entry.window.isDestroyed()) entry.window.destroy();
         if (activeTabId === Number(id)) activeTabId = lastTabId();
-        syncZ(true);
+        refreshFrame();
         emitChanged();
       },
     },
@@ -354,8 +362,8 @@ export function createElectronAdapter(host) {
       async send(tabId, method, params) {
         const wc = webContents.fromId(Number(tabId));
         if (!wc) throw new Error(`tab ${tabId} not found`);
-        // 隐藏标签页模型：AI 视图常驻窗口底层（被平台页遮挡），实测被遮挡视图
-        // 依然有 compositor surface——CDP 截图直接可用，无需显示切换。
+        // Offscreen pages keep their own compositor surface, including while the
+        // host is minimized, hidden, or presenting another tab.
         return wc.debugger.sendCommand(method, params);
       },
       async detach() { /* 常驻 attach 语义：detach 为 no-op */ },
