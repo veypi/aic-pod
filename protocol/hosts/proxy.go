@@ -13,6 +13,8 @@ import (
 )
 
 const proxyDomain = "aic/host/owner-proxy/v1"
+const proxyTTL = time.Minute
+const proxyClockSkew = 5 * time.Second
 const MaxProxyEnvelope = 192 << 10
 
 // Packet is only a transport adapter container. HTTP exposes Data directly;
@@ -74,6 +76,7 @@ type ProxyEnvelope struct {
 	ConnectionID      string   `json:"connection_id,omitempty"`
 	Scope             []string `json:"scope"`
 	Nonce             string   `json:"nonce"`
+	IssuedAt          int64    `json:"issued_at"`
 	ExpiresAt         int64    `json:"expires_at"`
 	Packet            Packet   `json:"packet"`
 }
@@ -106,7 +109,8 @@ func SignProxy(key []byte, e ProxyEnvelope, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	e.ExpiresAt = now.Add(time.Minute).Unix()
+	e.IssuedAt = now.Unix()
+	e.ExpiresAt = now.Add(proxyTTL).Unix()
 	if len(key) != 32 || !ValidID(e.HostID) || !ValidID(e.UserID) || e.CredentialVersion == 0 {
 		return "", Fail("unauthorized", "Invalid proxy identity")
 	}
@@ -145,7 +149,13 @@ func VerifyProxy(key []byte, token string, now time.Time) (ProxyEnvelope, error)
 		return reject()
 	}
 	var e ProxyEnvelope
-	if json.Unmarshal(raw, &e) != nil || e.Domain != proxyDomain || !ValidID(e.Nonce) || !ValidID(e.HostID) || !ValidID(e.UserID) || e.CredentialVersion == 0 || e.ExpiresAt <= now.Unix() || e.ExpiresAt > now.Add(time.Minute).Unix() || e.validate() != nil {
+	if json.Unmarshal(raw, &e) != nil || e.Domain != proxyDomain || !ValidID(e.Nonce) || !ValidID(e.HostID) || !ValidID(e.UserID) || e.CredentialVersion == 0 || e.validate() != nil {
+		return reject()
+	}
+	// Bound lifetime using the issuer's timestamps, not the receiver's clock.
+	// Match direct tickets' future-issuance tolerance without extending expiry.
+	n := now.Unix()
+	if e.IssuedAt <= 0 || e.IssuedAt > n+int64(proxyClockSkew/time.Second) || e.ExpiresAt <= n || e.ExpiresAt <= e.IssuedAt || e.ExpiresAt-e.IssuedAt > int64(proxyTTL/time.Second) {
 		return reject()
 	}
 	return e, nil

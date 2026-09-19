@@ -70,6 +70,42 @@ func TestAccessBindsTicketPeerAndLease(t *testing.T) {
 	}
 }
 
+func TestProxyAccessClockSkewKeepsReplayProtection(t *testing.T) {
+	issuedAt := time.Unix(1_800_000_000, 250_000_000)
+	directKey, err := hosts.DirectKey("secret", "host_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := hosts.ProxyKey("secret", "host_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []time.Duration{-2 * time.Second, 2 * time.Second} {
+		t.Run(offset.String(), func(t *testing.T) {
+			a, err := NewAccess(AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 2, Key: directKey, ProxyKey: key, Now: func() time.Time { return issuedAt.Add(offset) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope := hosts.ProxyEnvelope{HostID: "host_1", UserID: "owner", CredentialVersion: 2, Scope: []string{"fs"}, Packet: hosts.Packet{Data: []byte(`{"v":1,"type":"request","id":"r1","method":"hello","params":{"protocol":"hosts/1"}}`)}}
+			token, err := hosts.SignProxy(key, envelope, issuedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, caller, err := a.Proxy(token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := a.Proxy(token); err == nil {
+				t.Fatal("replayed proxy request accepted with clock skew")
+			}
+			a.Close(caller.ConnectionID)
+			if _, _, err := a.Proxy(token); err == nil {
+				t.Fatal("replayed proxy request accepted after disconnect with clock skew")
+			}
+		})
+	}
+}
+
 func TestProxyAccessCannotUseRTCOrForeignAuthority(t *testing.T) {
 	now := time.Now()
 	key, _ := hosts.DirectKey("secret", "host_1")
