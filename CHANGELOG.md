@@ -5,6 +5,73 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.7.0 — 2026-09-20
+
+### 破坏性变更
+
+- **RTC 与服务器代理传输改走共享命令运行时（旧通道与 caps 上报不兼容）**
+  （`protocol/hosts`（新）+ `libs/rtc` 重构 + `libs/host`）：RTC 拆分为
+  hosts-control / hosts-data / hosts-live 三条数据通道，移除 `fschan` 私有
+  文件通道；caps 按 rtc/proxy 分别上报协议与命令元数据，不再上报 mgmt code；
+  新增代理请求主题 `u.{uid}.h.host_{id}.proxy.req`。依赖旧 caps 形态或 RTC
+  文件通道的消费方需同步升级。
+
+- **桌面端窗口呈现架构替换：WebContentsView 池 → 固定视口离屏窗口**
+  （`desktop/electron-adapter.mjs`、`desktop/main.js`）：浏览器标签改为隐藏
+  离屏窗口（DPR=1、后台不节流）渲染，JPEG 帧经 hosts/1 live 流推给平台页
+  （ack 背压）；移除窗口层叠重排与 leader 键抓取（leader 会话交接行为不再
+  存在）；页面输入统一为 `native:mouse/wheel/key/text/edit/reset` IPC。
+
+### 新增
+
+- **hosts/1 与 fs/1 线协议**（`protocol/hosts`（新）+ `protocol/fs`（新））：
+  统一信封与错误模型（code/message/details/retry/effect）、准入 ticket
+  （direct/proxy 分离签名、生命周期与时钟偏差约束、重放防护）、二进制流分帧
+  与固定测试向量；fs/1 文件方法与结果 schema 由 RTC 与代理两种传输共用。
+
+- **host 共享命令运行时与 fs/1 provider**（`libs/hostcmd`（新）+ `libs/hostfs`（新））：
+  provider 目录与会话（resume token）、操作去重/查询/取消、有界执行与每会话
+  配额；RTC/代理共用字节传输状态机（bytes.create/seal/read、seq/offset ack、
+  重复块检测）；hostfs 提供 roots/home/stat/list/read/write/mkdir/remove/find/
+  copy/move（条件写、原子替换、平台原生 move）。
+
+- **桌面端浏览器窗口经 hosts/1 live 流呈现**（`desktop/browser/direct.mjs`、
+  `input-queue.mjs`、`live-socket.mjs`（新））：browser 命令直连 dispatch；
+  连续 move/wheel 输入合并推送；固定视口离屏页 JPEG 帧推送。
+
+- **浏览器视口设置**（`cfg` + `api` + `ui/page/settings.html`）：`browser_width`
+  / `browser_height`（默认 1280×720，范围 320–4096，越界回落），本地设置页
+  可录入；旧客户端缺省字段保持原值。
+
+- **新配置项**（`cfg`）：`hosts_upload_bytes` / `hosts_proxy_upload_bytes` /
+  `hosts_streams`（零值使用设备默认 512 MiB / 64 MiB / 4）。
+
+### 变更
+
+- RTC/代理/命令服务装配到共享运行时（`libs/host` 适配器 + `libs/proto` +
+  `api`）：provider 注册 Direct 通道；会话结束释放 UI/驱动绑定。
+- RTC 实现重写（`libs/rtc/rtc.go`、`peer.go`、`live.go`；删除 `fschan.go`）。
+- 桌面端（`electron-adapter.mjs`、`main.js`、`remote-preload.js`）：离屏窗口
+  生命周期与视口归一（contain-fit 含入、显示坐标映射）；`native:frame` 转发；
+  移除 `leader-grab.js`（含单测）。
+- 文档：新增 `docs/hosts-direct-protocol-proposal.md`（直接通道设计记录）；
+  `desktop/README.md` 更新离屏固定视口架构；`docs/design.md` 同步。
+
+### 修复
+
+- **proxy 票据按签发时间校验生命周期，容忍时钟偏差**（`protocol/hosts/proxy.go`）：
+  签发窗口由签发者给定（issued_at + TTL 60s），接收方验证容忍 ±5s 未来签发
+  且不延长过期；零/负/超长生命周期与超容差未来签发一律拒绝；配套用例覆盖
+  偏差边界、合法 MAC 下窗口篡改，以及重发与断连后重放（`libs/hostcmd/access_test.go`）。
+
+### 测试
+
+- 协议向量与运行时单测扩充：hosts/1（ticket/stream 固定向量）、fs/1、
+  hostcmd（runtime/access/transfer/live）、hostfs（fs/operations/copy）、rtc
+  跨通道、browser（direct/input-queue/live-socket/viewport 等）。
+- desktop `npm test` 113 例；live 回归新增固定视口/后台渲染/隐藏渲染用例
+  （真 Chromium CDP）。
+
 ## v0.6.7 — 2026-09-18
 
 ### 破坏性变更

@@ -1,7 +1,7 @@
 {
   "name": "aic-desktop",
   "productName": "AIC Desktop",
-  "version": "0.6.4-dirty",
+  "version": "0.7.0",
   "description": "AIC Desktop — Electron shell + Go backend (host agent)",
   "main": "main.js",
   "private": true,
