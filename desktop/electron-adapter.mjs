@@ -2,7 +2,7 @@
  * never resizes the browser and automation never activates an OS window. */
 import { BrowserWindow, webContents, session, nativeImage } from "electron";
 import { createBrowserInput } from "./browser/input.mjs";
-import { normalizeViewport, fitViewport } from "./browser/viewport.mjs";
+import { normalizeViewport } from "./browser/viewport.mjs";
 import crypto from "node:crypto";
 import { createEventLog } from "./browser/network.mjs";
 import fs from "node:fs";
@@ -11,8 +11,8 @@ import path from "node:path";
 const BG_PARTITION = "persist:aic-worker"; // AI 工作区（独立存储，不碰平台页默认会话）
 const MAX_TABS = 50; // 标签数上限（防失控）
 
-/** host: win (lifetime), getViewport()/viewport (new-tab default),
- * onChanged(state), onFrame(frame). No browser is attached to the host window. */
+/** host: win (process lifetime), getViewport()/viewport (new-window default).
+ * Viewers discover resources through browser/1; there is no presentation layout. */
 export function createElectronAdapter(host) {
   if (!host || !host.win) throw new Error("electron adapter requires host.win");
 
@@ -20,17 +20,12 @@ export function createElectronAdapter(host) {
   const tabs = new Map();
   // 已常驻 attach 的 tabId
   const attached = new Set();
-  // ---- 内容池布局状态（渲染器驱动；docs §4）----
-  let poolRect = null; // {x,y,width,height}，最后一次有效 rect（隐藏不清零）
-  let poolVisible = false;
-  let activeTabId = null; // Presentation selection, independent from the automation target.
-  let frameSeq = 0, pendingFrame = null, dirtyFrame = false;
-  let frameTimer = null;
   let disposed = false;
   // 下载只在显式授权的 download 调用内落盘。
   const pendingDownloads = new Map();
   const eventLogs = new Map();
   const revisions = new Map();
+  const frameWatches = new Map();
   const dialogs = new Map(), dialogListeners = new Set();
 
   // ---- 工作区视图基建 ----
@@ -61,7 +56,7 @@ export function createElectronAdapter(host) {
     return String(name || "download.bin").replace(/[\\/]/g, "_");
   }
 
-  function attachView(view) {
+  async function attachView(view) {
     const wc = view.webContents;
     eventLogs.set(wc.id, createEventLog());
     revisions.set(wc.id, 1);
@@ -80,86 +75,22 @@ export function createElectronAdapter(host) {
     try {
       wc.debugger.attach("1.3");
       attached.add(wc.id);
-      for (const domain of ["Page", "DOM", "Accessibility", "Network", "Runtime"]) wc.debugger.sendCommand(domain + ".enable").catch(() => {});
+      for (const domain of ["Page", "DOM", "Accessibility", "Network", "Runtime"]) await wc.debugger.sendCommand(domain + ".enable");
       wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", {enabled:true}).catch(() => {});
-    } catch { /* attach is retried by the first explicit operation */ }
+    } catch (error) { throw new Error(`browser initialization failed: ${error.message}`); }
   }
 
-  // ---- 展示区域、帧推送与生命周期 ----
-
-  // Preserve the complete presentation rect even when it is partly off screen.
-  function sanitizeRect(r) {
-    if (!r || typeof r !== "object") return null;
-    const { x, y, w, h } = r;
-    if (![x, y, w, h].every(Number.isFinite) || w < 0 || h < 0) return null;
-    return { x, y, width: w, height: h };
-  }
-
-  function poolShown() {
-    return !!(poolVisible && poolRect && poolRect.width >= 2 && poolRect.height >= 2 && tabs.has(activeTabId));
-  }
-
-  // At most one frame in flight. Hidden viewers do not accumulate IPC frames.
-  function resetFrame() {
-    clearTimeout(frameTimer); frameTimer = null; pendingFrame = null; dirtyFrame = false;
-  }
-  function refreshFrame() {
-    resetFrame();
-    const wc = tabs.get(activeTabId)?.window.webContents;
-    if (poolShown() && wc && !wc.isDestroyed()) wc.invalidate();
-  }
-  function acknowledgeFrame(seq) {
-    if (seq !== pendingFrame) return;
-    clearTimeout(frameTimer); frameTimer = null; pendingFrame = null;
-    if (dirtyFrame) {
-      dirtyFrame = false;
-      const wc = tabs.get(activeTabId)?.window.webContents;
-      if (wc && !wc.isDestroyed()) wc.invalidate();
-    }
-  }
-  function publishFrame(id, image) {
-    if (disposed || id !== activeTabId || !poolShown() || !host.onFrame ||
-        host.win.isDestroyed() || !host.win.isVisible() || host.win.isMinimized()) return;
-    if (pendingFrame !== null) { dirtyFrame = true; return; }
-    const seq = ++frameSeq;
-    pendingFrame = seq;
-    frameTimer = setTimeout(() => acknowledgeFrame(seq), 1000);
-    frameTimer.unref?.();
-    try { host.onFrame({ tabId: id, seq, ...tabs.get(id).viewport, data: image.toPNG() }); }
-    catch { resetFrame(); }
-  }
-  for (const event of ["show", "restore"]) host.win.on(event, refreshFrame);
   host.win.once("closed", dispose);
   function dispose() {
     if (disposed) return;
     disposed = true;
-    resetFrame();
-    for (const event of ["show", "restore"]) host.win.removeListener(event, refreshFrame);
     host.win.removeListener("closed", dispose);
     for (const { window } of [...tabs.values()]) if (!window.isDestroyed()) window.destroy();
     tabs.clear();
   }
 
-  function state() {
-    const out = [];
-    for (const { window, viewport } of tabs.values()) {
-      const wc = window.webContents;
-      out.push({ id: wc.id, title: wc.getTitle(), url: wc.getURL(), loading: wc.isLoading(), viewport: { ...viewport } });
-    }
-    return { tabs: out, activeTabId };
-  }
-
-  function emitChanged() {
-    try { host.onChanged?.(state()); } catch { /* 渲染器重建中：getState 是权威源 */ }
-  }
-
-  const lastTabId = () => {
-    const keys = [...tabs.keys()];
-    return keys.length ? keys[keys.length - 1] : null;
-  };
-
   // The only place browser size is assigned. OS layout changes never reach here.
-  function createView(url, viewport) {
+  function createView(viewport) {
     const view = new BrowserWindow({
       ...viewport, useContentSize: true, show: false, frame: false,
       resizable: false, movable: false, focusable: false, skipTaskbar: true,
@@ -174,25 +105,58 @@ export function createElectronAdapter(host) {
       },
     });
     const wc = view.webContents;
-    wc.setFrameRate(30);
+    // Tool-owned pages must never play audio on the device, including autoplay
+    // and Web Audio. Mute the whole WebContents before its first navigation.
+    wc.setAudioMuted(true);
+    wc.setFrameRate(60);
+    let repaintTimer, repaintDelay = 100;
+    const retryPaint = () => {
+      if (repaintTimer) return;
+      repaintTimer = setTimeout(() => {
+        repaintTimer = null;
+        if (!wc.isDestroyed() && frameWatches.get(wc.id)?.size) wc.invalidate();
+      }, repaintDelay);
+      repaintDelay = Math.min(repaintDelay * 2, 1000);
+    };
+    wc.on("paint", (_event, _dirty, image) => {
+      const watchers = frameWatches.get(wc.id);
+      if (!watchers?.size) return;
+      // A static page may never paint again after an empty startup frame.
+      if (image.isEmpty()) return retryPaint();
+      // Encode once per compositor frame, shared by all viewers of this target.
+      const bytes = image.toJPEG(75);
+      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 ||
+          bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) return retryPaint();
+      clearTimeout(repaintTimer);
+      repaintTimer = null;
+      repaintDelay = 100;
+      for (const watcher of watchers) watcher.frame(bytes);
+    });
     wc.setVisualZoomLevelLimits(1, 1);
     const tabId = wc.id;
     tabs.set(tabId, { window: view, viewport, winId: host.win.id });
-    wc.on("paint", (_event, _dirty, image) => publishFrame(tabId, image));
-    attachView(view);
-    wc.on("page-title-updated", emitChanged);
-    wc.on("did-navigate", emitChanged);
-    wc.on("did-navigate-in-page", emitChanged);
-    wc.on("did-start-loading", emitChanged);
-    wc.on("did-stop-loading", emitChanged);
-    wc.on("render-process-gone", emitChanged); // 崩溃不删标签（用户可原地重载/关闭），只同步状态
+    let pageReady = Promise.resolve();
+    wc.on("did-finish-load", () => {
+      // Chromium gives about:blank a dark system canvas even when the window's
+      // background is white. Style only that document; navigation drops the CSS.
+      pageReady = wc.getURL() === "about:blank"
+        ? wc.insertCSS(":root { color-scheme: light; background-color: #fff; }")
+        : Promise.resolve();
+      pageReady.then(() => {
+        if (!wc.isDestroyed() && frameWatches.get(wc.id)?.size) wc.invalidate();
+      }).catch(() => {});
+    });
+    // Start the renderer before awaiting CDP initialization. The target URL is
+    // loaded only after CDP initialization and the blank document's styling.
+    const initialLoad = wc.loadURL("about:blank").then(() => pageReady);
+    const ready = Promise.all([attachView(view), initialLoad]);
     wc.on("destroyed", () => {
+      clearTimeout(repaintTimer);
+      for (const watcher of frameWatches.get(tabId) || []) watcher.closed();
+      frameWatches.delete(tabId);
       tabs.delete(tabId);
       attached.delete(tabId);
       eventLogs.delete(tabId); revisions.delete(tabId); dialogs.delete(tabId);
-      if (activeTabId === tabId) activeTabId = lastTabId();
-      refreshFrame();
-      emitChanged();
     });
     // 新窗口请求（target=_blank / window.open）→ 转新标签；非 http(s) 协议拒绝
     wc.setWindowOpenHandler(({ url: target }) => {
@@ -201,11 +165,10 @@ export function createElectronAdapter(host) {
       }
       return { action: "deny" };
     });
-    if (url) wc.loadURL(url).catch(() => {});
-    return view;
+    return {view,ready};
   }
 
-  // tabs.create 的公共内核（adapter 契约与 window.open 转发共用）：新建即可视激活
+  // tabs.create and window.open share this device-owned pool.
   async function tabsCreate({ windowId, url, viewport } = {}) {
     if (windowId !== undefined && String(windowId) !== String(host.win.id)) {
       throw new Error(`window ${windowId} not found`);
@@ -214,10 +177,14 @@ export function createElectronAdapter(host) {
     const size = normalizeViewport(viewport || (await host.getViewport?.()) || host.viewport);
     if (disposed || host.win.isDestroyed()) throw new Error("browser pool closed");
     if (tabs.size >= MAX_TABS) throw new Error(`tab limit reached (${MAX_TABS})`);
-    const view = createView(url || "about:blank", size);
-    activeTabId = view.webContents.id;
-    refreshFrame();
-    emitChanged();
+    const {view,ready} = createView(size);
+    const deadline = setTimeout(() => { if (!view.isDestroyed()) view.destroy(); }, 5000);
+    try { await ready; } catch (error) { if (!view.isDestroyed()) view.destroy(); throw error; }
+    finally { clearTimeout(deadline); }
+    if (view.isDestroyed()) throw new Error("browser window closed during creation");
+    // The initial blank document is already loaded. Navigating to it again
+    // replaces its compositor surface just as a new viewer subscribes.
+    if (url && url !== "about:blank") view.webContents.loadURL(url).catch(() => {});
     return tabOf(view.webContents.id);
   }
 
@@ -231,19 +198,10 @@ export function createElectronAdapter(host) {
       windowId: entry.winId,
       title: wc.getTitle(),
       url: wc.getURL(),
-      active: tabId === activeTabId,
       viewport: { ...entry.viewport },
     };
   }
 
-
-  function inputTarget() {
-    if (!poolShown()) return null;
-    const active = tabs.get(activeTabId);
-    if (!active || active.window.webContents.isDestroyed()) return null;
-    return { wc: active.window.webContents, rect: fitViewport(poolRect, active.viewport) };
-  }
-  const input = createBrowserInput(inputTarget);
 
   // ---- adapter 契约 ----
 
@@ -252,6 +210,27 @@ export function createElectronAdapter(host) {
     // browser-tool 每次调用前设置（下载产物落盘目录）
     revision(tabId) { return revisions.get(tabId) || 0; },
     dialog(tabId) { return dialogs.get(tabId); },
+    watchFrames(tabId, frame, closed) {
+      const wc = tabs.get(Number(tabId))?.window.webContents;
+      if (!wc || wc.isDestroyed()) throw new Error("Browser window closed");
+      let watchers = frameWatches.get(wc.id);
+      if (!watchers) frameWatches.set(wc.id, watchers = new Set());
+      const watcher = {frame, closed};
+      watchers.add(watcher);
+      wc.invalidate();
+      return () => { watchers.delete(watcher); if (!watchers.size) frameWatches.delete(wc.id); };
+    },
+    invalidateFrame(tabId) {
+      const wc = tabs.get(Number(tabId))?.window.webContents;
+      if (!wc || wc.isDestroyed()) throw new Error("Browser window closed");
+      wc.invalidate();
+    },
+    inputFor(tabId) {
+      return createBrowserInput(() => {
+        const entry = tabs.get(Number(tabId));
+        return entry ? {wc: entry.window.webContents, rect:{x:0,y:0,...entry.viewport,scale:1}} : null;
+      });
+    },
     onDialog(listener) { dialogListeners.add(listener); return () => dialogListeners.delete(listener); },
     events(tabId) { return eventLogs.get(tabId); },
     async encodeImage(bytes) {
@@ -280,35 +259,6 @@ export function createElectronAdapter(host) {
       finally { clearTimeout(timer); if (pendingDownloads.get(tabId) === pending) pendingDownloads.delete(tabId); }
     },
 
-    // 内容池控制面（main.js native:* IPC 调用）
-    tabControl: {
-      input,
-      // 渲染器只控制展示区域；null 不影响 browser 视口。
-      applyLayout({ rect, visible, refresh = false } = {}) {
-        const wasShown = poolShown();
-        if (rect !== undefined && rect !== null) {
-          const r = sanitizeRect(rect);
-          if (r) poolRect = r;
-        }
-        if (typeof visible === "boolean") poolVisible = visible;
-        if (!poolVisible) input.reset();
-        if (refresh || wasShown !== poolShown()) refreshFrame();
-      },
-      acknowledgeFrame,
-      setActive(id) {
-        const tid = Number(id);
-        if (!tabs.has(tid)) return;
-        input.reset();
-        activeTabId = tid;
-        refreshFrame();
-        emitChanged();
-      },
-      hasWorkTabs: () => tabs.size > 0,
-      getState: state,
-      // 可见图片的 contain 区域（留白不接收输入）。
-      poolState: inputTarget,
-    },
-
     tabs: {
 
       async get(id) {
@@ -320,7 +270,7 @@ export function createElectronAdapter(host) {
         return Promise.all([...tabs.keys()].map((id) => tabOf(id)));
       },
       async create({ windowId, url, active, viewport }) {
-        void active; // 标签页语义：不激活窗口焦点（可视激活由 activeTabId 承担）
+        void active; // Automation never changes frontend selection.
         return tabsCreate({ windowId, url, viewport });
       },
       async update(id, props) {
@@ -338,9 +288,6 @@ export function createElectronAdapter(host) {
         eventLogs.delete(Number(id));
         revisions.delete(Number(id));
         if (!entry.window.isDestroyed()) entry.window.destroy();
-        if (activeTabId === Number(id)) activeTabId = lastTabId();
-        refreshFrame();
-        emitChanged();
       },
     },
 

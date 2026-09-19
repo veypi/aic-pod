@@ -231,7 +231,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 - 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req.{sid}`（工具请求，§6.1 v4——sid 段定向，信封 SessionID 一致；run_tool 无会话直发用 manual 占位）
 - 即时发布 CAPS → 定时心跳（20s）→ 单订阅 inbox（`u.{uid}.h.host_{host_id}.>`）→ 验签执行 → req-reply 回复
 
-**RTC 直连（2026-09-10，§6.4）**：owner 页面与设备的 WebRTC DataChannel 直连（https 页面不受混合内容限制——非 HTTP 子资源，UDP+DTLS，身份锚点 = 认证信令交换的 SDP 指纹，无需 CA 证书）。host 为纯应答方：caps 上报 `mgmt{code, rtc:true}`（服务端缓存 `mgmt_code` 透出 owner 域）；信令入向复用通配 inbox（`rtc.in`），出向 `u.{uid}.h.{host_id}.{cred_ver}.rtc`（natsauth pub allow 放行）；`libs/rtc` 单 UDP mux（随机端口）+ mDNS QueryOnly（解析浏览器 `.local` 化名候选）+ 鉴权帧（code，5 次失败锁 1 分钟）+ fs 帧协议（vcore.RunFS 复用，granted=9 本地控制台信任级，fsauth deny 照常生效）+ `readbin`/`writebin` 二进制字节出入口（vcore.ReadBin/WriteBin，256MB 上限，预览/下载与二进制写入用）。
+**RTC 直连（2026-09-18，hosts/1）**：owner 页面按需建立通用设备连接，设备宣告 `mgmt{rtc:true,protocols:["hosts/1"]}`。NATS 仅承载 offer/answer/candidate；入场票据绑定主体、设备凭据版本、PC 与真实 DTLS 指纹。控制和二进制通道分别为 hosts-control/hosts-data，所有业务进入 CommandService/Runtime，fs 是首个 provider。原 code/fs/readbin/writebin RTC 协议已删除；本地管理 API 的 code 独立保留。完整契约与当前边界见 [统一设备协议](hosts-direct-protocol-proposal.md)。
 
 ## 外部扩展
 

@@ -6,21 +6,20 @@
 //   ├─ spawn Go 后端 → 本地 API 配置/绑定 → 平台页 WebContentsView
 //   ├─ browser provider（browser-tool.mjs）：固定视口离屏 BrowserWindow 标签池
 //   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
-//   ├─ nativeWin 桥：离屏 paint → 平台 canvas 等比例展示 → 帧确认背压
+//   ├─ hosts/1 browser 命令：RTC 画面字节源与租约输入，共享 AI 浏览器池
 //   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
 //	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload；不依赖平台页）：托盘
 //	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
 //	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
 //
 // 安全：所有 IPC handler 校验 event.senderFrame.url 的 host——
-// 平台能力（local:api/window:*/pet:*/native:*）仅白名单 host（配置 host + 默认与旧平台域名）可调；
+// 平台能力（local:api/window:*/pet:*）仅白名单 host（配置 host + 默认与旧平台域名）可调；
 // 设置能力（platform:check/open、settings:close）仅 127.0.0.1 本地页面可调。端口/code 不出主进程。
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut } = require('electron')
 const { spawn } = require('child_process')
 const fs = require('fs')
 const net = require('net')
 const path = require('path')
-const { normMods, leaderHit } = require('./leader-grab')
 
 // ---- 常量 ----
 const isDev = !app.isPackaged
@@ -42,7 +41,6 @@ const LEGACY_HOSTS = ['ivec.ai']
 
 let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
 let platformView = null // 平台页视图（恒占满 contentView）
-let aiBrowser = null // browser 壳通道（adapter.tabControl = 原生内容池控制面）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
 let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
 let keepWin = null // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
@@ -56,7 +54,6 @@ let petPosTimer = null // 桌宠位置写盘防抖 timer
 let localPort = 0 // Go 后端本地服务端口
 let localCode = '' // 本地 API 校验码（不出主进程）
 let host = DEFAULT_HOST // 平台地址（配置读取）
-let browserInputFocused = false // 平台 viewer 的键盘输入代理是否聚焦
 
 // ---- 单实例（唯一 ID，第二实例聚焦现有窗口；本地服务端口唯一） ----
 if (!app.requestSingleInstanceLock()) {
@@ -262,28 +259,16 @@ async function setupBrowserProvider() {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const { startBrowserServer } = await import('./browser-tool.mjs')
-      const { port, token, adapter } = await startBrowserServer({
+      const { port, token } = await startBrowserServer({
         host: {
           win: mainWin,
           getViewport: async () => {
             const cfg = await getLocalConfig()
             return { width: cfg?.browser_width, height: cfg?.browser_height }
           },
-          onFrame: (frame) => {
-            if (platformReady()) platformView.webContents.send('native:frame', frame)
-          },
-          // 标签集变化 → 全量推平台页（渲染器以 getState 为权威源，事件只做增量提醒）
-          onChanged: (st) => {
-            try {
-              if (platformView && !platformView.webContents.isDestroyed()) {
-                platformView.webContents.send('native:changed', st)
-              }
-            } catch (_) { /* 渲染器重建中 */ }
-          },
         },
         log: (f, ...a) => console.log('[browser]', f, ...a),
       })
-      aiBrowser = { adapter }
       const r = await fetch(`http://127.0.0.1:${localPort}/api/provider/register`, {
         method: 'POST',
         headers: { 'x-aic-code': localCode, 'Content-Type': 'application/json' },
@@ -400,32 +385,6 @@ function handleCmd(line, conn) {
   reply(delivered ? { ok: true } : { ok: false, error: 'no window alive' })
 }
 
-// ---- browser 展示桥：平台提供展示区域，浏览器运行视口独立固定 ----
-
-const tabCtl = () => aiBrowser?.adapter?.tabControl || null
-const emptyState = () => ({ tabs: [], activeTabId: null })
-
-// 平台页整帧跳转/崩溃 → 停止画面推送（不影响后台 browser；
-// getState 是权威源，事件丢了无所谓）
-function resetNativeContent() {
-  browserInputFocused = false
-  platformView?.webContents.setIgnoreMenuShortcuts(false)
-  tabCtl()?.applyLayout({ visible: false })
-}
-
-// Physical keyboard focus stays in the platform viewer, so its existing layout
-// shortcuts receive native events (including leader releases) without handoff.
-let leaderMods = []
-
-function platformReady() {
-  if (!platformView || platformView.webContents.isDestroyed()) return false
-  try {
-    return allowedHostsCache.includes(new URL(platformView.webContents.getURL()).host)
-  } catch (_) {
-    return false
-  }
-}
-
 // 本地配置 = 独立设置窗口（系统边框）。不依赖平台页/主窗状态——平台或主窗异常
 // 时仍可打开改基本配置；单例（已开则 show+focus），关闭即销毁、重开重载。
 function openSettings() {
@@ -513,80 +472,6 @@ function registerIpc() {
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
     shell.openExternal(u)
-    return true
-  })
-
-  // ---- native:* 原生内容池桥（仅平台白名单；docs §3） ----
-  const validTabUrl = (u) => /^https?:\/\//i.test(u) || u === 'about:blank'
-
-  ipcMain.handle('native:state', (e) => {
-    if (!isPlatformFrame(e)) throw new Error('forbidden')
-    return tabCtl()?.getState() || emptyState()
-  })
-
-  ipcMain.handle('native:tab-create', async (e, url) => {
-    if (!isPlatformFrame(e) || !aiBrowser) throw new Error('forbidden')
-    const u = String(url || '').trim()
-    if (u && !validTabUrl(u)) throw new Error('invalid url')
-    await aiBrowser.adapter.tabs.create({ windowId: mainWin.id, url: u || 'about:blank' })
-    return tabCtl()?.getState() || emptyState()
-  })
-
-  ipcMain.handle('native:tab-close', async (e, id) => {
-    if (!isPlatformFrame(e) || !aiBrowser) throw new Error('forbidden')
-    await aiBrowser.adapter.tabs.remove(Number(id))
-    return tabCtl()?.getState() || emptyState()
-  })
-
-  ipcMain.handle('native:tab-activate', (e, id) => {
-    if (!isPlatformFrame(e)) throw new Error('forbidden')
-    tabCtl()?.setActive(id)
-    return tabCtl()?.getState() || emptyState()
-  })
-
-  ipcMain.handle('native:tab-navigate', async (e, id, url) => {
-    if (!isPlatformFrame(e) || !aiBrowser) throw new Error('forbidden')
-    const u = String(url || '').trim()
-    if (!validTabUrl(u)) throw new Error('invalid url')
-    await aiBrowser.adapter.tabs.update(Number(id), { url: u })
-    return tabCtl()?.getState() || emptyState()
-  })
-
-  // 展示布局：只影响画面推送与输入映射，不修改 browser bounds。
-  ipcMain.handle('native:layout', (e, st) => {
-    if (!isPlatformFrame(e)) return false
-    tabCtl()?.applyLayout({ rect: st?.rect ?? null, visible: !!(st && st.visible), refresh: st?.refresh === true })
-    return true
-  })
-
-  // The platform owns physical focus and IME. Input is mapped into the fixed
-  // browser viewport; no background browser window is ever shown or focused.
-  for (const kind of ['mouse', 'wheel', 'key', 'text', 'edit', 'reset']) {
-    ipcMain.on('native:' + kind, (e, payload) => {
-      if (!isPlatformFrame(e)) return
-      if (kind === 'key' && leaderHit(payload, leaderMods)) return
-      Promise.resolve().then(() => tabCtl()?.input?.[kind](payload)).catch(() => {})
-    })
-  }
-  ipcMain.on('native:input-focus', (e, focused) => {
-    if (!isPlatformFrame(e)) return
-    browserInputFocused = !!focused
-    if (!browserInputFocused) e.sender.setIgnoreMenuShortcuts(false)
-  })
-  ipcMain.on('native:frame-ack', (e, seq) => {
-    if (isPlatformFrame(e)) tabCtl()?.acknowledgeFrame(seq)
-  })
-
-  // 页面仍是快捷键唯一源；leader 校验防止布局命令被误投给 browser。
-  // native:focus 保留桥兼容性（launcher 等动作）。
-  ipcMain.handle('native:leader', (e, mods) => {
-    if (!isPlatformFrame(e)) return false
-    leaderMods = normMods(mods)
-    return true
-  })
-  ipcMain.handle('native:focus', (e) => {
-    if (!isPlatformFrame(e)) return false
-    if (platformView && !platformView.webContents.isDestroyed()) platformView.webContents.focus()
     return true
   })
 
@@ -703,25 +588,13 @@ function createMainWindow(init) {
   // v2 反转模型：平台页背景透明——内容区"洞"由页面 mask 挖除，洞底即下层原生视图
   //（docs §1/§4；页面侧用 mask 而非 clip-path，clip-path 会让采样元素不可命中）
   platformView.setBackgroundColor('#00000000')
-  // 平台页 zoom 硬钉 1（Electron 44 setZoomMode）：nativeWin 坐标契约
+  // Keep the platform UI zoom independent of device browser coordinates.
   //（CSS px = DIP，zoom 恒等映射）由框架保证，不依赖“页面未启用 zoom”的约定
   platformView.webContents.setZoomMode('disabled')
-  // v2：洞内输入由页面命中判定后经 IPC（native:mouse / native:wheel）转发（docs §6）
   // 平台页 target=_blank → 系统浏览器
   platformView.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
-  })
-  // 平台页整帧跳转（非 SPA 内跳转）/ 渲染进程崩溃 → 原生内容复位隐藏态
-  platformView.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) resetNativeContent()
-  })
-  platformView.webContents.on('render-process-gone', resetNativeContent)
-  platformView.webContents.on('before-input-event', (_event, input) => {
-    // Only edit accelerators belong to the offscreen page. Keep application
-    // shortcuts (Quit, Hide, reload, DevTools...) available while viewing it.
-    const edit = (input.meta || input.control) && !input.alt && /^[acvxyz]$/i.test(input.key)
-    platformView.webContents.setIgnoreMenuShortcuts(browserInputFocused && edit)
   })
 
   layoutMain()

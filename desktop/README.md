@@ -20,10 +20,12 @@ Electron Main (Node, main.js)
  │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
  ├─ BaseWindow 主窗口：平台页 WebContentsView，browser 仅以 canvas 画面展示
  ├─ 离屏 BrowserWindow 标签池：默认固定 1280×720、DPR=1，背景节流关闭
+ │    browser 工具窗口在首次加载前统一静音，网页播放音视频不会从设备输出声音
  │    主窗口缩放/隐藏不改变标签视口；CDP 输入和截图可独立在后台运行
- │    paint → native:frame → canvas 按 min(宽比,高比) 等比例居中展示（带帧确认背压）
- │    人工输入由 DOM 命中判定后映射回页面原始坐标，键盘/IME 焦点留在平台
- │    设计见 aic/docs/os_native_windows.md v3
+ │    compositor paint → hosts/1 live 双向流 → RTC hosts-live → canvas 按 min(宽比,高比) 居中展示
+ │    Browser 应用发现各设备 AI 窗口；直接转发原始像素坐标输入，允许 AI/人类并行，键盘/IME 留在前端
+ │    没有 iframe/nativeWin 降级；Web 与桌面前端使用相同 hosts 通道
+ │    设计见 aic/docs/os_native_windows.md
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
  │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
  │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）

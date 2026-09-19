@@ -44,6 +44,7 @@ export function createBrowserInput(getTarget) {
       if (!t || !Number.isFinite(x) || !Number.isFinite(y) || !inside(t.rect, x, y)) return;
       const unit = m.mode === 1 ? 40 : m.mode === 2 ? t.rect.height : 1;
       await send(t, 'Input.dispatchMouseEvent', { type: 'mouseWheel', ...viewportPoint(t.rect, x, y),
+        modifiers: modifiers(m),
         deltaX: (Number(m.dx) || 0) * unit / t.rect.scale,
         deltaY: (Number(m.dy) || 0) * unit / t.rect.scale });
     },

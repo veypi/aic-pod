@@ -31,18 +31,8 @@ const fixture=`<!doctype html><meta charset="utf-8"><title>UI fixture</title>
 <div id="scroller" aria-label="Scroller" role="region" style="height:100px;width:300px;overflow:auto"><div style="height:1500px;width:1500px">Nested scroll</div></div>
 <div style="height:5000px;width:3000px">Page scroll</div>
 <script>window.clicks=0;document.getElementById('save').onclick=e=>{window.clicks++;document.getElementById('status').textContent='Saved '+clicks;window.trusted=e.isTrusted};console.log('fixture-console');</script>`;
-const viewerSource=process.env.AIC_PLATFORM_UI ? path.join(process.env.AIC_PLATFORM_UI,'os/browser-viewer.js') : new URL('../../../aic/ui/os/browser-viewer.js',import.meta.url);
-const vhtmlBundle = new URL('../../../vhtml/dist/vhtml.min.js',import.meta.url);
-const platformUI = process.env.AIC_PLATFORM_UI || new URL('../../../aic/ui/',import.meta.url).pathname;
 const server=http.createServer((req,res)=>{
  const pathname = new URL(req.url,'http://localhost').pathname;
- const files = {'/vhtml.js':vhtmlBundle,'/os/browser-viewer.js':viewerSource,
-  '/os/wincontent.js':path.join(platformUI,'os/wincontent.js'),'/page/local/browser.html':path.join(platformUI,'page/local/browser.html')};
- if(files[pathname]) {res.setHeader('Content-Type',pathname.endsWith('.html')?'text/html':'text/javascript');res.end(fsSync.readFileSync(files[pathname]));return;}
- if(['/env.js','/routes.js','/langs.json'].includes(pathname)) {res.writeHead(404);res.end();return;}
- if(pathname==='/component') {res.setHeader('Content-Type','text/html');res.end(`<!doctype html><style>html,body{margin:0;width:100%;height:100%}</style><body><page-local-browser></page-local-browser><script type="module">import VHTML from '/vhtml.js';window.$vhtml=new VHTML(document.body);await $vhtml.ready;window.componentReady=true;</script>`);return;}
- if(req.url==='/viewer.js') {res.setHeader('Content-Type','text/javascript');res.end(fsSync.readFileSync(viewerSource));return;}
- if(req.url==='/viewer') {res.setHeader('Content-Type','text/html');res.end(`<!doctype html><body style="margin:0;background:#cbd5e1"><div id="viewer" style="position:absolute;left:20px;top:30px;width:640px;height:500px;background:white;overflow:hidden"></div><script type="module">import {createBrowserViewer} from '/viewer.js';const bridge=window.aicDesktop.nativeWin;window.viewer=createBrowserViewer({el:document.getElementById('viewer'),bridge});bridge.onChanged(s=>viewer.setState(s));viewer.setState(await bridge.getState());</script>`);return;}
  if(req.url==='/viewport') {res.setHeader('Content-Type','text/html');res.end(`<!doctype html><style>body{margin:0;height:1800px}input{position:absolute;left:80px;top:30px;width:200px;height:40px}</style><input id="edit"><script>addEventListener('mousedown',()=>window.presses=(window.presses||0)+1)</script>`);return;}
  if(req.url==='/file'){res.writeHead(200,{'Content-Type':'text/plain','Content-Disposition':'attachment; filename="hello.txt"'});res.end('download fixture');}else{res.writeHead(200,{'Content-Type':'text/html'});res.end(fixture)}});
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -50,16 +40,8 @@ let win,provider;
 try{
  await app.whenReady();win=new BaseWindow({show:false,width:900,height:700});const platformView=new WebContentsView({webPreferences:{preload:path.resolve('remote-preload.js')}});win.contentView.addChildView(platformView);
  ipcMain.on('allowed:hosts',e=>{e.returnValue=['127.0.0.1:'+server.address().port]});
- provider=await startBrowserServer({host:{win,platformView,
-  onFrame:frame=>platformView.webContents.send('native:frame',frame),
-  onChanged:state=>platformView.webContents.send('native:changed',state),
- }});const {adapter}=provider;
- ipcMain.handle('native:state',()=>adapter.tabControl.getState());
- ipcMain.handle('native:layout',(_e,state)=>adapter.tabControl.applyLayout(state));
- ipcMain.on('native:frame-ack',(_e,seq)=>adapter.tabControl.acknowledgeFrame(seq));
- ipcMain.on('native:input-focus',(_e,focused)=>platformView.webContents.setIgnoreMenuShortcuts(focused));
- for(const kind of ['mouse','wheel','key','text','edit','reset']) ipcMain.on('native:'+kind,(_e,payload)=>Promise.resolve(adapter.tabControl.input[kind](payload)).catch(console.error));
- await testViewport({win,platformView,adapter,base:'http://127.0.0.1:'+server.address().port,root:process.env.AIC_BROWSER_TEST_ARTIFACTS || root,hasViewerSource:fsSync.existsSync(viewerSource),hasVhtml:fsSync.existsSync(vhtmlBundle)});
+ provider=await startBrowserServer({host:{win}});const {adapter}=provider;
+ await testViewport({win,platformView,adapter,base:'http://127.0.0.1:'+server.address().port});
  await fs.mkdir(sessionDir,{recursive:true});
  // Exercise the authenticated provider, including its scheduling, over separate sockets.
  async function run(argv,extra={}){const response=await new Promise((resolve,reject)=>{
