@@ -20,16 +20,34 @@ type Caps struct {
 	DeviceInfo    *DeviceInfo `json:"device_info,omitempty"`
 	FS            FSCaps      `json:"fs"`
 	Exec          ExecCaps    `json:"exec"`
-	// Mgmt 本地管理面声明（RTC 直连，2026-09-10）：仅 rtc 开关开启时上报；
-	// 服务端缓存并透出给 owner 页面（/api/hosts），页面据此发起 WebRTC 直连。
-	Mgmt          *MgmtCaps   `json:"mgmt,omitempty"`
+	// Mgmt 分别声明已启动的 RTC / proxy 及开放命令；不包含凭据。
+	Mgmt *MgmtCaps `json:"mgmt,omitempty"`
 }
 
-// MgmtCaps 是本地管理面声明。Code 为本地校验码（与本地管理 API 的 x-aic-code
-// 同源，RTC DataChannel 鉴权帧复用）；RTC 标记 RTC 应答能力已开启。
+// TransportCaps declares one running command transport without credentials.
+type TransportCaps struct {
+	Enabled  bool     `json:"enabled"`
+	Protocol string   `json:"protocol"`
+	Commands []string `json:"commands"`
+}
+
+func (t TransportCaps) Supports(protocol, command string) bool {
+	if !t.Enabled || t.Protocol != protocol {
+		return false
+	}
+	if command == "" {
+		return true
+	}
+	for _, c := range t.Commands {
+		if c == command {
+			return true
+		}
+	}
+	return false
+}
+
 type MgmtCaps struct {
-	Code string `json:"code"`
-	RTC  bool   `json:"rtc,omitempty"`
+	Transports map[string]TransportCaps `json:"transports"`
 }
 
 // DeviceInfo 是 host 设备信息（连接时上报，用户不可编辑）。

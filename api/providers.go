@@ -42,6 +42,7 @@ func ProviderRegister(x *vigo.X, req *providerRegisterReq) (*OKResp, error) {
 	}
 	if err := host.RegisterProvider(host.Provider{
 		Decl:       decl,
+		Direct:     &host.ShellChannel{Addr: addr, Token: req.Token},
 		Run:        host.RunViaShell(host.ShellChannel{Addr: addr, Token: req.Token}),
 		EndSession: host.EndSessionViaShell(host.ShellChannel{Addr: addr, Token: req.Token}),
 	}); err != nil {

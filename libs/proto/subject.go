@@ -124,7 +124,7 @@ func ParseToolReqSubject(subject string) (uid, host, tool, sid string, err error
 
 // RtcInSubject RTC 信令入向（页面 → 设备）：u.{uid}.h.host_{host_id}.rtc.in
 // host 端通配 inbox（HostInboxSubject）天然覆盖；前端 JWT pub allow
-//（u.{uid}.>）覆盖，pub 方向不受 FrontendDenyPattern 限制。
+// （u.{uid}.>）覆盖，pub 方向不受 FrontendDenyPattern 限制。
 func RtcInSubject(uid, hostID string) (string, error) {
 	if !validSeg(uid) || !validSeg(hostID) {
 		return "", fmt.Errorf("proto: invalid uid/hostID segment")
@@ -164,4 +164,13 @@ func FrontendDenyPattern(uid string) (string, error) {
 		return "", fmt.Errorf("proto: invalid uid segment")
 	}
 	return fmt.Sprintf("u.%s.h.%s*.>", uid, HostIDPrefix), nil
+}
+
+// ProxySubject carries server-signed owner management requests, independently of
+// AI tool subjects and RTC signaling. The existing private host inbox covers it.
+func ProxySubject(uid, hostID string) (string, error) {
+	if !validSeg(uid) || !validSeg(hostID) {
+		return "", fmt.Errorf("proto: invalid proxy destination")
+	}
+	return fmt.Sprintf("u.%s.h.%s.proxy.req", uid, hostSeg(hostID)), nil
 }

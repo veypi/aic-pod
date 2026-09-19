@@ -70,9 +70,14 @@ type Options struct {
 	Code string `json:"code" yaml:"code" desc:"local api secret code (empty = random per process)"`
 	// RTC 直连应答开关（WebRTC DataChannel，2026-09-10）：开启后 host 作为
 	// 应答方接受 owner 页面发起的 RTC 直连（信令经 NATS，数据面 UDP/DTLS），
-	// 并在 caps 的 mgmt 字段上报 Code 供服务端缓存、owner 页面鉴权使用；
-	// 关闭则不上报 mgmt、不应答 rtc.in 信令。
+	// 能力摘要按 rtc/proxy 分别上报，凭据不进入摘要。
+	// 关闭 RTC 仍保留服务器文件 proxy。
 	RTC bool `json:"rtc" yaml:"rtc" default:"true" desc:"answer WebRTC direct links from owner pages (default true)"`
+
+	// Zero values use the advertised device defaults (512 MiB / 64 MiB / 4).
+	HostsUploadBytes      int64 `json:"hosts_upload_bytes,omitempty" yaml:"hosts_upload_bytes" desc:"maximum hosts upload size in bytes"`
+	HostsProxyUploadBytes int64 `json:"hosts_proxy_upload_bytes,omitempty" yaml:"hosts_proxy_upload_bytes" desc:"maximum proxied hosts upload size in bytes"`
+	HostsStreams          int   `json:"hosts_streams,omitempty" yaml:"hosts_streams" desc:"maximum active file streams per session"`
 
 	// Execution policies: deny first, then operation-covering allow, then default.
 	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`

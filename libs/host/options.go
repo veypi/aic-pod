@@ -6,11 +6,15 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/hostcmd"
 )
 
 // optionsOf 将配置转换为 host 客户端 Options（解析 ExecTimeout）。
 // deviceType 由调用方指定（cli/desktop），version 为客户端版本（va.b.c）。
 func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...any)) (Options, error) {
+	if o.HostsUploadBytes < 0 || o.HostsProxyUploadBytes < 0 || o.HostsStreams < 0 {
+		return Options{}, fmt.Errorf("hosts transfer budgets must be nonnegative")
+	}
 	timeout := 30 * time.Minute
 	if s := strings.TrimSpace(o.ExecTimeout); s != "" {
 		d, err := time.ParseDuration(s)
@@ -20,6 +24,7 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 		timeout = d
 	}
 	return Options{
+		Transfers:   hostcmd.TransferConfig{MaxUploadBytes: o.HostsUploadBytes, ProxyUploadBytes: o.HostsProxyUploadBytes, MaxStreams: o.HostsStreams},
 		Host:        o.Host,
 		Key:         o.Key,
 		WorkDir:     o.WorkDir,
@@ -27,7 +32,6 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 		Version:     version,
 		ExecTimeout: timeout,
 		NoSandbox:   o.NoSandbox,
-		Code:        o.Code,
 		RTC:         o.RTC,
 		OnLog:       onLog,
 	}, nil

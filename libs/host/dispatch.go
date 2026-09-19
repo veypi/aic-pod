@@ -19,10 +19,14 @@ import (
 )
 
 // handleMsg 处理一条入站消息：rtc.in 信令路由到 RTC 服务（不参与验签流程——
-// 信令身份由 NATS 权限模型保证，DataChannel 另有 code 鉴权帧）；
+// 信令身份由 NATS 权限模型保证，DataChannel 使用绑定 DTLS 证书的短期票据）；
 // 其余按工具请求处理（§6.2 host 端验证规范）：
 // 验签 → deadline 过期拒绝 → nonce 窗口去重 → granted_level 纵深检查 → 分发。
 func (c *Client) handleMsg(msg *nats.Msg) {
+	if strings.HasSuffix(msg.Subject, ".proxy.req") {
+		c.handleProxy(msg)
+		return
+	}
 	if strings.HasSuffix(msg.Subject, ".rtc.in") {
 		c.handleRTCSignal(msg.Data)
 		return
@@ -212,6 +216,9 @@ func (c *Client) execFS(ctx context.Context, req *proto.ToolRequest) *proto.Tool
 	env := c.newEnv(req.SessionID, "")
 	env.Granted = req.GrantedLevel
 	res, err := vcore.RunFS(ctx, env, req.Data)
+	if res != nil {
+		c.attachFileURL(res.Attrs)
+	}
 	return resultToResponse(req.MsgID, res, err)
 }
 

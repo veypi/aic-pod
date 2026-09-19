@@ -22,14 +22,17 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/fsauth"
+	"github.com/veypi/aic-pod/libs/hostcmd"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/aic-pod/libs/vcore"
+	"github.com/veypi/aic-pod/protocol/hosts"
 )
 
 // Options 客户端配置。
 type Options struct {
+	Transfers   hostcmd.TransferConfig
 	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
 	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
@@ -38,8 +41,7 @@ type Options struct {
 	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
 	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
 	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
-	Code        string        // 本地校验码（caps mgmt 上报；RTC DataChannel 鉴权帧同源）
-	RTC         bool          // RTC 直连应答开关（cfg.Options.RTC）：关则不上报 mgmt、不应答信令
+	RTC         bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
 	OnLog       func(format string, args ...any)
 }
 
@@ -63,7 +65,9 @@ type Client struct {
 	policy       *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
 	netPol       *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
 	sshPol       *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
-	rtcSvc       *rtc.Service                 // RTC 直连应答服务（opts.RTC 且 Code 非空时启动）
+	rtcMu        sync.RWMutex
+	commands     *CommandService
+	rtcSvc       *rtc.Service // hosts/1 直连服务
 	logf         func(string, ...any)
 	uiScriptExec []string // test worker entry; production re-executes the host binary
 }
@@ -155,7 +159,7 @@ func (c *Client) Connect() error {
 			c.execGrantMu.Unlock()
 			if isAuthError(err) {
 				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new credential and restart.")
-				go nc.Close()
+				go func() { c.stopRTC(); nc.Close() }()
 			}
 		}),
 	}
@@ -188,20 +192,28 @@ func (c *Client) Connect() error {
 
 	go c.heartbeatLoop()
 
-	// RTC 直连应答服务（2026-09-10）：信令走现有通配 inbox，失败不阻断主连接。
-	if c.opts.RTC && c.opts.Code != "" {
+	// The command runtime also serves authenticated server proxy when RTC is off.
+	if err := c.startCommands(); err != nil {
+		c.logf("device commands unavailable: %v", err)
+	}
+	if c.opts.RTC {
 		if err := c.startRTC(); err != nil {
 			c.logf("rtc disabled: %v", err)
 		}
 	}
+	c.publishCaps(nc)
 	return nil
 }
 
 // Close 优雅关闭：关闭 RTC 服务 → 取消订阅 → 断开 NATS。
 func (c *Client) Close() error {
-	if c.rtcSvc != nil {
-		c.rtcSvc.Close()
-		c.rtcSvc = nil
+	service := c.detachRTC()
+	if service != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := service.Close(ctx); err != nil {
+			go service.Close(context.Background())
+		}
+		cancel()
 	}
 	if c.nc != nil {
 		c.nc.Close()
@@ -225,6 +237,10 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	opts.Key = c.opts.Key
 	opts.DeviceName = c.opts.DeviceName
 	oldURL := ResolveNATSURL(c.opts.Host)
+	restartRTC := c.opts.WorkDir != opts.WorkDir || c.opts.RTC != opts.RTC || c.opts.Transfers != opts.Transfers
+	if restartRTC {
+		c.stopRTC()
+	}
 	c.procs.SetExecTimeout(opts.ExecTimeout)
 	c.procs.NoSandbox = opts.NoSandbox
 	// 授权模型同步（三域）：work_dir 变更 + 配置重载
@@ -232,6 +248,19 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	c.policy.SetWorkDir(opts.WorkDir)
 	c.syncAuth()
 	c.opts = opts
+	if restartRTC && c.nc != nil {
+		if err := c.startCommands(); err != nil {
+			return err
+		}
+		if opts.RTC {
+			if err := c.startRTC(); err != nil {
+				return err
+			}
+		}
+	}
+	if c.nc != nil {
+		c.publishCaps(c.nc)
+	}
 	if ResolveNATSURL(opts.Host) != oldURL {
 		if c.nc != nil {
 			c.nc.Close()
@@ -245,15 +274,35 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 // ---- RTC 直连应答（2026-09-10，libs/rtc） ----
 
 // startRTC 启动 RTC 应答服务：信令出向发布到 RtcOutSubject（natsauth host JWT
-// pub allow 已放行），fs 执行体为本地控制台信任级。幂等（重连不重复启动——
+// pub allow 已放行），设备命令使用独立签名票据。幂等（重连不重复启动——
 // UDP mux 与 PeerConnection 生命周期独立于 NATS 连接）。
+func (c *Client) startCommands() error {
+	c.rtcMu.Lock()
+	defer c.rtcMu.Unlock()
+	if c.commands != nil {
+		return nil
+	}
+	commands, err := c.NewCommandService("")
+	if err != nil {
+		return err
+	}
+	c.commands = commands
+	return nil
+}
+
 func (c *Client) startRTC() error {
+	if err := c.startCommands(); err != nil {
+		return err
+	}
+	c.rtcMu.Lock()
+	defer c.rtcMu.Unlock()
 	if c.rtcSvc != nil {
 		return nil
 	}
+	commands := c.commands
 	hostname, _ := os.Hostname()
 	svc, err := rtc.New(rtc.Config{
-		Code:     c.opts.Code,
+		Commands: commands,
 		HostID:   c.hostID,
 		Hostname: hostname,
 		Version:  c.opts.Version,
@@ -268,54 +317,29 @@ func (c *Client) startRTC() error {
 			data, _ := json.Marshal(sig)
 			c.nc.Publish(subj, data)
 		},
-		RunFS:    c.runFSLocal,
-		ReadBin:  c.readBinLocal,
-		WriteBin: c.writeBinLocal,
-		Logf:     c.logf,
+		Logf: c.logf,
 	})
 	if err != nil {
 		return err
 	}
+	c.commands = commands
 	c.rtcSvc = svc
 	return nil
 }
 
 // handleRTCSignal 处理一条 rtc.in 信令（dispatch.go handleMsg 路由过来）。
 func (c *Client) handleRTCSignal(data []byte) {
-	if c.rtcSvc == nil {
+	c.rtcMu.RLock()
+	svc := c.rtcSvc
+	c.rtcMu.RUnlock()
+	if svc == nil {
 		return
 	}
 	var sig proto.RtcSignal
 	if err := json.Unmarshal(data, &sig); err != nil {
 		return
 	}
-	c.rtcSvc.HandleSignal(&sig)
-}
-
-// runFSLocal 是 RTC 直连通道的 fs 执行体：code 鉴权通过 = 本地控制台信任级
-// （granted=9，不再出现审批；fsauth 三域 deny/allow 照常生效，deny 恒拒不可绕过）。
-// sid 为空：无会话临时 grant 视图（与 run_tool 直发同语义）。
-func (c *Client) runFSLocal(ctx context.Context, raw json.RawMessage) (*vcore.Result, error) {
-	env := c.newEnv("", "")
-	env.Granted = 9
-	return vcore.RunFS(ctx, env, raw)
-}
-
-// readBinLocal 是 RTC 直连通道 readbin op 的执行体（2026-09-10，预览/下载
-// 大二进制的字节出口）：与 runFSLocal 同信任级、同 fsauth 判定实例。
-func (c *Client) readBinLocal(path string, off, length int64) ([]byte, string, int64, error) {
-	env := c.newEnv("", "")
-	env.Granted = 9
-	return vcore.ReadBin(env, path, off, length)
-}
-
-// writeBinLocal 是 RTC 直连通道 writebin op 的执行体（2026-09-12，写方向的
-// 原始字节入口，host fs put 二进制内容用）：与 runFSLocal 同信任级、同 fsauth
-// 判定实例。
-func (c *Client) writeBinLocal(path string, data []byte) (int, error) {
-	env := c.newEnv("", "")
-	env.Granted = 9
-	return vcore.WriteBin(env, path, data)
+	svc.HandleSignal(&sig)
 }
 
 // ---- caps v2 上报（§6.3） ----
@@ -410,18 +434,42 @@ func (c *Client) buildCaps() *proto.Caps {
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
 		Mgmt:          c.buildMgmt(),
-		FS:            proto.FSCaps{},                  // actions=null = 全部 8 个
+		FS:            proto.FSCaps{},                  // actions=null = 全部 8 个；工作区不限制完整路径访问
 		Exec:          proto.ExecCaps{Commands: decls}, // 统一命令声明表
 	}
 }
 
-// buildMgmt 构造本地管理面声明：仅 RTC 开关开启且持有校验码时上报
-// （服务端以 mgmt 存在性判定设备直连能力，页面据此发起 RTC 直连）。
+// buildMgmt advertises only the live generic transport, never a management code.
 func (c *Client) buildMgmt() *proto.MgmtCaps {
-	if !c.opts.RTC || c.opts.Code == "" {
+	c.rtcMu.RLock()
+	defer c.rtcMu.RUnlock()
+	if c.commands == nil {
 		return nil
 	}
-	return &proto.MgmtCaps{Code: c.opts.Code, RTC: true}
+	m := &proto.MgmtCaps{Transports: map[string]proto.TransportCaps{"proxy": {Enabled: true, Protocol: hosts.Protocol, Commands: []string{"fs"}}}}
+	if c.rtcSvc != nil {
+		commands := []string{"fs"}
+		if p, ok := lookupProvider("browser"); ok && p.Direct != nil {
+			commands = append(commands, "browser")
+		}
+		m.Transports["rtc"] = proto.TransportCaps{Enabled: true, Protocol: hosts.Protocol, Commands: commands}
+	}
+	return m
+}
+func (c *Client) detachRTC() *CommandService {
+	c.rtcMu.Lock()
+	svc, commands := c.rtcSvc, c.commands
+	c.rtcSvc, c.commands = nil, nil
+	c.rtcMu.Unlock()
+	if svc != nil {
+		svc.Close()
+	}
+	return commands
+}
+func (c *Client) stopRTC() {
+	if service := c.detachRTC(); service != nil {
+		go service.Close(context.Background())
+	}
 }
 
 func (c *Client) publishCaps(nc *nats.Conn) {

@@ -24,6 +24,7 @@ import (
 
 // Provider 是一个壳注册命令：声明 + 执行体。
 type Provider struct {
+	Direct     *ShellChannel // optional hosts/1 command provider, independent of frontend platform
 	Decl       proto.CommandDecl
 	Run        ProviderRunFunc
 	EndSession func(context.Context, string) error
@@ -53,6 +54,7 @@ func RegisterProvider(p Provider) error {
 	rtMu.Unlock()
 	if c != nil {
 		c.addProvider(p.Decl)
+		c.syncDirectProviders()
 		if c.nc != nil {
 			c.publishCaps(c.nc)
 		}
@@ -115,7 +117,6 @@ func (c *Client) syncProviders() bool {
 		return false
 	}
 	c.cmdsMu.Lock()
-	defer c.cmdsMu.Unlock()
 	changed := false
 	for _, d := range decls {
 		if _, ok := c.cmdByName[d.Name]; !ok {
@@ -123,7 +124,24 @@ func (c *Client) syncProviders() bool {
 		}
 		c.addProviderLocked(d)
 	}
+	c.cmdsMu.Unlock()
+	c.syncDirectProviders()
 	return changed
+}
+
+// Reconcile after rtClient is published too: registration may race startup
+// between construction of the command runtime and publication of the client.
+func (c *Client) syncDirectProviders() {
+	p, ok := lookupProvider("browser")
+	if !ok || p.Direct == nil {
+		return
+	}
+	c.rtcMu.RLock()
+	service := c.commands
+	c.rtcMu.RUnlock()
+	if service != nil {
+		_ = service.Runtime.Register(service.browser.provider())
+	}
 }
 
 // ---- 壳本地通道（127.0.0.1 TCP 换行 JSON） ----
