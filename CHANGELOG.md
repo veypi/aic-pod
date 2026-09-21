@@ -7,6 +7,9 @@
 
 ## 未发布
 
+- **去本地管理 API（破坏性）**：本机不再监听任何端口、不再有校验码（code）。设置面 = `config.yaml`：CLI 用 `aic config get|set`（JSON 走 stdin/stdout）与 `aic bind|unbind`（凭证走 stdin）读写；删除 `api/` 包（10 端点 + CORS + code 校验）、`ui/` 壳页装配、`AIC_PORT_FILE` 启动握手、`cfg.Code/Port` 与 `HostsURL`；`aic` 主命令只启动 host 会话，不再打印 management 链接。新增 `settings` 包承接原 get/set 逻辑（只落盘，生效由调用方重启进程完成）。
+- **桌面前端设置窗改单文件静态页（破坏性）**：`desktop/settings-ui/settings.html`（无框架、无构建；`app://aic` 自定义协议 + settings-preload 设置桥 + 跟随系统主题）替代 vhtml 壳页与 `AIC_PORT_FILE` 握手；`local:api` 由转发本地 HTTP 改为主进程本地实现（spawn `aic-backend config|bind|unbind` 子命令 / 读 `aic.log` 尾 / 起停后端子进程）；保存·绑定·解绑后自动重启后端子进程生效；删除 localCode/localPort 握手与相关旧用例。
+- 平台侧配套（aic 仓）：清浏览器插件时代遗留——`local_handler.js` 插件通道、hosts 页 `isExtension` 判定与插件文案全部移除（插件早已不存在），本机通道只剩桌面端注入。
 - 修复 browser 上传暂存文件过早删除，文件保留至页面关闭并限制数量/总字节；`page.wait hidden` 不再将多个匹配误判为隐藏。CDP 事件积压优先丢弃旧帧/遥测，帧 ACK 独立发送，生命周期事件保序。
 - 修复 CUA stdio 写堵塞导致取消/关闭挂起；NATS 重连时停止旧心跳并同步连接访问，避免心跳累积和连接竞争。
 - 桌面包固定 Chrome for Testing 版本与四目标架构 SHA-256，构建时自动同步完整资源，仅打包当前架构，打包后校验缺失/错版资源，移除旧 browser JS 目录的打包入口。
