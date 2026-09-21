@@ -180,3 +180,49 @@ func TestHostPolicyLiteralSpellings(t *testing.T) {
 		t.Fatal("write outside allow-list succeeded")
 	}
 }
+
+// TestHostPolicyXcodeShimTools（darwin 原生探测）：Xcode 命令行工具 shim
+// （/usr/bin/git、python3、cc 先读 /var/db/xcode_select_link 解析 developer dir，
+// 再去那里执行真实工具）必须在读白名单内可执行——2026-09-22 收紧读锁后缺该
+// 读根，shim 报 "unable to read data link ... (Operation not permitted)"。
+func TestHostPolicyXcodeShimTools(t *testing.T) {
+	if os.Getenv("AIC_SANDBOX_PROBE") != "1" {
+		t.Skip("explicit native sandbox probe")
+	}
+	work := canonicalRoot(t.TempDir())
+	pol := fsauth.New()
+	pol.SetWorkDir(work)
+	run := func(script string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), readAllow: pol.ReadPatternsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, plan.argv[0], plan.argv[1:]...)
+		cmd.Dir = work
+		b, e := cmd.CombinedOutput()
+		if e != nil {
+			t.Logf("sandbox: %s", b)
+		}
+		return e
+	}
+	if err := run("/usr/bin/xcode-select -p"); err != nil {
+		t.Fatalf("xcode-select shim failed in sandbox: %v", err)
+	}
+	// 真实 git 还会读 ~/.gitconfig（用户数据，锁内不可读）而硬退；这里用空全局
+	// 配置验证工具本体可达（沙箱内 git 若需读用户配置，由用户自行 ro: 放行）。
+	if err := run("GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --version"); err != nil {
+		t.Fatalf("xcode shim git denied in sandbox: %v", err)
+	}
+	if _, err := os.Stat("/usr/bin/python3"); err == nil {
+		if err := run("/usr/bin/python3 --version"); err != nil {
+			t.Fatalf("xcode shim python3 denied in sandbox: %v", err)
+		}
+	}
+	if _, err := os.Stat("/usr/bin/cc"); err == nil {
+		if err := run("/usr/bin/cc --version"); err != nil {
+			t.Fatalf("xcode shim cc denied in sandbox: %v", err)
+		}
+	}
+}
