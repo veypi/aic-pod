@@ -77,7 +77,7 @@ func TestInvalidConfigStillStartsAndCanBeRepaired(t *testing.T) {
 			for _, call := range []struct{ method, path, body string }{
 				{"GET", "/settings", ""},
 				{"GET", "/api/get_config", ""},
-				{"POST", "/api/set_config", `{"host":"http://localhost:4000","home_path":"/agents"}`},
+				{"POST", "/api/set_config", `{"host":"http://localhost:4000","home_path":"/agents","exec_policy":"deny","exec_allow":[],"exec_deny":[],"fs_policy":"deny","fs_allow":[],"fs_deny":[],"net_policy":"deny","net_allow":[],"net_deny":[],"ssh_policy":"deny","ssh_allow":[],"ssh_deny":[]}`},
 			} {
 				req, err := http.NewRequest(call.method, base+call.path, strings.NewReader(call.body))
 				if err != nil {

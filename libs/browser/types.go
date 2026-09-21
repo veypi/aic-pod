@@ -19,6 +19,8 @@ type Config struct {
 	MaxPages                                int
 	MaxDownloadBytes, MaxTotalDownloadBytes int64
 	DownloadTTL                             time.Duration
+	MaxUploads                              int
+	MaxUploadBytes, MaxTotalUploadBytes     int64
 }
 type Empty struct{}
 type PageArgs struct {

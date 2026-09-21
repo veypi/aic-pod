@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build darwin || linux || windows
 
 package hostfs
 
@@ -166,5 +166,27 @@ func TestMkdirParentsPreflightNamesTopmostMissingLevel(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "base-dir", "mid")); !os.IsNotExist(err) {
 		t.Fatal("created a level before the denied one")
+	}
+}
+
+func TestMkdirParentsProbeCannotEscapeRoot(t *testing.T) {
+	f := setup(t)
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "existing"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(f.root, "escape")); err != nil {
+		t.Skip("symlink unavailable:", err)
+	}
+	// Existing targets are also rejected: the permission-free probe must not
+	// reveal success for a directory reached outside this root.
+	for _, segments := range [][]string{{"escape"}, {"escape", "existing"}, {"escape", "created", "leaf"}} {
+		op := f.call(t, "mkdir", mkdirArgs{Path: loc(segments...), Parents: true, ExistOK: true})
+		if op.Error == nil || op.Error.Code != "permission_denied" || op.Error.Effect != "none" {
+			t.Fatalf("root escape %v: %+v", segments, op)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outside, "created")); !os.IsNotExist(err) {
+		t.Fatal("created a directory outside the root", err)
 	}
 }

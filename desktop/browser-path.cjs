@@ -1,13 +1,11 @@
 // Desktop supplies only a default executable. Go owns discovery, launch and CDP.
 const fs = require('node:fs')
 const path = require('node:path')
+const { browserExecutable } = require('./browser-bundle.cjs')
 function browserEnv({ packaged, resourcesPath, directory, platform = process.platform, arch = process.arch, env = process.env }) {
   if (env.AIC_BROWSER_DEFAULT_PATH) return { AIC_BROWSER_DEFAULT_PATH: env.AIC_BROWSER_DEFAULT_PATH }
   const root = packaged ? path.join(resourcesPath, 'browser') : path.join(directory, 'vendor', 'browser')
-  const platformRoot = path.join(root, `${platform}-${arch}`)
-  const bundled = platform === 'darwin'
-    ? path.join(platformRoot, 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing')
-    : path.join(platformRoot, platform === 'win32' ? 'chrome.exe' : 'chrome')
+  const bundled = browserExecutable(root, platform, arch)
   const candidates = [bundled]
   if (platform === 'darwin') candidates.push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
   if (platform === 'win32') for (const dir of [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA]) {

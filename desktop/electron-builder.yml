@@ -7,6 +7,8 @@ directories:
 files:
   - main.js
   - browser-path.cjs
+  - browser-bundle.cjs
+  - browser.json
   - backend-startup.cjs
   - loading.html
   - remote-preload.js
@@ -29,10 +31,8 @@ extraResources:
       - aic-backend*
   - from: vendor/cua
     to: cua
-  - from: vendor
-    to: .
-    filter:
-      - browser/**
+  - from: vendor/browser/${platform}-${arch}
+    to: browser/${platform}-${arch}
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg
@@ -58,6 +58,7 @@ linux:
   icon: assets/icon.png
   category: Utility
   maintainer: veypi <i@veypi.com>
-# 打包钩子：macOS ad-hoc 深签（见 mac 段注释；其他平台 no-op）
+# 打包钩子：同步/校验目标平台 Chrome；macOS 额外 ad-hoc 深签（见 mac 段）
 afterPack: scripts/after-pack-adhoc-sign.js
+beforePack: scripts/before-pack-browser.cjs
 npmRebuild: false

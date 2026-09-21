@@ -23,6 +23,45 @@ type download struct {
 	created             time.Time
 }
 
+// Chrome's File objects may read from disk long after setFileInputFiles returns,
+// including after a form submission starts. Retain uploads until page closure;
+// enforce count/byte limits instead of expiring live File objects by a timer.
+type upload struct {
+	page  *page
+	bytes int64
+}
+
+func (s *Service) reserveUpload(p *page, size int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.pages[p.info.ID] != p {
+		return "", wire.Fail("closed", "Upload page closed")
+	}
+	total := size
+	for _, u := range s.uploads {
+		total += u.bytes
+	}
+	if len(s.uploads) >= s.cfg.MaxUploads || total > s.cfg.MaxTotalUploadBytes {
+		return "", wire.Fail("overloaded", "Upload storage limit reached; close pages holding uploaded files")
+	}
+	dir := filepath.Join(s.cfg.StateDir, "uploads")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	private, err := os.MkdirTemp(dir, "upload-*")
+	if err == nil {
+		s.uploads[private] = upload{page: p, bytes: size}
+	}
+	return private, err
+}
+
+func (s *Service) releaseUpload(dir string) {
+	s.mu.Lock()
+	delete(s.uploads, dir)
+	s.mu.Unlock()
+	_ = os.RemoveAll(dir)
+}
+
 func (s *Service) downloadEvent(conn *chrome.Conn, e chrome.Event) {
 	var v struct {
 		GUID     string  `json:"guid"`
@@ -254,30 +293,30 @@ func (s *Service) Upload(ctx context.Context, c tool.Caller, a UploadArgs) (Resu
 	}
 	defer file.Close()
 	st, err := file.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > s.cfg.MaxDownloadBytes {
+	if err != nil || !st.Mode().IsRegular() || st.Size() > s.cfg.MaxUploadBytes {
 		return Result{}, errArg("Upload must be a bounded regular file")
 	}
-	dir := filepath.Join(s.cfg.StateDir, "uploads")
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		return Result{}, err
-	}
-	private, err := os.MkdirTemp(dir, "upload-*")
+	private, err := s.reserveUpload(p, st.Size())
 	if err != nil {
 		return Result{}, err
 	}
-	defer os.RemoveAll(private)
+	retained := false
+	defer func() {
+		if !retained {
+			s.releaseUpload(private)
+		}
+	}()
 	stage, err := os.OpenFile(filepath.Join(private, filepath.Base(source)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return Result{}, err
 	}
-	defer os.Remove(stage.Name())
 	defer stage.Close()
-	copied, err := copyChecked(ctx, stage, io.LimitReader(file, s.cfg.MaxDownloadBytes+1), func() error { _, e := s.checkFile(ctx, c, source, false); return e })
+	copied, err := copyChecked(ctx, stage, io.LimitReader(file, st.Size()+1), func() error { _, e := s.checkFile(ctx, c, source, false); return e })
 	if err != nil {
 		return Result{}, err
 	}
-	if copied > s.cfg.MaxDownloadBytes {
-		return Result{}, errArg("Upload exceeds limit")
+	if copied != st.Size() {
+		return Result{}, wire.Fail("source_changed", "Upload source size changed")
 	}
 	if err = stage.Close(); err != nil {
 		return Result{}, err
@@ -288,6 +327,14 @@ func (s *Service) Upload(ctx context.Context, c tool.Caller, a UploadArgs) (Resu
 			return err
 		}
 		defer p.release(object)
+		// A lost response can still mean Chrome accepted the file. Keep its
+		// backing bytes even on an uncertain CDP result, until this page closes.
+		s.mu.Lock()
+		_, retained = s.uploads[private]
+		s.mu.Unlock()
+		if !retained {
+			return wire.Fail("closed", "Upload page closed")
+		}
 		return p.call(ctx, "DOM.setFileInputFiles", map[string]any{"files": []string{stage.Name()}, "objectId": object}, nil)
 	})
 	return Result{PageInfo: p.snapshot(), Effect: effect(err)}, err

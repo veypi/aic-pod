@@ -54,8 +54,8 @@ type Env struct {
 // PathPolicy 是 Env 的文件路径策略接口（v0.14.5 §2 注入式：实现由 fsauth 提供，
 // vcore 只依赖签名——fsauth 侧 canonical 判定，注入侧保证 fs 与 exec 同实例）。
 type PathPolicy interface {
-	// Decide 返回路径的 (read, write) 所需等级：deny → 0/0（显式 fs_allow 条目
-	// 命中 → 回落正常分级并豁免 deny）；白名单 → 1/2；其余 → 1/3。
+	// Decide 返回路径的 (read, write) 所需等级：deny/未匹配 → 0/0，
+	// 可写 allow → 1/2，只读 allow → 1/0；deny 始终优先。
 	// 入参为 Resolve/CheckPath 之后的绝对路径；实现内部做 canonical 展开。
 	Decide(path string) (read, write int)
 }

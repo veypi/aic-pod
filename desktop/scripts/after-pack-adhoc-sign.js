@@ -9,7 +9,7 @@
  * （系统设置 → 隐私与安全性 → 仍要打开 可放行），且不引入 hardened runtime，
  * 保留麦克风/相机权限路径。
  *
- * 仅 darwin 生效（其他平台 no-op）；签名/校验失败即抛错（构建失败）。
+ * 所有平台先校验 Chrome 资源，darwin 额外签名；校验/签名失败即构建失败。
  *
  * 注：彻底免用户放行需 Developer ID 签名 + 公证（需苹果开发者账号）。
  */
@@ -18,8 +18,14 @@
 const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
+const { Arch } = require("builder-util");
+const { assertBrowserBundle } = require("../browser-bundle.cjs");
 
 module.exports = async (context) => {
+  const resources = context.electronPlatformName === "darwin"
+    ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
+    : path.join(context.appOutDir, "resources");
+  assertBrowserBundle(path.join(resources, "browser"), context.electronPlatformName, Arch[context.arch]);
   if (context.electronPlatformName !== "darwin") return;
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   if (!fs.existsSync(appPath)) {

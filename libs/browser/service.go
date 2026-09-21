@@ -67,6 +67,7 @@ type Service struct {
 	sessions  map[string]*page
 	frames    map[string]*page
 	downloads map[string]*download
+	uploads   map[string]upload
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closed    bool
@@ -92,8 +93,17 @@ func New(cfg Config) *Service {
 	if cfg.DownloadTTL <= 0 {
 		cfg.DownloadTTL = time.Hour
 	}
+	if cfg.MaxUploads <= 0 {
+		cfg.MaxUploads = 128
+	}
+	if cfg.MaxUploadBytes <= 0 {
+		cfg.MaxUploadBytes = 256 << 20
+	}
+	if cfg.MaxTotalUploadBytes <= 0 {
+		cfg.MaxTotalUploadBytes = 1 << 30
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{cfg: cfg, start: make(chan struct{}, 1), pages: map[string]*page{}, targets: map[string]*page{}, sessions: map[string]*page{}, frames: map[string]*page{}, downloads: map[string]*download{}, ctx: ctx, cancel: cancel}
+	s := &Service{cfg: cfg, start: make(chan struct{}, 1), pages: map[string]*page{}, targets: map[string]*page{}, sessions: map[string]*page{}, frames: map[string]*page{}, downloads: map[string]*download{}, uploads: map[string]upload{}, ctx: ctx, cancel: cancel}
 	go func() {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -177,6 +187,11 @@ func (s *Service) ensure(ctx context.Context) (*chrome.Conn, error) {
 	}
 	s.downloads = map[string]*download{}
 	s.mu.Unlock()
+	// No upload belongs to a page in this new Chrome process. Discard private
+	// stages left by a crash before accepting new file inputs.
+	if err = os.RemoveAll(filepath.Join(s.cfg.StateDir, "uploads")); err != nil {
+		return nil, err
+	}
 	stage := filepath.Join(s.cfg.StateDir, "downloads")
 	if err = os.MkdirAll(stage, 0700); err != nil {
 		return nil, err
@@ -360,6 +375,13 @@ func (s *Service) attach(ctx context.Context, conn *chrome.Conn, target, subject
 }
 func (s *Service) remove(p *page) {
 	s.mu.Lock()
+	uploads := []string{}
+	for dir, u := range s.uploads {
+		if u.page == p {
+			uploads = append(uploads, dir)
+			delete(s.uploads, dir)
+		}
+	}
 	delete(s.pages, p.info.ID)
 	delete(s.targets, p.target)
 	delete(s.sessions, p.session)
@@ -369,6 +391,9 @@ func (s *Service) remove(p *page) {
 		}
 	}
 	s.mu.Unlock()
+	for _, dir := range uploads {
+		_ = os.RemoveAll(dir)
+	}
 	p.mu.Lock()
 	p.closed = true
 	viewers := []*frameStream{}

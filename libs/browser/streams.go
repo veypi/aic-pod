@@ -191,11 +191,8 @@ func (s *Service) frameEvent(p *page, raw json.RawMessage) {
 	if json.Unmarshal(raw, &event) != nil {
 		return
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(s.ctx, time.Second)
-		defer cancel()
-		_ = p.call(ctx, "Page.screencastFrameAck", map[string]any{"sessionId": event.ID}, nil)
-	}()
+	// The CDP transport ACKs every frame, including frames dropped before this
+	// consumer sees them. Event delivery must not hold up browser production.
 	if len(event.Data) > 6<<20 {
 		return
 	}

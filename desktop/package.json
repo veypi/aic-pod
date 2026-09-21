@@ -8,6 +8,7 @@
   "scripts": {
     "start": "electron .",
     "cua-sync": "node scripts/sync-cua.mjs",
+    "browser-sync": "node scripts/sync-browser.mjs",
     "predist": "node scripts/sync-cua.mjs",
     "dist": "electron-builder",
     "predist:mac": "node scripts/sync-cua.mjs",

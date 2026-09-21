@@ -223,6 +223,9 @@ func expandHomeDir(p string) string {
 }
 
 func (c *Client) execAllowed(sid, name string) bool {
+	if cfg.CheckAuth() != nil {
+		return false
+	}
 	a := cfg.AuthSnapshot()
 	c.execGrantMu.RLock()
 	allow := append(append([]string{"commands", "grant"}, a.ExecAllow...), c.execGrants[sid]...)

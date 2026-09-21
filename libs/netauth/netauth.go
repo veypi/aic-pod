@@ -111,10 +111,9 @@ func (p *Policy) DenyHit(e Entry) bool {
 	return false
 }
 
-// Allowed 判定目标连通性：命中 deny → 拒，除非存在更具体的 allow（具体度优先：
-// 端口数字 > *；同精度 deny 胜）。policy=open 时未命中 deny 一律放；policy=deny
-// 时仅 allow（内建 + cfg + sid 临时 grant）放行。临时 grant 不压 deny（只有
-// 内建/cfg allow 参与具体度比较）。host 归一化与条目同口径。
+// Allowed 先拒绝所有 deny 命中；open 模式放行剩余目标，deny 模式仅放行
+// 内建 allow、配置 allow 或当前 sid 的临时 grant。端口更具体的 allow 也不能
+// 覆盖 deny；host 与规则使用同一归一化口径。
 func (p *Policy) Allowed(sid, host string, port int) bool {
 	q := Entry{Host: host, Port: strconv.Itoa(port)}
 	if ip, err := netip.ParseAddr(strings.TrimSuffix(strings.ToLower(host), ".")); err == nil {
@@ -161,11 +160,8 @@ func entryMatch(r, q Entry) bool {
 	return r.Port == "*" || r.Port == q.Port || q.Port == "*"
 }
 
-// Snapshot 返回 sid 的（deny, allow）条目快照——沙箱 profile 生成用
-// （allow = 内建 + cfg + sid 临时 grant；open 模式下沙箱层直接放行不读本快照）。
-// deny 剔除被同 host 具体端口 allow 压过的端口 * 条目（具体度优先；同精度 deny
-// 胜）——deny 模式下未放行端口由基线全拒兜底，剔除不降低隔离；grant 不参与
-// 剔除（不压 deny，与 Allowed 同口径）。
+// Snapshot 返回独立的 deny/allow 快照，供沙箱 profile 生成使用。
+// allow 包含内建、配置和 sid 的临时 grant；deny 保持完整并始终优先。
 func (p *Policy) Snapshot(sid string) (deny, allow []Entry) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -174,20 +170,6 @@ func (p *Policy) Snapshot(sid string) (deny, allow []Entry) {
 	allow = append(allow, p.grants[sid]...)
 	deny = append(deny, p.deny...)
 	return deny, allow
-}
-
-// portNarrowedByAllow 报告端口 * 的 deny 条目是否被同 host 的具体端口 allow
-// 压过（具体度优先）。
-func portNarrowedByAllow(d Entry, allow []Entry) bool {
-	if d.Port != "*" {
-		return false
-	}
-	for _, a := range allow {
-		if a.Host == d.Host && a.Port != "*" {
-			return true
-		}
-	}
-	return false
 }
 
 // List 返回 sid 视角的当前 allow 清单（规范形态字符串，grant 响应回显用）。

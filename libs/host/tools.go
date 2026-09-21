@@ -19,6 +19,9 @@ import (
 
 func (c *Client) initTools() {
 	c.tools = tool.New(tool.Config{ExecutionEpoch: c.procs.Epoch(), Execute: c.executeCommand, Authorize: func(ctx context.Context, caller tool.Caller, name string, m wire.Method) error {
+		if err := cfg.CheckAuth(); err != nil {
+			return wire.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
+		}
 		if caller.Subject != "catalog" && name != "fs" && !c.execAllowed(caller.Origin, name) {
 			return wire.Fail("permission_denied", "Tool is denied by device policy")
 		}

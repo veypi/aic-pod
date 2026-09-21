@@ -1,0 +1,10 @@
+{
+  "version": "153.0.8010.52",
+  "source": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+  "assets": {
+    "darwin-arm64": { "platform": "mac-arm64", "sha256": "6f67faa4b34dd551b53abb6fee24edeae470ab695b0b100ddc4885ff0be6724a" },
+    "darwin-x64": { "platform": "mac-x64", "sha256": "01130a136cb492ff32a7253b2b8db9577bd3f7543574e2d7ce1a83ed1cbed3fd" },
+    "linux-x64": { "platform": "linux64", "sha256": "e66f66d4802a46d4a022667e668aa950e277cadbfbed4b3777915b47413a0ef9" },
+    "win32-x64": { "platform": "win64", "sha256": "df4854428c509fcf2f790ac448bca3f994151bcff22008236fa7c4587294fbe1" }
+  }
+}

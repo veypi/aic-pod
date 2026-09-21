@@ -85,6 +85,8 @@ stream 仅向前端提供双向异步原始消息通道，不进入 exec 后台�
 
 Browser 的 `page.frames` 与 `page.input` 分开授权，消息格式由 Browser viewer 私有实现。前后端保留最新待处理移动/滚动，离散按键点击保序；帧接收与解码分离，保留最新待画帧。真实输入自动进入人工控制，空闲 10 秒退出；无接管按钮或接管 call。Chrome 专用实例关闭边界弹性回滚。
 
+前端遇到 RTC `disconnected` 保留现有调用和流最多 10 秒，连接恢复后继续使用；`failed`/`closed` 或超过宽限期才清理。下一次打开会替换连接池中的已关闭连接；不自动重放写操作。
+
 ## Browser 运行环境
 
 Browser 使用真实 Chrome 的新版 headless 模式，保持后台无窗口运行。每次启动时先用临时 profile 的内置页读取实际 UA、完整 Client Hints 和窗口边框尺寸，再启动长期使用的专用 profile。探测不访问外部网站，也不会读取用户的个人 Chrome profile。
@@ -97,6 +99,12 @@ Browser 使用真实 Chrome 的新版 headless 模式，保持后台无窗口运
 
 这是浏览器环境一致性处理，不承诺无法被网站识别为自动化。首次打开页面增加一次短暂的 Chrome 本地探测；已经运行的实例不重复探测。实现依据：[Chrome Headless](https://developer.chrome.com/docs/automation-and-testing/headless)、[CDP](https://chromedevtools.github.io/devtools-protocol/)、[Chromium UA/Client Hints](https://chromium.googlesource.com/chromium/src/+/main/components/embedder_support/user_agent_utils.cc)。
 
+上传先复制到专用暂存区，Chrome 的 File 对象可能在调用返回后才读取磁盘，因此暂存保留到所属页面关闭（服务退出也清理；下次启动清理崩溃残留）。默认单文件 256 MiB、最多 128 份、总计 1 GiB；达到上限需关闭持有上传的页面释放空间。导航或重复设置 input 不提前删除，以免破坏页面仍持有的 File 对象。`page.wait hidden` 仅在匹配数为零或唯一匹配已隐藏时成功，多个匹配继续等待。
+
+CDP 待派发事件最多 512 条/32 MiB。积压时丢弃旧 screencast 帧、Network 遥测和 Runtime 日志，生命周期事件保持顺序；帧 ACK 独立于消费者发送，丢帧仍 ACK。全为关键事件的溢出或 ACK 队列无法推进仍明确断开，避免无限内存或静默丢失页面状态。
+
+CUA 写管道不持状态锁，取消或关闭会中断堵塞写入；部分消息写入后销毁该驱动连接，不重放交互。NATS 每条连接只持有一个心跳，连接替换前等待旧心跳退出。
+
 ## FS 与文件代理
 
 前端 RTC 与 HTTP 文件代理都调用同一个 FS；代理经服务器签名转换成 hosts_nats/1，保留真实用户身份和 fs-only 授权约束。没有随机 AI session、通用 operation/resource 注册表或代理专用协议。
@@ -107,8 +115,10 @@ FS 源的 epoch/ID、版本、校验和、暂存归 FS 所有。读写通过 24 
 
 FS 写授权按「谁被创建/修改就查谁」判定：write/edit/remove 只要求目标自身；mkdir -p 与 write/curl -o 等补父目录的便利逻辑只对实际创建的层级做写检查（先检后建、拒绝时零副作用），已存在的祖先层级不要求写授权。存在性探测本身不做策略门控——目标路径祖先链的存在性因此对调用方可观察，但不暴露目录内容。
 
+原生 hostfs 支持 macOS、Linux 和 Windows，AI 文本工具与 RTC/代理共用实现。Windows 读取通过父目录句柄打开单个叶节点并拒绝 reparse point；移动用原生相对句柄重命名，absent 条件原子禁止覆盖。写入在关闭写句柄后提交并返回稳定版本；条件新建不要求文件系统支持硬链接。
+
 ## 验证和边界
 
 Go race 覆盖设备分发、授权、统一执行、FS 和真实 RTC。服务器测试覆盖真实 NATS 签名/权限以及 HTTP→NATS→设备 FS→Node SDK：二进制、中文/BOM/CRLF、空文件、分页、范围恢复、条件冲突、写入回复丢失。
 
-macOS Chrome 已实测自动输入、边缘滚动、观察、下载/上传、弹窗、popup；统一 exec 的真实 Chrome wait 取消后页面仍存活。前端覆盖文件路由、缓存、浏览器输入与解码、设备选择及空白页。Windows/Linux 以交叉编译检查为限，仍需原生环境运行验收；可选 script 编排尚未接入。
+macOS Chrome 已实测自动输入、边缘滚动、观察、下载/上传、弹窗、popup；统一 exec 的真实 Chrome wait 取消后页面仍存活。前端覆盖文件路由、缓存、浏览器输入与解码、设备选择及空白页。桌面 Chrome 的四目标归档已校验哈希与资源布局，macOS arm64 已验证实际打包、签名与包内 Chrome。Windows/Linux 仅完成交叉编译和归档检查，仍需原生环境运行验收；可选 script 编排尚未接入。

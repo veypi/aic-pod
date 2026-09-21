@@ -29,7 +29,7 @@ type Policy struct {
 	readRoots  []string
 	readGlobs  []string
 	extraWrite []string // cfg fs_allow 裸路径条目（canonical 前缀）
-	allowGlobs []string // cfg fs_allow 通配条目（canonicalPattern 展开：精确授权 + 压 deny）
+	allowGlobs []string // cfg fs_allow 通配条目（canonicalPattern 展开：精确授权，仍受 deny 限制）
 	deny       []string // 拒绝模式（平台初始表 + cfg fs_deny 叠加，预展开：expandVars + canonicalPattern）
 	grants     map[string][]string
 
@@ -182,8 +182,8 @@ type View struct {
 	sid string
 }
 
-// Decide 返回 (read, write) 所需等级（canonical 判定；deny → 0/0，
-// 显式 fs_allow 条目命中 → 回落正常分级并豁免 deny）。
+// Decide 返回 (read, write) 所需等级：deny 和未匹配路径 → 0/0，
+// 可写 allow → 1/2，只读 allow → 1/0；deny 始终优先。
 func (v *View) Decide(path string) (int, int) {
 	return v.p.decide(v.sid, canonical(path))
 }
@@ -246,12 +246,8 @@ func (p *Policy) denyHit(cpath string) bool {
 	return false
 }
 
-// allowHitLocked 判定显式 allow 条目命中（cfg fs_allow）：裸路径条目覆盖其子树
-// （root 自身 + 全部后代），通配条目按 glob 精确匹配。命中 → 写 2 且豁免 deny
-// 的读写双拒（allow 覆盖 deny）。内建便利根与临时 grant 不在本判定内——它们
-// 是写便利不是信任声明（公共区的 browser cookie 库、缓存/工作区里的 .env 等
-// 仍受 deny 保护）；要开洞必须显式写 fs_allow。判定在 canonical 路径上进行，
-// symlink 跳转出 allow 条目不豁免（与 deny 同口径）。
+// allowHitLocked 判定显式可写 allow：裸路径覆盖其子树，通配按 glob 匹配。
+// 路径已 canonical，调用方必须先检查 deny；allow 不豁免任何 deny。
 func (p *Policy) allowHitLocked(cpath string) bool {
 	for _, root := range p.extraWrite {
 		if matchPattern(joinPattern(root, "**"), cpath) {

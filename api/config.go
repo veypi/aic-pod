@@ -42,7 +42,9 @@ type configView struct {
 // 注：隐藏配置（no_sandbox 等）不在此视图暴露——仅配置文件/flag/env 可配。
 func GetConfig(x *vigo.X) (*configView, error) {
 	o := effective()
-	a := cfg.AuthSnapshot()
+	// Keep malformed fields visible for explicit repair; never display a
+	// normalized policy as though the rejected configuration were active.
+	a := cfg.RawAuthSnapshot()
 	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
 		HomePath:    o.NormalizedHomePath(),
 		BrowserPath: o.BrowserPath, BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
@@ -55,7 +57,7 @@ func GetConfig(x *vigo.X) (*configView, error) {
 // SetConfigReq 是 set_config 的白名单参数（host/work_dir/exec_timeout/home_path 可写；
 // key 不走 set_config——只走 Bind，body 中的 credential 不得被持久化）。
 // 隐藏配置（no_sandbox 等）不可经 set_config 修改，只能改配置文件。
-// 授权九键（policy/deny/allow × fs/net/ssh）：policy 空串 = 不改；列表 nil = 不改
+// 授权十二键（policy/deny/allow × exec/fs/net/ssh）：policy 空串 = 不改；列表 nil = 不改
 // （保持现状），非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent
 // 的唯一回撤出口。
 type SetConfigReq struct {
@@ -101,8 +103,7 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 			return nil, vigo.ErrInvalidArg.WithString("invalid exec_timeout: " + err.Error())
 		}
 	}
-	// 授权配置显式校验（policy 取值 / net/ssh 条目形态——运行期坏条目静默跳过，
-	// 写入前必须显式报错，否则用户以为生效）
+	// 授权配置显式校验；坏配置阻止设备工具调用，必须修正后才能保存。
 	if !validPolicy(req.ExecPolicy) || !validPolicy(req.FsPolicy) || !validPolicy(req.NetPolicy) || !validPolicy(req.SshPolicy) {
 		return nil, vigo.ErrInvalidArg.WithString("invalid policy: want deny | open")
 	}
@@ -147,55 +148,13 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	}
 	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(req.ExecTimeout)
-	// 授权九键：policy 空串 = 不改；列表 nil = 不改，非 nil = 整体替换。
-	authChanged := false
-	if req.ExecPolicy != "" {
-		fileCfg.ExecPolicy = req.ExecPolicy
-		authChanged = true
-	}
-	if req.ExecDeny != nil {
-		fileCfg.ExecDeny = *req.ExecDeny
-		authChanged = true
-	}
-	if req.ExecAllow != nil {
-		fileCfg.ExecAllow = *req.ExecAllow
-		authChanged = true
-	}
-	if req.FsPolicy != "" {
-		fileCfg.FsPolicy = req.FsPolicy
-		authChanged = true
-	}
-	if req.NetPolicy != "" {
-		fileCfg.NetPolicy = req.NetPolicy
-		authChanged = true
-	}
-	if req.SshPolicy != "" {
-		fileCfg.SshPolicy = req.SshPolicy
-		authChanged = true
-	}
-	if req.FsDeny != nil {
-		fileCfg.FsDeny = *req.FsDeny
-		authChanged = true
-	}
-	if req.FsAllow != nil {
-		fileCfg.FsAllow = *req.FsAllow
-		authChanged = true
-	}
-	if req.NetDeny != nil {
-		fileCfg.NetDeny = *req.NetDeny
-		authChanged = true
-	}
-	if req.NetAllow != nil {
-		fileCfg.NetAllow = *req.NetAllow
-		authChanged = true
-	}
-	if req.SshDeny != nil {
-		fileCfg.SshDeny = *req.SshDeny
-		authChanged = true
-	}
-	if req.SshAllow != nil {
-		fileCfg.SshAllow = *req.SshAllow
-		authChanged = true
+	authChanged := applyAuthChanges(req, fileCfg)
+	// A malformed env/flag override also needs explicit repair. An unrelated
+	// save must not replace it with the file's potentially more permissive value.
+	active := effective()
+	applyAuthChanges(req, &active)
+	if err := active.ValidateAuth(); err != nil {
+		return nil, vigo.ErrInvalidArg.WithError(err)
 	}
 	// home_path：必须以单个 / 开头（// 开头是协议相对 URL，拼接后会跳转到别的站点，拒绝）
 	if hp := strings.TrimSpace(req.HomePath); hp != "" {
@@ -243,6 +202,34 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 		}
 	}
 	return &OKResp{OK: true}, nil
+}
+
+func applyAuthChanges(req *SetConfigReq, o *cfg.Options) bool {
+	changed := false
+	for _, field := range []struct {
+		value  string
+		target *string
+	}{
+		{req.ExecPolicy, &o.ExecPolicy}, {req.FsPolicy, &o.FsPolicy},
+		{req.NetPolicy, &o.NetPolicy}, {req.SshPolicy, &o.SshPolicy},
+	} {
+		if field.value != "" {
+			*field.target = field.value
+			changed = true
+		}
+	}
+	for _, field := range []struct{ value, target *[]string }{
+		{req.ExecAllow, &o.ExecAllow}, {req.ExecDeny, &o.ExecDeny},
+		{req.FsAllow, &o.FsAllow}, {req.FsDeny, &o.FsDeny},
+		{req.NetAllow, &o.NetAllow}, {req.NetDeny, &o.NetDeny},
+		{req.SshAllow, &o.SshAllow}, {req.SshDeny, &o.SshDeny},
+	} {
+		if field.value != nil {
+			*field.target = *field.value
+			changed = true
+		}
+	}
+	return changed
 }
 
 // expandHome 展开 work_dir 的 ~ 前缀（~ 或 ~/xxx → 用户主目录）。

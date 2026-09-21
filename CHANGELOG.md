@@ -7,6 +7,12 @@
 
 ## 未发布
 
+- 修复 browser 上传暂存文件过早删除，文件保留至页面关闭并限制数量/总字节；`page.wait hidden` 不再将多个匹配误判为隐藏。CDP 事件积压优先丢弃旧帧/遥测，帧 ACK 独立发送，生命周期事件保序。
+- 修复 CUA stdio 写堵塞导致取消/关闭挂起；NATS 重连时停止旧心跳并同步连接访问，避免心跳累积和连接竞争。
+- 桌面包固定 Chrome for Testing 版本与四目标架构 SHA-256，构建时自动同步完整资源，仅打包当前架构，打包后校验缺失/错版资源，移除旧 browser JS 目录的打包入口。
+- 文件权限测试不再依赖 `/var/tmp` 可写，补齐单文件授权写入与 mkdir 符号链接越根回归；清理过时的 allow 覆盖 deny 注释和死代码，不改变权限规则。
+- 修复坏授权配置被静默清空或回退为 open：保留非法规则，解析失败的授权字段显示错误标记；设备工具暂停调用，本地设置仍可打开并显式修复。无关设置保存不能覆盖坏配置，环境变量/flag 中的错误授权也必须显式修正。
+- 补齐 Windows hostfs 原生实现，恢复统一文件服务及 AI read/write/edit/rg/cp/mv/curl -o：读文件拒绝 reparse point，移动基于固定父目录句柄并支持原子禁止覆盖；条件新建不依赖硬链接，写入返回版本在关闭写句柄后保持稳定。文件与配置回归测试纳入 Windows 构建流程。
 - 修复 fs 写便利逻辑把写授权放大到已存在祖先的 bug：write/curl -o/writebin/cp/mv 补父目录与 mkdir -p 的存在性探测不再做策略门控，写检查只覆盖实际创建的层级（先检后建、拒绝时零副作用）；只授权单个文件即可写入，与 edit/mkdir/remove「谁被创建/修改就查谁」同口径。
 - browser/cua 改为 hosts_tools/1 typed 方法声明，RTC 和 NATS 共用鉴权与调用分发器；宿主不再托管其业务 session/operation/resource。
 - browser 迁入 Go，自管独立 Chrome 与 pipe CDP；删除 Electron browser 引擎、TCP provider 和旧调用入口。Desktop 只注入 Chrome 默认路径。

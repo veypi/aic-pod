@@ -25,7 +25,7 @@ net/ssh 以 `host:port` 精确匹配主机，端口可为数字或 `*`。IPv6 �
 
 默认 fs/ssh policy 为 deny，exec/net 为 open。工作区、Session 区、临时区、工具缓存装配为默认读写资源；系统运行库、系统 CA 装配为只读资源；默认凭证保护名单与 fs_deny 合并后统一优先。系统运行库不包含整个用户目录或整个 `/System/Volumes/Data`。调用参数 workdir 只决定工作目录，不授予该目录权限。
 
-`cfg.ValidateAuth` 在读取和保存时校验。配置文件仅接受当前 snake_case 键；坏配置不能静默替换正在生效的策略。本地设置 API 与永久 grant 使用同一配置更新锁，写盘成功后更新内存。
+配置文件仅接受当前 snake_case 键。错误的授权 policy/列表不能回退为 open 或清空；业务格式错误保留原值，类型解析失败保留可见错误标记，整个文件损坏则将全部授权字段标为无效。设备工具通过 `cfg.CheckAuth` 拒绝调用，授权等级和临时 grant 均不能绕过；本地设置 API 继续可用。必须显式修正错误字段后才能保存，无关设置更新不会覆盖原文件，也不能清除环境变量/flag 中的错误授权。文件解析错误必须修复文件或通过设置 API 修复，不能依赖更高优先级参数掩盖。配置保存经 `ValidateAuth` 校验；本地设置 API 与永久 grant 使用同一配置更新锁，写盘成功后更新内存。
 
 ## 请求处理
 
@@ -56,6 +56,8 @@ grant 自身 required=4，先经正常云端审批再修改 host 的对应 allow
 - macOS Seatbelt：默认关闭文件读取和写入，按读/写 allow 生成范围，最后叠加 deny。ro 不进入写允许规则。dyld 需要读取根目录本身及允许路径的祖先元数据；这些是 literal 规则，不放开目录子树。网络规则仅对 loopback 可以精确执行；不能表达的域名/IP 条目在启动前拒绝。
 - Linux bubblewrap：关闭策略使用空根和明确绑定的只读/读写目录，不因 workdir 自动绑定目录。bwrap 不能完整表达路径 deny、动态路径 glob 和精确网络目标；存在路径 deny 或其他无法落实的策略时明确返回权限错误。默认配置含凭证 deny，所以当前配置下的原生命令会被拒绝，不能用近似挂载冒充完整保护。
 - Windows：保留受限令牌、ACL 和 Job Object 资源限制。该后端没有实现路径读取限制和网络规则，携带这些规则的原生调用在启动前拒绝；虚拟 fs、net/ssh 的本地检查仍工作。
+
+Windows 文件服务单独由 hostfs 实现，与上述原生进程沙箱限制无关：支持文件读写、编辑、搜索、复制、移动和 curl 输出文件，遵守统一 fs 授权。读取拒绝 reparse point，提交和移动以固定父目录句柄执行，保留版本条件与原子禁止覆盖。
 
 nosandbox 免沙箱执行不再叠加本地 fs/net 策略条件：请求级 nosandbox 经 dispatch 强制 Critical(4) 人工审批（granted 9 随签名下发）后直接执行；ssh/scp 内部管控调用与全局 no_sandbox 配置同属免沙箱来源。无法建立沙箱时仍拒绝运行（沙箱路径 fail-closed），不提供静默裸跑兜底。
 

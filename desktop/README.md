@@ -54,6 +54,9 @@ browser 代码位于 libs/browser/，修改后重新编译 Go 后端；协议与
 内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
 `npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。
 
+独立 Chrome 开发时可用 `npm run browser-sync` 同步到 `vendor/browser/<platform>-<arch>`，
+或者继续使用系统 Chrome / `browser_path`。同步清单在 `browser.json`。
+
 ## 打包（electron-builder，须在目标平台执行）
 
 ```bash
@@ -71,7 +74,15 @@ make desktop-linux-amd64     # Linux → dist/aic-desktop-linux-x64.AppImage
 受限网络（GitHub 直连不稳）：手动下载对应资产后 `npm run cua-sync -- --asset <文件>`
 （仍走 sha256 校验）。
 
-CI：`.github/workflows/build.yml` desktop job（tag v* 触发，五平台产物）。
+独立 Chrome 由 electron-builder 的 `beforePack` 自动同步（包括直接调用 electron-builder）。
+`browser.json` 固定 [Chrome for Testing](https://github.com/GoogleChromeLabs/chrome-for-testing)
+版本及 macOS arm64/x64、Windows x64、Linux x64 官方归档 SHA-256；校验成功后才替换缓存。
+完整资源和随附声明位于 `resources/browser/<platform>-<arch>`，只复制当前架构，不进入 asar。
+`afterPack` 与 `check-asar.mjs` 校验版本标记、可执行文件和必要资源；缺失即构建失败。
+升级时一起更新版本和四个哈希，再 `npm run browser-sync -- --force`。
+离线归档可用 `npm run browser-sync -- --asset <chrome-平台.zip>`，仍严格校验哈希。
+
+CI：`.github/workflows/build.yml` desktop job（tag v* 触发，四目标产物）。
 
 ## 发版
 

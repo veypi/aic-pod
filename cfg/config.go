@@ -39,7 +39,7 @@ var DeviceType = "cli"
 //   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path/-code）与 env 键
 //     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH/CODE）的来源，也是本地 API（get_config/
 //     set_config）的键
-//   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；未知或错误字段忽略
+//   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；未知字段忽略，错误授权字段阻止工具调用
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
 //
@@ -147,7 +147,8 @@ func NormalizePolicy(s, def string) string {
 	return PolicyDeny
 }
 
-// Normalize 在通用解析后处理设备配置语义：无效值使用字段默认值，错误规则列表忽略。
+// Normalize repairs ordinary settings, but preserves malformed authorization
+// values so they cannot silently become permissions or be erased by Save.
 func (o *Options) Normalize() {
 	h := strings.TrimSpace(o.Host)
 	if h != "" && !strings.Contains(h, "://") {
@@ -177,24 +178,36 @@ func (o *Options) Normalize() {
 		{&o.ExecPolicy, PolicyOpen}, {&o.FsPolicy, PolicyDeny},
 		{&o.NetPolicy, PolicyOpen}, {&o.SshPolicy, PolicyDeny},
 	} {
-		if *mode.value != PolicyOpen && *mode.value != PolicyDeny {
+		if *mode.value == "" {
 			*mode.value = mode.fallback
 		}
 	}
-	if policy.ValidateFS(o.FsAllow, true) != nil {
-		o.FsAllow = nil
+}
+
+// ApplyConfigIssues prevents the generic parser's permissive fallback from
+// enabling tools after an authorization field (or the entire file) failed to
+// decode. Invalid markers must be explicitly replaced before saving; the file
+// itself remains untouched and the local management API can still start.
+func (o *Options) ApplyConfigIssues(issues []flags.ConfigIssue) {
+	fields := map[string]any{
+		"exec_policy": &o.ExecPolicy, "exec_allow": &o.ExecAllow, "exec_deny": &o.ExecDeny,
+		"fs_policy": &o.FsPolicy, "fs_allow": &o.FsAllow, "fs_deny": &o.FsDeny,
+		"net_policy": &o.NetPolicy, "net_allow": &o.NetAllow, "net_deny": &o.NetDeny,
+		"ssh_policy": &o.SshPolicy, "ssh_allow": &o.SshAllow, "ssh_deny": &o.SshDeny,
 	}
-	if policy.ValidateFS(o.FsDeny, false) != nil {
-		o.FsDeny = nil
-	}
-	for _, list := range []*[]string{&o.ExecAllow, &o.ExecDeny} {
-		if policy.ValidateExec(*list) != nil {
-			*list = nil
-		}
-	}
-	for _, list := range []*[]string{&o.NetAllow, &o.NetDeny, &o.SshAllow, &o.SshDeny} {
-		if policy.ValidateEntries(*list) != nil {
-			*list = nil
+	for _, issue := range issues {
+		for name, field := range fields {
+			if issue.Field != "" && issue.Field != name {
+				continue
+			}
+			switch value := field.(type) {
+			case *string:
+				*value = "invalid"
+			case *[]string:
+				// A visible invalid entry survives the settings editor's trimming
+				// of blank lines; unrelated form saves must not clear this error.
+				*value = []string{"INVALID " + name + ": repair malformed configuration"}
+			}
 		}
 	}
 }
@@ -320,12 +333,13 @@ func LogWriter() (io.Writer, error) {
 
 // LoadFile 仅读取配置文件返回独立副本，不触碰 Global——
 // 页面写操作（bind/set_config）落盘用：基于文件配置修改，flag/env 启动覆盖不落盘。
-// 配置文件不阻断启动和设置页：读不到/整体损坏用默认值，未知/错误字段单独忽略。
+// 配置文件不阻断启动和设置页：普通字段错误回退默认值；授权字段错误或整体
+// 损坏保留无效标记，阻止设备工具调用和无关配置覆盖，直到显式修正。
 // Code 未配置时随机生成（codeAuto=true，Save 不落盘）。
 func LoadFile() (*Options, error) {
 	o := NewOptions()
 	if p, err := Path(); err == nil {
-		flags.LoadCfg(p, o)
+		o.ApplyConfigIssues(flags.LoadCfg(p, o))
 	}
 	o.Normalize()
 	if err := o.EnsureCode(); err != nil {
@@ -334,7 +348,7 @@ func LoadFile() (*Options, error) {
 	return o, nil
 }
 
-// Load 始终安装可用配置；配置文件错误已由 LoadFile 回退默认值。
+// Load 安装配置；无效授权仍可通过本地管理 API 修复。
 func Load() (*Options, error) {
 	o, err := LoadFile()
 	if err == nil {
@@ -366,14 +380,28 @@ type AuthCfg struct {
 // AuthSnapshot 返回当前授权配置快照（fsauth/netauth Reconcile 的数据源）。
 // policy 在读点归一化（防空值/非法值漂移到安全语义外：fs/ssh 空=deny，net 空=open）。
 func AuthSnapshot() AuthCfg {
+	c := RawAuthSnapshot()
+	c.ExecPolicy = NormalizePolicy(c.ExecPolicy, PolicyOpen)
+	c.FsPolicy = NormalizePolicy(c.FsPolicy, PolicyDeny)
+	c.NetPolicy = NormalizePolicy(c.NetPolicy, PolicyOpen)
+	c.SshPolicy = NormalizePolicy(c.SshPolicy, PolicyDeny)
+	return c
+}
+
+// RawAuthSnapshot exposes malformed fields to the local settings editor so
+// saving unrelated settings cannot mistake a fallback for an explicit repair.
+func RawAuthSnapshot() AuthCfg {
 	authMu.RLock()
 	defer authMu.RUnlock()
-	return AuthCfg{
-		ExecPolicy: NormalizePolicy(Global.ExecPolicy, PolicyOpen), ExecDeny: Global.ExecDeny, ExecAllow: Global.ExecAllow,
-		FsPolicy: NormalizePolicy(Global.FsPolicy, PolicyDeny), FsDeny: Global.FsDeny, FsAllow: Global.FsAllow,
-		NetPolicy: NormalizePolicy(Global.NetPolicy, PolicyOpen), NetDeny: Global.NetDeny, NetAllow: Global.NetAllow,
-		SshPolicy: NormalizePolicy(Global.SshPolicy, PolicyDeny), SshDeny: Global.SshDeny, SshAllow: Global.SshAllow,
-	}
+	return AuthFrom(Global)
+}
+
+// CheckAuth gates device tools independently of grants and permission levels.
+// A broken local policy must be repaired through the local management API.
+func CheckAuth() error {
+	authMu.RLock()
+	defer authMu.RUnlock()
+	return Global.ValidateAuth()
 }
 
 // SetAuth 更新授权配置（内存即时生效；落盘由调用方负责——

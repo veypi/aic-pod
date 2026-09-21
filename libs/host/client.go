@@ -59,27 +59,32 @@ type Client struct {
 	tools       *tool.Dispatcher
 	browser     *browser.Service
 
-	execGrantMu sync.RWMutex
-	execGrants  map[string][]string
-	optsMu      sync.RWMutex
-	opts        Options
-	nc          *nats.Conn
-	kTool       string
-	hostID      string
-	uid         string
-	credVer     uint64
-	replay      *replayCache
-	procs       *exec_procs.Manager // exec 子进程统一托管（§5.8/§5.9）
-	policy      *fsauth.Policy      // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
-	netPol      *netauth.Policy     // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol      *netauth.Policy     // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
-	rtcMu       sync.RWMutex
-	access      *hostauth.Access
-	files       *hostfs.FS
-	bytes       *hostfs.Bytes
-	initErr     error
-	rtcSvc      *rtc.Service // hosts_rtc/1 直连服务
-	logf        func(string, ...any)
+	execGrantMu     sync.RWMutex
+	execGrants      map[string][]string
+	optsMu          sync.RWMutex
+	opts            Options
+	lifecycleMu     sync.Mutex // serializes Connect, Reconfigure and Close
+	closed          bool
+	ncMu            sync.RWMutex
+	nc              *nats.Conn
+	heartbeatCancel context.CancelFunc
+	heartbeatDone   chan struct{}
+	kTool           string
+	hostID          string
+	uid             string
+	credVer         uint64
+	replay          *replayCache
+	procs           *exec_procs.Manager // exec 子进程统一托管（§5.8/§5.9）
+	policy          *fsauth.Policy      // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	netPol          *netauth.Policy     // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol          *netauth.Policy     // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	rtcMu           sync.RWMutex
+	access          *hostauth.Access
+	files           *hostfs.FS
+	bytes           *hostfs.Bytes
+	initErr         error
+	rtcSvc          *rtc.Service // hosts_rtc/1 直连服务
+	logf            func(string, ...any)
 }
 
 // New 创建客户端（不连接）。
@@ -130,6 +135,19 @@ func New(opts Options) *Client {
 
 // Connect 连接 NATS，发布 caps v2，订阅会话级 inbox，启动心跳。后台运行，即时返回。
 func (c *Client) Connect() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.connect()
+}
+
+func (c *Client) connect() error {
+	if c.closed {
+		return fmt.Errorf("host client closed")
+	}
+	if nc := c.connection(); nc != nil && !nc.IsClosed() {
+		return nil
+	}
+	c.closeConnection()
 	if c.initErr != nil {
 		return c.initErr
 	}
@@ -137,18 +155,16 @@ func (c *Client) Connect() error {
 	if len(parts) != 4 {
 		return fmt.Errorf("invalid credential key")
 	}
-	c.hostID = parts[0]
-	if _, err := fmt.Sscanf(parts[1], "%d", &c.credVer); err != nil || c.credVer == 0 {
+	var credVer uint64
+	if _, err := fmt.Sscanf(parts[1], "%d", &credVer); err != nil || credVer == 0 {
 		return fmt.Errorf("invalid credential key version")
 	}
 	secret := parts[2]
-	c.uid = parts[3]
 
-	kConnect, _, kTool, err := proto.DeriveKeys(secret, c.hostID)
+	kConnect, _, _, err := proto.DeriveKeys(secret, c.hostID)
 	if err != nil {
 		return fmt.Errorf("derive keys: %w", err)
 	}
-	c.kTool = kTool
 
 	c.logf("starting aic-host v%s [%s/%s] (host=%s)", c.options().Version, c.options().DeviceType, c.options().DeviceName, c.hostID)
 
@@ -169,7 +185,14 @@ func (c *Client) Connect() error {
 			c.logf("NATS disconnected: %v", err)
 			if isAuthError(err) {
 				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new credential and restart.")
-				go func() { c.stopRTC(); nc.Close() }()
+				go func() {
+					c.lifecycleMu.Lock()
+					defer c.lifecycleMu.Unlock()
+					if c.connection() == nc {
+						c.stopRTC()
+						c.closeConnection()
+					}
+				}()
 			}
 		}),
 	}
@@ -185,22 +208,23 @@ func (c *Client) Connect() error {
 	if err != nil {
 		return fmt.Errorf("nats connect: %w", err)
 	}
-	c.nc = nc
 	c.logf("connected to NATS: %s", natsURL)
 
 	c.publishCaps(nc)
 
 	inbox, err := proto.HostInboxSubject(c.uid, c.hostID)
 	if err != nil {
+		nc.Close()
 		return err
 	}
 	// 每个请求独立 goroutine：避免 handler 阻塞造成 head-of-line 阻塞
 	if _, err := nc.Subscribe(inbox, func(msg *nats.Msg) { go c.handleMsg(msg) }); err != nil {
+		nc.Close()
 		return fmt.Errorf("subscribe: %w", err)
 	}
 	c.logf("listening on %s", inbox)
 
-	go c.heartbeatLoop()
+	c.installConnection(nc)
 
 	// The command runtime also serves authenticated server proxy when RTC is off.
 	if err := c.startCommands(); err != nil {
@@ -217,6 +241,13 @@ func (c *Client) Connect() error {
 
 // Close 优雅关闭：关闭 RTC 服务 → 取消订阅 → 断开 NATS。
 func (c *Client) Close() error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	c.closeConnection()
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = c.procs.Close(shutdown)
 	cancelRuns()
@@ -235,10 +266,6 @@ func (c *Client) Close() error {
 	if service != nil {
 		service.RevokeAll()
 	}
-	if c.nc != nil {
-		c.nc.Close()
-		c.nc = nil
-	}
 	return nil
 }
 
@@ -246,9 +273,12 @@ func (c *Client) Close() error {
 // 保留 Client 与 exec_procs Manager（bg 任务原样保留），仅更新
 // work_dir/exec_timeout 参数；NATS 地址（host）变化时重连。
 // 凭证/身份字段不变（换绑走 bind 流程重建）。
-// 注：重连后旧 heartbeatLoop 仍引用 c.nc 继续发 presence（幂等，20s 一次，
-// 多一个并发 loop 无功能影响，不额外处理）。
 func (c *Client) Reconfigure(o cfg.Options) error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closed {
+		return fmt.Errorf("host client closed")
+	}
 	opts, err := optionsOf(o, c.options().DeviceType, c.options().Version, c.options().OnLog)
 	if err != nil {
 		return err
@@ -281,7 +311,8 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	if c.browser != nil {
 		c.browser.Configure(opts.BrowserPath, opts.BrowserWidth, opts.BrowserHeight)
 	}
-	if restartRTC && c.nc != nil {
+	nc := c.connection()
+	if restartRTC && nc != nil {
 		if err := c.startCommands(); err != nil {
 			return err
 		}
@@ -291,15 +322,12 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 			}
 		}
 	}
-	if c.nc != nil {
-		c.publishCaps(c.nc)
+	if nc != nil {
+		c.publishCaps(nc)
 	}
 	if ResolveNATSURL(opts.Host) != oldURL {
-		if c.nc != nil {
-			c.nc.Close()
-			c.nc = nil
-		}
-		return c.Connect()
+		c.closeConnection()
+		return c.connect()
 	}
 	return nil
 }
@@ -341,7 +369,8 @@ func (c *Client) startRTC() error {
 		Hostname:      hostname,
 		Version:       c.options().Version,
 		Send: func(sig *proto.RtcSignal) {
-			if c.nc == nil {
+			nc := c.connection()
+			if nc == nil {
 				return
 			}
 			subj, err := proto.RtcOutSubject(c.uid, c.hostID, c.credVer)
@@ -349,7 +378,7 @@ func (c *Client) startRTC() error {
 				return
 			}
 			data, _ := json.Marshal(sig)
-			c.nc.Publish(subj, data)
+			nc.Publish(subj, data)
 		},
 		Logf: c.logf,
 	})
@@ -499,11 +528,50 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 	c.logf("caps published to %s (%d commands)", subj, n)
 }
 
-func (c *Client) heartbeatLoop() {
+func (c *Client) connection() *nats.Conn {
+	c.ncMu.RLock()
+	defer c.ncMu.RUnlock()
+	return c.nc
+}
+
+// Lifecycle callers are serialized. Each heartbeat owns one immutable NATS
+// connection and must exit before a replacement is installed.
+func (c *Client) installConnection(nc *nats.Conn) {
+	c.closeConnection()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.ncMu.Lock()
+	c.nc, c.heartbeatCancel, c.heartbeatDone = nc, cancel, done
+	c.ncMu.Unlock()
+	go func() { defer close(done); c.heartbeatLoop(ctx, nc) }()
+}
+
+func (c *Client) closeConnection() {
+	c.ncMu.Lock()
+	nc, cancel, done := c.nc, c.heartbeatCancel, c.heartbeatDone
+	c.nc, c.heartbeatCancel, c.heartbeatDone = nil, nil, nil
+	c.ncMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if nc != nil {
+		nc.Close()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (c *Client) heartbeatLoop(ctx context.Context, nc *nats.Conn) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if c.nc == nil {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if nc.IsClosed() {
 			return
 		}
 		subj, err := proto.PresenceSubject(c.uid, c.hostID, c.credVer)
@@ -517,7 +585,7 @@ func (c *Client) heartbeatLoop() {
 			"sent_at":        time.Now().UTC().Format(time.RFC3339),
 		}
 		data, _ := json.Marshal(presence)
-		c.nc.Publish(subj, data)
+		nc.Publish(subj, data)
 	}
 }
 

@@ -4,17 +4,18 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-// isolateConfigDir 将配置文件隔离到临时目录（darwin/linux 均经 HOME 或
-// XDG_CONFIG_HOME 推导 UserConfigDir；darwin 下 UserConfigDir 用 HOME）。
+// isolateConfigDir 在三个桌面平台都隔离配置，避免测试访问用户配置。
 func isolateConfigDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
+	t.Setenv("APPDATA", dir)
 	return dir
 }
 
@@ -67,7 +68,7 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("config perm = %o, want 600", st.Mode().Perm())
 	}
 }
@@ -110,7 +111,7 @@ func TestPublicDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicDir not created: %v", err)
 	}
-	if !st.IsDir() || st.Mode().Perm() != 0o700 {
+	if !st.IsDir() || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o700) {
 		t.Fatalf("PublicDir perm = %v isdir=%v, want dir 0700", st.Mode().Perm(), st.IsDir())
 	}
 	// 幂等：再调不报错
@@ -210,11 +211,11 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config must not block startup: %v", err)
 		}
-		if Global != o || o.Code == "" || o.Host != DefaultHost || !o.RTC || o.BrowserWidth != 1280 || o.FsPolicy != PolicyDeny {
+		if Global != o || o.Code == "" || o.Host != DefaultHost || !o.RTC || o.BrowserWidth != 1280 {
 			t.Fatalf("missing usable defaults for %q", body)
 		}
-		if err := o.ValidateAuth(); err != nil {
-			t.Fatalf("invalid auth field was not discarded: %v", err)
+		if err := o.ValidateAuth(); err != nil && CheckAuth() == nil {
+			t.Fatal("malformed authorization did not disable device tools")
 		}
 		data, _ := os.ReadFile(p)
 		if string(data) != body {
@@ -240,11 +241,58 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if o.Key != "existing-device-key" || o.Host != "http://localhost:4000" || o.HomePath != "/agents" || o.HostsSources != 64 {
 		t.Fatal("unrelated invalid fields discarded valid configuration")
 	}
-	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != PolicyDeny || o.Code == "" {
+	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != "typo" || o.Code == "" {
 		t.Fatal("invalid fields did not fall back to defaults")
 	}
-	if !reflect.DeepEqual(o.FsAllow, []string{"/workspace"}) || len(o.ExecAllow) != 0 {
-		t.Fatal("valid rule lost or malformed list partially applied")
+	if !reflect.DeepEqual(o.FsAllow, []string{"/workspace"}) || o.ValidateAuth() == nil {
+		t.Fatal("valid rule lost or malformed authorization became valid")
+	}
+}
+
+func TestMalformedAuthorizationPreservedUntilExplicitRepair(t *testing.T) {
+	isolateConfigDir(t)
+	saved := Global
+	t.Cleanup(func() { Global = saved })
+	p, _ := Path()
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		"exec_policy: dney\nexec_deny: [sh]\n",
+		"exec_policy: open\nexec_deny: [sh, 'bad rule']\n",
+		"exec_policy: open\nexec_deny: [sh, {}]\n",
+		"fs_policy: open\nfs_deny: [/private, 'ro:/secret']\n",
+		"net_policy: open\nnet_deny: [example.com, '*:443']\n",
+		"ssh_policy: open\nssh_allow: [example.com, '*:22']\n",
+		"[broken yaml\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			o, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			o.Normalize() // repeated startup normalization must not erase the error
+			if CheckAuth() == nil {
+				t.Fatal("malformed authorization permits tools")
+			}
+			o.HomePath = "/agents"
+			if Save(o) == nil {
+				t.Fatal("unrelated save silently repaired authorization")
+			}
+			data, err := os.ReadFile(p)
+			if err != nil || string(data) != body {
+				t.Fatal("invalid config was overwritten", err)
+			}
+		})
+	}
+	o := NewOptions()
+	o.ExecPolicy, o.ExecDeny = PolicyOpen, []string{"sh", "bad rule"}
+	o.Normalize()
+	if !reflect.DeepEqual(o.ExecDeny, []string{"sh", "bad rule"}) {
+		t.Fatal("deny entries were discarded")
 	}
 }
 

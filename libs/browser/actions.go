@@ -303,7 +303,7 @@ func (p *page) resolve(ctx context.Context, c tool.Caller, l Locator) (string, e
 			return "", err
 		}
 		if len(found.IDs) != 1 {
-			return "", wire.Fail("locator_match", fmt.Sprintf("Expected one element, matched %d", len(found.IDs)))
+			return "", locatorMatchError(len(found.IDs))
 		}
 		var resolved struct {
 			Object struct {
@@ -329,7 +329,7 @@ func (p *page) resolve(ctx context.Context, c tool.Caller, l Locator) (string, e
 			}
 		}
 		if matches != 1 {
-			return "", wire.Fail("locator_match", fmt.Sprintf("Expected one element, matched %d", matches))
+			return "", locatorMatchError(matches)
 		}
 	}
 	var resolved struct {
@@ -339,6 +339,12 @@ func (p *page) resolve(ctx context.Context, c tool.Caller, l Locator) (string, e
 	}
 	err := p.call(ctx, "DOM.resolveNode", map[string]any{"backendNodeId": backend}, &resolved)
 	return resolved.Object.ID, err
+}
+
+func locatorMatchError(count int) *wire.Fault {
+	err := wire.Fail("locator_match", fmt.Sprintf("Expected one element, matched %d", count))
+	err.Details = map[string]any{"matches": count}
+	return err
 }
 func (p *page) node(ctx context.Context, object, fn string, args ...any) (json.RawMessage, error) {
 	argv := []map[string]any{}
@@ -498,7 +504,8 @@ func (s *Service) Wait(ctx context.Context, c tool.Caller, a WaitArgs) (PageInfo
 			object, e := p.resolve(ctx, c, *a.Locator)
 			if e != nil {
 				if f, ok := e.(*wire.Fault); ok && f.Code == "locator_match" {
-					match = a.State == "hidden"
+					details, _ := f.Details.(map[string]any)
+					match = a.State == "hidden" && details["matches"] == 0
 					err = nil
 				} else {
 					err = e

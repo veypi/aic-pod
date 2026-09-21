@@ -200,9 +200,10 @@ type cuaMcp struct {
 	bin               string
 	logf              func(string, ...any)
 	callMu            sync.Mutex
+	writeGate         chan struct{}
 	mu                sync.Mutex
 	cmd               *exec.Cmd
-	stdin             io.Writer
+	stdin             io.WriteCloser
 	pending           map[int]chan mcpResponse
 	nextID            int
 	alive             bool
@@ -211,7 +212,7 @@ type cuaMcp struct {
 }
 
 func newCuaMcp(bin string, logf func(string, ...any)) *cuaMcp {
-	return &cuaMcp{bin: bin, logf: logf, pending: map[int]chan mcpResponse{}, nextID: 1}
+	return &cuaMcp{bin: bin, logf: logf, writeGate: make(chan struct{}, 1), pending: map[int]chan mcpResponse{}, nextID: 1}
 }
 
 // ensure 保证子进程存活且完成 MCP 握手（懒启动；死进程清理后重生）。
@@ -310,8 +311,14 @@ func (m *cuaMcp) ensure(ctx context.Context) error {
 		m.mu.Unlock()
 		return fmt.Errorf("cua-driver mcp initialize: %w", err)
 	}
-	m.notify("notifications/initialized", map[string]any{})
+	if err := m.notify(initCtx, "notifications/initialized", map[string]any{}); err != nil {
+		return err
+	}
 	m.mu.Lock()
+	if m.cmd != cmd {
+		m.mu.Unlock()
+		return fmt.Errorf("cua-driver closed during initialization")
+	}
 	m.alive = true
 	m.mu.Unlock()
 	m.logf("[cua] mcp initialized (pid %d)", cmd.Process.Pid)
@@ -349,24 +356,32 @@ func (m *cuaMcp) readLoop(stdout io.ReadCloser) {
 
 // request 发送一个 JSON-RPC 请求并等应答（ctx 控超时；等待不持 mu）。
 func (m *cuaMcp) request(ctx context.Context, method string, params any) (*json.RawMessage, error) {
+	select {
+	case m.writeGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	m.mu.Lock()
 	if m.cmd == nil || m.stdin == nil {
 		m.mu.Unlock()
+		<-m.writeGate
 		return nil, fmt.Errorf("cua-driver not running")
 	}
 	id := m.nextID
 	m.nextID++
 	ch := make(chan mcpResponse, 1)
 	m.pending[id] = ch
-	body, _ := json.Marshal(map[string]any{
+	cmd, stdin := m.cmd, m.stdin
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); delete(m.pending, id); m.mu.Unlock() }()
+	body, werr := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": method, "params": params,
 	})
-	_, werr := m.stdin.Write(append(body, '\n'))
-	m.mu.Unlock()
+	if werr == nil {
+		werr = m.writeMessage(ctx, cmd, stdin, append(body, '\n'))
+	}
+	<-m.writeGate
 	if werr != nil {
-		m.mu.Lock()
-		delete(m.pending, id)
-		m.mu.Unlock()
 		return nil, fmt.Errorf("cua-driver write: %w", werr)
 	}
 	select {
@@ -383,13 +398,58 @@ func (m *cuaMcp) request(ctx context.Context, method string, params any) (*json.
 	}
 }
 
-func (m *cuaMcp) notify(method string, params any) {
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.stdin != nil {
-		m.stdin.Write(append(body, '\n'))
+func (m *cuaMcp) notify(ctx context.Context, method string, params any) error {
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err != nil {
+		return err
 	}
+	select {
+	case m.writeGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-m.writeGate }()
+	m.mu.Lock()
+	cmd, stdin := m.cmd, m.stdin
+	m.mu.Unlock()
+	if cmd == nil || stdin == nil {
+		return fmt.Errorf("cua-driver not running")
+	}
+	return m.writeMessage(ctx, cmd, stdin, append(body, '\n'))
+}
+
+// Caller holds writeGate, never mu. Closing this generation's stdin interrupts
+// a blocked write; a partial JSON-RPC line requires a fresh transport, not replay.
+func (m *cuaMcp) writeMessage(ctx context.Context, cmd *exec.Cmd, stdin io.WriteCloser, body []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	finished := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		m.mu.Lock()
+		if m.cmd == cmd {
+			m.killLocked()
+		}
+		m.mu.Unlock()
+		close(finished)
+	})
+	n, err := stdin.Write(body)
+	if !stop() {
+		<-finished
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	} else if err == nil && n != len(body) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		m.mu.Lock()
+		if m.cmd == cmd {
+			m.killLocked()
+		}
+		m.mu.Unlock()
+	}
+	return err
 }
 
 // call never replays an interaction after a transport/session error.
@@ -463,6 +523,9 @@ func cuaSessionEndedErr(err error) bool {
 
 // killLocked 终止子进程并清理状态。调用方须持 mu。
 func (m *cuaMcp) killLocked() {
+	if m.stdin != nil {
+		_ = m.stdin.Close()
+	}
 	if m.cmd != nil && m.cmd.Process != nil {
 		m.cmd.Process.Kill()
 	}

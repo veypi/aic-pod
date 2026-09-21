@@ -827,6 +827,26 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if err = file.Sync(); err != nil {
 		return nil, err
 	}
+	// Windows finalizes last-write time when the writable handle closes. Keep
+	// a read handle to the same object so the returned version survives Close
+	// and the subsequent commit still uses a pinned, verified staging file.
+	if runtime.GOOS == "windows" {
+		reader, err := openRegular(h, temp)
+		if err != nil {
+			return nil, err
+		}
+		staged, statErr := file.Stat()
+		opened, openErr := reader.Stat()
+		if statErr != nil || openErr != nil || !os.SameFile(staged, opened) {
+			reader.Close()
+			return nil, hosts.Fail("source_changed", "Staging file changed before commit")
+		}
+		closeErr := file.Close()
+		file = reader
+		if closeErr != nil {
+			return nil, closeErr
+		}
+	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -851,17 +871,15 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if err = p.Condition.Check(currentVersion, currentExists); err != nil {
 		return nil, err
 	}
-	// Hard-link creation is atomic and no-replace. The staging file is in the
-	// same directory/filesystem; remove its temporary name after linking.
+	// Atomic no-replace works without hard-link support (e.g. Windows FAT
+	// volumes) and cannot overwrite a destination created after preflight.
 	if p.Condition.Absent {
-		err = h.Link(temp, name)
-		if err == nil {
-			if unlinkErr := h.Remove(temp); unlinkErr != nil {
-				failure := hosts.Fail("filesystem_error", "File committed but staging cleanup failed")
-				failure.Effect = "partial"
-				return nil, failure
-			}
+		dir, openErr := h.Open(".")
+		if openErr != nil {
+			return nil, openErr
 		}
+		err = renameNoReplace(int(dir.Fd()), temp, int(dir.Fd()), name)
+		dir.Close()
 	} else {
 		err = h.Rename(temp, name)
 	}

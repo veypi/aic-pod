@@ -39,6 +39,10 @@ type Conn struct {
 	next        int64
 	pending     map[int64]chan message
 	events      chan Event
+	eventQueue  []Event // guarded by mu; replies never wait for event consumers
+	eventBytes  int
+	eventWake   chan struct{}
+	frameAcks   chan Event
 	done        chan struct{}
 	processDone chan struct{}
 	once        sync.Once
@@ -88,7 +92,9 @@ func start(ctx context.Context, path, profile string, args ...string) (*Conn, er
 	}
 	inR.Close()
 	outW.Close()
-	c := &Conn{writeGate: make(chan struct{}, 1), cmd: cmd, read: outR, write: inW, pending: map[int64]chan message{}, events: make(chan Event, 512), done: make(chan struct{}), processDone: make(chan struct{})}
+	c := &Conn{writeGate: make(chan struct{}, 1), cmd: cmd, read: outR, write: inW, pending: map[int64]chan message{}, events: make(chan Event), eventWake: make(chan struct{}, 1), frameAcks: make(chan Event, 512), done: make(chan struct{}), processDone: make(chan struct{})}
+	go c.dispatchEvents()
+	go c.ackFrames()
 	go c.loop()
 	go func() {
 		err := cmd.Wait()
@@ -143,12 +149,8 @@ func (c *Conn) loop() {
 			if c.prepareAttachment(msg.Event) {
 				continue
 			}
-			select {
-			case c.events <- msg.Event:
-			case <-c.done:
-				return
-			default:
-				c.fail(fmt.Errorf("CDP event queue overflow"))
+			if err := c.enqueueEvent(msg.Event); err != nil {
+				c.fail(err)
 				return
 			}
 		}
@@ -158,6 +160,8 @@ func (c *Conn) fail(err error) {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.err = err
+		c.eventQueue = nil
+		c.eventBytes = 0
 		closing := c.closing
 		c.mu.Unlock()
 		close(c.done)

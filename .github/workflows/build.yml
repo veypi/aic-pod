@@ -28,7 +28,7 @@ jobs:
           fetch-tags: true
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache: false
       - uses: actions/setup-node@v4
         with:
@@ -41,6 +41,8 @@ jobs:
         run: |
           go test ./protocol/ui
           npm test --prefix desktop
+      - name: Test native files and authorization config
+        run: go test ./libs/hostfs ./cfg
       - name: Build
         run: make ${{ matrix.target }}
       - name: Upload artifacts
@@ -71,7 +73,7 @@ jobs:
           fetch-tags: true
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache: false
       - name: Install go-winres (windows)
         if: runner.os == 'Windows'

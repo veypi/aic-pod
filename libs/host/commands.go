@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
@@ -41,6 +42,9 @@ func (c *Client) initFilesystem() error {
 		return err
 	}
 	files, err := hostfs.New(hostfs.Config{Roots: roots, Home: &home, Bytes: store, MaxProxyUploadBytes: c.options().Transfers.ProxyUploadBytes, Check: func(ctx context.Context, call hostfs.Call, path string, write bool) error {
+		if cfg.CheckAuth() != nil {
+			return wire.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

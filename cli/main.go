@@ -72,6 +72,13 @@ func main() {
 		logv.Error().Msg(err.Error())
 		os.Exit(2)
 	}
+	cfg.Global.ApplyConfigIssues(cmd.ConfigIssues())
+	for _, issue := range cmd.ConfigIssues() {
+		logv.Warn().Msgf("configuration issue (%s, %s): %s", issue.Source, issue.Field, issue.Reason)
+	}
+	if err := cfg.Global.ValidateAuth(); err != nil {
+		logv.Warn().Msg("device tools disabled: invalid authorization configuration; repair local settings")
+	}
 	if err := cmd.Run(); err != nil {
 		logv.Error().Msg(err.Error())
 		os.Exit(1)

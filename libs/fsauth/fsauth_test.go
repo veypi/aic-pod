@@ -9,18 +9,38 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 )
 
-// mkBase 在 os.TempDir() 之外建测试根（t.TempDir() 落在临时区白名单内，
-// 分级向量会被污染）：优先 /var/tmp（unix），不可写时回落 t.TempDir()。
-// 两侧（模式/路径）都经 canonical 归一，/var → /private/var 类 symlink 安全。
+// mkBase 始终使用测试临时目录，不依赖 /var/tmp 可写或宿主机目录布局。
 func mkBase(t *testing.T) string {
 	t.Helper()
-	for _, parent := range []string{"/var/tmp", "/tmp"} {
-		if base, err := os.MkdirTemp(parent, "fsauth-"); err == nil {
-			t.Cleanup(func() { os.RemoveAll(base) })
-			return base
+	return t.TempDir()
+}
+
+// 隔离测试只移除全局临时区便利根，避免 t.TempDir() 中的拒绝向量被放行。
+// 工作区、显式 allow、deny、grant 和缓存等仍由真实实现构造和判定。
+func isolateTemporaryRoots(p *Policy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	temporary := append(tempRoots(), canonical(os.TempDir()))
+	roots := p.baseRoots[:0]
+	for _, root := range p.baseRoots {
+		isTemporary := false
+		for _, tmp := range temporary {
+			if root == canonical(tmp) {
+				isTemporary = true
+				break
+			}
+		}
+		if !isTemporary {
+			roots = append(roots, root)
 		}
 	}
-	return t.TempDir()
+	p.baseRoots = roots
+}
+
+func TestDefaultTemporaryRootsRemainWritable(t *testing.T) {
+	p := &Policy{grants: map[string][]string{}}
+	p.rebuildBaseRootsLocked()
+	assertGrades(t, p, filepath.Join(t.TempDir(), "file"), 1, 2)
 }
 
 // newTestPolicy 构造隔离 Policy（公共区/会话区指向测试根，不碰真实 $HOME/.aic）。
@@ -39,6 +59,7 @@ func newTestPolicy(t *testing.T, workDir string) *Policy {
 	p.mu.Lock()
 	p.rebuildBaseRootsLocked()
 	p.mu.Unlock()
+	isolateTemporaryRoots(p)
 	return p
 }
 
@@ -55,6 +76,7 @@ func setDeny(t *testing.T, p *Policy, extra ...string) {
 func setAllow(t *testing.T, p *Policy, entries ...string) {
 	t.Helper()
 	roots, globs := splitAllow(entries)
+	defer isolateTemporaryRoots(p)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.extraWrite = roots
@@ -65,6 +87,7 @@ func setAllow(t *testing.T, p *Policy, entries ...string) {
 // addAllowRoot 追加单个裸路径 fs_allow 条目（包内测试 helper；同 rebuildLocked 语义）。
 func addAllowRoot(t *testing.T, p *Policy, root string) {
 	t.Helper()
+	defer isolateTemporaryRoots(p)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.extraWrite = append(p.extraWrite, canonical(root))
@@ -100,7 +123,7 @@ func TestDenyPatterns(t *testing.T) {
 	}
 }
 
-// TestDecideGrading：deny → 0/0；白名单 → 1/2；其余 → 1/3。
+// TestDecideGrading：deny → 0/0；可写白名单 → 1/2；未匹配 → 0/0。
 func TestDecideGrading(t *testing.T) {
 	base := mkBase(t)
 	ws := filepath.Join(base, "ws")
@@ -115,7 +138,7 @@ func TestDecideGrading(t *testing.T) {
 	assertGradesSid(t, p, "s1", p.sessionDir+"/s2/out.txt", 1, 2)
 	// 白名单：公共区
 	assertGrades(t, p, p.publicDir+"/x.txt", 1, 2)
-	// 其余：1/3
+	// 未匹配：0/0
 	assertGrades(t, p, base+"/elsewhere/f.txt", 0, 0)
 	// deny：/** 语义含根自身——连 ls 目录一并拒
 	setDeny(t, p, base+"/secrets/**")
@@ -124,9 +147,7 @@ func TestDecideGrading(t *testing.T) {
 	assertGrades(t, p, base+"/secrets-sub/x", 0, 0) // 前缀不同名不命中
 }
 
-// TestDecideAllowOverride：allow 覆盖 deny（两键语义，2026-09-09）——显式 fs_allow
-// 条目压过 deny：裸路径覆盖其子树、通配条目精确匹配（并授予写 2）；内建便利根
-// （工作区/临时区/公共区/缓存/会话区）与临时 grant 不压（安全默认保持权威）。
+// TestDenyPrecedesAllAllow：deny 优先于显式 allow、临时 grant 和 open 模式。
 func TestDenyPrecedesAllAllow(t *testing.T) {
 	base := mkBase(t)
 	p := newTestPolicy(t, "")
@@ -149,6 +170,7 @@ func TestReadOnlyAllowAndRevocation(t *testing.T) {
 	a.FsAllow = []string{"ro:" + base + "/read", base + "/write"}
 	cfg.SetAuth(a)
 	p.Reconcile()
+	isolateTemporaryRoots(p)
 	assertGrades(t, p, base+"/read/file", 1, 0)
 	assertGrades(t, p, base+"/write/file", 1, 2)
 	assertGrades(t, p, base+"/outside/file", 0, 0)
@@ -370,9 +392,9 @@ func TestCanonicalSymlinkBypass(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skip("symlink unavailable:", err)
 	}
-	// 经 link 访问 outside 下的文件 → canonical 后落在 outside（非白名单）→ 1/3
+	// 经 link 访问 outside 下的文件 → canonical 后落在 outside（非白名单）→ 0/0
 	assertGrades(t, p, link+"/f.txt", 0, 0)
-	// link 自身的 canonical 身份 = outside（EvalSymlinks 成功）→ 同样 1/3：
+	// link 自身的 canonical 身份 = outside（EvalSymlinks 成功）→ 同样 0/0：
 	// 写 link 即写 outside，权限随真实目标
 	assertGrades(t, p, link, 0, 0)
 	// 白名单内普通文件不受影响
@@ -411,6 +433,7 @@ func TestDecideMissingTopLevelConsistency(t *testing.T) {
 	p.extraWrite = canonicalList([]string{missing + "/work"})
 	p.rebuildBaseRootsLocked()
 	p.mu.Unlock()
+	isolateTemporaryRoots(p)
 	assertGrades(t, p, missing+"/work/f.txt", 1, 2)
 }
 
@@ -424,6 +447,7 @@ func TestWriteRootsFor(t *testing.T) {
 	p.extraWrite = canonicalList([]string{base + "/custom"})
 	p.rebuildBaseRootsLocked()
 	p.mu.Unlock()
+	isolateTemporaryRoots(p)
 	p.Grant("s1", base+"/granted")
 
 	roots := p.WriteRootsFor("s1")
@@ -464,12 +488,14 @@ func TestReconcile(t *testing.T) {
 	o.FsDeny = []string{secrets + "/**"}
 	cfg.Global = o
 	p.Reconcile()
+	isolateTemporaryRoots(p)
 	assertGrades(t, p, custom+"/x", 1, 2)
 	assertGrades(t, p, secrets+"/x", 0, 0)
 	// Reconcile 后 deny 表重建：cfg 清空即恢复默认表
 	o2 := cfg.NewOptions()
 	cfg.Global = o2
 	p.Reconcile()
+	isolateTemporaryRoots(p)
 	assertGrades(t, p, secrets+"/x", 0, 0)
 }
 

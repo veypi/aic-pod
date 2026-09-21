@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
+const { assertBrowserBundle, manifest } = require("../browser-bundle.cjs");
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.resolve(desktopDir, "..", "dist");
@@ -100,6 +101,16 @@ const backendCandidates = [
 if (!backendCandidates.some((p) => fs.existsSync(p))) {
   missing.push("resources/backend/aic-backend(.exe)");
 }
+
+// Chrome is a required independent runtime, outside asar. Validate the target
+// and its resources, rather than allowing a system Chrome fallback to hide a
+// broken release. Old JS engines and other architectures must not ship.
+try {
+  const root = path.join(resDir, "browser"), targets = fs.readdirSync(root);
+  if (targets.length !== 1 || !manifest.assets[targets[0]]) throw new Error("expected exactly one supported browser target");
+  const [platform, arch] = targets[0].split("-");
+  assertBrowserBundle(root, platform, arch);
+} catch (error) { missing.push(`resources/browser: ${error.message}`); }
 
 // ---- 结果 ----
 if (missing.length) {
