@@ -258,15 +258,16 @@
   </div>
 </body>
 <script setup>
-  // 页面与本地 API 同源（壳页面 /settings 路由）：$mod.$fetch 自动携带 x-aic-code
+  // 设置读写经 Electron 桥：$mod.$pod.* → settings-preload → 主进程 spawn
+  // `aic-backend config|bind|unbind` 子命令写 config.yaml；保存/绑定后主进程自动重启后端子进程
   setMsg = (text, ok) => {
     $refs.msg.textContent = text;
     if (ok === 'warn') $refs.msg.style.color = '#facc15';
     else $refs.msg.style.color = ok ? '#4ade80' : '#f87171';
   };
 
-  // 网络层失败（本地服务已重启/端口变化）：fetch 抛 TypeError；业务错误走 HTTP JSON
-  isNetErr = (e) => e instanceof TypeError || /failed to fetch|networkerror|load failed/i.test((e && e.message) || '');
+  // 调用失败分类：桥/主进程异常（重启窗口内）→ 提示重试；业务错误 = 后端校验消息
+  isNetErr = (e) => e instanceof TypeError || /failed to fetch|network|invoke|不可用/i.test((e && e.message) || '');
 
   // 凭证脏检查基线（get_config 回填值）：与当前输入一致时保存不重绑
   loadedKey = '';
@@ -361,7 +362,7 @@
 
   refreshStatus = async () => {
     try {
-      const s = await $mod.$fetch('/api/get_status');
+      const s = await $mod.$pod.get_status();
       if (s.running) {
         $refs.sdot.className = 'dot on';
         $refs.stext.textContent = '已连接 ' + (s.host_id || '') + (s.hostname ? ' @' + s.hostname : '') + (s.version ? ' · ' + s.version : '');
@@ -377,7 +378,7 @@
 
   boot = async () => {
     try {
-      const cfg = await $mod.$fetch('/api/get_config');
+      const cfg = await $mod.$pod.get_config();
       $refs.host.value = cfg.host || '';
       $refs.key.value = cfg.key || '';
       loadedKey = cfg.key || '';
@@ -422,15 +423,15 @@
         body[d.key + '_deny'] = auth[d.key].deny;
         body[d.key + '_allow'] = auth[d.key].allow;
       }
-      await $mod.$fetch('/api/set_config', {method: 'POST', body});
+      await $mod.$pod.set_config(body);
     } catch (e) {
-      setMsg(isNetErr(e) ? '本地服务不可达（可能已重启），请重新打开本地配置页' : '保存失败: ' + e.message, false);
+      setMsg(isNetErr(e) ? '设置桥暂不可用（后端可能正在重启），请重试' : '保存失败: ' + e.message, false);
       refreshStatus();
       return;
     }
     if (key && key !== loadedKey) {
       try {
-        await $mod.$fetch('/api/bind', {method: 'POST', body: {credential: key}});
+        await $mod.$pod.bind(key);
         loadedKey = key;
       } catch (e) {
         setMsg('地址已保存；凭证未生效: ' + e.message, 'warn');
@@ -459,7 +460,7 @@
       ok = !!(r && r.ok);
     } else {
       try {
-        const r = await $mod.$fetch('/api/check_host', {method: 'POST', body: {host: h}});
+        const r = await $mod.$pod.check_host(h);
         ok = !!(r && r.ok);
       } catch (e) {ok = false;}
     }
@@ -484,8 +485,8 @@
   reconnect = async () => {
     $refs.btnReconnect.disabled = true;
     try {
-      await $mod.$fetch('/api/stop', {method: 'POST', body: {}});
-      await $mod.$fetch('/api/start', {method: 'POST', body: {}});
+      await $mod.$pod.stop();
+      await $mod.$pod.start();
       setMsg('已重连', true);
     } catch (e) {setMsg('重连失败: ' + e.message, false);}
     $refs.btnReconnect.disabled = false;

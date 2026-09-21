@@ -3,24 +3,26 @@
 // 架构（固定视口 browser，设计见 aic/docs/os_native_windows.md）：
 //
 // Electron Main (Node)
-//   ├─ spawn Go 后端 → 本地 API 配置/绑定 → 平台页 WebContentsView
+//   ├─ spawn Go 后端；设置/凭证经 `aic-backend config|bind` 子命令读写 config.yaml
 //   ├─ browser 默认路径：独立 Chrome，生命周期与执行由 Go 管理
 //   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
 //   ├─ hosts_rtc/1 与 hosts_nats/1：后端统一 browser 工具
 //   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
-//	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload；不依赖平台页）：托盘
+//	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload + app://aic 协议）：托盘
 //	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
 //	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
 //
-// 安全：所有 IPC handler 校验 event.senderFrame.url 的 host——
+// 安全：所有 IPC handler 校验 event.senderFrame.url——
 // 平台能力（local:api/window:*/pet:*）仅白名单 host（配置 host + 默认与旧平台域名）可调；
-// 设置能力（platform:check/open、settings:close）仅 127.0.0.1 本地页面可调。端口/code 不出主进程。
-const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut } = require('electron')
+// 设置能力（platform:check/open、settings:close）仅设置窗（app://aic 协议）可调；
+// local:api 的设置面分支两类 frame 都可用，但只落盘 config.yaml（无 HTTP、无端口、无 code）。
+const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol } = require('electron')
 const { spawn } = require('child_process')
 const { browserEnv } = require('./browser-path.cjs')
-const { waitForBackend } = require('./backend-startup.cjs')
+const { waitForStartup } = require('./backend-startup.cjs')
 const fs = require('fs')
 const net = require('net')
+const os = require('os')
 const path = require('path')
 
 // ---- 常量 ----
@@ -41,6 +43,47 @@ const DEFAULT_HOST = 'https://ivec-ai.com'
 // 兼容旧配置与跳转后的页面 origin。
 const LEGACY_HOSTS = ['ivec.ai']
 
+// ---- 设置窗自定义协议（2026-09-22 去本地管理 API） ----
+// app://aic/<path> → desktop/settings-ui/<path>（SPA：无扩展名路径回落壳页 root.html）。
+// 本地不再监听端口、无校验码：设置读写经 IPC → spawn `aic-backend config|bind` 子命令。
+const SETTINGS_SCHEME = 'app'
+const SETTINGS_ORIGIN = 'app://aic'
+const settingsUiDir = path.join(__dirname, 'settings-ui')
+const SETTINGS_MIME = {
+  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
+  '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon',
+}
+// standard+secure 才能跑 ES module / fetch（vhtml 组件加载、langs.json）；须在 app ready 前注册
+protocol.registerSchemesAsPrivileged([
+  { scheme: SETTINGS_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+])
+
+function registerSettingsProtocol() {
+  const handler = async (request) => {
+    let rel = '/'
+    try { rel = decodeURIComponent(new URL(request.url).pathname || '/') } catch (e) { /* 忽略 */ }
+    const hasExt = /\.[A-Za-z0-9]+$/.test(rel)
+    const candidates = rel === '/' ? ['/root.html'] : hasExt ? [rel] : [rel, '/root.html']
+    for (const c of candidates) {
+      const file = path.resolve(settingsUiDir, '.' + path.posix.normalize(c))
+      if (file !== settingsUiDir && !file.startsWith(settingsUiDir + path.sep)) continue // 目录穿越护栏
+      try {
+        const body = await fs.promises.readFile(file)
+        const mime = SETTINGS_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
+        return new Response(body, { headers: { 'Content-Type': mime } })
+      } catch (e) { /* 下一候选 */ }
+    }
+    return new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } })
+  }
+  // 默认 session + 设置窗独立 partition：自定义协议逐 session 注册，缺一处即 ERR_UNKNOWN_URL_SCHEME
+  protocol.handle(SETTINGS_SCHEME, handler)
+  try { session.fromPartition('settings').protocol.handle(SETTINGS_SCHEME, handler) } catch (e) {
+    console.error('[settings] protocol register failed:', e.message)
+  }
+}
+
 let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
 let platformView = null // 平台页视图（恒占满 contentView）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
@@ -53,8 +96,7 @@ let quitting = false
 let petDragOff = null // 桌宠拖动：鼠标相对窗口偏移
 let petPos = null // 桌宠当前位置 {x, y}（内存缓存，创建/拖动时更新）
 let petPosTimer = null // 桌宠位置写盘防抖 timer
-let localPort = 0 // Go 后端本地服务端口
-let localCode = '' // 本地 API 校验码（不出主进程）
+let backendReady = false // 后端子进程已就绪（就绪后异常退出 → failStartup；主动 stop/restart 不算失败）
 let host = DEFAULT_HOST // 平台地址（配置读取）
 
 // ---- 单实例（唯一 ID，第二实例聚焦现有窗口；本地服务端口唯一） ----
@@ -130,17 +172,16 @@ async function start() {
     filePath: path.join(__dirname, 'remote-preload.js'),
   })
 
+  registerSettingsProtocol()
   registerIpc()
   startCmdServer()
 
-  // 2. 异步链：spawn 后端 → 握手 → 读配置 → 探测平台 → 跳转
+  // 2. 异步链：spawn 后端 → 读配置（config get 子命令）→ 探测平台 → 跳转
   setStep('正在启动本地服务…')
-  const info = await spawnBackend()
-  localPort = info.port
-  localCode = info.code
+  await spawnBackend()
 
   setStep('正在读取配置…')
-  const cfg = await getLocalConfig()
+  const cfg = await readConfig().catch(() => null)
   if (!cfg) throw new Error('无法读取本地服务配置，请检查本地服务日志')
   if (cfg && cfg.host) host = cfg.host
   allowedHostsCache = computeAllowedHosts(host)
@@ -185,29 +226,53 @@ function cuaEnv() {
   return fs.existsSync(bin) ? { CUA_DRIVER_PATH: bin } : {}
 }
 
-// ---- 启动子进程与握手 ----
+// ---- 后端子进程：启动 / 停止 / 重启（无端口握手，2026-09-22） ----
 async function spawnBackend() {
-  const portFile = path.join(app.getPath('userData'), 'aic-port.json')
-  fs.mkdirSync(path.dirname(portFile), { recursive: true })
-  fs.rmSync(portFile, { force: true })
   backend = spawn(backendBin, [], {
     // Browser automation runs in Go with a separate Chrome executable.
     // cuaEnv()：内置 cua-driver 路径注入（缺失时空对象，回落系统探测）。
-    env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop', ...browserEnv({packaged: app.isPackaged, resourcesPath: process.resourcesPath, directory: __dirname}), ...cuaEnv() },
+    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv({packaged: app.isPackaged, resourcesPath: process.resourcesPath, directory: __dirname}), ...cuaEnv() },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
   backend.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
-  let ready = false
   backend.on('exit', (code, signal) => {
-    if (ready) failStartup(new Error(`后端进程异常退出（${signal || code}）`))
+    if (backendReady) failStartup(new Error(`后端进程异常退出（${signal || code}）`))
+    backendReady = false
   })
   backend.on('error', (error) => {
-    if (ready) failStartup(error)
+    if (backendReady) failStartup(error)
+    backendReady = false
   })
-  const info = await waitForBackend(backend, portFile)
-  ready = true
-  return info
+  await waitForStartup(backend)
+  backendReady = true
+  return backend
+}
+
+function backendAlive() {
+  return !!backend && !backend.killed && backend.exitCode == null && backend.signalCode == null
+}
+
+async function stopBackend() {
+  const child = backend
+  backendReady = false // 主动停止：退出不再算启动失败
+  backend = null
+  if (!child || child.exitCode != null || child.signalCode != null) return
+  await new Promise((resolve) => {
+    child.once('close', () => resolve())
+    try { child.kill('SIGTERM') } catch (e) { /* 已退出 */ }
+    const t = setTimeout(() => { try { child.kill('SIGKILL') } catch (e) { /* 忽略 */ } resolve() }, 5000)
+    t.unref?.()
+  })
+}
+
+// 保存配置/绑定凭证后重启后端子进程（变更 = 重启生效）；并发调用串行化
+let restarting = null
+function restartBackend() {
+  if (!restarting) {
+    restarting = (async () => { await stopBackend(); await spawnBackend() })().finally(() => { restarting = null })
+  }
+  return restarting
 }
 
 function failStartup(error) {
@@ -220,16 +285,103 @@ function failStartup(error) {
   app.quit()
 }
 
-// ---- 主进程内部 HTTP（本地 API / 平台探测） ----
-async function getLocalConfig() {
-  try {
-    const r = await fetch(`http://127.0.0.1:${localPort}/api/get_config`, {
-      headers: { 'x-aic-code': localCode },
-      signal: AbortSignal.timeout(3000),
+// ---- 本机设置（Go 子命令：config get|set / bind|unbind；stdin 传 JSON / 凭证） ----
+// 设置面 = config.yaml（唯一来源）：与方法名一一对应，无 HTTP、无端口、无 code。
+function runBackendCmd(args, input, { timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(backendBin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL') } catch (e) { /* 忽略 */ }
+      reject(new Error(`aic-backend ${args.join(' ')} 超时（${timeoutMs / 1000}s）`))
+    }, timeoutMs)
+    child.stdout.on('data', (d) => { out += d.toString() })
+    child.stderr.on('data', (d) => { err += d.toString() })
+    child.on('error', (e) => { clearTimeout(timer); reject(e) })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) reject(new Error(err.trim() || `aic-backend ${args.join(' ')} 退出码 ${code}`))
+      else resolve(out)
     })
-    return r.ok ? await r.json() : null
-  } catch (e) {
-    return null
+    if (input != null) child.stdin.write(String(input))
+    child.stdin.end()
+  })
+}
+
+// 读有效配置（config get → JSON 视图；含 key，仅主进程内部使用）
+async function readConfig() {
+  return JSON.parse(await runBackendCmd(['config', 'get']))
+}
+
+async function writeConfig(patch) {
+  await runBackendCmd(['config', 'set'], JSON.stringify(patch || {}))
+}
+
+async function bindCredential(credential) {
+  await runBackendCmd(['bind'], String(credential))
+}
+
+async function unbindCredential() {
+  await runBackendCmd(['unbind'])
+}
+
+// host_id 从凭证首段解析（与连接状态无关，同 Go 侧 settings.BoundHostID）
+function boundHostID(credential) {
+  const parts = String(credential || '').trim().split('.')
+  return parts.length === 4 ? parts[0] : ''
+}
+
+// 运行状态：后端子进程存活 + 已绑定凭证（未绑定则 host 会话不启动）
+async function localStatus() {
+  const cfg = await readConfig().catch(() => null)
+  return {
+    running: backendAlive() && !!(cfg && cfg.key),
+    host_id: boundHostID(cfg && cfg.key),
+    hostname: os.hostname(),
+    version: (cfg && cfg.version) || '',
+  }
+}
+
+// 日志尾部（Go logv 写 UserConfigDir/aic/aic.log；截断起点落在行中间时丢弃首段）
+const logReadMax = 256 << 10
+async function readLogTail() {
+  const p = path.join(app.getPath('appData'), 'aic', 'aic.log')
+  let fh
+  try { fh = await fs.promises.open(p, 'r') } catch (e) {
+    if (e.code === 'ENOENT') return { log: '' }
+    throw e
+  }
+  try {
+    const st = await fh.stat()
+    const start = st.size > logReadMax ? st.size - logReadMax : 0
+    const len = Number(st.size - start)
+    const buf = Buffer.alloc(len)
+    const { bytesRead } = await fh.read(buf, 0, len, start)
+    let text = buf.subarray(0, bytesRead).toString('utf8')
+    if (start > 0) { const i = text.indexOf('\n'); if (i >= 0) text = text.slice(i + 1) }
+    return { log: text }
+  } finally { await fh.close() }
+}
+
+// check_host：探测 {host}/root.html（补 https://、去尾斜杠）
+async function checkHost(raw) {
+  let base = String(raw || '').trim()
+  if (!base) throw new Error('host is empty')
+  if (!base.includes('://')) base = 'https://' + base
+  let u
+  try { u = new URL(base) } catch (e) { throw new Error('invalid host (http/https only)') }
+  if (!/^https?:$/.test(u.protocol) || !u.host) throw new Error('invalid host (http/https only)')
+  return { ok: await probeRoot(u.origin), url: base.replace(/\/+$/, '') + '/root.html' }
+}
+
+// 配置变更后同步主进程缓存的平台地址（只增不减：已在跑的平台页不应因改地址失联）
+async function syncHostFromConfig() {
+  const cfg = await readConfig().catch(() => null)
+  if (!cfg || !cfg.host) return
+  host = cfg.host
+  for (const h of computeAllowedHosts(host)) {
+    if (!allowedHostsCache.includes(h)) allowedHostsCache.push(h)
   }
 }
 
@@ -283,13 +435,11 @@ function isPlatformFrame(event) {
   }
 }
 
-// 校验调用方是否本地设置页（127.0.0.1:<本地服务端口>，精确 host:port——平台开发态
-// 常用 localhost:4000 同机不同端口，按 hostname 判会把平台页误当本地页）
-function isLocalFrame(event) {
-  if (!localPort) return false
+// 校验调用方是否设置窗（app://aic 设置页；与平台页/开发态 localhost 完全区分）
+function isSettingsFrame(event) {
   try {
     const u = new URL(event.senderFrame.url)
-    return u.host === `127.0.0.1:${localPort}`
+    return u.protocol === SETTINGS_SCHEME + ':' && u.hostname === 'aic'
   } catch (e) {
     return false
   }
@@ -365,7 +515,7 @@ function openSettings() {
       sandbox: true,
     },
   })
-  settingsWin.loadURL(`http://127.0.0.1:${localPort}/settings?code=${encodeURIComponent(localCode)}`)
+  settingsWin.loadURL(SETTINGS_ORIGIN + '/settings')
   settingsWin.on('closed', () => { settingsWin = null })
 }
 
@@ -388,27 +538,52 @@ function registerIpc() {
     e.returnValue = allowedHostsCache
   })
 
-  // 本地 API 转发（平台页 → 本地服务，code 由主进程持有）
+  // 设置面 + 本地状态：方法名与平台页 window.aicDesktop.api、设置页 $mod.$pod 一致。
+  // 平台 frame（hosts 页绑定/解绑/查状态）与设置窗 frame 都可用；实现 = 主进程本地执行
+  // （spawn `aic-backend config|bind` 子命令 / 读日志 / 重启后端子进程），不经过任何端口。
   ipcMain.handle('local:api', async (event, name, args) => {
-    if (!isPlatformFrame(event)) throw new Error('forbidden')
+    if (!isPlatformFrame(event) && !isSettingsFrame(event)) throw new Error('forbidden')
     const m = String(name || '')
     if (!/^[a-z_]+$/.test(m)) throw new Error('invalid method')
-    const isGet = ['ping', 'get_config', 'get_status', 'get_log'].includes(m)
-    try {
-      const init = { headers: { 'x-aic-code': localCode }, signal: AbortSignal.timeout(15000) }
-      if (!isGet) {
-        init.method = 'POST'
-        init.headers['Content-Type'] = 'application/json'
-        init.body = JSON.stringify(args || {})
+    const a = args || {}
+    switch (m) {
+      case 'ping':
+        return 'pong'
+      case 'get_config':
+        return await readConfig()
+      case 'set_config':
+        await writeConfig(a)
+        await restartBackend()
+        await syncHostFromConfig()
+        return { ok: true }
+      case 'bind': {
+        const cred = String(a.credential || '').trim()
+        if (!cred) throw new Error('credential is empty')
+        await bindCredential(cred)
+        await restartBackend()
+        await syncHostFromConfig()
+        reloadSettingsIfOpen() // 平台页完成绑定 → 开着的设置窗重载取最新凭证/状态
+        return { ok: true, host: host }
       }
-      const r = await fetch(`http://127.0.0.1:${localPort}/api/${m}`, init)
-      const d = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`)
-      // 平台页完成绑定/解绑 → 本地配置窗口（若开着）原地重载
-      if (m === 'bind' || m === 'unbind') reloadSettingsIfOpen()
-      return d
-    } catch (e) {
-      throw new Error(e.message || String(e))
+      case 'unbind':
+        await unbindCredential()
+        await restartBackend()
+        reloadSettingsIfOpen()
+        return { ok: true }
+      case 'get_status':
+        return await localStatus()
+      case 'get_log':
+        return await readLogTail()
+      case 'check_host':
+        return await checkHost(a.host)
+      case 'start':
+        if (!backendAlive()) await spawnBackend()
+        return { ok: true }
+      case 'stop':
+        await stopBackend()
+        return { ok: true }
+      default:
+        throw new Error('invalid method')
     }
   })
 
@@ -466,14 +641,14 @@ function registerIpc() {
     savePetPosDebounced()
   })
 
-  // 设置窗口能力（仅 127.0.0.1 本地页面）
+  // 设置窗口能力（仅设置窗 app://aic 页面）
   ipcMain.handle('platform:check', async (e, url) => {
-    if (!isLocalFrame(e)) return { ok: false, error: 'forbidden' }
+    if (!isSettingsFrame(e)) return { ok: false, error: 'forbidden' }
     const ok = await probeRoot(url)
     return { ok, url: String(url || '').replace(/\/+$/, '') + '/root.html' }
   })
   ipcMain.handle('platform:open', (e, url) => {
-    if (!isLocalFrame(e)) return false
+    if (!isSettingsFrame(e)) return false
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
     rememberPlatformHost(u)
@@ -484,7 +659,7 @@ function registerIpc() {
 
   // 本地配置窗口关闭（设置页「关闭」按钮触发）
   ipcMain.handle('settings:close', (e) => {
-    if (!isLocalFrame(e)) return false
+    if (!isSettingsFrame(e)) return false
     closeSettings()
     return true
   })

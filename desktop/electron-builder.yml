@@ -13,6 +13,7 @@ files:
   - loading.html
   - remote-preload.js
   - settings-preload.js
+  - settings-ui/**
   - package.json
   - assets/**
   - "!**/*.test.mjs"

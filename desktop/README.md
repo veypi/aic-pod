@@ -1,14 +1,16 @@
 # AIC Desktop（Electron）
 
-替代旧 wails3 壳：**Chromium 渲染 + Go 后端子进程**。渲染的是 HTTP 页面（本地壳
-页面 + 平台页），渲染器零前端构建——Electron 只提供窗口/托盘/桌宠/窗口控制。
+替代旧 wails3 壳：**Chromium 渲染 + Go 后端子进程**。渲染的是平台 HTTP 页面 +
+本地设置页（自定义 `app://aic` 协议；**本地不监听任何端口**），渲染器零前端构建——
+Electron 只提供窗口/托盘/桌宠/窗口控制。
 
 ## 架构
 
 ```
 Electron Main (Node, main.js)
- ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：本地 vigo 服务 + NATS host 会话）
- │    └─ 握手：AIC_PORT_FILE 环境变量 → 后端写 {port, code} JSON
+ ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
+ │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
+ │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
  ├─ browser-path.cjs：只注入 AIC_BROWSER_DEFAULT_PATH（独立 Chrome）
  │    Go libs/browser 经 pipe 自管 Chrome、profile、page、下载和输入租约
  │    browser/cua 经 hosts_tool 一次声明，由 hosts_rtc/1 与 hosts_nats/1 调用
@@ -21,8 +23,10 @@ Electron Main (Node, main.js)
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
  │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
  │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
- ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，settings-preload；托盘「本地配置」
- │    直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；bind/unbind 成功后原地重载
+ ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，`app://aic` 协议加载
+ │    settings-ui/；settings-preload 暴露设置桥 → IPC 'local:api' → 主进程 spawn 子命令；
+ │    托盘「本地配置」直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；
+ │    保存/绑定后自动重启后端子进程并原地重载设置页
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
@@ -49,7 +53,9 @@ make backend-bin
 cd desktop && npm install && npm start
 ```
 
-壳页面/平台页改动即时生效（HTTP 服务），main.js/preload.js 改动需重启 electron。
+平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/）与 main.js/preload.js
+改动需重启 electron。设置页静态资源：vhtml 运行时 `settings-ui/vhtml/vhtml.min.js`
+从 `../vhtml/dist/vhtml.min.js` 复制（升级 vhtml 后重新复制）。
 browser 代码位于 libs/browser/，修改后重新编译 Go 后端；协议与测试见 [设备工具实现](../docs/hosts-tools.md)。Electron 不再包含 browser CDP 引擎。
 内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
 `npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。

@@ -5,8 +5,8 @@
  * Distributed under terms of the MIT license.
  */
 
-// 本地服务仅保留配置页 /settings（Electron 主窗口/设置窗口/浏览器壳入口）；
-// 平台 UI 全部由远端 aic 提供（桌面版 header / pet 等都在平台侧）。
+// 设置窗只保留配置页 /settings（Electron 设置窗口，app://aic 协议，见 main.js）；
+// 无本地 HTTP 服务：平台 UI 全部由远端 aic 提供（桌面版 header / pet 等都在平台侧）。
 const routes = [
   { path: "/settings", component: "/page/settings.html" },
   { path: "/", redirect: "/settings" },

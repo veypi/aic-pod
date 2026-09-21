@@ -92,6 +92,11 @@ while (queue.length) {
 
 if ([...entries].some(x=>x.startsWith("/vendor/browser/"))) missing.push("Chrome belongs in resources/browser, outside asar");
 
+// ---- 设置页（app://aic 协议 → desktop/settings-ui）静态资源随包 ----
+for (const f of ["/settings-ui/root.html", "/settings-ui/env.js", "/settings-ui/routes.js", "/settings-ui/page/settings.html", "/settings-ui/vhtml/vhtml.min.js"]) {
+  if (!entries.has(f)) missing.push(`设置页缺失: ${f}`);
+}
+
 // ---- resources/backend 后端二进制 ----
 const resDir = path.dirname(asarPath); // mac: Contents/Resources；win/linux: resources
 const backendCandidates = [

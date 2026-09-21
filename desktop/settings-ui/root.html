@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>aic</title>
-  <link rel="stylesheet" href="{{.scoped}}/assets/global.css">
+  <link rel="stylesheet" href="/assets/global.css">
 </head>
 
 <body>
@@ -16,8 +16,10 @@
 </body>
 <script type="module">
   document.body.setAttribute('theme', localStorage.getItem('theme'))
-  import VHTML from "{{.scoped}}/vhtml/vhtml.min.js"
-  window.$vhtml = new VHTML(document.body, {{.scoped}})
+  import VHTML from "/vhtml/vhtml.min.js"
+  // scoped = ''：页面挂在自定义协议根下（app://aic/<path> → desktop/settings-ui/<path>，
+  // 由 desktop/main.js 的 registerSettingsProtocol 映射）。本地不再监听端口、无校验码。
+  window.$vhtml = new VHTML(document.body, '')
 </script>
 
 </html>
