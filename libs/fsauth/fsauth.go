@@ -99,7 +99,7 @@ func (p *Policy) rebuildBaseRootsLocked() {
 	// Decide 侧缓存目录不做存在性探测：前缀匹配对不存在目录天然生效，白名单
 	// 意图跟目录身份走（未装 rust 时写 ~/.cargo 也是白名单意图内的工具链缓存）。
 	// bind 侧源必须存在，走 CacheRoots() 实时探测——两侧自此语义分离。
-	p.decideCaches = cacheRootDirs()
+	p.decideCaches = dedupClean(cacheRootDirs()) // 去空：空 root 会拼出 "/**"（匹配全部路径）
 }
 
 // SetWorkDir 同步工作区（set_config / Reconfigure；空 = 清除）并重算根基底。
@@ -265,6 +265,11 @@ func (p *Policy) allowHitLocked(cpath string) bool {
 // joinPattern 拼接「根 + 子模式」（根为 "/" 时不产生 "//"——matchPattern 按 / 分段，
 // 双斜杠会引入空段使模式整体失配）。
 func joinPattern(root, sub string) string {
+	if root == "" {
+		// 空 root 绝不允许拼出 "/**"（匹配全部路径）：返回空串，调用方丢弃。
+		// 2026-09-22：GOCACHE/XDG_CACHE_HOME 未设置 → 空缓存根 → 读锁失效。
+		return ""
+	}
 	if root == "/" {
 		return "/" + sub
 	}
@@ -278,10 +283,22 @@ func (p *Policy) ReadPatternsFor(sid string) []string {
 	out := append([]string{}, p.readGlobs...)
 	roots := append(append([]string{}, p.readRoots...), p.decideRootsLocked(sid)...)
 	for _, r := range roots {
-		out = append(out, joinPattern(r, "**"))
+		if r == "" {
+			continue // 空 root 展开成 "/**" = 放行全部路径，必须丢弃
+		}
+		if pat := joinPattern(r, "**"); pat != "" {
+			out = append(out, pat)
+		}
 	}
 	out = append(out, p.allowGlobs...)
-	return out
+	// 收口：任何空 pattern 都不能进入沙箱 profile（空 root / 异常条目）。
+	dst := out[:0]
+	for _, s := range out {
+		if s != "" {
+			dst = append(dst, s)
+		}
+	}
+	return dst
 }
 
 // WritePatternsFor adds glob grants to the same write roots used by fs.
@@ -409,6 +426,18 @@ func dedupClean(roots []string) []string {
 		out = append(out, r)
 	}
 	return out
+}
+
+// appendEnvDirs 只追加非空环境变量目录：空值经 joinPattern 会变成 "/**"
+// （匹配全部路径），fs_policy=deny（含默认值）时等于放开全部读——
+// 2026-09-22 修复：GOCACHE/XDG_CACHE_HOME 未设置时读锁失效。
+func appendEnvDirs(dirs []string, names ...string) []string {
+	for _, name := range names {
+		if v := os.Getenv(name); v != "" {
+			dirs = append(dirs, v)
+		}
+	}
+	return dirs
 }
 
 // canonicalPattern 对 glob 模式的字面前缀段（首个含通配符段之前）做

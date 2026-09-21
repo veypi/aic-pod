@@ -27,7 +27,7 @@ func cacheRootDirs() []string {
 			filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData"),
 		)
 	}
-	return append(dirs, os.Getenv("GOCACHE"), os.Getenv("XDG_CACHE_HOME"))
+	return appendEnvDirs(dirs, "GOCACHE", "XDG_CACHE_HOME")
 }
 
 // CacheRoots（darwin）= cacheRootDirs 存在性过滤版：exec 沙箱 bind 白名单用

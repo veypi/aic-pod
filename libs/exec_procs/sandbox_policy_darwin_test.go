@@ -71,3 +71,60 @@ func TestHostPolicyNativeEnforcement(t *testing.T) {
 		t.Fatal("denied file changed")
 	}
 }
+
+// TestHostPolicyReadScopeFromPolicy（darwin 原生探测）：读白名单直接来自
+// Policy.ReadPatternsFor 时也必须收紧——空缓存根曾被展开成 "/**" 而使读锁
+// 失效（2026-09-22 修复），该用例守住这条链路。
+func TestHostPolicyReadScopeFromPolicy(t *testing.T) {
+	if os.Getenv("AIC_SANDBOX_PROBE") != "1" {
+		t.Skip("explicit native sandbox probe")
+	}
+	t.Setenv("GOCACHE", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	work := canonicalRoot(t.TempDir())
+	inside := filepath.Join(work, "inside.txt")
+	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideDir, err := os.MkdirTemp("/Users/Shared", "aic-readscope-")
+	if err != nil {
+		t.Skipf("no writable outside dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	outside := filepath.Join(outsideDir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pol := fsauth.New()
+	pol.SetWorkDir(work)
+	read := pol.ReadPatternsFor("")
+	for _, pat := range read {
+		if pat == "" || pat == "/**" {
+			t.Fatalf("policy produced match-all read pattern: %#v", read)
+		}
+	}
+
+	run := func(script string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, readAllow: read, deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, plan.argv[0], plan.argv[1:]...)
+		cmd.Dir = work
+		b, e := cmd.CombinedOutput()
+		if e != nil {
+			t.Logf("sandbox: %s", b)
+		}
+		return e
+	}
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	if err := run("/bin/cat " + q(inside)); err != nil {
+		t.Fatalf("workdir read should succeed: %v", err)
+	}
+	if err := run("/bin/cat " + q(outside)); err == nil {
+		t.Fatalf("read outside readAllow succeeded (read lockdown void): %s", outside)
+	}
+}

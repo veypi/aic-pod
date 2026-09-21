@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -13,6 +14,47 @@ import (
 func mkBase(t *testing.T) string {
 	t.Helper()
 	return t.TempDir()
+}
+
+// TestReadPatternsForNoMatchAll 守住「空缓存根 → /** → 匹配全部路径」这个
+// 2026-09-22 修复：GOCACHE/XDG_CACHE_HOME 未设置时读白名单里不得出现空
+// pattern 或 /**（沙箱会把它编译成 ^(/.*)?$ 放行全部读）。
+func TestReadPatternsForNoMatchAll(t *testing.T) {
+	t.Setenv("GOCACHE", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	p := New()
+	p.SetWorkDir(t.TempDir())
+	for _, sid := range []string{"", "sid-1"} {
+		for _, pat := range p.ReadPatternsFor(sid) {
+			if pat == "" || pat == "/**" {
+				t.Fatalf("empty cache root leaked into read patterns (sid=%q): %q", sid, pat)
+			}
+		}
+	}
+	for _, d := range p.decideCaches {
+		if d == "" {
+			t.Fatalf("decideCaches contains empty entry: %#v", p.decideCaches)
+		}
+	}
+	if got := joinPattern("", "**"); got != "" {
+		t.Fatalf("joinPattern(%q, %q) = %q, want empty", "", "**", got)
+	}
+
+	// 正向对照：显式设置 GOCACHE（未 canonical 的 t.TempDir 路径）时必须出现。
+	cache := filepath.Join(t.TempDir(), "gocache")
+	t.Setenv("GOCACHE", cache)
+	p2 := New()
+	p2.SetWorkDir(t.TempDir())
+	found := false
+	for _, pat := range p2.ReadPatternsFor("") {
+		if strings.HasPrefix(pat, cache) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("GOCACHE dir %q missing from read patterns: %#v", cache, p2.ReadPatternsFor(""))
+	}
 }
 
 // 隔离测试只移除全局临时区便利根，避免 t.TempDir() 中的拒绝向量被放行。

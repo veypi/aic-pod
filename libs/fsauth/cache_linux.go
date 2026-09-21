@@ -31,7 +31,7 @@ func cacheRootDirs() []string {
 			filepath.Join(home, ".composer"),
 		)
 	}
-	return append(dirs, os.Getenv("GOCACHE"))
+	return appendEnvDirs(dirs, "GOCACHE")
 }
 
 // CacheRoots（linux）= cacheRootDirs 存在性过滤版（exec 沙箱 bind 白名单用）。
