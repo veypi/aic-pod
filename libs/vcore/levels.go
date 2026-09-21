@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/libs/proto"
-	"github.com/veypi/aic-pod/protocol/ui"
 )
 
 // 权限分级表（§2.4 required 标准表）作为数据与指令定义同包——
@@ -113,10 +112,6 @@ func ExecRequired(action string, argv []string) int {
 	switch action {
 	case "git":
 		return gitRequired(argv)
-	case "browser":
-		return browserRequired(argv)
-	case "cua":
-		return cuaRequired(argv)
 	case "json":
 		return jsonRequired(argv)
 	}
@@ -182,8 +177,6 @@ func checkoutPathspecLike(args []string) bool {
 }
 
 // Browser/CUA classification uses exactly the parser and schema used by executors.
-func browserRequired(argv []string) int { return ui.Required("browser", argv) }
-func cuaRequired(argv []string) int     { return ui.Required("cua", argv) }
 
 // jsonRequired 判定 json 子命令等级：首个非 flag 参数（json 无带值 flag）。
 // 未知子命令按 Write 兜底（修改类，保守）。

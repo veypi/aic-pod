@@ -117,6 +117,15 @@ func TestLocalAPICorrectCode(t *testing.T) {
 	}
 }
 
+func TestLocalAPIEmptyCodeRejected(t *testing.T) {
+	initTestAPI(t)
+	cfg.Global.Code = ""
+	status, _ := req(t, "GET", "/api/get_config", "", "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("empty configured code accepted: got %d, want 401", status)
+	}
+}
+
 func TestLocalAPIFailLock(t *testing.T) {
 	initTestAPI(t)
 	// 连续 5 次错误 → 锁定 1 分钟

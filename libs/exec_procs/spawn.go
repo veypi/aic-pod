@@ -26,7 +26,7 @@ func (m *Manager) Spawn(ctx context.Context, opts StartOptions) (*Spawned, error
 
 	plan := launchPlan{}
 	execArgv := opts.Exec
-	confined := !opts.NoSandbox && !m.NoSandbox
+	confined := !opts.NoSandbox && !m.noSandbox.Load()
 	if confined {
 		var err error
 		plan, err = planConfined(confineSpec{

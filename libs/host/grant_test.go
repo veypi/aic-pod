@@ -1,7 +1,6 @@
 package host
 
 import (
-	"context"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -96,7 +95,7 @@ func TestRunGrantTarget(t *testing.T) {
 	}
 }
 
-func TestExecGrantIsLocalAndRevokedBySignedSessionEnd(t *testing.T) {
+func TestExecGrantIsLocal(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
 	defer func() { cfg.Global = saved }()
@@ -117,16 +116,5 @@ func TestExecGrantIsLocalAndRevokedBySignedSessionEnd(t *testing.T) {
 	}
 	if !c.execAllowed("s1", "json") || c.execAllowed("s2", "json") {
 		t.Fatal("grant crossed session boundary")
-	}
-	c.netPol.Configure("deny", nil, nil)
-	c.sshPol.Configure("deny", nil, nil)
-	c.netPol.Grant("s1", netauth.Entry{Host: "example.com", Port: "443"})
-	c.sshPol.Grant("s1", netauth.Entry{Host: "example.com", Port: "22"})
-	r := c.dispatch(context.Background(), testSubject, signedReq(t, c, "exec", map[string]any{"action": "_session_end"}, 9))
-	if r.State != proto.StateCompleted {
-		t.Fatalf("cleanup failed: %+v", r)
-	}
-	if c.execAllowed("s1", "json") || c.netPol.Allowed("s1", "example.com", 443) || c.sshPol.Allowed("s1", "example.com", 22) {
-		t.Fatal("temporary grant survived session clear")
 	}
 }

@@ -1,4 +1,4 @@
-// Package rtc transports hosts/1 over authenticated, reliable WebRTC channels.
+// Package rtc transports hosts_rtc/1 over authenticated, reliable WebRTC channels.
 // It has no filesystem or UI command dispatch: all business calls enter Backend.
 package rtc
 
@@ -12,29 +12,18 @@ import (
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	"github.com/veypi/aic-pod/libs/hostcmd"
+	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/proto"
-	"github.com/veypi/aic-pod/protocol/hosts"
+	hosts "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 const maxPeerConnections = 16
-const controlLabel = "hosts-control"
-const dataLabel = "hosts-data"
-const liveLabel = "hosts-live"
 
-type Backend interface {
-	Authorization() *hostcmd.Access
-	Epoch() string
-	HandlePacket(context.Context, string, hosts.Packet) hosts.Packet
-	Limits(bool) map[string]any
-	CheckSession(string, string) error
-	Disconnect(string)
-	Reap()
-}
 type Config struct {
 	HostID, Hostname, Version string
 	Send                      func(*proto.RtcSignal)
-	Commands                  Backend
+	Authorization             *hostauth.Access
+	Tools                     ToolBackend
 	Logf                      func(string, ...any)
 }
 type Service struct {
@@ -49,8 +38,8 @@ type Service struct {
 }
 
 func New(cfg Config) (*Service, error) {
-	if cfg.Commands == nil || cfg.Send == nil || !hosts.ValidID(cfg.HostID) {
-		return nil, fmt.Errorf("rtc: Commands, Send and HostID are required")
+	if cfg.Authorization == nil || cfg.Tools == nil || cfg.Send == nil || !hosts.ValidID(cfg.HostID) {
+		return nil, fmt.Errorf("rtc: Authorization, Tools, Send and HostID are required")
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
 	if err != nil {
@@ -59,7 +48,7 @@ func New(cfg Config) (*Service, error) {
 	se := webrtc.SettingEngine{}
 	se.SetICEUDPMux(ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: conn}))
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
-	se.SetSCTPMaxMessageSize(hosts.MaxControlBytes)
+	se.SetSCTPMaxMessageSize(1 << 20)
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -84,7 +73,7 @@ func (s *Service) maintain() {
 			for _, p := range peers {
 				p.expire(now)
 			}
-			s.cfg.Commands.Reap()
+			s.cfg.Authorization.Expired()
 		}
 	}
 }
@@ -140,7 +129,7 @@ func (s *Service) HandleSignal(sig *proto.RtcSignal) {
 	}
 }
 func (s *Service) offer(sig *proto.RtcSignal) {
-	if len(sig.SDP) == 0 || len(sig.SDP) > hosts.MaxControlBytes {
+	if len(sig.SDP) == 0 || len(sig.SDP) > hosts.MaxMessageBytes {
 		return
 	}
 	s.mu.Lock()

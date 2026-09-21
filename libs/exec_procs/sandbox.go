@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
@@ -513,35 +512,6 @@ func isLoopbackHost(h string) bool {
 
 func stringsJoin(forms []string) string {
 	return strings.Join(forms, " ")
-}
-
-// writableRoots 收集 workspace-write 的全部可写根：平台临时区 + 工作区 +
-// 常见工具链缓存目录（fsauth.CacheRoots，go/npm/pip 等构建缓存——沙箱下不可写会
-// 导致构建工具链不可用；投毒风险属可接受边界，见 host_sandbox.md）+ 公共区
-// $HOME/.aic（publicRoots，AI 与工具状态共享保存区）+ 追加根（fsauth 配置
-// 白名单/临时 grant，v0.14.5 统一名单）。canonicalize + 去重。
-func writableRoots(workdir string, extra []string) []string {
-	roots := []string{"/private/tmp", os.TempDir()}
-	if workdir != "" {
-		roots = append(roots, workdir)
-	}
-	roots = append(roots, fsauth.CacheRoots()...)
-	roots = append(roots, publicRoots()...)
-	roots = append(roots, extra...)
-	seen := map[string]bool{}
-	out := make([]string, 0, len(roots))
-	for _, r := range roots {
-		if r == "" {
-			continue
-		}
-		c := canonicalRoot(r)
-		if seen[c] {
-			continue
-		}
-		seen[c] = true
-		out = append(out, c)
-	}
-	return out
 }
 
 // canonicalRoot 消解路径到真实文件系统身份（symlink/.. 展开；失败回落绝对路径）。

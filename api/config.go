@@ -16,6 +16,7 @@ import (
 // configView 是 get_config 的返回视图（含 key——设置窗口需显示当前凭证；
 // 本地 API 受 code 校验保护）。
 type configView struct {
+	BrowserPath   string   `json:"browser_path"`
 	BrowserWidth  int      `json:"browser_width"`
 	BrowserHeight int      `json:"browser_height"`
 	Host          string   `json:"host"`
@@ -43,8 +44,8 @@ func GetConfig(x *vigo.X) (*configView, error) {
 	o := effective()
 	a := cfg.AuthSnapshot()
 	return &configView{Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
-		HomePath:     o.NormalizedHomePath(),
-		BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
+		HomePath:    o.NormalizedHomePath(),
+		BrowserPath: o.BrowserPath, BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
 		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
 		FsPolicy: a.FsPolicy, FsDeny: a.FsDeny, FsAllow: a.FsAllow,
 		NetPolicy: a.NetPolicy, NetDeny: a.NetDeny, NetAllow: a.NetAllow,
@@ -58,6 +59,7 @@ func GetConfig(x *vigo.X) (*configView, error) {
 // （保持现状），非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent
 // 的唯一回撤出口。
 type SetConfigReq struct {
+	BrowserPath   *string   `json:"browser_path" src:"json"`
 	BrowserWidth  *int      `json:"browser_width" src:"json"`
 	BrowserHeight *int      `json:"browser_height" src:"json"`
 	Host          string    `json:"host" src:"json"`
@@ -134,6 +136,9 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 		}
 		wd = abs
 	}
+	if req.BrowserPath != nil {
+		fileCfg.BrowserPath = strings.TrimSpace(*req.BrowserPath)
+	}
 	if req.BrowserWidth != nil {
 		fileCfg.BrowserWidth = *req.BrowserWidth
 	}
@@ -201,14 +206,18 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	} else {
 		fileCfg.HomePath = "/" // 清空 = 恢复默认首页
 	}
-	fileCfg.Normalize()
 	if err := fileCfg.ValidateAuth(); err != nil {
 		return nil, vigo.ErrInvalidArg.WithError(err)
 	}
+	fileCfg.Normalize()
 	if err := cfg.Save(fileCfg); err != nil {
 		return nil, vigo.ErrInternalServer.WithError(err)
 	}
 	mu.Lock()
+	browserChanged := cfg.Global.BrowserPath != fileCfg.BrowserPath || cfg.Global.BrowserWidth != fileCfg.BrowserWidth || cfg.Global.BrowserHeight != fileCfg.BrowserHeight
+	if req.BrowserPath != nil {
+		cfg.Global.BrowserPath = fileCfg.BrowserPath
+	}
 	hostChanged := cfg.Global.Host != fileCfg.Host
 	workDirChanged := cfg.Global.WorkDir != fileCfg.WorkDir
 	execTimeoutChanged := cfg.Global.ExecTimeout != fileCfg.ExecTimeout
@@ -228,7 +237,7 @@ func SetConfig(x *vigo.X, req *SetConfigReq) (*OKResp, error) {
 	// 运行参数变更（host/work_dir/exec_timeout/授权模型）：应用新配置——保留会话与
 	// bg 任务，仅更新参数；NATS 地址变化时重连（Client.Reconfigure，内部同步
 	// fsauth/netauth Policy：work_dir 重设 + 授权名单重载，内存即时生效）。
-	if host.Running() && (hostChanged || workDirChanged || execTimeoutChanged || authChanged) {
+	if host.Running() && (hostChanged || workDirChanged || execTimeoutChanged || authChanged || browserChanged) {
 		if err := host.ApplyConfig(o); err != nil {
 			logv.Warn().Msgf("apply config failed: %v", err)
 		}

@@ -12,30 +12,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/veypi/aic-pod/libs/hostcmd"
+	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
-	"github.com/veypi/aic-pod/protocol/hosts"
+	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 type fixture struct {
-	rt      *hostcmd.Runtime
-	fs      *FS
-	store   *hostcmd.Bytes
-	root    string
-	caller  hostcmd.Caller
-	session hostcmd.Session
-	count   int
+	fs     *FS
+	store  *Bytes
+	root   string
+	caller tool.Caller
+	owner  string
+	count  int
 }
 
 func setup(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{root: t.TempDir()}
 	var err error
-	f.store, err = hostcmd.NewBytes(hostcmd.BytesConfig{TempDir: t.TempDir()})
+	f.store, err = NewBytes(BytesConfig{TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.fs, err = New(Config{Roots: []Root{{ID: "home", Name: "Home", Path: f.root, Default: true}}, Bytes: f.store, Check: func(_ context.Context, _ hostcmd.Call, path string, _ bool) error {
+	f.fs, err = New(Config{Roots: []Root{{ID: "home", Name: "Home", Path: f.root, Default: true}}, Bytes: f.store, Check: func(_ context.Context, _ Call, path string, _ bool) error {
 		if strings.Contains(filepath.Base(path), "denied") {
 			return hosts.Fail("permission_denied", "Denied by local policy")
 		}
@@ -44,24 +43,9 @@ func setup(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.rt, err = hostcmd.New(hostcmd.Config{Authorize: func(context.Context, hostcmd.Call) error { return nil }, OnSessionClose: f.store.CloseSession})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = f.rt.Register(f.fs.Provider()); err != nil {
-		t.Fatal(err)
-	}
-	f.caller = hostcmd.Caller{Subject: "owner", ConnectionID: "connection_1", ExpiresAt: time.Now().Add(time.Hour)}
-	f.session, err = f.rt.Open(f.caller)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f.caller = tool.Caller{Subject: "owner", ConnectionID: "test", Level: 9, ExpiresAt: time.Now().Add(time.Hour)}
+	f.owner = Owner(f.caller)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := f.rt.Shutdown(ctx); err != nil {
-			t.Error(err)
-		}
 		f.fs.Close()
 		f.store.Close()
 	})
@@ -73,22 +57,29 @@ func loc(parts ...string) fsp.Path {
 	}
 	return fsp.Path{RootID: "home", Segments: parts}
 }
-func (f *fixture) call(t *testing.T, method string, args any) hosts.Operation {
+func (f *fixture) call(t *testing.T, method string, args any) outcome {
 	t.Helper()
-	f.count++
-	id := strings.Repeat("o", f.count)
 	raw, _ := json.Marshal(args)
-	op, err := f.rt.Invoke(context.Background(), f.caller, hosts.Invocation{SessionID: f.session.ID, RuntimeEpoch: f.session.RuntimeEpoch, OperationID: id, Command: "fs", Method: method, Args: raw})
+	result, err := f.fs.Run(context.Background(), Call{Caller: f.caller, Owner: f.owner, Command: "fs", Method: method, Args: raw})
 	if err != nil {
-		return hosts.Operation{Status: "failed", Error: hosts.AsFault(err)}
+		fault := hosts.AsFault(err)
+		status := "failed"
+		if fault.Code == "cancelled" {
+			status = "cancelled"
+		}
+		return outcome{Status: status, Error: fault}
 	}
-	op, err = f.rt.Get(context.Background(), f.caller, f.session.ID, op.ID, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return op
+	value, _ := json.Marshal(result)
+	return outcome{Status: "succeeded", Value: value}
 }
-func value[T any](t *testing.T, op hosts.Operation) T {
+
+type outcome struct {
+	Status string
+	Error  *hosts.Fault
+	Value  json.RawMessage
+}
+
+func value[T any](t *testing.T, op outcome) T {
 	t.Helper()
 	if op.Status != "succeeded" {
 		t.Fatalf("operation failed: %+v", op)
@@ -102,7 +93,7 @@ func value[T any](t *testing.T, op hosts.Operation) T {
 func (f *fixture) upload(t *testing.T, data []byte) hosts.ResourceRef {
 	t.Helper()
 	size := int64(len(data))
-	src, err := f.store.Upload(context.Background(), f.session.ID, bytes.NewReader(data), &size, "", "")
+	src, err := f.store.Upload(context.Background(), f.owner, bytes.NewReader(data), &size, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +112,9 @@ func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
 	if current.Version != saved.Version {
 		t.Fatal("commit returned a stale version")
 	}
-	src := value[hostcmd.ByteSource](t, f.call(t, "read", pathArgs{Path: path}))
+	src := value[ByteSource](t, f.call(t, "read", pathArgs{Path: path}))
 	var read bytes.Buffer
-	if err = f.store.Copy(context.Background(), f.session.ID, src.Ref, 0, nil, &read); err != nil {
+	if err = f.store.Copy(context.Background(), f.owner, src.Ref, 0, nil, &read); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(data, read.Bytes()) {
@@ -135,7 +126,7 @@ func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
 	if stale.Error == nil || stale.Error.Code != "version_conflict" {
 		t.Fatalf("stale save accepted: %+v", stale)
 	}
-	if err = f.store.Copy(context.Background(), f.session.ID, src.Ref, 0, nil, &bytes.Buffer{}); err == nil {
+	if err = f.store.Copy(context.Background(), f.owner, src.Ref, 0, nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("old live source was not invalidated")
 	}
 	empty := value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("empty"), Source: f.upload(t, nil), Condition: fsp.Condition{Absent: true}}))
@@ -212,26 +203,26 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 func TestMetadataSourcePolicyAllowsWriteConsumptionAndRevocation(t *testing.T) {
 	f := setup(t)
 	args, _ := json.Marshal(map[string]any{"path": loc()})
-	verify, err := f.fs.ResultPolicy(hostcmd.Call{SessionID: f.session.ID, Command: "fs", Method: "list", Args: args})
+	verify, err := f.fs.ResultPolicy(Call{Owner: f.owner, Command: "fs", Method: "list", Args: args})
 	if err != nil {
 		t.Fatal(err)
 	}
 	size := int64(2)
-	source, err := f.store.Upload(context.Background(), f.session.ID, strings.NewReader("{}"), &size, "", "application/json")
+	source, err := f.store.Upload(context.Background(), f.owner, strings.NewReader("{}"), &size, "", "application/json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = f.store.SetVerifier(f.session.ID, source.Ref, verify); err != nil {
+	if err = f.store.SetVerifier(f.owner, source.Ref, verify); err != nil {
 		t.Fatal(err)
 	}
 	op := f.call(t, "write", map[string]any{"path": loc("snapshot.json"), "source": source.Ref, "condition": map[string]any{"absent": true}})
 	if op.Status != "succeeded" {
 		t.Fatal("metadata source could not be written", op)
 	}
-	f.fs.cfg.Check = func(context.Context, hostcmd.Call, string, bool) error {
+	f.fs.cfg.Check = func(context.Context, Call, string, bool) error {
 		return hosts.Fail("permission_denied", "changed policy")
 	}
-	if err = f.store.Copy(context.Background(), f.session.ID, source.Ref, 0, nil, &bytes.Buffer{}); err == nil || hosts.AsFault(err).Code != "permission_denied" {
+	if err = f.store.Copy(context.Background(), f.owner, source.Ref, 0, nil, &bytes.Buffer{}); err == nil || hosts.AsFault(err).Code != "permission_denied" {
 		t.Fatal("snapshot policy not rechecked", err)
 	}
 }

@@ -4,9 +4,9 @@
 //
 // Electron Main (Node)
 //   ├─ spawn Go 后端 → 本地 API 配置/绑定 → 平台页 WebContentsView
-//   ├─ browser provider（browser-tool.mjs）：固定视口离屏 BrowserWindow 标签池
+//   ├─ browser 默认路径：独立 Chrome，生命周期与执行由 Go 管理
 //   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
-//   ├─ hosts/1 browser 命令：RTC 画面字节源与租约输入，共享 AI 浏览器池
+//   ├─ hosts_rtc/1 与 hosts_nats/1：后端统一 browser 工具
 //   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
 //	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload；不依赖平台页）：托盘
 //	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
@@ -17,6 +17,8 @@
 // 设置能力（platform:check/open、settings:close）仅 127.0.0.1 本地页面可调。端口/code 不出主进程。
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut } = require('electron')
 const { spawn } = require('child_process')
+const { browserEnv } = require('./browser-path.cjs')
+const { waitForBackend } = require('./backend-startup.cjs')
 const fs = require('fs')
 const net = require('net')
 const path = require('path')
@@ -60,7 +62,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => focusMain())
-  app.whenReady().then(start)
+  app.whenReady().then(start).catch(failStartup)
   app.on('activate', () => focusMain()) // mac Dock 图标点击
   app.on('before-quit', () => { quitting = true })
 }
@@ -134,19 +136,12 @@ async function start() {
   // 2. 异步链：spawn 后端 → 握手 → 读配置 → 探测平台 → 跳转
   setStep('正在启动本地服务…')
   const info = await spawnBackend()
-  if (!info) {
-    dialog.showErrorBox('AIC Desktop', '后端启动超时')
-    app.quit()
-    return
-  }
   localPort = info.port
   localCode = info.code
 
-  // browser 壳通道与 Go provider 注册（失败不影响主流程：该 host 无 browser 能力）
-  setupBrowserProvider()
-
   setStep('正在读取配置…')
   const cfg = await getLocalConfig()
+  if (!cfg) throw new Error('无法读取本地服务配置，请检查本地服务日志')
   if (cfg && cfg.host) host = cfg.host
   allowedHostsCache = computeAllowedHosts(host)
   // 默认打开地址：host + home_path（默认 /；非法值回退 /）
@@ -191,37 +186,38 @@ function cuaEnv() {
 }
 
 // ---- 启动子进程与握手 ----
-function spawnBackend() {
-  return new Promise((resolve) => {
-    const portFile = path.join(app.getPath('userData'), 'aic-port.json')
-    try { fs.rmSync(portFile, { force: true }) } catch (e) { /* 忽略 */ }
-    backend = spawn(backendBin, [], {
-      // AIC_NODE_BIN：Electron 二进位路径，后端 cua run 以 ELECTRON_RUN_AS_NODE=1
-      // 将其当纯 node 运行时跑脚本（三平台 Electron 包自带，零新增依赖）。
-      // cuaEnv()：内置 cua-driver 路径注入（缺失时空对象，回落系统探测）。
-      env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop', AIC_NODE_BIN: process.execPath, ...cuaEnv() },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
-    backend.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
-    backend.on('exit', (code) => {
-      if (!quitting) {
-        dialog.showErrorBox('AIC Desktop', `后端进程异常退出 (${code})`)
-        app.quit()
-      }
-    })
-    // 轮询端口文件（最多 15s）
-    const deadline = Date.now() + 15000
-    const tryRead = () => {
-      try {
-        const info = JSON.parse(fs.readFileSync(portFile, 'utf8'))
-        if (info && info.port && info.code) return resolve(info)
-      } catch (e) { /* 未写入/未完整 */ }
-      if (Date.now() > deadline) return resolve(null)
-      setTimeout(tryRead, 100)
-    }
-    tryRead()
+async function spawnBackend() {
+  const portFile = path.join(app.getPath('userData'), 'aic-port.json')
+  fs.mkdirSync(path.dirname(portFile), { recursive: true })
+  fs.rmSync(portFile, { force: true })
+  backend = spawn(backendBin, [], {
+    // Browser automation runs in Go with a separate Chrome executable.
+    // cuaEnv()：内置 cua-driver 路径注入（缺失时空对象，回落系统探测）。
+    env: { ...process.env, AIC_PORT_FILE: portFile, AIC_DEVICE_TYPE: 'desktop', ...browserEnv({packaged: app.isPackaged, resourcesPath: process.resourcesPath, directory: __dirname}), ...cuaEnv() },
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+  backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
+  backend.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
+  let ready = false
+  backend.on('exit', (code, signal) => {
+    if (ready) failStartup(new Error(`后端进程异常退出（${signal || code}）`))
+  })
+  backend.on('error', (error) => {
+    if (ready) failStartup(error)
+  })
+  const info = await waitForBackend(backend, portFile)
+  ready = true
+  return info
+}
+
+function failStartup(error) {
+  if (quitting) return
+  quitting = true
+  const message = error.message || String(error)
+  console.error('[startup]', message)
+  platformView?.webContents.executeJavaScript(`window.__setError && window.__setError(${JSON.stringify(message)})`).catch(() => {})
+  dialog.showErrorBox('AIC Desktop 启动失败', message)
+  app.quit()
 }
 
 // ---- 主进程内部 HTTP（本地 API / 平台探测） ----
@@ -247,42 +243,6 @@ async function probeRoot(url) {
     return r.ok || r.status === 304
   } catch (e) {
     return false
-  }
-}
-
-// ---- browser 壳通道（共享插件 browser core + Electron CDP 适配器） ----
-// browser-tool.js 是 ESM（core 同源 ESM），从 CJS 主进程动态 import 装载。
-// 注册成功后 Go 后端把 browser 加入 caps 并重发；exec browser 请求经
-// 127.0.0.1 TCP 换行 JSON 通道转发回本进程执行（Go libs/host/register.go）。
-async function setupBrowserProvider() {
-  const maxAttempts = 3
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const { startBrowserServer } = await import('./browser-tool.mjs')
-      const { port, token } = await startBrowserServer({
-        host: {
-          win: mainWin,
-          getViewport: async () => {
-            const cfg = await getLocalConfig()
-            return { width: cfg?.browser_width, height: cfg?.browser_height }
-          },
-        },
-        log: (f, ...a) => console.log('[browser]', f, ...a),
-      })
-      const r = await fetch(`http://127.0.0.1:${localPort}/api/provider/register`, {
-        method: 'POST',
-        headers: { 'x-aic-code': localCode, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'browser', addr: `127.0.0.1:${port}`, token }),
-        signal: AbortSignal.timeout(5000),
-      })
-      const d = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`)
-      console.log('[browser] provider registered (channel 127.0.0.1:%d)', port)
-      return
-    } catch (e) {
-      console.error(`[browser] provider setup failed (attempt ${attempt}/${maxAttempts}):`, e.message)
-      if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 3000))
-    }
   }
 }
 

@@ -47,7 +47,7 @@ grant ssh dev.example:22 --temp
 
 grant 自身 required=4，先经正常云端审批再修改 host 的对应 allow。省略范围时默认为本 Session 临时授权，永久授权写入本地配置。deny 内目标不能申请；exec grant 必须指定本机已注册命令。commands/grant 默认可用于发现和申请，明确 exec_deny 仍可关闭它们。
 
-临时授权按 Session 隔离，Session clear/delete 通过已签名的内部生命周期请求撤销；设备断线、退出或重启也清空临时授权。永久授权不受 Session 清理影响。运行中的进程继续使用启动时快照；新启动重新读取策略。
+临时授权按 Session 隔离，保存在设备进程内存，随进程退出或重启清空；Session clear/delete 不影响临时授权（2026-09-21 定）。永久授权写入设备本地配置，不受 Session 清理影响。运行中的进程继续使用启动时快照；新启动重新读取策略。
 
 浏览器扩展 host 使用相同的 fs/exec 字符串规则，OPFS 根与命令默认全开；支持 fs/exec 临时 grant、通过扩展本地 settings 保存永久 grant。SDK 宿主没有配置保存入口时，永久 grant 报错而不假称成功。扩展没有原生 net/ssh 沙箱能力。
 

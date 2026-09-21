@@ -4,7 +4,6 @@ import (
 	"sort"
 
 	"github.com/veypi/aic-pod/libs/proto"
-	"github.com/veypi/aic-pod/protocol/ui"
 )
 
 // CommandMeta 是指令元数据（§6.3 注册信息三件套）：
@@ -39,8 +38,6 @@ var commandMeta = map[string]CommandMeta{
 			"  clone is shallow by default (--depth 1, single-branch); --depth <n> overrides, --full clones all history\n" +
 			"  remote auth: host uses local git credentials; cloud is anonymous-only",
 	},
-	"browser": {Desc: "ui/1 browser automation (desktop Electron/CDP)", Help: ui.Help("browser", "")},
-	"cua":     {Desc: "ui/1 native application and window automation", Help: ui.Help("cua", "")},
 	"bg_list": {
 		Desc: "list background processes of this session",
 		Help: "bg_list\n" +
@@ -163,12 +160,6 @@ func Decl(name string) (proto.CommandDecl, bool) {
 		level = proto.LevelRead // 基础 = read（读操作）；push/reset/checkout 动态提升在 gitRequired
 	} else if name == "json" {
 		level = proto.LevelRead // 基础 = read（view）；set/del/append/merge 动态提升在 jsonRequired
-	} else if name == "browser" {
-		level = proto.LevelRead // ui/1 applies the operation level from the shared schema
-	} else if name == "cua" {
-		// 基础 = read（2026-09-09 用户定）：声明层不设 Write 地板，否则读类子命令
-		// 的动态降级永远被 max(声明, 动态) 吃掉；写/危险动作由 cuaRequired 动态提升。
-		level = proto.LevelRead
 	}
 	return proto.CommandDecl{Name: name, Desc: m.Desc, Help: m.Help, RequiredLevel: level}, true
 }

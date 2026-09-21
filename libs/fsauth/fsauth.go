@@ -90,6 +90,7 @@ func (p *Policy) rebuildBaseRootsLocked() {
 	if t := os.TempDir(); t != "" {
 		roots = append(roots, canonical(t))
 	}
+	roots = append(roots, tempRoots()...)
 	if p.publicDir != "" {
 		roots = append(roots, p.publicDir)
 	}
@@ -489,5 +490,3 @@ func expandVars(s string) (string, bool) {
 	}
 	return filepath.ToSlash(s), ok
 }
-
-func (p *Policy) ResetTemporary() { p.mu.Lock(); defer p.mu.Unlock(); p.grants = map[string][]string{} }

@@ -5,6 +5,15 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- 修复 fs 写便利逻辑把写授权放大到已存在祖先的 bug：write/curl -o/writebin/cp/mv 补父目录与 mkdir -p 的存在性探测不再做策略门控，写检查只覆盖实际创建的层级（先检后建、拒绝时零副作用）；只授权单个文件即可写入，与 edit/mkdir/remove「谁被创建/修改就查谁」同口径。
+- browser/cua 改为 hosts_tools/1 typed 方法声明，RTC 和 NATS 共用鉴权与调用分发器；宿主不再托管其业务 session/operation/resource。
+- browser 迁入 Go，自管独立 Chrome 与 pipe CDP；删除 Electron browser 引擎、TCP provider 和旧调用入口。Desktop 只注入 Chrome 默认路径。
+- cua 驱动、窗口、快照状态迁入独立工具。前端 browser viewer 改为只读帧流和显式输入接管。
+- 当前协议、配置、测试和范围见 [hosts-tools.md](docs/hosts-tools.md)。文件管理与普通 exec 本次不迁移。
+- 移除会话授权撤销与断线清空：删除 `authorization.revoke` 动作、origin 拉黑窗口与 NATS 断线自清；临时授权改为纯进程内存态（按 Session 隔离，仅随进程退出/重启清空），无调用方的 `fsauth/netauth.ResetTemporary` 一并删除。
+
 ## v0.7.0 — 2026-09-20
 
 ### 破坏性变更

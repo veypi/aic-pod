@@ -1,12 +1,16 @@
 # aic-pod
 
+设备端 fs、exec、browser/cua 与文件代理已统一采用 [hosts_tools/1 三协议架构](docs/hosts-tools.md)：Go 自管 Chrome，Desktop 仅提供默认可执行文件路径。
+
+Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/hosts-tools.md#browser-运行环境)。
+
 AIC Pod 客户端 — 部署在 PC/服务器上，通过 NATS WebSocket 连接 AIC 平台，把本机能力
 （命令执行 / 文件操作 / 浏览器自动化 / 原生 GUI 自动化 / ssh·scp 转发）注册为 LLM 可调用的工具。
 
 | 客户端 | 形态 | 核心能力 |
 |---|---|---|
-| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser（壳通道）、cua（原生 GUI 自动化） |
-| **cli** | 单二进制 `aic` | exec（沙箱 + 三域授权）、fs、ssh/scp |
+| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser（Go + Chrome）、cua（原生 GUI 自动化） |
+| **cli** | 单二进制 `aic` | exec（沙箱 + 三域授权，含 browser/cua/ssh/scp）、fs |
 
 安全模型见 [docs/host_sandbox.md](docs/host_sandbox.md)，架构见 [docs/design.md](docs/design.md)，
 版本变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -17,8 +21,14 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 （macOS: `~/Library/Application Support/aic/config.yaml`），任一端的修改
 （编辑文件 / 页面绑定）另一端启动即生效。
 
-解析由 vigo/flags 承担（AutoRegister 自动注册 flag + env，只需配置结构体），
+解析由 vigo/flags 承担：`AutoRegister` 声明字段，`ConfigFile` 声明文件，`Parse` 统一合并，
 优先级：**显式 flag > 环境变量 > 配置文件 > 结构体默认**。
+
+配置读取允许容错：未知字段忽略，错误字段使用默认值并保留其他有效字段；
+文件无法读取或 YAML 整体损坏时使用默认配置启动，仍可进入本地设置页修复。
+读取时不覆盖原文件，只有用户保存配置时才写回。
+设置页通过 `flags.LoadCfg` 读取持久配置，不混入命令行或环境变量覆盖；
+aic-pod 只负责设备参数的业务校验和本地 code 生成。
 
 | 环境变量 | CLI flag | 配置键 | 默认值 | 说明 |
 |---|---|---|---|---|

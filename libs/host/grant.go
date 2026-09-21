@@ -233,9 +233,7 @@ func (c *Client) grantExec(sid, msgID, name string, permanent bool) *proto.ToolR
 	if err := policy.ValidateExec([]string{name}); err != nil {
 		return reject(msgID, err.Error())
 	}
-	c.cmdsMu.RLock()
-	_, declared := c.cmdByName[name]
-	c.cmdsMu.RUnlock()
+	declared := c.tools != nil && c.tools.HasCommand(name)
 	if !declared {
 		return reject(msgID, "grant exec requires a registered command name")
 	}
@@ -266,12 +264,4 @@ func (c *Client) grantExec(sid, msgID, name string, permanent bool) *proto.ToolR
 		c.execGrantMu.Unlock()
 	}
 	return &proto.ToolResponse{MsgID: msgID, State: proto.StateCompleted, Content: fmt.Sprintf("granted exec %s (scope=%s)", name, scope)}
-}
-func (c *Client) dropSessionGrants(sid string) {
-	c.policy.DropSession(sid)
-	c.netPol.DropSession(sid)
-	c.sshPol.DropSession(sid)
-	c.execGrantMu.Lock()
-	delete(c.execGrants, sid)
-	c.execGrantMu.Unlock()
 }

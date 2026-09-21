@@ -20,6 +20,7 @@
     .wrap {
       text-align: center;
       color: #333;
+      max-width: 80vw;
     }
 
     .spinner {
@@ -48,6 +49,8 @@
       color: #888;
       margin-top: 10px;
       min-height: 16px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
   </style>
 </head>
@@ -63,6 +66,11 @@
     window.__setStep = (t) => {
       const el = document.getElementById('step')
       if (el) el.textContent = t || ''
+    }
+    window.__setError = (t) => {
+      document.querySelector('.spinner').style.display = 'none'
+      document.querySelector('.title').textContent = 'AIC Desktop 启动失败'
+      window.__setStep(t)
     }
   </script>
 </body>

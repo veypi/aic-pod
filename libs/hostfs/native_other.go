@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/veypi/aic-pod/protocol/hosts"
+	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 func atomicReplaceSupported() bool { return false }

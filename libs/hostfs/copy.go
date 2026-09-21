@@ -7,14 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/veypi/aic-pod/libs/hostcmd"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
-	"github.com/veypi/aic-pod/protocol/hosts"
+	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 // A directory copy is a bounded sequence of conditional commits, not a
 // transaction. Failure reports the number of entries already committed.
-func (f *FS) copy(ctx context.Context, call hostcmd.Call, p moveArgs) (any, error) {
+func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if len(p.Dst.Segments) == 0 {
 		return nil, hosts.Fail("permission_denied", "Cannot replace a root")
 	}
@@ -94,29 +93,29 @@ func (f *FS) copy(ctx context.Context, call hostcmd.Call, p moveArgs) (any, erro
 	return map[string]any{"entry": entry(p.Dst, current), "completed": completed}, nil
 }
 
-func (f *FS) copyFile(ctx context.Context, call hostcmd.Call, src, dst fsp.Path, version string, condition fsp.Condition) error {
+func (f *FS) copyFile(ctx context.Context, call Call, src, dst fsp.Path, version string, condition fsp.Condition) error {
 	readCall := call
 	readCall.Method = "read"
 	value, err := f.readOrStat(ctx, readCall, pathArgs{Path: src, IfVersion: version})
 	if err != nil {
 		return err
 	}
-	live := value.(hostcmd.ByteSource)
-	defer f.cfg.Bytes.Release(call.SessionID, live.Ref)
+	live := value.(ByteSource)
+	defer f.cfg.Bytes.Release(call.Owner, live.Ref)
 	r, w := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := f.cfg.Bytes.Copy(ctx, call.SessionID, live.Ref, 0, nil, w)
+		err := f.cfg.Bytes.Copy(ctx, call.Owner, live.Ref, 0, nil, w)
 		w.CloseWithError(err)
 		done <- err
 	}()
-	sealed, err := f.cfg.Bytes.Upload(ctx, call.SessionID, r, &live.Size, "", live.MediaType)
+	sealed, err := f.cfg.Bytes.Upload(ctx, call.Owner, r, &live.Size, "", live.MediaType)
 	r.CloseWithError(err)
 	readErr := <-done
 	if err != nil {
 		return err
 	}
-	defer f.cfg.Bytes.Release(call.SessionID, sealed.Ref)
+	defer f.cfg.Bytes.Release(call.Owner, sealed.Ref)
 	if readErr != nil {
 		return readErr
 	}

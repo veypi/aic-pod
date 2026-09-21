@@ -1,10 +1,10 @@
 // Package host 是 AIC host agent 运行时（docs/instruction_sets_v2.md §6.2）：
-// NATS 连接与认证、caps v2 上报、心跳、req 分发（fs/exec）、bg 注册表、
+// NATS 连接与认证、能力上报、心跳、fs/exec 方法分发、执行管理器装配、
 // granted_level 纵深检查（与 vcore 分级表同源）。
 //
 // 物理 host 命令空间 = 统一命令声明表（§5.1）：恒声明（exec 核心虚拟指令 +
-// json + commands + bg_*）+ 启动探测（shell/git，exec.LookPath）+ 本地 provider
-// 动态注册（desktop 壳的 browser 等，register.go）。未声明的命令一律拒绝，
+// json + commands + bg_*）+ 启动探测（shell/git，exec.LookPath）。browser/cua
+// 一并注册为 exec.commands。未声明的命令一律拒绝，
 // 不存在「未知命令透传」。
 package host
 
@@ -20,56 +20,66 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/browser"
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/fsauth"
-	"github.com/veypi/aic-pod/libs/hostcmd"
+	"github.com/veypi/aic-pod/libs/hostauth"
+	"github.com/veypi/aic-pod/libs/hostfs"
+	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/aic-pod/libs/vcore"
-	"github.com/veypi/aic-pod/protocol/hosts"
+
+	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
+	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
+	toolwire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 // Options 客户端配置。
 type Options struct {
-	Transfers   hostcmd.TransferConfig
-	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
-	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
-	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
-	DeviceName  string        // 展示名称，默认 hostname
-	DeviceType  string        // 客户端类型（cli/desktop/...），默认 cli
-	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
-	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
-	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
-	RTC         bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
-	OnLog       func(format string, args ...any)
+	BrowserPath, BrowserStateDir string
+	BrowserWidth, BrowserHeight  int
+	Transfers                    hostfs.TransferConfig
+	Host                         string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
+	Key                          string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
+	WorkDir                      string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
+	DeviceName                   string        // 展示名称，默认 hostname
+	DeviceType                   string        // 客户端类型（cli/desktop/...），默认 cli
+	Version                      string        // 客户端版本号（va.b.c，§6.3 版本门禁）
+	ExecTimeout                  time.Duration // 程序后台自有超时，默认 30m（§5.9）
+	NoSandbox                    bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
+	RTC                          bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
+	OnLog                        func(format string, args ...any)
 }
 
 // Client 是 host agent 客户端。
 type Client struct {
-	uiSessionRoot string // Optional private artifact root used by embedded runtimes/tests.
+	sessionRoot string
+	tools       *tool.Dispatcher
+	browser     *browser.Service
 
-	execGrantMu  sync.RWMutex
-	execGrants   map[string][]string
-	opts         Options
-	nc           *nats.Conn
-	kTool        string
-	hostID       string
-	uid          string
-	credVer      uint64
-	replay       *replayCache
-	cmdsMu       sync.RWMutex                 // cmds/cmdByName：provider 动态注册（register.go）并发保护
-	cmds         []proto.CommandDecl          // 统一命令声明表（§5.1：恒声明 + 启动探测 + 壳 provider）
-	cmdByName    map[string]proto.CommandDecl // cmds 的 name 索引（路由与纵深检查用）
-	procs        *exec_procs.Manager          // exec 子进程统一托管（§5.8/§5.9）
-	policy       *fsauth.Policy               // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
-	netPol       *netauth.Policy              // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol       *netauth.Policy              // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
-	rtcMu        sync.RWMutex
-	commands     *CommandService
-	rtcSvc       *rtc.Service // hosts/1 直连服务
-	logf         func(string, ...any)
-	uiScriptExec []string // test worker entry; production re-executes the host binary
+	execGrantMu sync.RWMutex
+	execGrants  map[string][]string
+	optsMu      sync.RWMutex
+	opts        Options
+	nc          *nats.Conn
+	kTool       string
+	hostID      string
+	uid         string
+	credVer     uint64
+	replay      *replayCache
+	procs       *exec_procs.Manager // exec 子进程统一托管（§5.8/§5.9）
+	policy      *fsauth.Policy      // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	netPol      *netauth.Policy     // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol      *netauth.Policy     // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	rtcMu       sync.RWMutex
+	access      *hostauth.Access
+	files       *hostfs.FS
+	bytes       *hostfs.Bytes
+	initErr     error
+	rtcSvc      *rtc.Service // hosts_rtc/1 直连服务
+	logf        func(string, ...any)
 }
 
 // New 创建客户端（不连接）。
@@ -95,7 +105,7 @@ func New(opts Options) *Client {
 		}
 	}
 	procs := exec_procs.NewManager(opts.ExecTimeout)
-	procs.NoSandbox = opts.NoSandbox
+	procs.SetNoSandbox(opts.NoSandbox)
 	policy := fsauth.New()
 	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{
@@ -107,17 +117,23 @@ func New(opts Options) *Client {
 		sshPol: netauth.New(netauth.SshKeys),
 		logf:   logf,
 	}
-	c.cmds, c.cmdByName = buildCommandTable()
-	// cua 探测声明成功 → 建立进程级运行时（MCP 子进程懒启动，cua.go）
-	if _, ok := c.cmdByName["cua"]; ok {
-		initCuaRuntime(c.logf)
+
+	if parts := strings.SplitN(opts.Key, ".", 4); len(parts) == 4 {
+		c.hostID = parts[0]
+		c.uid = parts[3]
+		_, _, c.kTool, _ = proto.DeriveKeys(parts[2], parts[0])
+		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
 	}
+	c.initTools()
 	return c
 }
 
 // Connect 连接 NATS，发布 caps v2，订阅会话级 inbox，启动心跳。后台运行，即时返回。
 func (c *Client) Connect() error {
-	parts := strings.SplitN(c.opts.Key, ".", 4)
+	if c.initErr != nil {
+		return c.initErr
+	}
+	parts := strings.SplitN(c.options().Key, ".", 4)
 	if len(parts) != 4 {
 		return fmt.Errorf("invalid credential key")
 	}
@@ -134,13 +150,13 @@ func (c *Client) Connect() error {
 	}
 	c.kTool = kTool
 
-	c.logf("starting aic-host v%s [%s/%s] (host=%s)", c.opts.Version, c.opts.DeviceType, c.opts.DeviceName, c.hostID)
+	c.logf("starting aic-host v%s [%s/%s] (host=%s)", c.options().Version, c.options().DeviceType, c.options().DeviceName, c.hostID)
 
-	natsURL := ResolveNATSURL(c.opts.Host)
+	natsURL := ResolveNATSURL(c.options().Host)
 	opts := []nats.Option{
 		nats.Name("aic-host-" + c.hostID),
 		nats.TokenHandler(func() string {
-			return proto.GenerateConnectToken(c.hostID, c.uid, c.opts.Version, c.opts.DeviceType, c.opts.DeviceName,
+			return proto.GenerateConnectToken(c.hostID, c.uid, c.options().Version, c.options().DeviceType, c.options().DeviceName,
 				time.Now().UnixMilli(), mustNonce(), kConnect)
 		}),
 		nats.ReconnectWait(2 * time.Second),
@@ -151,12 +167,6 @@ func (c *Client) Connect() error {
 		}),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			c.logf("NATS disconnected: %v", err)
-			c.policy.ResetTemporary()
-			c.netPol.ResetTemporary()
-			c.sshPol.ResetTemporary()
-			c.execGrantMu.Lock()
-			c.execGrants = nil
-			c.execGrantMu.Unlock()
 			if isAuthError(err) {
 				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new credential and restart.")
 				go func() { c.stopRTC(); nc.Close() }()
@@ -196,7 +206,7 @@ func (c *Client) Connect() error {
 	if err := c.startCommands(); err != nil {
 		c.logf("device commands unavailable: %v", err)
 	}
-	if c.opts.RTC {
+	if c.options().RTC {
 		if err := c.startRTC(); err != nil {
 			c.logf("rtc disabled: %v", err)
 		}
@@ -207,13 +217,23 @@ func (c *Client) Connect() error {
 
 // Close 优雅关闭：关闭 RTC 服务 → 取消订阅 → 断开 NATS。
 func (c *Client) Close() error {
+	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = c.procs.Close(shutdown)
+	cancelRuns()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = c.tools.Close(ctx)
+	}()
+	if c.files != nil {
+		_ = c.files.Close()
+	}
+	if c.bytes != nil {
+		_ = c.bytes.Close()
+	}
 	service := c.detachRTC()
 	if service != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := service.Close(ctx); err != nil {
-			go service.Close(context.Background())
-		}
-		cancel()
+		service.RevokeAll()
 	}
 	if c.nc != nil {
 		c.nc.Close()
@@ -229,25 +249,38 @@ func (c *Client) Close() error {
 // 注：重连后旧 heartbeatLoop 仍引用 c.nc 继续发 presence（幂等，20s 一次，
 // 多一个并发 loop 无功能影响，不额外处理）。
 func (c *Client) Reconfigure(o cfg.Options) error {
-	opts, err := optionsOf(o, c.opts.DeviceType, c.opts.Version, c.opts.OnLog)
+	opts, err := optionsOf(o, c.options().DeviceType, c.options().Version, c.options().OnLog)
 	if err != nil {
 		return err
 	}
 	// 凭证与身份字段保持现有会话不变
-	opts.Key = c.opts.Key
-	opts.DeviceName = c.opts.DeviceName
-	oldURL := ResolveNATSURL(c.opts.Host)
-	restartRTC := c.opts.WorkDir != opts.WorkDir || c.opts.RTC != opts.RTC || c.opts.Transfers != opts.Transfers
+	opts.Key = c.options().Key
+	opts.DeviceName = c.options().DeviceName
+	oldURL := ResolveNATSURL(c.options().Host)
+	restartRTC := c.options().WorkDir != opts.WorkDir || c.options().RTC != opts.RTC || c.options().Transfers != opts.Transfers
 	if restartRTC {
 		c.stopRTC()
 	}
 	c.procs.SetExecTimeout(opts.ExecTimeout)
-	c.procs.NoSandbox = opts.NoSandbox
+	c.procs.SetNoSandbox(opts.NoSandbox)
 	// 授权模型同步（三域）：work_dir 变更 + 配置重载
 	//（九键经 cfg.Global 由 api.SetConfig 先行更新）。
 	c.policy.SetWorkDir(opts.WorkDir)
 	c.syncAuth()
+	c.optsMu.Lock()
 	c.opts = opts
+	c.optsMu.Unlock()
+	if c.files != nil {
+		_, home, err := deviceFileRoots(opts.WorkDir)
+		if err != nil {
+			return err
+		}
+		c.files.Configure(home, opts.Transfers.ProxyUploadBytes)
+		c.bytes.Configure(opts.Transfers.MaxUploadBytes, opts.Transfers.MaxSources)
+	}
+	if c.browser != nil {
+		c.browser.Configure(opts.BrowserPath, opts.BrowserWidth, opts.BrowserHeight)
+	}
 	if restartRTC && c.nc != nil {
 		if err := c.startCommands(); err != nil {
 			return err
@@ -279,14 +312,14 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 func (c *Client) startCommands() error {
 	c.rtcMu.Lock()
 	defer c.rtcMu.Unlock()
-	if c.commands != nil {
+	if c.access != nil {
 		return nil
 	}
-	commands, err := c.NewCommandService("")
+	commands, err := c.newAccess()
 	if err != nil {
 		return err
 	}
-	c.commands = commands
+	c.access = commands
 	return nil
 }
 
@@ -299,13 +332,14 @@ func (c *Client) startRTC() error {
 	if c.rtcSvc != nil {
 		return nil
 	}
-	commands := c.commands
+	commands := c.access
 	hostname, _ := os.Hostname()
 	svc, err := rtc.New(rtc.Config{
-		Commands: commands,
-		HostID:   c.hostID,
-		Hostname: hostname,
-		Version:  c.opts.Version,
+		Authorization: commands,
+		Tools:         c,
+		HostID:        c.hostID,
+		Hostname:      hostname,
+		Version:       c.options().Version,
 		Send: func(sig *proto.RtcSignal) {
 			if c.nc == nil {
 				return
@@ -322,7 +356,7 @@ func (c *Client) startRTC() error {
 	if err != nil {
 		return err
 	}
-	c.commands = commands
+	c.access = commands
 	c.rtcSvc = svc
 	return nil
 }
@@ -344,16 +378,15 @@ func (c *Client) handleRTCSignal(data []byte) {
 
 // ---- caps v2 上报（§6.3） ----
 
-// buildCommandTable 构建物理 host 的统一命令声明表（§5.1）：
+// commandDefinitions builds raw-argv declarations before registering them alongside service commands:
 //   - 恒声明：exec 核心虚拟指令（curl）+ json + commands + bg_list/bg_wait/bg_kill
 //     （vcore 元数据同源）；文件类指令属 fs 指令集（fs.actions 声明）
 //   - 启动探测（exec.LookPath，探测到才声明）：
 //     shell（bash/zsh/sh/fish；Windows: powershell/pwsh/cmd）→ level 3（逃生舱）；
 //     git → level 1（本地凭证天然可用）；ssh/scp → level 3（目标闸独立通道）
 //
-// browser 等壳能力不在此探测——由壳进程经本地 provider 通道动态注册（register.go，
-// desktop 实现，agent-browser CLI 依赖已彻底移除）。
-func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
+// browser/cua 由 initTools 一次声明到 hosts_tool，不进入普通进程命令表。
+func commandDefinitions() []proto.CommandDecl {
 	var cmds []proto.CommandDecl
 	seen := map[string]bool{}
 	add := func(d proto.CommandDecl) {
@@ -400,42 +433,26 @@ func buildCommandTable() ([]proto.CommandDecl, map[string]proto.CommandDecl) {
 			add(d)
 		}
 	}
-	// cua 一级命令（§5.10）：cua-driver 二进制探测（CUA_DRIVER_PATH → PATH →
-	// 常见安装路径），探测到才声明（运行时单例在 New() 建立，需 logf）
-	if findCuaDriver() != "" {
-		if d, ok := vcore.Decl("cua"); ok {
-			add(d)
-		}
-	}
-	// 壳 provider（desktop 的 browser 等）：进程级注册表汇入（register.go）
-	for _, d := range providerDecls() {
-		add(d)
-	}
-	byName := make(map[string]proto.CommandDecl, len(cmds))
-	for _, d := range cmds {
-		byName[d.Name] = d
-	}
-	return cmds, byName
+	return cmds
 }
 
 // buildCaps 构造物理 host 的 caps v2（§6.3）：
-// fs.actions=null（全部 8 个）；exec.commands = 统一命令声明表。
+// FS 与 exec 元数据均从实际注册声明生成。
 func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
-	c.cmdsMu.RLock()
-	decls := make([]proto.CommandDecl, len(c.cmds))
-	copy(decls, c.cmds)
-	c.cmdsMu.RUnlock()
+	decls := c.tools.Commands(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)})
 	return &proto.Caps{
 		HostID:        c.hostID,
 		CredentialVer: c.credVer,
-		AgentVersion:  c.opts.Version,
-		DeviceType:    c.opts.DeviceType,
+		AgentVersion:  c.options().Version,
+		DeviceType:    c.options().DeviceType,
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
 		Mgmt:          c.buildMgmt(),
-		FS:            proto.FSCaps{},                  // actions=null = 全部 8 个；工作区不限制完整路径访问
-		Exec:          proto.ExecCaps{Commands: decls}, // 统一命令声明表
+
+		ToolProtocols: []string{toolwire.Protocol, natswire.Protocol, rtcwire.Protocol},
+		FS:            c.filesystemCaps(),                                      // 内建 FS 方法与 AI 文本动作
+		Exec:          proto.ExecCaps{Epoch: c.procs.Epoch(), Commands: decls}, // 统一命令声明表
 	}
 }
 
@@ -443,23 +460,21 @@ func (c *Client) buildCaps() *proto.Caps {
 func (c *Client) buildMgmt() *proto.MgmtCaps {
 	c.rtcMu.RLock()
 	defer c.rtcMu.RUnlock()
-	if c.commands == nil {
+	if c.files == nil {
 		return nil
 	}
-	m := &proto.MgmtCaps{Transports: map[string]proto.TransportCaps{"proxy": {Enabled: true, Protocol: hosts.Protocol, Commands: []string{"fs"}}}}
+	m := &proto.MgmtCaps{Transports: map[string]proto.TransportCaps{"proxy": {Enabled: true, Protocol: natswire.Protocol, Commands: []string{"fs"}}}}
 	if c.rtcSvc != nil {
-		commands := []string{"fs"}
-		if p, ok := lookupProvider("browser"); ok && p.Direct != nil {
-			commands = append(commands, "browser")
-		}
-		m.Transports["rtc"] = proto.TransportCaps{Enabled: true, Protocol: hosts.Protocol, Commands: commands}
+		commands := []string{"fs", "exec"}
+
+		m.Transports["rtc"] = proto.TransportCaps{Enabled: true, Protocol: rtcwire.Protocol, Commands: commands}
 	}
 	return m
 }
-func (c *Client) detachRTC() *CommandService {
+func (c *Client) detachRTC() *hostauth.Access {
 	c.rtcMu.Lock()
-	svc, commands := c.rtcSvc, c.commands
-	c.rtcSvc, c.commands = nil, nil
+	svc, commands := c.rtcSvc, c.access
+	c.rtcSvc, c.access = nil, nil
 	c.rtcMu.Unlock()
 	if svc != nil {
 		svc.Close()
@@ -468,7 +483,7 @@ func (c *Client) detachRTC() *CommandService {
 }
 func (c *Client) stopRTC() {
 	if service := c.detachRTC(); service != nil {
-		go service.Close(context.Background())
+		service.RevokeAll()
 	}
 }
 
@@ -480,9 +495,7 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 	}
 	data, _ := json.Marshal(c.buildCaps())
 	nc.Publish(subj, data)
-	c.cmdsMu.RLock()
-	n := len(c.cmds)
-	c.cmdsMu.RUnlock()
+	n := len(c.tools.Commands(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)}))
 	c.logf("caps published to %s (%d commands)", subj, n)
 }
 
@@ -518,3 +531,16 @@ func isAuthError(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "authentication") || strings.Contains(s, "authorization")
 }
+
+func (c *Client) filesystemCaps() proto.FSCaps {
+	catalog := c.tools.Catalog(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)})
+	actions := []string{}
+	for _, m := range catalog.FS {
+		if strings.HasPrefix(m.Name, "text.") {
+			actions = append(actions, strings.TrimPrefix(m.Name, "text."))
+		}
+	}
+	return proto.FSCaps{Actions: &actions, Methods: catalog.FS}
+}
+
+func (c *Client) options() Options { c.optsMu.RLock(); defer c.optsMu.RUnlock(); return c.opts }

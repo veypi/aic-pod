@@ -238,6 +238,7 @@
     <input id="exec_timeout" ref="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
     <label>浏览器分辨率（宽 × 高）</label>
     <div class="row">
+      <input type="text" ref="browser_path" aria-label="Chrome 可执行文件" placeholder="Chrome 路径（留空自动查找，下次启动浏览器生效）">
       <input type="number" min="320" max="4096" step="1" ref="browser_width" aria-label="浏览器宽度" placeholder="1280">
       <span>×</span>
       <input type="number" min="320" max="4096" step="1" ref="browser_height" aria-label="浏览器高度" placeholder="720">
@@ -383,6 +384,7 @@
       $refs.work_dir.value = cfg.work_dir || '';
       $refs.exec_timeout.value = cfg.exec_timeout || '';
       $refs.home_path.value = cfg.home_path || '/';
+      $refs.browser_path.value = cfg.browser_path || "";
       $refs.browser_width.value = cfg.browser_width || 1280;
       $refs.browser_height.value = cfg.browser_height || 720;
       for (const d of domains) {
@@ -414,7 +416,7 @@
       if (![browser_width, browser_height].every(n => Number.isInteger(n) && n >= 320 && n <= 4096)) {
         throw new Error('浏览器宽高必须是 320–4096 之间的整数');
       }
-      const body = {host, work_dir, exec_timeout, home_path, browser_width, browser_height};
+      const body = {host, work_dir, exec_timeout, home_path, browser_width, browser_height, browser_path: $refs.browser_path.value.trim()};
       for (const d of domains) {
         body[d.key + '_policy'] = auth[d.key].policy;
         body[d.key + '_deny'] = auth[d.key].deny;

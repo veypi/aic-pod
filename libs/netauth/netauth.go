@@ -207,5 +207,3 @@ func (p *Policy) List(sid string) []string {
 }
 
 func (p *Policy) DropSession(sid string) { p.mu.Lock(); defer p.mu.Unlock(); delete(p.grants, sid) }
-
-func (p *Policy) ResetTemporary() { p.mu.Lock(); defer p.mu.Unlock(); p.grants = map[string][]Entry{} }

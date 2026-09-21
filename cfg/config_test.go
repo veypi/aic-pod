@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -188,7 +189,7 @@ func TestConfigExecutionPolicyRoundTrip(t *testing.T) {
 		t.Fatalf("policy round trip: %+v != %+v", AuthFrom(o), AuthFrom(got))
 	}
 }
-func TestInvalidConfigDoesNotReplaceActivePolicy(t *testing.T) {
+func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 	isolateConfigDir(t)
 	if err := Save(&Options{FsPolicy: PolicyDeny}); err != nil {
 		t.Fatal(err)
@@ -196,20 +197,102 @@ func TestInvalidConfigDoesNotReplaceActivePolicy(t *testing.T) {
 	if _, err := Load(); err != nil {
 		t.Fatal(err)
 	}
-	active := Global
 	p, _ := Path()
 	for _, body := range []string{
 		"::::broken yaml::::\n[\n", "fspolicy: open\n", "fs_policy: typo\n", "fs_allow: [ 'ro:' ]\n",
 		"fs_allow: [ {path: /, access: rw} ]\n", "fs_deny: [ 'ro:/secret' ]\n", "exec_allow: [ 'git*' ]\n", "net_allow: [ '*:443' ]\n",
+		"plain text", "[arbitrary, values]", "", "rtc: invalid\nbrowser_width: [bad]\ncode: {}\n",
 	} {
 		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Load(); err == nil {
-			t.Errorf("invalid config accepted: %q", body)
+		o, err := Load()
+		if err != nil {
+			t.Fatalf("config must not block startup: %v", err)
 		}
-		if Global != active {
-			t.Fatal("failed load replaced active policy")
+		if Global != o || o.Code == "" || o.Host != DefaultHost || !o.RTC || o.BrowserWidth != 1280 || o.FsPolicy != PolicyDeny {
+			t.Fatalf("missing usable defaults for %q", body)
+		}
+		if err := o.ValidateAuth(); err != nil {
+			t.Fatalf("invalid auth field was not discarded: %v", err)
+		}
+		data, _ := os.ReadFile(p)
+		if string(data) != body {
+			t.Fatal("loading must not overwrite the user's config")
+		}
+	}
+}
+
+func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
+	isolateConfigDir(t)
+	p, _ := Path()
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nbrowser_width: nope\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_allow: [/workspace]\nexec_allow: [git, {}]\n"
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Key != "existing-device-key" || o.Host != "http://localhost:4000" || o.HomePath != "/agents" || o.HostsSources != 64 {
+		t.Fatal("unrelated invalid fields discarded valid configuration")
+	}
+	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != PolicyDeny || o.Code == "" {
+		t.Fatal("invalid fields did not fall back to defaults")
+	}
+	if !reflect.DeepEqual(o.FsAllow, []string{"/workspace"}) || len(o.ExecAllow) != 0 {
+		t.Fatal("valid rule lost or malformed list partially applied")
+	}
+}
+
+func TestUnreadableConfigFallsBack(t *testing.T) {
+	isolateConfigDir(t)
+	p, _ := Path()
+	// 配置路径为目录，模拟读文件失败（root 运行时 chmod 仍可能可读）。
+	if err := os.MkdirAll(p, 0700); err != nil {
+		t.Fatal(err)
+	}
+	o, err := Load()
+	if err != nil || o.Code == "" || o.Host != DefaultHost {
+		t.Fatalf("unreadable config blocked startup: %v", err)
+	}
+}
+
+func TestEnsureCode(t *testing.T) {
+	isolateConfigDir(t)
+	o := NewOptions()
+	if err := o.EnsureCode(); err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Code) != 32 || !o.codeAuto {
+		t.Fatal("missing per-process local API code")
+	}
+	code := o.Code
+	if err := o.EnsureCode(); err != nil || o.Code != code {
+		t.Fatal("EnsureCode changed an existing code")
+	}
+	if err := Save(o); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := Path()
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), code) {
+		t.Fatal("generated code was persisted")
+	}
+	fixed := &Options{Code: "configured-code"}
+	if err := fixed.EnsureCode(); err != nil || fixed.Code != "configured-code" || fixed.codeAuto {
+		t.Fatal("configured code must be preserved")
+	}
+	for _, bad := range []string{"   ", "line\nbreak", "中文"} {
+		o := &Options{Code: bad}
+		if err := o.EnsureCode(); err != nil || len(o.Code) != 32 || !o.codeAuto {
+			t.Fatal("invalid header code did not fall back to a generated code")
 		}
 	}
 }

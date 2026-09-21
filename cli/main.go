@@ -15,6 +15,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"net/url"
 	"os"
@@ -54,19 +56,22 @@ func main() {
 		logv.SetLogger(logv.NewLogger(logv.ConsoleWriter(), lw))
 	}
 
-	// 配置：文件值填充 cfg.Global 后交给 AutoRegister（flag/env 覆盖）
-	o, err := cfg.Load()
-	if err != nil {
-		logv.Warn().Msgf("load config: %v", err)
-	}
-
 	cmd := flags.New("aic", "AIC host agent (local client)")
-	cmd.AutoRegister(o)
+	cmd.AutoRegister(cfg.Global)
+	if p, err := cfg.Path(); err == nil {
+		cmd.ConfigFile(p)
+	}
 
 	// 主命令：连接运行（本地 API + host 会话）
 	cmd.Command = func() error { return runCmd() }
 
-	cmd.Parse()
+	if err := cmd.Parse(); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		logv.Error().Msg(err.Error())
+		os.Exit(2)
+	}
 	if err := cmd.Run(); err != nil {
 		logv.Error().Msg(err.Error())
 		os.Exit(1)

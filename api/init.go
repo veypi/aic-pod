@@ -37,7 +37,6 @@ func init() {
 	Router.Post("/start", "Start Host", StartHost)
 	Router.Post("/stop", "Stop Host", StopHost)
 	Router.Post("/check_host", "Check Host", CheckHost)
-	Router.Post("/provider/register", "Register Shell Provider", ProviderRegister)
 	// 兜底：OPTIONS 预检由 security 统一短路（vigo 路由未命中不走 Use 链，
 	// 必须能 match 到路由）；其余未注册路径返回 JSON 404。
 	Router.Any("/**", "Catch All", CatchAll)
@@ -148,7 +147,7 @@ func checkCode(r *http.Request) bool {
 	if now.Before(lockEnd) {
 		return false
 	}
-	if r.Header.Get("x-aic-code") != cfg.Global.Code {
+	if cfg.Global.Code == "" || r.Header.Get("x-aic-code") != cfg.Global.Code {
 		failCnt++
 		if failCnt >= 5 {
 			lockEnd = now.Add(time.Minute)

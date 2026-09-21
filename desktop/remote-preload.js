@@ -1,6 +1,6 @@
 // remote-preload.js — 注入 defaultSession 全部 frame（Electron 35+ session.registerPreloadScript）。
 // 仅平台白名单 host（配置 host + 默认域名与旧域名）：完整能力（api 转发/窗口控制/
-// 外链/桌宠）。浏览器命令通过 hosts/1 设备连接调用。
+// 外链/桌宠）。浏览器命令通过 hosts_rtc/1 设备连接调用。
 // 本地设置页不在本 preload 范围：独立配置窗口走 settings-preload（独立 partition）。
 const { contextBridge, ipcRenderer } = require('electron')
 

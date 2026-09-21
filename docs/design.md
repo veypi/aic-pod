@@ -1,5 +1,7 @@
 # AIC Pod 设计文档
 
+设备能力以 [三协议实现说明](hosts-tools.md) 和 [统一结构图](hosts-protocols-proposal.md) 为准。下文其他模块说明保留；旧设备传输入口已移除。
+
 ## 概述
 
 AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程形式运行在各类终端设备上，通过 NATS over WebSocket 连入 AIC 服务端，将设备上的执行能力（命令执行、文件操作、浏览器控制、原生 GUI 自动化、ssh/scp 转发等）注册为 LLM 可调用的工具。本机能力受三域授权（fs/net/ssh）与进程沙箱两道闸控制（详见 [host_sandbox.md](host_sandbox.md)）。
@@ -39,7 +41,7 @@ aic-pod/
 ├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
 │                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
 │                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
-│                         #   壳 provider：browser-tool.mjs（desktop/browser/ 独立 ui/1 core + Electron CDP）
+│                         #   browser-path.cjs 仅注入 Chrome 默认路径；Go libs/browser 独立执行
 │                         #   内置 cua-driver 发行物（cua.json + scripts/sync-cua.mjs → resources/cua）
 ├── protocol/ui/          # ui/1 命令 schema、Go 解析/结果、跨语言验收向量
 ├── docs/                 # design.md（本文）、host_sandbox.md（沙箱与三域授权）、ui-protocol.md
@@ -74,7 +76,7 @@ aic-pod/
 | **语言** | Node（主进程）+ Go（后端二进制） |
 | **目标平台** | Windows / macOS / Linux |
 | **形态** | 启动：loading → spawn 后端（AIC_PORT_FILE 握手）→ 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + 默认域名与旧域名 ivec.ai），平台页经 window.aicDesktop 直调本地 API（端口/code 不出主进程，IPC handler 校验 senderFrame host） |
-| **能力** | 与 cli 相同（exec/fs/ssh/scp，沙箱 + 三域授权）；另有壳 provider `browser`（Electron CDP）与 `cua`（cua-driver MCP 桥接，原生 GUI 自动化，内置发行物随包分发） |
+| **能力** | 与 cli 相同（exec/fs/ssh/scp，沙箱 + 三域授权）；另有 `hosts_tools/1` 的 `browser`（独立 Chrome）与 `cua`（cua-driver MCP 桥接，原生 GUI 自动化，内置发行物随包分发） |
 | **本地页面** | 仅 /settings 配置页（独立系统边框配置窗口：托盘「本地配置」直开，平台不可达首配时自动打开）；设置保存后探测并跳 {host}/hosts |
 | **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
 | **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 host 注册 |
@@ -131,7 +133,7 @@ cua / browser / ssh / scp 属宿主体外或独立通道能力，不进 exec 沙
 - **恒声明**：核心虚拟指令（`curl`/`json` + `commands`/`bg_list`/`bg_wait`/`bg_kill`，vcore 元数据同源）
 - **fs 指令集**（独立工具，8 action）：`read`/`write`/`edit`/`ls`/`rg`/`cp`/`mv`/`rm`
 - **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；ssh/scp → 独立目标闸（ssh 域 Policy）；cua（cua-driver 二进制）→ 本机 GUI 自动化（§5.10）
-- **壳 provider 注册**：desktop 的 `browser`（Electron CDP 原生实现，公共 schema 与 cua 同源，§5.6）
+- **工具注册**：browser/cua 经 hosts_tool 一次声明，由 hosts_rtc/1 与 hosts_nats/1 调用，详见 [当前实现](hosts-tools.md)
 - 分级与动态提升（git push/checkout/reset、browser 子命令、cua `--delivery foreground`/`activate`、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
 
 ### fs — 文件操作
@@ -231,7 +233,7 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 - 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req.{sid}`（工具请求，§6.1 v4——sid 段定向，信封 SessionID 一致；run_tool 无会话直发用 manual 占位）
 - 即时发布 CAPS → 定时心跳（20s）→ 单订阅 inbox（`u.{uid}.h.host_{host_id}.>`）→ 验签执行 → req-reply 回复
 
-**RTC 直连（2026-09-18，hosts/1）**：owner 页面按需建立通用设备连接，设备宣告 `mgmt{rtc:true,protocols:["hosts/1"]}`。NATS 仅承载 offer/answer/candidate；入场票据绑定主体、设备凭据版本、PC 与真实 DTLS 指纹。控制和二进制通道分别为 hosts-control/hosts-data，所有业务进入 CommandService/Runtime，fs 是首个 provider。原 code/fs/readbin/writebin RTC 协议已删除；本地管理 API 的 code 独立保留。完整契约与当前边界见 [统一设备协议](hosts-direct-protocol-proposal.md)。
+**设备调用**：前端 hosts_rtc/1 与服务器 hosts_nats/1 共用 hosts_tools/1 声明和分发，内建 FS 与 exec.commands 是唯一能力模型。RTC 票据绑定 DTLS，控制使用 hosts-tools，原始 stream 使用 hosts-stream/*。文件代理转换为签名的 fs-only NATS call。业务状态分别由 FS、exec、Browser、CUA 管理。
 
 ## 外部扩展
 

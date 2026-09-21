@@ -63,10 +63,10 @@ func monitorGroupRSS(e *Entry, limit uint64) {
 		case <-e.done:
 			return
 		case <-ticker.C:
-			if e.pid <= 0 {
+			if e.PID() <= 0 {
 				return
 			}
-			kb, err := groupRSSKB(e.pid)
+			kb, err := groupRSSKB(e.PID())
 			if err != nil {
 				continue
 			}

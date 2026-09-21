@@ -6,22 +6,16 @@ directories:
   buildResources: assets
 files:
   - main.js
-  - browser-tool.mjs
-  - electron-adapter.mjs
+  - browser-path.cjs
+  - backend-startup.cjs
   - loading.html
   - remote-preload.js
   - settings-preload.js
   - package.json
   - assets/**
-  - browser/**
-  - ui/**
   - "!**/*.test.mjs"
-  - from: ../protocol/ui
-    to: ui
-    filter:
-      - schema.json
   # vendor/cua 走 extraResources（→ resources/cua），不进 asar（否则重复打包 + 丢可执行位/签名）
-  - "!vendor/cua/**"
+  - "!vendor/**"
   - scripts/**
   - "!scripts/test-*.mjs"
 # Go 后端二进制（make desktop-backend 产出 desktop/bin/aic-backend）→ resources/backend/
@@ -35,6 +29,10 @@ extraResources:
       - aic-backend*
   - from: vendor/cua
     to: cua
+  - from: vendor
+    to: .
+    filter:
+      - browser/**
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg

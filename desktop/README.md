@@ -9,23 +9,15 @@
 Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：本地 vigo 服务 + NATS host 会话）
  │    └─ 握手：AIC_PORT_FILE 环境变量 → 后端写 {port, code} JSON
- ├─ browser 壳通道（browser-tool.mjs）：ui/1 browser core（browser/，直接使用 CDP）
- │    + electron-adapter（webContents.debugger CDP）→ 127.0.0.1 TCP 换行 JSON
- │    → 向 Go 后端注册 provider（/api/provider/register），caps 出现 browser
- │    browser/cua run 由 Go host 启动独立 JS worker，逐步复用现有命令；不在 Electron 主进程执行脚本
- ├─ cua（本机 GUI 自动化）：Go 后端原生桥接 cua-driver（libs/host/cua.go，
- │    MCP 持久子进程懒启动）；启动探测到 cua-driver 二进制才声明（不经壳通道）；
- │    发行物内置：scripts/sync-cua.mjs 按 desktop/cua.json 固定版本 + sha256 同步到
- │    vendor/cua → resources/cua，main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP；
- │    macOS 走 CuaDriver.app daemon 唯一形态（TCC 授权归 com.trycua.driver，host 自动拉起）
- ├─ BaseWindow 主窗口：平台页 WebContentsView，browser 仅以 canvas 画面展示
- ├─ 离屏 BrowserWindow 标签池：默认固定 1280×720、DPR=1，背景节流关闭
- │    browser 工具窗口在首次加载前统一静音，网页播放音视频不会从设备输出声音
- │    主窗口缩放/隐藏不改变标签视口；CDP 输入和截图可独立在后台运行
- │    compositor paint → hosts/1 live 双向流 → RTC hosts-live → canvas 按 min(宽比,高比) 居中展示
- │    Browser 应用发现各设备 AI 窗口；直接转发原始像素坐标输入，允许 AI/人类并行，键盘/IME 留在前端
- │    没有 iframe/nativeWin 降级；Web 与桌面前端使用相同 hosts 通道
- │    设计见 aic/docs/os_native_windows.md
+ ├─ browser-path.cjs：只注入 AIC_BROWSER_DEFAULT_PATH（独立 Chrome）
+ │    Go libs/browser 经 pipe 自管 Chrome、profile、page、下载和输入租约
+ │    browser/cua 经 hosts_tool 一次声明，由 hosts_rtc/1 与 hosts_nats/1 调用
+ ├─ cua：Go libs/cua 自管 cua-driver MCP、窗口与快照
+ │    scripts/sync-cua.mjs 将固定版本发行物同步到 vendor/cua → resources/cua
+ │    main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP
+ ├─ BaseWindow 主窗口：平台页 WebContentsView
+ │    Browser viewer 通过 RTC 观看 Go 管理的 Chrome，接管后才能输入
+ │    固定设备视口，viewer 关闭或缩放不影响页面生命周期
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
  │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
  │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
@@ -53,12 +45,12 @@ composition 提交转发给离屏页面。原生内容的焦点交接已取消�
 ```bash
 # 1. 编译 Go 后端（desktop/bin/aic-backend）
 make backend-bin
-# 2. 安装依赖 + 启动（browser 源码直接加载，无同步步骤）
+# 2. 安装依赖 + 启动（需独立 Chrome，或配置 browser_path）
 cd desktop && npm install && npm start
 ```
 
 壳页面/平台页改动即时生效（HTTP 服务），main.js/preload.js 改动需重启 electron。
-browser 代码位于 desktop/browser/；公共 schema 位于 protocol/ui/schema.json，打包时进入 ui/schema.json。改动后需重启 Electron。
+browser 代码位于 libs/browser/，修改后重新编译 Go 后端；协议与测试见 [设备工具实现](../docs/hosts-tools.md)。Electron 不再包含 browser CDP 引擎。
 内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
 `npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。
 

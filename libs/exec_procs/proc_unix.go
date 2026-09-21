@@ -33,16 +33,16 @@ func closeJob(job uintptr) {}
 // killEntry 终止后台条目：子进程先对整个进程组发 SIGTERM，5s 未退出补
 // SIGKILL（§5.8）；托管任务（pid=0）无进程，仅 cancel 中止任务体。
 func killEntry(e *Entry) {
-	if e.pid > 0 {
+	if e.PID() > 0 {
 		// 进程组杀死（Setpgid 使 pgid == pid）
-		_ = syscall.Kill(-e.pid, syscall.SIGTERM)
+		_ = syscall.Kill(-e.PID(), syscall.SIGTERM)
 		go func() {
 			timer := time.NewTimer(5 * time.Second)
 			<-timer.C
 			select {
 			case <-e.done:
 			default:
-				_ = syscall.Kill(-e.pid, syscall.SIGKILL)
+				_ = syscall.Kill(-e.PID(), syscall.SIGKILL)
 			}
 		}()
 	}
@@ -51,3 +51,5 @@ func killEntry(e *Entry) {
 		e.cancel()
 	}
 }
+
+func killProcessTree(pid int) { _ = syscall.Kill(-pid, syscall.SIGKILL) }

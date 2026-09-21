@@ -45,33 +45,32 @@ func TestCapsFSActionsForms(t *testing.T) {
 
 func TestCapsCommandDecl(t *testing.T) {
 	var c Caps
-	mustUnmarshal(t, `{"host_id":"host_a","exec":{"commands":[
-		{"name":"browser","desc":"control a web browser","help":"browser <sub>","level":2},
-		{"name":"bg_kill","level":3},
-		{"name":"unknown_level"}
-	]}}`, &c)
-	if len(c.Exec.Commands) != 3 {
-		t.Fatalf("commands = %v", c.Exec.Commands)
+	mustUnmarshal(t, `{"host_id":"host_a","exec":{"epoch":"runtime_epoch","commands":[
+ {"name":"browser","desc":"control a web browser","help":"browser <method>","level":1,"methods":[{"name":"page.wait","mode":"call","access":1,"background":true,"input":{"type":"object"}}]},
+ {"name":"sh","raw_argv":true,"level":3,"methods":[{"name":"run","mode":"call","access":3,"background":true,"input":{"type":"object"}}]}
+ ]}}`, &c)
+	if c.Exec.Epoch != "runtime_epoch" || len(c.Exec.Commands) != 2 {
+		t.Fatal(c.Exec)
 	}
-	v0 := c.Exec.Commands[0]
-	if v0.Name != "browser" || v0.Desc != "control a web browser" || v0.Help != "browser <sub>" || v0.RequiredLevel != 2 {
-		t.Errorf("commands[0] = %+v", v0)
+	browser := c.Exec.Commands[0]
+	if browser.RequiredLevel != 1 || browser.Help == "" || len(browser.Methods) != 1 || !browser.Methods[0].Background {
+		t.Fatal(browser)
 	}
-	if c.Exec.Commands[1].RequiredLevel != 3 {
-		t.Errorf("commands[1] level = %d", c.Exec.Commands[1].RequiredLevel)
+	shell := c.Exec.Commands[1]
+	if !shell.RawArgv || shell.RequiredLevel != 3 || shell.Methods[0].Name != "run" {
+		t.Fatal(shell)
 	}
-	// 未声明 level = 0（不暴露给 AI，仅供服务端按需处理；host 必备指令都会显式声明）
-	if c.Exec.Commands[2].RequiredLevel != 0 {
-		t.Errorf("commands[2] level = %d, want 0", c.Exec.Commands[2].RequiredLevel)
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 序列化：level 非零必出；desc/help 非空必出；零值省略
-	out, _ := json.Marshal(c.Exec.Commands[0])
-	if !strings.Contains(string(out), "\"level\":2") || !strings.Contains(string(out), "\"desc\"") || !strings.Contains(string(out), "\"help\"") {
-		t.Errorf("commands[0] marshal = %s", out)
+	var roundtrip Caps
+	mustUnmarshal(t, string(raw), &roundtrip)
+	if string(roundtrip.Exec.Commands[0].Methods[0].Input) != `{"type":"object"}` || roundtrip.Exec.Epoch != c.Exec.Epoch {
+		t.Fatal("method schema or execution epoch lost")
 	}
-	out2, _ := json.Marshal(c.Exec.Commands[2])
-	if strings.Contains(string(out2), "\"level\"") || strings.Contains(string(out2), "desc") {
-		t.Errorf("commands[2] marshal should omit zero fields: %s", out2)
+	if strings.Contains(string(raw), `"tools":`) {
+		t.Fatal("parallel tool capability published")
 	}
 }
 

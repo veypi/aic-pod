@@ -10,9 +10,8 @@ import (
 	"sort"
 	"syscall"
 
-	"github.com/veypi/aic-pod/libs/hostcmd"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
-	"github.com/veypi/aic-pod/protocol/hosts"
+	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 type findArgs struct {
@@ -37,7 +36,7 @@ var stopWalk = errors.New("walk budget exhausted")
 func child(p fsp.Path, name string) fsp.Path {
 	return fsp.Path{RootID: p.RootID, Segments: append(append([]string{}, p.Segments...), name)}
 }
-func (f *FS) info(ctx context.Context, call hostcmd.Call, p fsp.Path, write bool) (fs.FileInfo, error) {
+func (f *FS) info(ctx context.Context, call Call, p fsp.Path, write bool) (fs.FileInfo, error) {
 	r, abs, err := f.check(ctx, call, p, write)
 	if err != nil {
 		return nil, err
@@ -49,7 +48,7 @@ func (f *FS) info(ctx context.Context, call hostcmd.Call, p fsp.Path, write bool
 	defer h.Close()
 	return h.Lstat(name)
 }
-func (f *FS) walk(ctx context.Context, call hostcmd.Call, p fsp.Path, depth int, write, skipDenied bool, visit func(walkEntry) error) error {
+func (f *FS) walk(ctx context.Context, call Call, p fsp.Path, depth int, write, skipDenied bool, visit func(walkEntry) error) error {
 	count := 0
 	var walk func(fsp.Path, int) error
 	walk = func(p fsp.Path, level int) error {
@@ -113,7 +112,7 @@ func (f *FS) walk(ctx context.Context, call hostcmd.Call, p fsp.Path, depth int,
 	}
 	return walk(p, 0)
 }
-func (f *FS) find(ctx context.Context, call hostcmd.Call, p findArgs) (any, error) {
+func (f *FS) find(ctx context.Context, call Call, p findArgs) (any, error) {
 	if p.Limit == 0 {
 		p.Limit = 100
 	}
@@ -156,26 +155,21 @@ func partial(err error, completed int) error {
 	result.Details = map[string]any{"completed": completed}
 	return result
 }
-func (f *FS) mkdirParents(ctx context.Context, call hostcmd.Call, p mkdirArgs) (any, error) {
+func (f *FS) mkdirParents(ctx context.Context, call Call, p mkdirArgs) (any, error) {
 	if len(p.Path.Segments) == 0 {
 		return nil, hosts.Fail("permission_denied", "Cannot create a root")
 	}
 	// Start at the requested path and stop at the nearest existing directory.
 	// An allowed /Users/me/project must not require write permission on /Users.
+	// 探测不做策略门控：已存在的祖先不需要写授权（谁被创建才查谁，与
+	// edit/mkdir/remove 同口径）；写预检只覆盖将创建的层级——先检后建，
+	// 拒绝时零副作用；创建时 f.mkdir 仍逐级复查。
 	var missing []fsp.Path
 	current := p.Path
 	var value any
 	for {
-		before, err := f.info(ctx, call, current, true)
+		before, err := f.probe(current)
 		if err == nil {
-			if before.Mode()&os.ModeSymlink != 0 {
-				dir, info, e := f.directory(ctx, call, current, true)
-				if e != nil {
-					return nil, e
-				}
-				dir.Close()
-				before = info
-			}
 			if !before.IsDir() {
 				return nil, hosts.Fail("already_exists", "Parent is not a directory")
 			}
@@ -194,6 +188,11 @@ func (f *FS) mkdirParents(ctx context.Context, call hostcmd.Call, p mkdirArgs) (
 		missing = append(missing, current)
 		current = fsp.Path{RootID: current.RootID, Segments: current.Segments[:len(current.Segments)-1]}
 	}
+	for _, m := range missing {
+		if _, _, err := f.check(ctx, call, m, true); err != nil {
+			return nil, err
+		}
+	}
 	created := 0
 	for i := len(missing) - 1; i >= 0; i-- {
 		var err error
@@ -205,7 +204,7 @@ func (f *FS) mkdirParents(ctx context.Context, call hostcmd.Call, p mkdirArgs) (
 	}
 	return value, nil
 }
-func (f *FS) removeTree(ctx context.Context, call hostcmd.Call, p removeArgs) (any, error) {
+func (f *FS) removeTree(ctx context.Context, call Call, p removeArgs) (any, error) {
 	if len(p.Path.Segments) == 0 {
 		return nil, hosts.Fail("permission_denied", "Cannot remove a root")
 	}
@@ -245,7 +244,7 @@ func (f *FS) removeTree(ctx context.Context, call hostcmd.Call, p removeArgs) (a
 	}
 	return map[string]any{"removed": true, "path": p.Path, "completed": completed}, nil
 }
-func (f *FS) move(ctx context.Context, call hostcmd.Call, p moveArgs) (any, error) {
+func (f *FS) move(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if len(p.Src.Segments) == 0 || len(p.Dst.Segments) == 0 {
 		return nil, hosts.Fail("permission_denied", "Cannot move or replace a root")
 	}

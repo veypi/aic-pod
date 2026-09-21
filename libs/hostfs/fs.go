@@ -22,9 +22,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/veypi/aic-pod/libs/hostcmd"
+	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
-	"github.com/veypi/aic-pod/protocol/hosts"
+	hosts "github.com/veypi/aic-pod/protocol/fs"
+	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 type Root struct {
@@ -35,9 +36,10 @@ type Config struct {
 	Roots []Root
 	// Home is the initial browsing directory, not a filesystem boundary.
 	Home  *fsp.Path
-	Bytes *hostcmd.Bytes
+	Bytes *Bytes
 	// Check must consult the current device policy; it must not trust args.
-	Check               func(context.Context, hostcmd.Call, string, bool) error
+	Check               func(context.Context, Call, string, bool) error
+	MaxProxyUploadBytes int64
 	MaxDirectoryEntries int
 }
 type root struct {
@@ -54,6 +56,9 @@ type FS struct {
 func New(cfg Config) (*FS, error) {
 	if cfg.Bytes == nil || cfg.Check == nil || len(cfg.Roots) == 0 {
 		return nil, fmt.Errorf("hostfs: roots, byte store and policy check required")
+	}
+	if cfg.MaxProxyUploadBytes <= 0 {
+		cfg.MaxProxyUploadBytes = 64 << 20
 	}
 	if cfg.MaxDirectoryEntries <= 0 {
 		cfg.MaxDirectoryEntries = 10000
@@ -144,11 +149,11 @@ func objectSchema(properties map[string]any, required ...string) json.RawMessage
 	raw, _ := json.Marshal(map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false})
 	return raw
 }
-func (f *FS) Provider() hostcmd.Provider {
+func (f *FS) Methods() []tool.Method {
 	path := map[string]any{"type": "object", "required": []string{"root_id", "segments"}, "properties": map[string]any{"root_id": map[string]any{"type": "string"}, "segments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "additionalProperties": false}
 	text := map[string]any{"type": "string"}
 	boolean := map[string]any{"type": "boolean"}
-	methods := map[string]hosts.Method{
+	methods := map[string]fsMethod{
 		"roots":  {InputSchema: objectSchema(map[string]any{}), Effect: "read"},
 		"home":   {InputSchema: objectSchema(map[string]any{}), Effect: "read"},
 		"stat":   {InputSchema: objectSchema(map[string]any{"path": path, "if_version": text, "follow_symlinks": map[string]any{"const": false}}, "path"), Effect: "read"},
@@ -158,8 +163,8 @@ func (f *FS) Provider() hostcmd.Provider {
 		"mkdir":  {InputSchema: objectSchema(map[string]any{"path": path, "parents": boolean, "exist_ok": boolean}, "path"), Effect: "write"},
 		"remove": {InputSchema: objectSchema(map[string]any{"path": path, "if_version": text, "recursive": boolean, "missing_ok": boolean}, "path", "if_version"), Effect: "write"},
 	}
-	methods["find"] = hosts.Method{InputSchema: objectSchema(map[string]any{"path": path, "glob": text, "depth": map[string]any{"type": "integer", "minimum": 0, "maximum": 64}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}}, "path"), Effect: "read"}
-	methods["move"] = hosts.Method{InputSchema: objectSchema(map[string]any{"src": path, "dst": path, "if_version": text, "condition": map[string]any{"type": "object"}}, "src", "dst", "if_version", "condition"), Effect: "write"}
+	methods["find"] = fsMethod{InputSchema: objectSchema(map[string]any{"path": path, "glob": text, "depth": map[string]any{"type": "integer", "minimum": 0, "maximum": 64}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}}, "path"), Effect: "read"}
+	methods["move"] = fsMethod{InputSchema: objectSchema(map[string]any{"src": path, "dst": path, "if_version": text, "condition": map[string]any{"type": "object"}}, "src", "dst", "if_version", "condition"), Effect: "write"}
 	methods["copy"] = methods["move"]
 	if !safeReadSupported() {
 		delete(methods, "copy")
@@ -170,7 +175,18 @@ func (f *FS) Provider() hostcmd.Provider {
 		delete(methods, "move")
 		delete(methods, "copy")
 	}
-	return hostcmd.Provider{Descriptor: hosts.Command{Name: "fs", Contract: fsp.Contract, Methods: methods}, Validate: f.validate, Scope: func(hostcmd.Call) string { return "host-filesystem" }, Run: f.run}
+	out := []tool.Method{}
+	for name, desc := range methods {
+		level := 1
+		if desc.Effect == "write" {
+			level = 2
+		}
+		out = append(out, tool.Method{Descriptor: wire.Method{Name: name, Mode: wire.Call, Access: level, Input: desc.InputSchema}, Run: func(ctx context.Context, caller tool.Caller, args json.RawMessage) (any, error) {
+			return f.Run(ctx, Call{Caller: caller, Owner: Owner(caller), Command: "fs", Method: name, Args: args})
+		}})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Descriptor.Name < out[j].Descriptor.Name })
+	return append(out, f.byteMethods()...)
 }
 func (f *FS) validate(method string, raw json.RawMessage) error {
 	var path fsp.Path
@@ -264,7 +280,7 @@ func (f *FS) validate(method string, raw json.RawMessage) error {
 
 // Authorize applies current policy both to new invocations and to queries of
 // retained results. Execution and range reads also check at the point of use.
-func (f *FS) Authorize(ctx context.Context, call hostcmd.Call) error {
+func (f *FS) Authorize(ctx context.Context, call Call) error {
 	if call.Command != "fs" {
 		return hosts.Fail("unsupported", "Command is not registered")
 	}
@@ -275,9 +291,10 @@ func (f *FS) Authorize(ctx context.Context, call hostcmd.Call) error {
 		return nil // Mount metadata grants no access; home checks its actual path.
 	}
 	var p struct {
-		Path fsp.Path `json:"path"`
-		Src  fsp.Path `json:"src"`
-		Dst  fsp.Path `json:"dst"`
+		Path    fsp.Path `json:"path"`
+		Src     fsp.Path `json:"src"`
+		Dst     fsp.Path `json:"dst"`
+		Parents bool     `json:"parents"`
 	}
 	if err := json.Unmarshal(call.Args, &p); err != nil {
 		return hosts.Fail("invalid_argument", "Invalid file location")
@@ -294,13 +311,20 @@ func (f *FS) Authorize(ctx context.Context, call hostcmd.Call) error {
 		}
 		p.Path = p.Dst
 	}
+	// mkdir -p 的写授权按「实际创建的层级」在执行内逐层判定（mkdirParents
+	// 先检后建、拒绝时零副作用）：整目标在此不做写检查——已存在的祖先不
+	// 需要写授权，否则 write/curl -o 等补父目录的便利逻辑会把授权要求放大
+	// 到容器目录，与 edit/mkdir/remove 只查目标的口径不一致。
+	if call.Method == "mkdir" && p.Parents {
+		return nil
+	}
 	_, _, err := f.check(ctx, call, p.Path, write)
 	if err != nil {
 		return fault(err)
 	}
 	return nil
 }
-func (f *FS) run(ctx context.Context, call hostcmd.Call) (value any, err error) {
+func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	defer func() {
@@ -396,7 +420,31 @@ func fault(err error) error {
 	}
 	return hosts.Fail("filesystem_error", "Filesystem operation could not be completed")
 }
-func (f *FS) check(ctx context.Context, call hostcmd.Call, p fsp.Path, write bool) (*root, string, error) {
+func (f *FS) check(ctx context.Context, call Call, p fsp.Path, write bool) (*root, string, error) {
+	r := f.roots[p.RootID]
+	if r == nil {
+		return nil, "", hosts.Fail("not_found", "Unknown filesystem root")
+	}
+	abs := filepath.Join(append([]string{r.Path}, p.Segments...)...)
+	if err := f.cfg.Check(ctx, call, abs, write); err != nil {
+		return nil, "", err
+	}
+	_, resolved, err := f.locate(p)
+	if err != nil {
+		return nil, "", err
+	}
+	if resolved != abs {
+		if err = f.cfg.Check(ctx, call, resolved, write); err != nil {
+			return nil, "", err
+		}
+	}
+	return r, resolved, nil
+}
+
+// locate 是 check 去掉策略门控的部分：根身份校验、父链符号链接解析与
+// root 收容。策略判定只在 check 内发生；mkdirParents 的存在性探测走本层，
+// 已存在的祖先不因 -p 便利逻辑被要求授权。
+func (f *FS) locate(p fsp.Path) (*root, string, error) {
 	r := f.roots[p.RootID]
 	if r == nil {
 		return nil, "", hosts.Fail("not_found", "Unknown filesystem root")
@@ -412,13 +460,9 @@ func (f *FS) check(ctx context.Context, call hostcmd.Call, p fsp.Path, write boo
 	if !os.SameFile(current, opened) {
 		return nil, "", hosts.Fail("expired", "Filesystem root identity changed")
 	}
-	abs := filepath.Join(append([]string{r.Path}, p.Segments...)...)
-	if err = f.cfg.Check(ctx, call, abs, write); err != nil {
-		return nil, "", err
-	}
-	resolved := abs
+	resolved := filepath.Join(append([]string{r.Path}, p.Segments...)...)
 	if len(p.Segments) > 0 {
-		resolved, err = resolveParentPath(abs)
+		resolved, err = resolveParentPath(resolved)
 		if err != nil {
 			return nil, "", err
 		}
@@ -427,12 +471,40 @@ func (f *FS) check(ctx context.Context, call hostcmd.Call, p fsp.Path, write boo
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, "", hosts.Fail("permission_denied", "Path is outside the filesystem root")
 	}
-	if resolved != abs {
-		if err = f.cfg.Check(ctx, call, resolved, write); err != nil {
-			return nil, "", err
-		}
-	}
 	return r, resolved, nil
+}
+
+// probe 是 mkdirParents 的存在性探测：返回末段最终信息（跟随符号链接——
+// mkdir -p 穿过已存在的链接层级），不做策略门控。探测只决定「哪几级缺失」；
+// 创建动作自身仍经 check（写）逐层判定。
+func (f *FS) probe(p fsp.Path) (fs.FileInfo, error) {
+	r, resolved, err := f.locate(p)
+	if err != nil {
+		return nil, err
+	}
+	h, name, err := parent(r, resolved)
+	if err != nil {
+		return nil, err
+	}
+	defer h.Close()
+	info, err := h.Lstat(name)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return info, err
+	}
+	full, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(r.Path, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, hosts.Fail("permission_denied", "Path is outside the filesystem root")
+	}
+	h2, name2, err := parent(r, full)
+	if err != nil {
+		return nil, err
+	}
+	defer h2.Close()
+	return h2.Lstat(name2)
 }
 
 // Resolve existing parent aliases (for example macOS /var -> /private/var).
@@ -519,7 +591,7 @@ func version(info fs.FileInfo) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%d/%d/%d/%s", info.Size(), info.ModTime().UnixNano(), info.Mode(), fileIdentity(info))))
 	return "fv_" + hex.EncodeToString(sum[:])
 }
-func (f *FS) readOrStat(ctx context.Context, call hostcmd.Call, p pathArgs) (any, error) {
+func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error) {
 	r, abs, err := f.check(ctx, call, p.Path, false)
 	if err != nil {
 		return nil, err
@@ -553,7 +625,7 @@ func (f *FS) readOrStat(ctx context.Context, call hostcmd.Call, p pathArgs) (any
 		return nil, hosts.Fail("source_changed", "File changed while being opened")
 	}
 	requested := filepath.Join(append([]string{r.Path}, p.Path.Segments...)...)
-	src, err := f.cfg.Bytes.AddFile(call.SessionID, file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
+	src, err := f.cfg.Bytes.AddFile(call.Owner, file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
 		if err := f.cfg.Check(ctx, call, requested, false); err != nil {
 			return err
 		}
@@ -583,7 +655,7 @@ type cursor struct {
 
 // Directory browsing may follow a directory alias, but authorizes both names
 // and opens the resolved target through pinned, no-follow directory handles.
-func (f *FS) directory(ctx context.Context, call hostcmd.Call, p fsp.Path, write bool) (*os.Root, fs.FileInfo, error) {
+func (f *FS) directory(ctx context.Context, call Call, p fsp.Path, write bool) (*os.Root, fs.FileInfo, error) {
 	r, abs, err := f.check(ctx, call, p, write)
 	if err != nil {
 		return nil, nil, err
@@ -619,7 +691,7 @@ func (f *FS) directory(ctx context.Context, call hostcmd.Call, p fsp.Path, write
 	return dir, info, nil
 }
 
-func (f *FS) list(ctx context.Context, call hostcmd.Call, p listArgs) (any, error) {
+func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 	dir, info, err := f.directory(ctx, call, p.Path, false)
 	if err != nil {
 		return nil, err
@@ -697,7 +769,7 @@ func (f *FS) list(ctx context.Context, call hostcmd.Call, p listArgs) (any, erro
 	}
 	return map[string]any{"entries": out, "next_cursor": next, "revision": revision}, nil
 }
-func (f *FS) write(ctx context.Context, call hostcmd.Call, p writeArgs) (any, error) {
+func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if len(p.Path.Segments) == 0 {
 		return nil, hosts.Fail("permission_denied", "Cannot replace a root")
 	}
@@ -708,7 +780,7 @@ func (f *FS) write(ctx context.Context, call hostcmd.Call, p writeArgs) (any, er
 	if err != nil {
 		return nil, err
 	}
-	src, err := f.cfg.Bytes.Describe(call.SessionID, p.Source)
+	src, err := f.cfg.Bytes.Describe(call.Owner, p.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -746,7 +818,7 @@ func (f *FS) write(ctx context.Context, call hostcmd.Call, p writeArgs) (any, er
 		return nil, err
 	}
 	defer func() { file.Close(); h.Remove(temp) }()
-	if err = f.cfg.Bytes.Copy(ctx, call.SessionID, p.Source, 0, nil, file); err != nil {
+	if err = f.cfg.Bytes.Copy(ctx, call.Owner, p.Source, 0, nil, file); err != nil {
 		return nil, err
 	}
 	if err = file.Chmod(mode); err != nil {
@@ -807,7 +879,7 @@ func (f *FS) write(ctx context.Context, call hostcmd.Call, p writeArgs) (any, er
 	e.Name = name
 	return e, nil
 }
-func (f *FS) mkdir(ctx context.Context, call hostcmd.Call, p mkdirArgs) (any, error) {
+func (f *FS) mkdir(ctx context.Context, call Call, p mkdirArgs) (any, error) {
 	if p.Parents {
 		return f.mkdirParents(ctx, call, p)
 	}
@@ -836,7 +908,7 @@ func (f *FS) mkdir(ctx context.Context, call hostcmd.Call, p mkdirArgs) (any, er
 	}
 	return entry(p.Path, info), nil
 }
-func (f *FS) remove(ctx context.Context, call hostcmd.Call, p removeArgs) (any, error) {
+func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 	if p.Recursive {
 		return f.removeTree(ctx, call, p)
 	}
@@ -874,7 +946,7 @@ func (f *FS) remove(ctx context.Context, call hostcmd.Call, p removeArgs) (any, 
 // ResultPolicy binds a metadata snapshot to its originally checked paths. The
 // verifier only calls the device policy, without reacquiring the provider lock:
 // a consumer may legally use the immutable JSON source as fs.write input.
-func (f *FS) ResultPolicy(call hostcmd.Call) (func(context.Context) error, error) {
+func (f *FS) ResultPolicy(call Call) (func(context.Context) error, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if call.Method == "roots" || call.Method == "home" {
@@ -920,4 +992,35 @@ func (f *FS) ResultPolicy(call hostcmd.Call) (func(context.Context) error, error
 		}
 		return nil
 	}, nil
+}
+
+type fsMethod struct {
+	InputSchema json.RawMessage
+	Effect      string
+}
+type Call struct {
+	Caller                 tool.Caller
+	Owner, Command, Method string
+	Args                   json.RawMessage
+}
+
+func Owner(c tool.Caller) string {
+	h := sha256.Sum256([]byte(c.Subject + "\x00" + c.Origin))
+	return hex.EncodeToString(h[:16])
+}
+func (f *FS) Run(ctx context.Context, call Call) (any, error) {
+	if err := f.Authorize(ctx, call); err != nil {
+		return nil, err
+	}
+	return f.run(ctx, call)
+}
+
+func (f *FS) Configure(home fsp.Path, proxyLimit int64) {
+	if proxyLimit <= 0 {
+		proxyLimit = 64 << 20
+	}
+	f.mu.Lock()
+	f.cfg.Home = &home
+	f.cfg.MaxProxyUploadBytes = proxyLimit
+	f.mu.Unlock()
 }

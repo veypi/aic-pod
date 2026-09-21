@@ -165,12 +165,3 @@ func FrontendDenyPattern(uid string) (string, error) {
 	}
 	return fmt.Sprintf("u.%s.h.%s*.>", uid, HostIDPrefix), nil
 }
-
-// ProxySubject carries server-signed owner management requests, independently of
-// AI tool subjects and RTC signaling. The existing private host inbox covers it.
-func ProxySubject(uid, hostID string) (string, error) {
-	if !validSeg(uid) || !validSeg(hostID) {
-		return "", fmt.Errorf("proto: invalid proxy destination")
-	}
-	return fmt.Sprintf("u.%s.h.%s.proxy.req", uid, hostSeg(hostID)), nil
-}

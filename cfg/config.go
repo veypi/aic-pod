@@ -8,18 +8,17 @@ package cfg
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"github.com/veypi/aic-pod/libs/policy"
-	"gopkg.in/yaml.v3"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/veypi/aic-pod/libs/policy"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -40,8 +39,7 @@ var DeviceType = "cli"
 //   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path/-code）与 env 键
 //     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH/CODE）的来源，也是本地 API（get_config/
 //     set_config）的键
-//   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；历史落盘形态（结构体默认
-//     小写字段名，如 fsdeny/workdir）在 UnmarshalYAML 里兼容读入，Save 后自愈为新形态
+//   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；未知或错误字段忽略
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
 //
@@ -57,9 +55,10 @@ type Options struct {
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
-	// Browser viewport applies to newly created desktop tabs, independently of display layout.
-	BrowserWidth  int `json:"browser_width" yaml:"browser_width" default:"1280" desc:"browser viewport width in pixels (320-4096)"`
-	BrowserHeight int `json:"browser_height" yaml:"browser_height" default:"720" desc:"browser viewport height in pixels (320-4096)"`
+	// Browser viewport applies to newly created Chrome pages, independently of display layout.
+	BrowserPath   string `json:"browser_path" yaml:"browser_path" desc:"Chrome executable (independent of Electron)"`
+	BrowserWidth  int    `json:"browser_width" yaml:"browser_width" default:"1280" desc:"browser viewport width in pixels (320-4096)"`
+	BrowserHeight int    `json:"browser_height" yaml:"browser_height" default:"720" desc:"browser viewport height in pixels (320-4096)"`
 	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
@@ -74,10 +73,10 @@ type Options struct {
 	// 关闭 RTC 仍保留服务器文件 proxy。
 	RTC bool `json:"rtc" yaml:"rtc" default:"true" desc:"answer WebRTC direct links from owner pages (default true)"`
 
-	// Zero values use the advertised device defaults (512 MiB / 64 MiB / 4).
+	// Zero values use the advertised device defaults (512 MiB / 64 MiB / 128).
 	HostsUploadBytes      int64 `json:"hosts_upload_bytes,omitempty" yaml:"hosts_upload_bytes" desc:"maximum hosts upload size in bytes"`
 	HostsProxyUploadBytes int64 `json:"hosts_proxy_upload_bytes,omitempty" yaml:"hosts_proxy_upload_bytes" desc:"maximum proxied hosts upload size in bytes"`
-	HostsStreams          int   `json:"hosts_streams,omitempty" yaml:"hosts_streams" desc:"maximum active file streams per session"`
+	HostsSources          int   `json:"hosts_sources,omitempty" yaml:"hosts_sources" desc:"maximum retained filesystem byte sources"`
 
 	// Execution policies: deny first, then operation-covering allow, then default.
 	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
@@ -104,13 +103,19 @@ func (o *Options) Port() int { return o.port }
 // SetPort 写入本地管理 API 实际监听端口（仅 api.Start 调用）。
 func (o *Options) SetPort(p int) { o.port = p }
 
-// newCode 生成校验码（32 hex）。
-func newCode() string {
+// EnsureCode 在启动时确保本地 API 有非空校验码（32 hex，自动生成的值不落盘）。
+func (o *Options) EnsureCode() error {
+	// code 要能安全放进 HTTP header；空白、换行等错误配置回退随机值。
+	if o.Code != "" && strings.IndexFunc(o.Code, func(r rune) bool { return r < 0x21 || r > 0x7e }) == -1 {
+		return nil
+	}
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return "" // crypto/rand 不可用时留空（所有 API 调用 401，安全侧失败）
+		return fmt.Errorf("generate local API code: %w", err)
 	}
-	return hex.EncodeToString(buf)
+	o.Code = hex.EncodeToString(buf)
+	o.codeAuto = true
+	return nil
 }
 
 // Global 全局有效配置：NewOptions 初始化 → Load 填充文件值（Code 空则随机生成）→
@@ -120,7 +125,9 @@ var Global = NewOptions()
 
 // NewOptions 返回带默认值的配置实例（Code 留空，由 Load/LoadFile 生成）。
 func NewOptions() *Options {
-	return &Options{Host: DefaultHost, ExecTimeout: "30m", HomePath: "/", BrowserWidth: 1280, BrowserHeight: 720, RTC: true}
+	o := &Options{}
+	flags.SetDefaults(o)
+	return o
 }
 
 // 授权策略取值（fs_policy/exec_policy/net_policy/ssh_policy 的合法值）。
@@ -140,11 +147,20 @@ func NormalizePolicy(s, def string) string {
 	return PolicyDeny
 }
 
-// Normalize 填充缺省值（Host 空 → DefaultHost；HomePath 空/非法 → "/"；
-// 授权策略非法值 → deny）。
+// Normalize 在通用解析后处理设备配置语义：无效值使用字段默认值，错误规则列表忽略。
 func (o *Options) Normalize() {
-	if strings.TrimSpace(o.Host) == "" {
+	h := strings.TrimSpace(o.Host)
+	if h != "" && !strings.Contains(h, "://") {
+		h = "https://" + h
+	}
+	u, err := url.Parse(h)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		o.Host = DefaultHost
+	} else {
+		o.Host = h
+	}
+	if d, err := time.ParseDuration(o.ExecTimeout); err != nil || d <= 0 {
+		o.ExecTimeout = "30m"
 	}
 	o.HomePath = o.NormalizedHomePath()
 	if o.BrowserWidth < 320 || o.BrowserWidth > 4096 {
@@ -153,10 +169,34 @@ func (o *Options) Normalize() {
 	if o.BrowserHeight < 320 || o.BrowserHeight > 4096 {
 		o.BrowserHeight = 720
 	}
-	o.ExecPolicy = NormalizePolicy(o.ExecPolicy, PolicyOpen)
-	o.FsPolicy = NormalizePolicy(o.FsPolicy, PolicyDeny)
-	o.NetPolicy = NormalizePolicy(o.NetPolicy, PolicyOpen)
-	o.SshPolicy = NormalizePolicy(o.SshPolicy, PolicyDeny)
+	// 类型解析由 flags 完成；这里只处理设备权限规则的业务语义。
+	for _, mode := range []struct {
+		value    *string
+		fallback string
+	}{
+		{&o.ExecPolicy, PolicyOpen}, {&o.FsPolicy, PolicyDeny},
+		{&o.NetPolicy, PolicyOpen}, {&o.SshPolicy, PolicyDeny},
+	} {
+		if *mode.value != PolicyOpen && *mode.value != PolicyDeny {
+			*mode.value = mode.fallback
+		}
+	}
+	if policy.ValidateFS(o.FsAllow, true) != nil {
+		o.FsAllow = nil
+	}
+	if policy.ValidateFS(o.FsDeny, false) != nil {
+		o.FsDeny = nil
+	}
+	for _, list := range []*[]string{&o.ExecAllow, &o.ExecDeny} {
+		if policy.ValidateExec(*list) != nil {
+			*list = nil
+		}
+	}
+	for _, list := range []*[]string{&o.NetAllow, &o.NetDeny, &o.SshAllow, &o.SshDeny} {
+		if policy.ValidateEntries(*list) != nil {
+			*list = nil
+		}
+	}
 }
 
 // NormalizedHomePath 返回规范化默认首页路径：空 → "/"；非 / 开头补 "/"；
@@ -278,39 +318,23 @@ func LogWriter() (io.Writer, error) {
 	return w, nil
 }
 
-// LoadFile 仅读取配置文件返回独立副本（yaml，flags.LoadCfg），不触碰 Global——
+// LoadFile 仅读取配置文件返回独立副本，不触碰 Global——
 // 页面写操作（bind/set_config）落盘用：基于文件配置修改，flag/env 启动覆盖不落盘。
-// 文件不存在返回默认配置（非错误），损坏文件由 flags 记 warn 并返回当前值。
+// 配置文件不阻断启动和设置页：读不到/整体损坏用默认值，未知/错误字段单独忽略。
 // Code 未配置时随机生成（codeAuto=true，Save 不落盘）。
 func LoadFile() (*Options, error) {
 	o := NewOptions()
-	p, err := Path()
-	if err != nil {
-		return o, err
-	}
-	data, readErr := os.ReadFile(p)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return o, readErr
-	}
-	if readErr == nil {
-		dec := yaml.NewDecoder(strings.NewReader(string(data)))
-		dec.KnownFields(true)
-		if err := dec.Decode(o); err != nil {
-			return o, err
-		}
-	}
-	if err := o.ValidateAuth(); err != nil {
-		return o, err
+	if p, err := Path(); err == nil {
+		flags.LoadCfg(p, o)
 	}
 	o.Normalize()
-	if o.Code == "" {
-		o.Code = newCode()
-		o.codeAuto = true
+	if err := o.EnsureCode(); err != nil {
+		return nil, err
 	}
 	return o, nil
 }
 
-// Load 读取配置文件填充 Global 并返回（损坏文件不阻断启动，见 LoadFile）。
+// Load 始终安装可用配置；配置文件错误已由 LoadFile 回退默认值。
 func Load() (*Options, error) {
 	o, err := LoadFile()
 	if err == nil {

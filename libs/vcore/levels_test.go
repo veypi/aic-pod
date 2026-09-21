@@ -57,38 +57,10 @@ func TestGitRequired(t *testing.T) {
 	}
 }
 
-func TestUIRequired(t *testing.T) {
-	for _, domain := range []string{"browser", "cua"} {
-		for _, c := range []struct {
-			argv  []string
-			level int
-		}{
-			{[]string{"snapshot"}, 1}, {[]string{"target", "list"}, 1},
-			{[]string{"click", "@s12:e1"}, 2}, {[]string{"fill", "@s12:e1", "--text", "你好"}, 2},
-			{[]string{"click", "@s12:e1", "--delivery", "foreground"}, 3},
-			{[]string{"snapshot", "--delivery-mode", "foreground"}, 3},
-		} {
-			if got := ExecRequired(domain, c.argv); got != c.level {
-				t.Errorf("%s %v: got %d want %d", domain, c.argv, got, c.level)
-			}
+func TestDeviceToolsAreNotExecBuiltins(t *testing.T) {
+	for _, name := range []string{"browser", "cua"} {
+		if _, ok := Decl(name); ok {
+			t.Fatalf("%s still has an exec declaration", name)
 		}
-		decl, _ := Decl(domain)
-		if decl.RequiredLevel != 1 {
-			t.Fatalf("%s read baseline: %d", domain, decl.RequiredLevel)
-		}
-	}
-	if ExecRequired("browser", []string{"eval", "--code", "document.title"}) != 3 {
-		t.Fatal("eval requires code privilege")
-	}
-}
-
-// cua 注册声明（§6.3）：provider 注册白名单依赖 vcore.Decl 有元数据。
-func TestCuaDecl(t *testing.T) {
-	d, ok := Decl("cua")
-	if !ok {
-		t.Fatal("Decl(cua) not found")
-	}
-	if d.RequiredLevel != proto.LevelRead || d.Desc == "" || d.Help == "" {
-		t.Errorf("Decl(cua) = %+v", d)
 	}
 }

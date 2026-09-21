@@ -54,6 +54,10 @@ var (
 // Start 监听 127.0.0.1 随机端口并启动服务；已绑定设备自动连接 host。
 func Start() error {
 	cfg.Global.Normalize()
+	// flag/env 可覆盖文件配置；监听前再次确保 code 非空。
+	if err := cfg.Global.EnsureCode(); err != nil {
+		return err
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,19 +71,20 @@ func Start() error {
 		return err
 	}
 	s.SetRouter(Router)
+	// Electron 通过端口文件握手；写入失败属于启动失败，不能留下无法连接的服务。
+	if pf := os.Getenv("AIC_PORT_FILE"); pf != "" {
+		if err := os.WriteFile(pf, []byte(fmt.Sprintf(`{"port":%d,"code":%q}`, cfg.Global.Port(), cfg.Global.Code)), 0o600); err != nil {
+			ln.Close()
+			cfg.Global.SetPort(0)
+			return fmt.Errorf("write port file %s: %w", pf, err)
+		}
+	}
 	mu.Lock()
 	srv = s
 	mu.Unlock()
 	go func() { _ = s.Run() }()
 	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d (code=%s)", cfg.Global.Port(), cfg.Global.Code)
 	logv.WithNoCaller.Info().Msgf("working on: %s", cfg.Global.WorkDir)
-	// 端口上报（Electron 壳握手）：AIC_PORT_FILE 指定 JSON 文件路径时写入
-	// {port, code}，Electron 主进程据此加载壳页面（cli 正常使用不受影响）。
-	if pf := os.Getenv("AIC_PORT_FILE"); pf != "" {
-		if err := os.WriteFile(pf, []byte(fmt.Sprintf(`{"port":%d,"code":%q}`, cfg.Global.Port(), cfg.Global.Code)), 0o600); err != nil {
-			logv.Warn().Msgf("write port file %s: %v", pf, err)
-		}
-	}
 	// 已绑定 → 自动连接 host（失败按指数退避后台重试，不阻断本地服务）
 	if cfg.Global.Key != "" {
 		if err := host.Start(*cfg.Global); err != nil {

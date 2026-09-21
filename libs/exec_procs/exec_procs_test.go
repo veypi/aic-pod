@@ -13,7 +13,7 @@ import (
 func TestStartNormalCompletion(t *testing.T) {
 	m := NewManager(0)
 	// 该用例验证正常完成机制（落盘/行数/内容），与沙箱无关：全局免沙箱隔离环境差异（§5.10）
-	m.NoSandbox = true
+	m.SetNoSandbox(true)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "out.log")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -39,7 +39,7 @@ func TestStartNormalCompletion(t *testing.T) {
 func TestStartTimeoutBackground(t *testing.T) {
 	m := NewManager(0)
 	// 该用例验证超时转后台机制，与沙箱无关：全局免沙箱隔离环境差异（§5.10）
-	m.NoSandbox = true
+	m.SetNoSandbox(true)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "out.log")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -83,7 +83,7 @@ func TestStartTimeoutBackground(t *testing.T) {
 		t.Errorf("bg_list after kill = %d, want 0", got)
 	}
 	// bg_kill 已终结 → no such
-	if err := m.Kill("h1:s1:op2"); err == nil || !strings.Contains(err.Error(), "no such") {
+	if err := m.Kill("h1:s1:op2"); err == nil || !strings.Contains(err.Error(), "not_found") {
 		t.Errorf("kill completed: %v", err)
 	}
 }

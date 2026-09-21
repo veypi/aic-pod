@@ -16,8 +16,8 @@
     "dist:win": "electron-builder --win",
     "predist:linux": "node scripts/sync-cua.mjs",
     "dist:linux": "electron-builder --linux",
-    "test": "node --test ui/*.test.mjs browser/*.test.mjs",
-    "test:browser:live": "electron scripts/test-browser-live.mjs"
+    "test": "node --test *.test.cjs",
+    "test:browser:live": "cd .. && AIC_BROWSER_TEST=1 go test ./libs/browser -run TestChromeLive -count=1"
   },
   "devDependencies": {
     "electron": "^44.3.0",

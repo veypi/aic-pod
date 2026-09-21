@@ -1,12 +1,64 @@
 package pod
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
 )
+
+func TestStartHandshake(t *testing.T) {
+	previous := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	t.Cleanup(func() { Stop(); cfg.Global = previous })
+	portFile := filepath.Join(t.TempDir(), "port.json")
+	t.Setenv("AIC_PORT_FILE", portFile)
+	if err := Start(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(portFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info struct {
+		Port int    `json:"port"`
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Port != cfg.Global.Port() || info.Port == 0 || info.Code == "" || info.Code != cfg.Global.Code {
+		t.Fatal("invalid startup handshake")
+	}
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ping", info.Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("backend not ready: %d", resp.StatusCode)
+	}
+}
+
+func TestStartFailsWhenHandshakeCannotBeWritten(t *testing.T) {
+	previous := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	t.Cleanup(func() { Stop(); cfg.Global = previous })
+	t.Setenv("AIC_PORT_FILE", filepath.Join(t.TempDir(), "missing", "port.json"))
+	if err := Start(); err == nil || !strings.Contains(err.Error(), "write port file") {
+		t.Fatalf("expected handshake write error, got %v", err)
+	}
+	if cfg.Global.Port() != 0 || srv != nil {
+		t.Fatal("failed startup retained a running server")
+	}
+}
 
 func TestNextRetryDelay(t *testing.T) {
 	cases := []struct {

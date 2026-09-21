@@ -73,7 +73,7 @@ func TestConfineConfined(t *testing.T) {
 // StartOptions.NoSandbox 同效）——无沙箱后端的环境亦正常执行（§5.10）。
 func TestManagerNoSandboxGlobal(t *testing.T) {
 	m := NewManager(time.Minute)
-	m.NoSandbox = true
+	m.SetNoSandbox(true)
 	res, err := m.Start(context.Background(), StartOptions{Level: proto.LevelWrite,
 		ID:      "t-global-nosb",
 		Command: "echo hi",
@@ -109,22 +109,6 @@ func TestUnconfinedIgnoresPolicy(t *testing.T) {
 	if res.ExitCode != 0 || !strings.Contains(res.Content, "hi") {
 		t.Fatalf("result = %+v, want exit 0 with hi", res)
 	}
-}
-
-// writableRoots（workspace-write 可写根，§5.10）恒含：平台临时区 + 工作区 +
-// 缓存目录 + 公共区 $HOME/.aic（publicRoots，创建后加入）；canonicalize + 去重。
-func TestWritableRootsIncludesPublicDir(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	roots := writableRoots("/ws", nil)
-	want := canonicalRoot(filepath.Join(home, ".aic")) // canonicalize：darwin /var → /private/var
-	for _, r := range roots {
-		if r == want {
-			return
-		}
-	}
-	t.Fatalf("writableRoots missing public dir %q: %v", want, roots)
 }
 
 // bwrap 包装：read-only 无任何可写挂载；workspace-write 有 tmpfs /tmp +
@@ -384,30 +368,6 @@ func TestBwrapDenyArgs(t *testing.T) {
 	// 不存在的路径不产出覆盖（不可读无害）
 	if contains(got, "/nonexistent-zzz") {
 		t.Fatalf("nonexistent deny target should be skipped: %v", got)
-	}
-}
-
-func TestWritableRoots(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("unix path semantics")
-	}
-	roots := writableRoots("", nil)
-	seen := map[string]bool{}
-	for _, r := range roots {
-		if r == "" {
-			t.Fatalf("empty root leaked: %v", roots)
-		}
-		if seen[r] {
-			t.Fatalf("duplicate root %q: %v", r, roots)
-		}
-		seen[r] = true
-	}
-	// /tmp 与 /private/tmp 是同一文件系统身份，canonicalize 后必合并
-	if !seen["/private/tmp"] {
-		t.Fatalf("/private/tmp missing from roots: %v", roots)
-	}
-	if len(roots) < 2 { // /private/tmp + os.TempDir()
-		t.Fatalf("unexpected roots: %v", roots)
 	}
 }
 
