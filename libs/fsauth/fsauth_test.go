@@ -57,6 +57,44 @@ func TestReadPatternsForNoMatchAll(t *testing.T) {
 	}
 }
 
+// TestReadPatternsCoverLiteralSpellings：沙箱按系统调用实际传入的路径串匹配，
+// /etc、/tmp、$TMPDIR(/var/folders/…) 是 symlink 前缀，读/写名单里必须同时有
+// canonical 形与字面形（2026-09-22 与读锁修复同批）。
+func TestReadPatternsCoverLiteralSpellings(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin symlink spellings")
+	}
+	p := New()
+	p.SetWorkDir(t.TempDir())
+	pats := p.ReadPatternsFor("")
+	for _, want := range []string{"/etc/hosts", "/tmp/x", filepath.Join(os.TempDir(), "x")} {
+		covered := false
+		for _, pat := range pats {
+			if matchPattern(pat, want) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Fatalf("read patterns do not cover literal spelling %q: %#v", want, pats)
+		}
+	}
+	roots := p.WriteRootsFor("")
+	for _, want := range []string{"/tmp", os.TempDir()} {
+		want = strings.TrimSuffix(want, "/")
+		found := false
+		for _, r := range roots {
+			if r == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("write roots missing literal spelling %q: %#v", want, roots)
+		}
+	}
+}
+
 // 隔离测试只移除全局临时区便利根，避免 t.TempDir() 中的拒绝向量被放行。
 // 工作区、显式 allow、deny、grant 和缓存等仍由真实实现构造和判定。
 func isolateTemporaryRoots(p *Policy) {
@@ -67,7 +105,7 @@ func isolateTemporaryRoots(p *Policy) {
 	for _, root := range p.baseRoots {
 		isTemporary := false
 		for _, tmp := range temporary {
-			if root == canonical(tmp) {
+			if canonical(root) == canonical(tmp) {
 				isTemporary = true
 				break
 			}

@@ -85,21 +85,23 @@ func (p *Policy) rebuildLocked() {
 func (p *Policy) rebuildBaseRootsLocked() {
 	roots := []string{}
 	if p.workDir != "" {
-		roots = append(roots, p.workDir)
+		roots = append(roots, dualForms(p.workDir)...)
 	}
 	if t := os.TempDir(); t != "" {
-		roots = append(roots, canonical(t))
+		roots = append(roots, dualForms(t)...)
 	}
-	roots = append(roots, tempRoots()...)
+	roots = append(roots, dualList(tempRoots())...)
 	if p.publicDir != "" {
-		roots = append(roots, p.publicDir)
+		roots = append(roots, dualForms(p.publicDir)...)
 	}
-	roots = append(roots, p.extraWrite...)
-	p.baseRoots = roots
+	for _, e := range p.extraWrite {
+		roots = append(roots, dualForms(e)...)
+	}
+	p.baseRoots = dedupClean(roots)
 	// Decide 侧缓存目录不做存在性探测：前缀匹配对不存在目录天然生效，白名单
 	// 意图跟目录身份走（未装 rust 时写 ~/.cargo 也是白名单意图内的工具链缓存）。
 	// bind 侧源必须存在，走 CacheRoots() 实时探测——两侧自此语义分离。
-	p.decideCaches = dedupClean(cacheRootDirs()) // 去空：空 root 会拼出 "/**"（匹配全部路径）
+	p.decideCaches = dedupClean(dualList(cacheRootDirs())) // 去空+双拼写
 }
 
 // SetWorkDir 同步工作区（set_config / Reconfigure；空 = 清除）并重算根基底。
@@ -320,10 +322,15 @@ func splitAllow(entries []string) (roots, globs []string) {
 			continue
 		}
 		if strings.ContainsAny(e, "*?") {
-			globs = append(globs, canonicalPattern(e))
+			cp := canonicalPattern(e)
+			globs = append(globs, cp)
+			if cp != e {
+				// symlink 前缀的字面拼写也要覆盖（沙箱按传入串匹配，见 dualForms）。
+				globs = append(globs, e)
+			}
 			continue
 		}
-		roots = append(roots, canonical(e))
+		roots = append(roots, dualForms(e)...)
 	}
 	return roots, globs
 }
@@ -438,6 +445,38 @@ func appendEnvDirs(dirs []string, names ...string) []string {
 		}
 	}
 	return dirs
+}
+
+// dualForms 返回路径的 canonical 形与原始字面形（去尾斜杠；相同则只给一个）。
+// 沙箱（seatbelt）按系统调用实际传入的路径串匹配规则：macOS 的 /tmp、/etc、
+// $TMPDIR(/var/folders/…) 都是 symlink 前缀，只留 canonical 形会让字面拼写的
+// 访问（含路径解析的 metadata 读）被拒——与 compileDeny 的「双形态」对称
+// （2026-09-22）。
+func dualForms(p string) []string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return nil
+	}
+	for len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = strings.TrimSuffix(p, "/")
+	}
+	c := canonical(p)
+	if c == "" {
+		c = filepath.Clean(p)
+	}
+	if c == p {
+		return []string{c}
+	}
+	return []string{c, p}
+}
+
+// dualList 对一组路径逐个展开 dualForms（去重交给 dedupClean）。
+func dualList(paths []string) []string {
+	out := make([]string, 0, len(paths)*2)
+	for _, p := range paths {
+		out = append(out, dualForms(p)...)
+	}
+	return out
 }
 
 // canonicalPattern 对 glob 模式的字面前缀段（首个含通配符段之前）做

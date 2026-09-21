@@ -128,3 +128,55 @@ func TestHostPolicyReadScopeFromPolicy(t *testing.T) {
 		t.Fatalf("read outside readAllow succeeded (read lockdown void): %s", outside)
 	}
 }
+
+// TestHostPolicyLiteralSpellings（darwin 原生探测）：/etc、/tmp、$TMPDIR
+// (/var/folders/…) 的 symlink 字面拼写必须与 canonical 形一样放行（读+写），
+// 同时白名单外写仍被拒（2026-09-22）。
+func TestHostPolicyLiteralSpellings(t *testing.T) {
+	if os.Getenv("AIC_SANDBOX_PROBE") != "1" {
+		t.Skip("explicit native sandbox probe")
+	}
+	work := canonicalRoot(t.TempDir())
+	pol := fsauth.New()
+	pol.SetWorkDir(work)
+	tmp := strings.TrimSuffix(os.TempDir(), "/")
+	tmpFile := filepath.Join(tmp, "aic-spelling-probe.txt")
+	if err := os.WriteFile(tmpFile, []byte("tmp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(tmpFile) })
+
+	run := func(script string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), readAllow: pol.ReadPatternsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, plan.argv[0], plan.argv[1:]...)
+		cmd.Dir = work
+		b, e := cmd.CombinedOutput()
+		if e != nil {
+			t.Logf("sandbox: %s", b)
+		}
+		return e
+	}
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	if err := run("/bin/cat /etc/hosts"); err != nil {
+		t.Fatalf("literal /etc read denied: %v", err)
+	}
+	if err := run("/bin/cat " + q(tmpFile)); err != nil {
+		t.Fatalf("literal $TMPDIR read denied: %v", err)
+	}
+	if err := run("/usr/bin/touch /tmp/aic-spelling-ok"); err != nil {
+		t.Fatalf("literal /tmp write denied: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove("/tmp/aic-spelling-ok") })
+	if err := run("/usr/bin/touch " + q(filepath.Join(tmp, "aic-spelling-ok"))); err != nil {
+		t.Fatalf("literal $TMPDIR write denied: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Join(tmp, "aic-spelling-ok")) })
+	if err := run("/usr/bin/touch /Users/Shared/aic-spelling-should-fail"); err == nil {
+		t.Fatal("write outside allow-list succeeded")
+	}
+}

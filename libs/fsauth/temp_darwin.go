@@ -2,10 +2,7 @@
 
 package fsauth
 
-// tempRoots（darwin）：平台临时区字面根 /private/tmp（/tmp 的 canonical 形态）。
-// os.TempDir()（$TMPDIR）由 rebuildBaseRootsLocked 平台无关段统一收录；
-// /tmp 是不写 $TMPDIR 的进程的通用临时回落位置。v0.14.5 统一权限模型时
-// 随 exec_procs.writableRoots 下线而丢失（seatbelt subpath 白名单只剩
-// $TMPDIR，/tmp 与 /var/tmp 写入 EPERM），2026-09-21 补回——fs Decide 与
-// 沙箱 bind 共用同一份名单；darwin seatbelt 纯规则放行无挂载，字面根零副作用。
-func tempRoots() []string { return []string{"/private/tmp"} }
+// tempRoots（darwin）：平台临时区根。两个拼写都要在名单里——沙箱按系统调用
+// 实际传入的路径串匹配规则，/tmp 是指向 /private/tmp 的 symlink，只列 canonical
+// 形会让字面 /tmp（含路径解析的 metadata 读）被拒（2026-09-22）。
+func tempRoots() []string { return []string{"/private/tmp", "/tmp"} }
