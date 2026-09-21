@@ -23,9 +23,9 @@ Electron Main (Node, main.js)
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
  │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
  │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
- ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，`app://aic` 协议加载
- │    settings-ui/；settings-preload 暴露设置桥 → IPC 'local:api' → 主进程 spawn 子命令；
- │    托盘「本地配置」直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；
+ ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，`app://aic` 协议加载单文件静态页
+ │    settings-ui/settings.html；settings-preload 暴露设置桥 → IPC 'local:api' → 主进程 spawn
+ │    子命令；托盘「本地配置」直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；
  │    保存/绑定后自动重启后端子进程并原地重载设置页
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
@@ -53,9 +53,8 @@ make backend-bin
 cd desktop && npm install && npm start
 ```
 
-平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/）与 main.js/preload.js
-改动需重启 electron。设置页静态资源：vhtml 运行时 `settings-ui/vhtml/vhtml.min.js`
-从 `../vhtml/dist/vhtml.min.js` 复制（升级 vhtml 后重新复制）。
+平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/settings.html 单文件静态页，
+无框架/无构建、数据全走 IPC 桥）与 main.js/preload.js 改动需重启 electron。
 browser 代码位于 libs/browser/，修改后重新编译 Go 后端；协议与测试见 [设备工具实现](../docs/hosts-tools.md)。Electron 不再包含 browser CDP 引擎。
 内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
 `npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。

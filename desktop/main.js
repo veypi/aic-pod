@@ -8,7 +8,7 @@
 //   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
 //   ├─ hosts_rtc/1 与 hosts_nats/1：后端统一 browser 工具
 //   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
-//	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload + app://aic 协议）：托盘
+//	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload + app://aic 单文件静态页）：托盘
 //	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
 //	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
 //
@@ -44,10 +44,11 @@ const DEFAULT_HOST = 'https://ivec-ai.com'
 const LEGACY_HOSTS = ['ivec.ai']
 
 // ---- 设置窗自定义协议（2026-09-22 去本地管理 API） ----
-// app://aic/<path> → desktop/settings-ui/<path>（SPA：无扩展名路径回落壳页 root.html）。
-// 本地不再监听端口、无校验码：设置读写经 IPC → spawn `aic-backend config|bind` 子命令。
+// app://aic/<path> → desktop/settings-ui/<path>（单文件静态设置页 settings.html：
+// 无框架、无构建、无本地 HTTP 服务）。设置读写经 IPC → spawn `aic-backend config|bind` 子命令。
 const SETTINGS_SCHEME = 'app'
 const SETTINGS_ORIGIN = 'app://aic'
+const SETTINGS_PAGE = '/settings.html'
 const settingsUiDir = path.join(__dirname, 'settings-ui')
 const SETTINGS_MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
@@ -55,27 +56,24 @@ const SETTINGS_MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp',
   '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon',
 }
-// standard+secure 才能跑 ES module / fetch（vhtml 组件加载、langs.json）；须在 app ready 前注册
+// standard+secure 才有真实 origin（localStorage 可用）且不被当跨源阻塞；须在 app ready 前注册
 protocol.registerSchemesAsPrivileged([
   { scheme: SETTINGS_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
 ])
 
 function registerSettingsProtocol() {
   const handler = async (request) => {
-    let rel = '/'
-    try { rel = decodeURIComponent(new URL(request.url).pathname || '/') } catch (e) { /* 忽略 */ }
-    const hasExt = /\.[A-Za-z0-9]+$/.test(rel)
-    const candidates = rel === '/' ? ['/root.html'] : hasExt ? [rel] : [rel, '/root.html']
-    for (const c of candidates) {
-      const file = path.resolve(settingsUiDir, '.' + path.posix.normalize(c))
-      if (file !== settingsUiDir && !file.startsWith(settingsUiDir + path.sep)) continue // 目录穿越护栏
-      try {
-        const body = await fs.promises.readFile(file)
-        const mime = SETTINGS_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
-        return new Response(body, { headers: { 'Content-Type': mime } })
-      } catch (e) { /* 下一候选 */ }
-    }
-    return new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } })
+    let rel = SETTINGS_PAGE
+    try { rel = decodeURIComponent(new URL(request.url).pathname || SETTINGS_PAGE) } catch (e) { /* 忽略 */ }
+    if (rel === '/') rel = SETTINGS_PAGE
+    const notFound = () => new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } })
+    const file = path.resolve(settingsUiDir, '.' + path.posix.normalize(rel))
+    if (file !== settingsUiDir && !file.startsWith(settingsUiDir + path.sep)) return notFound() // 目录穿越护栏
+    try {
+      const body = await fs.promises.readFile(file)
+      const mime = SETTINGS_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
+      return new Response(body, { headers: { 'Content-Type': mime } })
+    } catch (e) { return notFound() }
   }
   // 默认 session + 设置窗独立 partition：自定义协议逐 session 注册，缺一处即 ERR_UNKNOWN_URL_SCHEME
   protocol.handle(SETTINGS_SCHEME, handler)
@@ -515,7 +513,7 @@ function openSettings() {
       sandbox: true,
     },
   })
-  settingsWin.loadURL(SETTINGS_ORIGIN + '/settings')
+  settingsWin.loadURL(SETTINGS_ORIGIN + SETTINGS_PAGE)
   settingsWin.on('closed', () => { settingsWin = null })
 }
 

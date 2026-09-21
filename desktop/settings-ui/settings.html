@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:">
+  <title>AIC 本地设置</title>
+  <!--
+    AIC Desktop 本地设置页：单文件静态页（无框架、无构建、无本地 HTTP 服务）。
+    数据全部经 Electron 桥：window.aicDesktop.api(method, args) → 主进程 spawn
+    `aic-backend config|bind|unbind` 子命令 / 读日志 / 重启后端子进程。
+    页面由 main.js 的 app://aic 协议提供（真实 origin，localStorage 可用）。
+  -->
+  <style>
+    :root {
+      --bg-color: #f1f8ff;
+      --bg-color-secondary: #f7fcff;
+      --text-color: #111827;
+      --text-color-secondary: #374151;
+      --text-color-tertiary: #6b7280;
+      --border-color: #d1d5db;
+    }
+
+    body[theme="dark"] {
+      --bg-color: #16181d;
+      --bg-color-secondary: #1e2128;
+      --text-color: #e8eaed;
+      --text-color-secondary: #aab0ba;
+      --text-color-tertiary: #8b919c;
+      --border-color: #3a3f4a;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+    }
+
+    body {
+      display: flex;
+      background: var(--bg-color-secondary);
+    }
+
+    .card {
+      width: min(520px, 100%);
+      box-sizing: border-box;
+      margin: auto;
+      padding: 28px 32px
+    }
+
+    h1 {
+      font-size: 17px;
+      margin: 0 0 4px
+    }
+
+    .sub {
+      color: var(--text-color-tertiary);
+      font-size: 12px;
+      margin-bottom: 18px
+    }
+
+    label {
+      display: block;
+      margin: 12px 0 4px;
+      color: var(--text-color-secondary);
+      font-size: 13px
+    }
+
+    input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-color);
+      color: var(--text-color);
+      font-size: 13px;
+      box-sizing: border-box
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #4b83f6
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center
+    }
+
+    .row input {
+      flex: 1
+    }
+
+    select {
+      padding: 5px 8px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-color);
+      color: var(--text-color);
+      font-size: 12px
+    }
+
+    .auth-title {
+      margin: 22px 0 2px;
+      font-size: 14px;
+      color: var(--text-color)
+    }
+
+    .auth-hint {
+      color: var(--text-color-tertiary);
+      font-size: 12px
+    }
+
+    .domain {
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      margin-top: 12px
+    }
+
+    .dhead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px
+    }
+
+    .dname {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-color)
+    }
+
+    .alist label {
+      margin-top: 8px
+    }
+
+    .alist input {
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 12px
+    }
+
+    .entries:empty {
+      display: none
+    }
+
+    .entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 3px 0;
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 12px
+    }
+
+    .entry span {
+      flex: 1;
+      word-break: break-all;
+      color: var(--text-color-secondary)
+    }
+
+    button.x {
+      padding: 0 6px;
+      background: transparent;
+      color: var(--text-color-tertiary);
+      font-size: 14px
+    }
+
+    button.x:hover {
+      background: transparent;
+      color: #f87171
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 16px 0 0;
+      font-size: 13px;
+      color: var(--text-color-secondary)
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #666;
+      flex: none
+    }
+
+    .dot.on {
+      background: #4ade80
+    }
+
+    .dot.off {
+      background: #f87171
+    }
+
+    #stext {
+      flex: 1
+    }
+
+    .btns {
+      margin-top: 22px;
+      display: flex;
+      gap: 10px;
+      align-items: center
+    }
+
+    button {
+      padding: 9px 16px;
+      border: none;
+      border-radius: 8px;
+      background: #3b6ef6;
+      color: #fff;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap
+    }
+
+    button:hover {
+      background: #2f5cd8
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: default
+    }
+
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--border-color);
+      color: var(--text-color-secondary)
+    }
+
+    button.ghost:hover {
+      border-color: #4b83f6
+    }
+
+    #msg {
+      font-size: 12px;
+      margin-left: auto
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>AIC 本地设置</h1>
+    <div class="sub">本机客户端配置 · 平台不可达时依然可用</div>
+    <div class="status"><span class="dot" id="sdot"></span><span id="stext">检查中…</span></div>
+    <label>平台地址 (host)</label>
+    <input id="host" placeholder="https://ivec-ai.com">
+    <label>凭证 (key)</label>
+    <div class="row">
+      <input id="key" placeholder="host key">
+      <button id="btnGet" title="打开平台设备页获取绑定 key">获取</button>
+    </div>
+    <label>工作目录 (work_dir)</label>
+    <input id="work_dir" placeholder="留空 = 系统临时目录">
+    <label>后台超时 (exec_timeout)</label>
+    <input id="exec_timeout" placeholder="留空 = 30m（如 30s / 5m / 1h）">
+    <label>浏览器分辨率（宽 × 高）</label>
+    <div class="row">
+      <input type="text" id="browser_path" aria-label="Chrome 可执行文件"
+        placeholder="Chrome 路径（留空自动查找，下次启动浏览器生效）">
+      <input type="number" id="browser_width" min="320" max="4096" step="1" aria-label="浏览器宽度" placeholder="1280">
+      <span>×</span>
+      <input type="number" id="browser_height" min="320" max="4096" step="1" aria-label="浏览器高度" placeholder="720">
+    </div>
+    <div class="sub">默认 1280 × 720，新建标签时生效。页面尺寸固定，显示区域自动等比例缩放。</div>
+    <label>默认打开地址 (home_path)</label>
+    <input id="home_path" placeholder="留空 = /（如 /、/a）">
+    <div class="auth-title">访问授权</div>
+    <div class="auth-hint">deny 恒优先：policy=deny 仅 allow 放行，policy=open 除 deny 全放。保存即生效（重启后端子进程）。</div>
+    <div id="auth"></div>
+    <div class="btns">
+      <button id="btnSave">保存</button>
+      <button id="btnReconnect" class="ghost">重连</button>
+      <button id="btnClose" class="ghost" hidden>关闭</button>
+      <span id="msg"></span>
+    </div>
+  </div>
+
+  <script>
+    // ---- 主题（与平台 UI 一致：localStorage.theme，缺省跟随系统） ----
+    (() => {
+      let theme = null
+      try { theme = localStorage.getItem('theme') } catch (e) { /* 忽略 */ }
+      if (theme !== 'light' && theme !== 'dark') {
+        theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      }
+      document.body.setAttribute('theme', theme)
+    })()
+
+    // ---- 设置桥（settings-preload → IPC local:api → 主进程） ----
+    const bridge = (window.aicDesktop && window.aicDesktop.api) || null
+    const call = (name, args) => {
+      if (!bridge) return Promise.reject(new Error('设置桥不可用（请在 AIC Desktop 中打开设置）'))
+      return Promise.resolve(bridge(name, args === undefined ? null : args))
+    }
+    const $pod = {
+      get_config: () => call('get_config'),
+      set_config: (cfg) => call('set_config', cfg),
+      bind: (credential) => call('bind', { credential }),
+      unbind: () => call('unbind', {}),
+      get_status: () => call('get_status'),
+      get_log: () => call('get_log'),
+      check_host: (host) => call('check_host', { host }),
+      start: () => call('start', {}),
+      stop: () => call('stop', {}),
+    }
+
+    const $ = (id) => document.getElementById(id)
+    const msgEl = $('msg')
+
+    const setMsg = (text, ok) => {
+      msgEl.textContent = text
+      if (ok === 'warn') msgEl.style.color = '#facc15'
+      else msgEl.style.color = ok ? '#4ade80' : '#f87171'
+    }
+
+    // 调用失败分类：桥/主进程异常（重启窗口内）→ 提示重试；业务错误 = 后端校验消息
+    const isNetErr = (e) => e instanceof TypeError || /failed to fetch|network|invoke|不可用/i.test((e && e.message) || '')
+
+    // 凭证脏检查基线（get_config 回填值）：与当前输入一致时保存不重绑
+    let loadedKey = ''
+
+    // 三域授权（fs/net/ssh × policy/deny/allow）：boot 回填 get_config 九键，UI 编辑
+    // 内存态，save 全量提交（空数组 = 清空，匹配后端 set_config 整体替换语义）。
+    const domains = [
+      { key: 'fs', name: '文件 (fs)', ph: '路径或 glob，如 /Users/x/proj 或 **/.env' },
+      { key: 'net', name: '网络 (net)', ph: 'host:port，如 example.com:443' },
+      { key: 'ssh', name: 'SSH (ssh)', ph: 'host[:port]，如 192.168.1.10' },
+    ]
+    const auth = {
+      fs: { policy: 'deny', deny: [], allow: [] },
+      net: { policy: 'open', deny: [], allow: [] },
+      ssh: { policy: 'deny', deny: [], allow: [] },
+    }
+
+    // 单张名单编辑器：标签 + 条目行（等宽文本 + × 删除）+ 输入行（回车/按钮添加）
+    const listEl = (d, st, kind, title) => {
+      const wrap = document.createElement('div')
+      wrap.className = 'alist'
+      const lab = document.createElement('label')
+      lab.textContent = `${title} (${d.key}_${kind})`
+      wrap.appendChild(lab)
+      const ul = document.createElement('div')
+      ul.className = 'entries'
+      st[kind].forEach((item, i) => {
+        const row = document.createElement('div')
+        row.className = 'entry'
+        const t = document.createElement('span')
+        t.textContent = item
+        const del = document.createElement('button')
+        del.className = 'x'
+        del.textContent = '×'
+        del.onclick = () => { st[kind].splice(i, 1); renderAuth() }
+        row.appendChild(t)
+        row.appendChild(del)
+        ul.appendChild(row)
+      })
+      wrap.appendChild(ul)
+      const row = document.createElement('div')
+      row.className = 'row'
+      const inp = document.createElement('input')
+      inp.placeholder = d.ph
+      const add = document.createElement('button')
+      add.className = 'ghost'
+      add.textContent = '添加'
+      const doAdd = () => {
+        const v = inp.value.trim()
+        if (!v || st[kind].includes(v)) return
+        st[kind].push(v)
+        renderAuth()
+      }
+      add.onclick = doAdd
+      inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); doAdd() } }
+      row.appendChild(inp)
+      row.appendChild(add)
+      wrap.appendChild(row)
+      return wrap
+    }
+
+    const renderAuth = () => {
+      const root = $('auth')
+      root.innerHTML = ''
+      for (const d of domains) {
+        const st = auth[d.key]
+        const box = document.createElement('div')
+        box.className = 'domain'
+        const head = document.createElement('div')
+        head.className = 'dhead'
+        const name = document.createElement('span')
+        name.className = 'dname'
+        name.textContent = d.name
+        const sel = document.createElement('select')
+        for (const v of ['deny', 'open']) {
+          const op = document.createElement('option')
+          op.value = v
+          op.textContent = v === 'deny' ? 'deny（仅允许名单放行）' : 'open（除拒绝名单全放）'
+          sel.appendChild(op)
+        }
+        sel.value = st.policy
+        sel.onchange = () => { st.policy = sel.value }
+        head.appendChild(name)
+        head.appendChild(sel)
+        box.appendChild(head)
+        box.appendChild(listEl(d, st, 'deny', '拒绝'))
+        box.appendChild(listEl(d, st, 'allow', '允许'))
+        root.appendChild(box)
+      }
+    }
+
+    const refreshStatus = async () => {
+      try {
+        const s = await $pod.get_status()
+        if (s.running) {
+          $('sdot').className = 'dot on'
+          $('stext').textContent = '已连接 ' + (s.host_id || '') + (s.hostname ? ' @' + s.hostname : '') + (s.version ? ' · ' + s.version : '')
+        } else {
+          $('sdot').className = 'dot off'
+          $('stext').textContent = '未连接' + (s.host_id ? '（host_id: ' + s.host_id + '）' : '')
+        }
+      } catch (e) {
+        $('sdot').className = 'dot off'
+        $('stext').textContent = '状态获取失败: ' + e.message
+      }
+    }
+
+    const boot = async () => {
+      try {
+        const cfg = await $pod.get_config()
+        $('host').value = cfg.host || ''
+        $('key').value = cfg.key || ''
+        loadedKey = cfg.key || ''
+        $('work_dir').value = cfg.work_dir || ''
+        $('exec_timeout').value = cfg.exec_timeout || ''
+        $('home_path').value = cfg.home_path || '/'
+        $('browser_path').value = cfg.browser_path || ''
+        $('browser_width').value = cfg.browser_width || 1280
+        $('browser_height').value = cfg.browser_height || 720
+        for (const d of domains) {
+          auth[d.key].policy = cfg[d.key + '_policy'] || auth[d.key].policy
+          auth[d.key].deny = cfg[d.key + '_deny'] || []
+          auth[d.key].allow = cfg[d.key + '_allow'] || []
+        }
+        renderAuth()
+      } catch (e) { setMsg('加载失败: ' + e.message, false) }
+      refreshStatus()
+    }
+
+    // 窗口重新获得焦点 → 刷新连接状态（不重拉 get_config，避免覆盖正在编辑的输入框）
+    window.addEventListener('focus', () => refreshStatus())
+
+    // 保存：先落盘（set_config）→ 凭证改动过才 bind；不跳转、不关闭页面（原地提示）。
+    // 连接/绑定失败都不回滚、不阻断已保存的配置（主进程在 set_config/bind 后自动重启后端子进程）。
+    const save = async () => {
+      const host = $('host').value.trim()
+      const key = $('key').value.trim()
+      const work_dir = $('work_dir').value.trim()
+      const exec_timeout = $('exec_timeout').value.trim()
+      const home_path = $('home_path').value.trim()
+      try {
+        const browser_width = Number($('browser_width').value || 1280)
+        const browser_height = Number($('browser_height').value || 720)
+        if (![browser_width, browser_height].every(n => Number.isInteger(n) && n >= 320 && n <= 4096)) {
+          throw new Error('浏览器宽高必须是 320–4096 之间的整数')
+        }
+        const body = { host, work_dir, exec_timeout, home_path, browser_width, browser_height, browser_path: $('browser_path').value.trim() }
+        for (const d of domains) {
+          body[d.key + '_policy'] = auth[d.key].policy
+          body[d.key + '_deny'] = auth[d.key].deny
+          body[d.key + '_allow'] = auth[d.key].allow
+        }
+        await $pod.set_config(body)
+      } catch (e) {
+        setMsg(isNetErr(e) ? '设置桥暂不可用（后端可能正在重启），请重试' : '保存失败: ' + e.message, false)
+        refreshStatus()
+        return
+      }
+      if (key && key !== loadedKey) {
+        try {
+          await $pod.bind(key)
+          loadedKey = key
+        } catch (e) {
+          setMsg('地址已保存；凭证未生效: ' + e.message, 'warn')
+          refreshStatus()
+          return
+        }
+      }
+      setMsg('已保存', true)
+      refreshStatus()
+    }
+
+    // 归一平台地址（补 scheme + 去尾斜杠）
+    const normalizeHost = (raw) => {
+      let h = (raw || 'https://ivec-ai.com').trim()
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(h)) h = 'https://' + h
+      return h.replace(/\/+$/, '')
+    }
+
+    // 探测 {host}/root.html 可达后打开平台（Electron：主窗口跳转、配置页保留）
+    const probeAndJump = async (rawHost, failMsg) => {
+      const h = normalizeHost(rawHost)
+      let ok = false
+      if (window.aicDesktop && window.aicDesktop.checkPlatform) {
+        const r = await window.aicDesktop.checkPlatform(h)
+        ok = !!(r && r.ok)
+      } else {
+        try {
+          const r = await $pod.check_host({ host: h })
+          ok = !!(r && r.ok)
+        } catch (e) { ok = false }
+      }
+      if (ok) {
+        const url = h + '/hosts'
+        if (window.aicDesktop && window.aicDesktop.openPlatform) window.aicDesktop.openPlatform(url)
+        else window.open(url, '_blank')
+        return true
+      }
+      setMsg(failMsg || '平台不可达，请检查地址', false)
+      return false
+    }
+
+    // 获取：打开 {host}/hosts 设备页拿绑定 key（桌面主窗口打开、配置页保留）
+    const getKey = () => { probeAndJump($('host').value.trim()) }
+
+    const reconnect = async () => {
+      const btn = $('btnReconnect')
+      btn.disabled = true
+      try {
+        await $pod.stop()
+        await $pod.start()
+        setMsg('已重连', true)
+      } catch (e) { setMsg('重连失败: ' + e.message, false) }
+      btn.disabled = false
+      refreshStatus()
+    }
+
+    // 桌面端独立配置窗口提供「关闭」；浏览器/无桥环境不渲染该按钮
+    const canClose = !!(window.aicDesktop && window.aicDesktop.closeSettings)
+    $('btnClose').hidden = !canClose
+
+    $('btnSave').onclick = save
+    $('btnReconnect').onclick = reconnect
+    $('btnGet').onclick = getKey
+    $('btnClose').onclick = () => {
+      if (window.aicDesktop && window.aicDesktop.closeSettings) window.aicDesktop.closeSettings()
+    }
+
+    if (!bridge) setMsg('设置桥不可用（请在 AIC Desktop 中打开设置）', false)
+    boot()
+  </script>
+</body>
+
+</html>
