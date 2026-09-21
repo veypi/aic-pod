@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -58,9 +57,6 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 	// 导出字段逐项比较（port 为进程级隐私字段；code 随机生成不落盘，不参与比较）
 	if got.Host != want.Host || got.Key != want.Key || got.WorkDir != want.WorkDir || got.ExecTimeout != want.ExecTimeout || got.HomePath != want.HomePath {
 		t.Fatalf("round trip = %+v, want %+v", *got, want)
-	}
-	if got.Code == "" {
-		t.Fatal("code should be generated when unset")
 	}
 	// 文件权限 0600
 	p, _ := Path()
@@ -117,25 +113,6 @@ func TestPublicDir(t *testing.T) {
 	// 幂等：再调不报错
 	if _, err := PublicDir(); err != nil {
 		t.Fatalf("PublicDir idempotent: %v", err)
-	}
-}
-
-func TestHostsURL(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"", "https://ivec-ai.com/hosts"},
-		{"https://ivec-ai.com", "https://ivec-ai.com/hosts"},
-		{"http://localhost:4000", "http://localhost:4000/hosts"},
-		{"http://localhost:4000/", "http://localhost:4000/hosts"},
-		{"http://127.0.0.1:4000/rses/aiv", "http://127.0.0.1:4000/rses/aiv/hosts"},
-		{"https://ivec-ai.com/hosts", "https://ivec-ai.com/hosts"},
-		{"ivec-ai.com", "https://ivec-ai.com/hosts"},
-		{"http://x:1/?q=1", "http://x:1/hosts"},
-	}
-	for _, c := range cases {
-		o := &Options{Host: c.in}
-		if got := o.HostsURL(); got != c.want {
-			t.Errorf("HostsURL(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }
 
@@ -202,7 +179,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 	for _, body := range []string{
 		"::::broken yaml::::\n[\n", "fspolicy: open\n", "fs_policy: typo\n", "fs_allow: [ 'ro:' ]\n",
 		"fs_allow: [ {path: /, access: rw} ]\n", "fs_deny: [ 'ro:/secret' ]\n", "exec_allow: [ 'git*' ]\n", "net_allow: [ '*:443' ]\n",
-		"plain text", "[arbitrary, values]", "", "rtc: invalid\nbrowser_width: [bad]\ncode: {}\n",
+		"plain text", "[arbitrary, values]", "", "rtc: invalid\nbrowser_width: [bad]\n",
 	} {
 		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 			t.Fatal(err)
@@ -211,7 +188,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config must not block startup: %v", err)
 		}
-		if Global != o || o.Code == "" || o.Host != DefaultHost || !o.RTC || o.BrowserWidth != 1280 {
+		if Global != o || o.Host != DefaultHost || !o.RTC || o.BrowserWidth != 1280 {
 			t.Fatalf("missing usable defaults for %q", body)
 		}
 		if err := o.ValidateAuth(); err != nil && CheckAuth() == nil {
@@ -241,7 +218,7 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if o.Key != "existing-device-key" || o.Host != "http://localhost:4000" || o.HomePath != "/agents" || o.HostsSources != 64 {
 		t.Fatal("unrelated invalid fields discarded valid configuration")
 	}
-	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != "typo" || o.Code == "" {
+	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != "typo" {
 		t.Fatal("invalid fields did not fall back to defaults")
 	}
 	if !reflect.DeepEqual(o.FsAllow, []string{"/workspace"}) || o.ValidateAuth() == nil {
@@ -304,43 +281,7 @@ func TestUnreadableConfigFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	o, err := Load()
-	if err != nil || o.Code == "" || o.Host != DefaultHost {
+	if err != nil || o.Host != DefaultHost {
 		t.Fatalf("unreadable config blocked startup: %v", err)
-	}
-}
-
-func TestEnsureCode(t *testing.T) {
-	isolateConfigDir(t)
-	o := NewOptions()
-	if err := o.EnsureCode(); err != nil {
-		t.Fatal(err)
-	}
-	if len(o.Code) != 32 || !o.codeAuto {
-		t.Fatal("missing per-process local API code")
-	}
-	code := o.Code
-	if err := o.EnsureCode(); err != nil || o.Code != code {
-		t.Fatal("EnsureCode changed an existing code")
-	}
-	if err := Save(o); err != nil {
-		t.Fatal(err)
-	}
-	p, _ := Path()
-	data, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), code) {
-		t.Fatal("generated code was persisted")
-	}
-	fixed := &Options{Code: "configured-code"}
-	if err := fixed.EnsureCode(); err != nil || fixed.Code != "configured-code" || fixed.codeAuto {
-		t.Fatal("configured code must be preserved")
-	}
-	for _, bad := range []string{"   ", "line\nbreak", "中文"} {
-		o := &Options{Code: bad}
-		if err := o.EnsureCode(); err != nil || len(o.Code) != 32 || !o.codeAuto {
-			t.Fatal("invalid header code did not fall back to a generated code")
-		}
 	}
 }

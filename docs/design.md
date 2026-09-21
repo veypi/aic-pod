@@ -16,10 +16,9 @@ aic-pod/
 ├── Makefile              # 构建/发版（build/cli-all/desktop-all/docker-build/release）
 ├── Dockerfile            # 容器镜像（ENTRYPOINT ["aic","run"]）
 │
-├── init.go               # 根包 pod：本地服务装配（Router + Start/Stop）
+├── init.go               # 根包 pod：host 会话装配（Start/Stop），本地不监听任何端口
 ├── cfg/                  # 配置中心：Options + Global（含 Version/DeviceType）、config.yaml 0600 原子写
-├── api/                  # 本地管理 HTTP 层（包级 Router：127.0.0.1 随机端口 + local_code 通道，
-│                         #   vigo 声明式 handler + 统一 JSON 响应；ui/settings.html 静态资源）
+├── settings/             # 本机设置面：View/Update/Apply（`aic config get|set` 的读/写模型）
 ├── libs/                 # 客户端核心：协议 + host 运行时 + 指令引擎 + 子进程托管
 │   ├── proto/            # 协议层：subject 拓扑、请求/响应信封、HMAC 签名（HKDF 三密钥派生）、
 │   │                     #   caps v2、客户端版本门禁、nonce 防重放（固定向量测试锁定）
@@ -37,10 +36,10 @@ aic-pod/
 │   └── exec_procs/       # 子进程统一托管：沙箱包装（seatbelt/bwrap/受限令牌）+ 日志落盘 +
 │                         #   请求超时自动后台化 + bg_list/bg_wait/bg_kill + 进程组终止
 │
-├── cli/                  # 命令行入口：aic（vigo/flags 解析，主命令运行，无子指令）
+├── cli/                  # 命令行入口：aic（vigo/flags 解析；子命令 config/bind/unbind/wake）
 ├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
-│                         #   remote-preload（host 白名单 → window.aicDesktop：api 转发/窗口控制）
-│                         #   + 端口握手（AIC_PORT_FILE）+ 窗口控制 IPC（preload contextBridge）
+│                         #   remote-preload（host 白名单 → window.aicDesktop：本地设置 IPC/窗口控制）
+│                         #   + settings-preload（设置窗自身）+ spawn `aic config/bind` 子命令读写 config.yaml
 │                         #   browser-path.cjs 仅注入 Chrome 默认路径；Go libs/browser 独立执行
 │                         #   内置 cua-driver 发行物（cua.json + scripts/sync-cua.mjs → resources/cua）
 ├── protocol/ui/          # ui/1 命令 schema、Go 解析/结果、跨语言验收向量
@@ -75,7 +74,7 @@ aic-pod/
 |------|------|
 | **语言** | Node（主进程）+ Go（后端二进制） |
 | **目标平台** | Windows / macOS / Linux |
-| **形态** | 启动：loading → spawn 后端（AIC_PORT_FILE 握手）→ 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + 默认域名与旧域名 ivec.ai），平台页经 window.aicDesktop 直调本地 API（端口/code 不出主进程，IPC handler 校验 senderFrame host） |
+| **形态** | 启动：loading → spawn 后端 → 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + 默认域名与旧域名 ivec.ai），平台页经 window.aicDesktop 调本地设置（主进程 spawn `aic config|bind` 子命令，无端口/无 code，IPC handler 校验 senderFrame host） |
 | **能力** | 与 cli 相同（exec/fs/ssh/scp，沙箱 + 三域授权）；另有 `hosts_tools/1` 的 `browser`（独立 Chrome）与 `cua`（cua-driver MCP 桥接，原生 GUI 自动化，内置发行物随包分发） |
 | **本地页面** | 仅 /settings 配置页（独立系统边框配置窗口：托盘「本地配置」直开，平台不可达首配时自动打开）；设置保存后探测并跳 {host}/hosts |
 | **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
@@ -186,8 +185,8 @@ c.RegisterCommand(proto.CommandDecl{
 | `libs/rtc` | RTC 直连应答（2026-09-10）：pion/webrtc 集成——单 UDP mux、mDNS QueryOnly、信令处理（offer/answer/trickle）、DataChannel 鉴权帧、fs 帧协议服务（chunk 流式 + backpressure）+ readbin/writebin 二进制字节出入口（vcore.ReadBin/WriteBin，预览/下载与二进制写入用）。 |
 | `libs/netauth` | 网络授权：net 域出站判定（deny 恒优先于 allow、localhost 内建、具体度排序、沙箱网络规则生成）。 |
 | `libs/exec_procs` | 子进程统一托管 + 沙箱：seatbelt/bubblewrap/受限令牌包装（按等级选 profile、env 清洗、资源限制、网络闸，无可用后端 fail-closed）、stdout+stderr 合并落盘、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
-| `api` | 本地管理 API：包级 Router（security 中间件 + common.JsonResponse/JsonErrorResponse 统一响应），127.0.0.1 随机端口 + local_code 通道（端点 ping/get_config/set_config/bind/unbind/get_status/get_log/start/stop + /settings 设置页静态资源）；host 会话生命周期自持（libs/host Runner，Init(deviceType, version) 创建，Start 时自动连接已绑定设备）；外链由壳页面处理（Electron 系统浏览器 IPC / 浏览器壳新标签，平台页 local_handler 拦截后 postMessage 转交）；有效配置读写 cfg.Global，get_log 读日志文件尾部。 |
-| `cfg` | 配置中心：Options 结构体（flag/env/文件/default 四级解析，port/code 进程级隐私字段）+ Global 全局有效配置 + Load/LoadFile/Save（config.yaml 0600 原子写）+ LogPath/LogWriter（aic.log console 格式滚动写入，cli console+文件双写、desktop 仅文件）。 |
+| `settings` | 本机设置面（2026-09-22 由本地管理 API 改为进程内调用）：View/Update/Apply 读写 config.yaml（`aic config get|set`、`aic bind|unbind` 子命令，JSON/凭证走 stdin/stdout）；host 会话生命周期自持（libs/host Runner，Start 时自动连接已绑定设备）；get_status/get_log 由 desktop 主进程直接读进程状态与日志文件。 |
+| `cfg` | 配置中心：Options 结构体（flag/env/文件/default 四级解析）+ Global 全局有效配置 + Load/LoadFile/Save（config.yaml 0600 原子写）+ LogPath/LogWriter（aic.log console 格式滚动写入，cli console+文件双写、desktop 仅文件）。 |
 
 **客户端只需做的：**
 
@@ -209,15 +208,16 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
   **显式 flag > 环境变量 > 配置文件（LoadConfig 填充默认值）> 结构体默认**
 - flag：`-host` / `-key` / `-work_dir` / `-exec_timeout` / `-home_path`（json tag 即 flag 名）
 - env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT` / `HOME_PATH`（字段名大写，无前缀）
-- 配置键：`host`（平台地址，默认 https://ivec-ai.com）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）、`code`（本地 API 校验码，空 = 进程级随机）、`rtc`（RTC 直连应答开关，默认 true；关闭则 caps 不上报 mgmt、不应答 rtc.in 信令）
+- 配置键：`host`（平台地址，默认 https://ivec-ai.com）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）、`rtc`（RTC 直连应答开关，默认 true；关闭则 caps 不上报 mgmt、不应答 rtc.in 信令）
 - 三域授权键（vigo/flags 自动注册 flag/env，env 名 = json tag 大写）：
   `fs_policy`/`fs_deny`/`fs_allow`、`net_policy`/`net_deny`/`net_allow`、`ssh_policy`/`ssh_deny`/`ssh_allow`；
-  隐藏项 `no_sandbox`（全局跳过 exec 沙箱，仅配置文件/flag/env 可改，本地管理 API 不暴露）
+  隐藏项 `no_sandbox`（全局跳过 exec 沙箱，仅配置文件/flag/env 可改，设置面不暴露）
 - 发版版本位：只改 `cfg/config.go` 的 `Version`（带 `v` 前缀）；
   `desktop/package.json` 由 `make desktop-version` 从 git describe 自动同步
 - NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /api/nc
-- 本地管理 API（api 包 Router）：cli 与 desktop 启动时在 127.0.0.1 随机端口监听，
-  打印带 local_code 的引导链接（`{host}/hosts?local_code={port}.{code}`），浏览器访问即绑定/管理本机
+- 本机设置面：不监听任何端口（2026-09-22 去本地管理 API）；设置 = `UserConfigDir/aic/config.yaml`，
+  CLI 用 `aic config get|set` / `aic bind|unbind` 读写，desktop 设置窗经 Electron IPC spawn 同一套子命令；
+  保存后重启后端子进程生效。
 
 ## 协议
 

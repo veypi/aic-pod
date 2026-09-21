@@ -25,10 +25,9 @@ CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yam
 优先级：**显式 flag > 环境变量 > 配置文件 > 结构体默认**。
 
 配置读取允许容错：未知字段忽略，错误字段使用默认值并保留其他有效字段；
-文件无法读取或 YAML 整体损坏时使用默认配置启动，仍可进入本地设置页修复。
-读取时不覆盖原文件，只有用户保存配置时才写回。
-设置页通过 `flags.LoadCfg` 读取持久配置，不混入命令行或环境变量覆盖；
-aic-pod 只负责设备参数的业务校验和本地 code 生成。
+文件无法读取或 YAML 整体损坏时使用默认配置启动，仍可用 `aic config get|set` 修复。
+读取时不覆盖原文件，只有保存配置时才写回。
+设置面（`aic config`）与启动读取共用 `flags` 的解析/原子写，只负责设备参数的业务校验。
 
 | 环境变量 | CLI flag | 配置键 | 默认值 | 说明 |
 |---|---|---|---|---|
@@ -37,21 +36,20 @@ aic-pod 只负责设备参数的业务校验和本地 code 生成。
 | `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 | `HOME_PATH` | `-home_path` | `home_path` | `/` | 桌面端默认打开地址（host 后的路径，如 `/`、`/a`） |
-| `CODE` | `-code` | `code` | 空 | 本地管理 API 校验码（空 = 进程级随机） |
 | `FS_POLICY` | `-fs_policy` | `fs_policy` | `deny` | 文件写默认立场：`deny`（仅内置根 + `fs_allow`）\| `open`（除 `fs_deny` 全放） |
 | `FS_DENY` / `FS_ALLOW` | `-fs_deny` / `-fs_allow` | `fs_deny` / `fs_allow` | — | 路径 glob 拒绝 / 显式允许（允许可覆盖拒绝；裸路径覆盖子树，glob 精确匹配） |
 | `NET_POLICY` | `-net_policy` | `net_policy` | `open` | 沙箱进程出站立场：`open` \| `deny`（仅 localhost） |
 | `NET_DENY` / `NET_ALLOW` | `-net_deny` / `-net_allow` | `net_deny` / `net_allow` | — | 出站目标 `host:port` 拒绝 / 允许（拒绝恒优先；内建 localhost:*） |
 | `SSH_POLICY` | `-ssh_policy` | `ssh_policy` | `deny` | ssh/scp 目标立场：`deny` \| `open` |
 | `SSH_DENY` / `SSH_ALLOW` | `-ssh_deny` / `-ssh_allow` | `ssh_deny` / `ssh_allow` | — | ssh 目标 `host[:port]` 拒绝 / 允许（拒绝恒优先） |
-| `NO_SANDBOX` | `-no_sandbox` | `no_sandbox` | `false` | 隐藏项：全局跳过 exec 沙箱（等同放弃进程级隔离，慎用；本地管理 API 不可改） |
+| `NO_SANDBOX` | `-no_sandbox` | `no_sandbox` | `false` | 隐藏项：全局跳过 exec 沙箱（等同放弃进程级隔离，慎用；仅配置文件/flag/env 可改） |
 
 > 三域授权（fs/net/ssh × policy/deny/allow）的完整判定式、内置根与会话级临时 grant
 > 语义见 [docs/host_sandbox.md](docs/host_sandbox.md)。
 
-本地管理 API（LocalAPI）由 api 包提供（cli/desktop 共用，vigo 框架实现）：
-`aic run` 启动时在 127.0.0.1 随机端口监听并**打印带 local_code 的引导链接**，
-用户浏览器访问该链接即可绑定/管理本机（与桌面端同一套通道协议）。
+本机不监听任何端口（2026-09-22 去本地管理 API）：设置面 = `UserConfigDir/aic/config.yaml`，
+CLI 用 `aic config get|set` / `aic bind|unbind` 读写（JSON/凭证走 stdin/stdout），
+desktop 设置窗经 Electron IPC spawn 同一套子命令；保存后重启后端进程生效。
 
 ## 安全模型
 
@@ -76,14 +74,16 @@ aic-pod 只负责设备参数的业务校验和本地 code 生成。
 ### 用法
 
 ```bash
-aic                                  # 连接运行（打印 management page 链接，浏览器访问即绑定/管理本机）
+aic                                  # 连接运行（config.yaml 里 key 非空则自动连接平台）
+aic config get | config set           # 读写本机设置（JSON 走 stdin/stdout）
+aic bind | unbind                     # 绑定/解绑平台凭证（凭证走 stdin）
 aic -key "<key>"               # 临时参数覆盖
 # 查看全部参数：aic -h
 ```
 
 临时参数（-host / -key / -work_dir / -exec_timeout / -home_path，或对应环境变量）只影响本次运行；
-**永久生效请直接编辑 `UserConfigDir/aic/config.yaml`**（或浏览器打开 management page 绑定/设置，
-页面写操作会自动持久化）。
+**永久生效请直接编辑 `UserConfigDir/aic/config.yaml`**（或 `aic config set` / desktop 设置窗，
+保存后重启后端生效）。
 
 ### 后台运行 (macOS/Linux)
 

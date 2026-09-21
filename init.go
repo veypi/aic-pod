@@ -1,93 +1,35 @@
 // Copyright (C) 2025 veypi <i@veypi.com>
 // Distributed under terms of the MIT license.
 
-// Package pod 是 AIC 本地客户端（aic-pod）的根包：本地服务装配（Router +
-// Start/Stop）。目录结构（对照 aic 服务端的分层）：
+// Package pod 是 AIC 本地客户端（aic-pod）的根包：host 会话装配（Start/Stop）。
+// 目录结构（对照 aic 服务端的分层）：
 //
-//	cfg/      配置中心：Options + Global（含 port/code 进程级隐私字段）、
-//	          Version/DeviceType 二进制身份、日志文件写入
-//	api/      本地管理端点（/api/*，自带 security 中间件与统一 JSON 响应）
-//	libs/     客户端核心：host（NATS 会话运行时）、proto（协议信封签名）、
+//	cfg/       配置中心：Options + Global、Version/DeviceType 二进制身份、日志文件写入
+//	settings/  本机设置面（`aic config get|set` 的读/写模型，原 api 包逻辑）
+//	libs/      客户端核心：host（NATS 会话运行时）、proto（协议信封签名）、
 //	          vcore（虚拟指令）、exec_procs（进程托管）、utils（纯工具）
-//	ui/       静态资源（settings.html 本机设置页）
-//	cli/      命令行版本（aic）
-//	desktop/  Electron 壳（main.js + preload.js）：Chromium 窗口 + Go 后端子进程（cli 二进制）
+//	cli/       命令行版本（aic）：连接运行 / config / bind / unbind
+//	desktop/   Electron 壳（main.js + preload.js）：Chromium 窗口 + Go 后端子进程
+//
+// 本地不监听任何端口（2026-09-22 去本地管理 API / code / 端口文件握手）：
+// 设置面 = config.yaml（Go 侧 flags 原子写），Electron 设置窗口经 IPC spawn
+// `aic config|bind|unbind` 子命令读写；变更生效 = 重启后端子进程。
 package pod
 
 import (
-	"context"
-	"embed"
-	_ "embed"
-	"fmt"
-	"net"
-	"os"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/veypi/aic-pod/api"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/host"
-	"github.com/veypi/vhtml"
-	"github.com/veypi/vigo"
 	"github.com/veypi/vigo/logv"
 )
 
-// Router 是本地服务根路由：/api/* 端点（鉴权/CORS 由 api 包 security 承担）+
-// /settings 本机设置页（公开页面，数据读取走 /api/*）。
-var Router = vigo.NewRouter()
-
-//go:embed ui
-var uifs embed.FS
-
-func init() {
-	Router.Extend("/api", api.Router)
-	Router.Extend("vhtml", vhtml.Router)
-	_ = vhtml.WrapUI(Router, uifs)
-}
-
-var (
-	mu  sync.Mutex
-	srv *vigo.Application
-)
-
-// Start 监听 127.0.0.1 随机端口并启动服务；已绑定设备自动连接 host。
+// Start 启动 host 会话：已绑定（key 非空）自动连接平台，未绑定仅提示。
 func Start() error {
 	cfg.Global.Normalize()
-	// flag/env 可覆盖文件配置；监听前再次确保 code 非空。
-	if err := cfg.Global.EnsureCode(); err != nil {
-		return err
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
-	cfg.Global.SetPort(ln.Addr().(*net.TCPAddr).Port)
-
-	s, err := vigo.NewServer(vigo.WithHost("127.0.0.1"), vigo.WithPort(0), vigo.WithListener(ln))
-	if err != nil {
-		ln.Close()
-		return err
-	}
-	s.SetRouter(Router)
-	// Electron 通过端口文件握手；写入失败属于启动失败，不能留下无法连接的服务。
-	if pf := os.Getenv("AIC_PORT_FILE"); pf != "" {
-		if err := os.WriteFile(pf, []byte(fmt.Sprintf(`{"port":%d,"code":%q}`, cfg.Global.Port(), cfg.Global.Code)), 0o600); err != nil {
-			ln.Close()
-			cfg.Global.SetPort(0)
-			return fmt.Errorf("write port file %s: %w", pf, err)
-		}
-	}
-	mu.Lock()
-	srv = s
-	mu.Unlock()
-	go func() { _ = s.Run() }()
-	// code 不进日志（2026-09-22）：logv 是终端+文件双写，desktop 壳经 AIC_PORT_FILE
-	// 握手拿 code，CLI 形态的带 code 链接由 cli 层只写 stderr。
-	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d", cfg.Global.Port())
 	logv.WithNoCaller.Info().Msgf("working on: %s", cfg.Global.WorkDir)
-	// 已绑定 → 自动连接 host（失败按指数退避后台重试，不阻断本地服务）
+	// 已绑定 → 自动连接 host（失败按指数退避后台重试，不阻断启动）
 	if cfg.Global.Key != "" {
 		if err := host.Start(*cfg.Global); err != nil {
 			logv.Warn().Msgf("auto start host failed: %v (retrying with backoff)", err)
@@ -95,6 +37,11 @@ func Start() error {
 		}
 	}
 	return nil
+}
+
+// Stop 停止 host 会话（应用退出时调用）。
+func Stop() {
+	host.Stop()
 }
 
 // ---- auto-start 退避重试 ----
@@ -155,18 +102,4 @@ func nextRetryDelay(delay, max time.Duration) time.Duration {
 		return max
 	}
 	return delay
-}
-
-// Stop 关闭服务并停止 host 会话（应用退出时调用）。
-func Stop() {
-	mu.Lock()
-	s := srv
-	srv = nil
-	mu.Unlock()
-	host.Stop()
-	if s != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	}
 }

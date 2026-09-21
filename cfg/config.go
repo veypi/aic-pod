@@ -6,8 +6,6 @@
 package cfg
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/url"
@@ -36,9 +34,9 @@ var DeviceType = "cli"
 // Options 是 cli 与 desktop 共享的唯一配置模型（配置参数就是一个结构体，
 // vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：
 //
-//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path/-code）与 env 键
-//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH/CODE）的来源，也是本地 API（get_config/
-//     set_config）的键
+//   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path）与 env 键
+//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH）的来源，也是设置面（settings 包，
+//     `aic config get|set`）的键
 //   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；未知字段忽略，错误授权字段阻止工具调用
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
@@ -63,10 +61,6 @@ type Options struct {
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
 	NoSandbox bool `json:"no_sandbox" yaml:"no_sandbox" desc:"disable process sandbox for exec calls (default: sandbox enabled)"`
-	// Code 本地 API 校验码（x-aic-code 头，纯随机秘钥，与端口无关）：
-	// 可配置（config.yaml 写死则固定，重启不失效）；为空时启动随机生成，
-	// 自动生成的值不写回配置文件（生命周期 = 进程，重启换新）。
-	Code string `json:"code" yaml:"code" desc:"local api secret code (empty = random per process)"`
 	// RTC 直连应答开关（WebRTC DataChannel，2026-09-10）：开启后 host 作为
 	// 应答方接受 owner 页面发起的 RTC 直连（信令经 NATS，数据面 UDP/DTLS），
 	// 能力摘要按 rtc/proxy 分别上报，凭据不进入摘要。
@@ -91,39 +85,14 @@ type Options struct {
 	SshPolicy  string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
 	SshDeny    []string `json:"ssh_deny" yaml:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
 	SshAllow   []string `json:"ssh_allow" yaml:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
-
-	// 进程级运行时态（unexported，不参与序列化/落盘）：
-	port     int  // 本地管理 API 监听端口（api.Start 监听后 SetPort 写入）
-	codeAuto bool // Code 为本次进程随机生成（Save 时跳过落盘）
 }
 
-// Port 返回本地管理 API 监听端口（未启动为 0）。
-func (o *Options) Port() int { return o.port }
-
-// SetPort 写入本地管理 API 实际监听端口（仅 api.Start 调用）。
-func (o *Options) SetPort(p int) { o.port = p }
-
-// EnsureCode 在启动时确保本地 API 有非空校验码（32 hex，自动生成的值不落盘）。
-func (o *Options) EnsureCode() error {
-	// code 要能安全放进 HTTP header；空白、换行等错误配置回退随机值。
-	if o.Code != "" && strings.IndexFunc(o.Code, func(r rune) bool { return r < 0x21 || r > 0x7e }) == -1 {
-		return nil
-	}
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return fmt.Errorf("generate local API code: %w", err)
-	}
-	o.Code = hex.EncodeToString(buf)
-	o.codeAuto = true
-	return nil
-}
-
-// Global 全局有效配置：NewOptions 初始化 → Load 填充文件值（Code 空则随机生成）→
-// flags.AutoRegister(Global) 叠加 flag/env；本地 API 的写操作（bind/set_config）
-// 同步更新 Global 并 Save 落盘。
+// Global 全局有效配置：NewOptions 初始化 → Load 填充文件值 →
+// flags.AutoRegister(Global) 叠加 flag/env；设置面的写操作（settings.Update.Apply）
+// 落盘后由调用方重启进程生效。
 var Global = NewOptions()
 
-// NewOptions 返回带默认值的配置实例（Code 留空，由 Load/LoadFile 生成）。
+// NewOptions 返回带默认值的配置实例。
 func NewOptions() *Options {
 	o := &Options{}
 	flags.SetDefaults(o)
@@ -225,31 +194,6 @@ func (o *Options) NormalizedHomePath() string {
 	return p
 }
 
-// HostsURL 由平台地址推导设备管理页入口 {host}/hosts（host 可带产品壳路径前缀，
-// 如 http://127.0.0.1:4000/rses/aiv → http://127.0.0.1:4000/rses/aiv/hosts）。
-// local_code 由调用方拼接（?local_code={port}.{code}）。
-func (o *Options) HostsURL() string {
-	h := strings.TrimSpace(o.Host)
-	if h == "" {
-		h = DefaultHost
-	}
-	if !strings.Contains(h, "://") {
-		h = "https://" + h
-	}
-	u, err := url.Parse(h)
-	if err != nil || u.Host == "" {
-		return h
-	}
-	p := strings.TrimSuffix(u.Path, "/")
-	if !strings.HasSuffix(p, "/hosts") {
-		p += "/hosts"
-	}
-	u.Path = p
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
-}
-
 // HomeURL 返回默认打开地址 {host}{home_path}（host 可带产品壳路径前缀，
 // 如 http://127.0.0.1:4000/rses/aiv + /a → http://127.0.0.1:4000/rses/aiv/a）。
 func (o *Options) HomeURL() string {
@@ -332,23 +276,19 @@ func LogWriter() (io.Writer, error) {
 }
 
 // LoadFile 仅读取配置文件返回独立副本，不触碰 Global——
-// 页面写操作（bind/set_config）落盘用：基于文件配置修改，flag/env 启动覆盖不落盘。
-// 配置文件不阻断启动和设置页：普通字段错误回退默认值；授权字段错误或整体
+// 设置面与 bind/unbind 子命令落盘用：基于文件配置修改，flag/env 启动覆盖不落盘。
+// 配置文件不阻断启动和设置：普通字段错误回退默认值；授权字段错误或整体
 // 损坏保留无效标记，阻止设备工具调用和无关配置覆盖，直到显式修正。
-// Code 未配置时随机生成（codeAuto=true，Save 不落盘）。
 func LoadFile() (*Options, error) {
 	o := NewOptions()
 	if p, err := Path(); err == nil {
 		o.ApplyConfigIssues(flags.LoadCfg(p, o))
 	}
 	o.Normalize()
-	if err := o.EnsureCode(); err != nil {
-		return nil, err
-	}
 	return o, nil
 }
 
-// Load 安装配置；无效授权仍可通过本地管理 API 修复。
+// Load 安装配置；无效授权仍可通过设置面（aic config set）修复。
 func Load() (*Options, error) {
 	o, err := LoadFile()
 	if err == nil {
@@ -397,7 +337,7 @@ func RawAuthSnapshot() AuthCfg {
 }
 
 // CheckAuth gates device tools independently of grants and permission levels.
-// A broken local policy must be repaired through the local management API.
+// A broken local policy must be repaired through the settings surface (aic config set).
 func CheckAuth() error {
 	authMu.RLock()
 	defer authMu.RUnlock()
@@ -405,7 +345,7 @@ func CheckAuth() error {
 }
 
 // SetAuth 更新授权配置（内存即时生效；落盘由调用方负责——
-// api.SetConfig 走 Save，grant --permanent 亦同）。
+// settings.Update.Apply 走 Save，grant --permanent 亦同）。
 func SetAuth(c AuthCfg) {
 	authMu.Lock()
 	defer authMu.Unlock()
@@ -426,7 +366,6 @@ func AuthFrom(o *Options) AuthCfg {
 }
 
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。
-// 进程随机生成的 Code 不落盘（codeAuto=true 时跳过该字段）。
 func Save(o *Options) error {
 	if err := o.ValidateAuth(); err != nil {
 		return err
@@ -439,11 +378,7 @@ func Save(o *Options) error {
 		return err
 	}
 	o.Normalize()
-	saveCfg := *o
-	if o.codeAuto {
-		saveCfg.Code = "" // 自动生成的秘钥不写回（重启换新）
-	}
-	if err := flags.DumpCfg(p, saveCfg); err != nil {
+	if err := flags.DumpCfg(p, o); err != nil {
 		return err
 	}
 	// DumpCfg 以 0644 创建，凭证敏感改 0600

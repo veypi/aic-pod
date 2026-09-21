@@ -1,6 +1,7 @@
 // AIC CLI — 部署在 PC (Windows/macOS/Linux) 上的 host agent，通过 NATS 连接 AIC 平台。
 //
-// 主命令即运行（`aic`）；唯一子指令 `wake`：唤醒桌宠/pet 页录音（仅 desktop 形态，
+// 主命令即运行（`aic`）；子命令：`config get|set`（读写本机设置，JSON 走 stdin/stdout）、
+// `bind` / `unbind`（绑定凭证走 stdin）、`wake`（唤醒桌宠/pet 页录音，仅 desktop 形态，
 // 经 Electron 本地指令通道转发 pet:cmd 事件，效果等同 pet 页左键单击）。
 // 临时参数走 flag（AutoRegister），永久生效用户直接改配置文件
 // （UserConfigDir/aic/config.yaml，cli/desktop 共享，cfg 包）。
@@ -11,14 +12,13 @@
 //	env ：HOST / KEY / WORK_DIR / EXEC_TIMEOUT / HOME_PATH
 //
 // 解析链：显式 flag > env > 配置文件（config.yaml）> 结构体 default tag
-// 日志统一 vigo/logv（cli：console + 文件双写，get_log 读日志文件尾部）。
+// 日志统一 vigo/logv（cli：console + 文件双写；desktop 设置窗的日志查看读同一文件）。
 package main
 
 import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -62,7 +62,15 @@ func main() {
 		cmd.ConfigFile(p)
 	}
 
-	// 主命令：连接运行（本地 API + host 会话）
+	// 子命令（2026-09-22 去本地管理 API）：设置面与绑定直接读写 config.yaml，
+	// Electron 设置窗口由主进程 spawn 这些子命令（无端口、无 code、无常驻服务）。
+	cfgCmd := cmd.SubCommand("config", "read or write config.yaml")
+	cfgCmd.SubCommand("get", "print effective configuration as JSON").Command = func() error { return runConfigGet() }
+	cfgCmd.SubCommand("set", "apply settings JSON from stdin to config.yaml").Command = func() error { return runConfigSet() }
+	cmd.SubCommand("bind", "save the platform credential from stdin to config.yaml").Command = func() error { return runBind() }
+	cmd.SubCommand("unbind", "clear the platform credential").Command = func() error { return runUnbind() }
+
+	// 主命令：连接运行（host 会话）
 	cmd.Command = func() error { return runCmd() }
 
 	if err := cmd.Parse(); err != nil {
@@ -85,8 +93,8 @@ func main() {
 	}
 }
 
-// runCmd 启动本地管理 API（含已绑定时自动连接 host），终端打印带 code 的本地壳
-// 引导链接（用户浏览器访问即绑定/管理本机），阻塞等待 SIGINT/SIGTERM。
+// runCmd 连接运行：启动 host 会话（key 非空自动连平台），阻塞等待 SIGINT/SIGTERM。
+// 本机设置面 = config.yaml（`aic config get|set` 或直接编辑；desktop 设置窗经 IPC 子命令）。
 func runCmd() error {
 	if err := pod.Start(); err != nil {
 		return err
@@ -99,20 +107,10 @@ func runCmd() error {
 		go exitWhenParentGone()
 	}
 
-	// 带 code 的引导链接：本地壳页面（header + iframe 平台页，与桌面同一体验）。
-	// code 只写终端、不进日志文件：logv 是终端+文件双写，直接写 stderr 绕开文件端；
-	// desktop 形态不打印（壳经 AIC_PORT_FILE 握手拿 code）（2026-09-22）。
-	link := fmt.Sprintf("http://127.0.0.1:%d/?code=%s", cfg.Global.Port(), url.QueryEscape(cfg.Global.Code))
 	logv.Info().Msgf("aic %s (host=%s)", cfg.Version, cfg.Global.Host)
-	logv.Info().Msgf("management page: http://127.0.0.1:%d", cfg.Global.Port())
-	if os.Getenv("AIC_PORT_FILE") == "" {
-		fmt.Fprintf(os.Stderr, "management page: %s\n", link)
-	}
-	logv.Info().Msgf("local api: http://127.0.0.1:%d", cfg.Global.Port())
-
 	if cfg.Global.Key == "" {
-		// 未绑定 → 提示去页面绑定（不退出）
-		logv.Warn().Msg("no key — open the management page to bind a device")
+		// 未绑定 → 提示配置凭证（不退出）
+		logv.Warn().Msg("no key — set key in config.yaml (or `aic bind`) to connect the platform")
 	}
 
 	// 阻塞等待 SIGINT/SIGTERM
