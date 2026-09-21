@@ -11,37 +11,15 @@
     数据全部经 Electron 桥：window.aicDesktop.api(method, args) → 主进程 spawn
     `aic-backend config|bind|unbind` 子命令 / 读日志 / 重启后端子进程。
     页面由 main.js 的 app://aic 协议提供（真实 origin，localStorage 可用）。
-    主题：默认跟随系统（prefers-color-scheme），可切 浅色/深色；html[data-theme] +
-    color-scheme 同时管住原生控件（placeholder/滚动条/下拉），避免深色下出现黑字。
+    主题：跟随系统 prefers-color-scheme（html[data-theme] + color-scheme 同时生效，
+    原生控件 placeholder/滚动条/下拉 不会在深色下变成黑字）。
   -->
   <script>
     (() => {
-      const KEY = 'theme'
-      const read = () => { try { return localStorage.getItem(KEY) } catch (e) { return null } }
-      const sysDark = () => !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
-      window.__theme = {
-        mode: () => (['light', 'dark'].includes(read()) ? read() : 'system'),
-        resolve(mode) { return mode === 'system' ? (sysDark() ? 'dark' : 'light') : mode },
-        set(mode) {
-          try { mode === 'system' ? localStorage.removeItem(KEY) : localStorage.setItem(KEY, mode) } catch (e) { /* 忽略 */ }
-          window.__theme.apply()
-        },
-        cycle() {
-          const next = { system: 'light', light: 'dark', dark: 'system' }
-          window.__theme.set(next[window.__theme.mode()])
-        },
-        apply() {
-          const mode = window.__theme.mode()
-          const resolved = window.__theme.resolve(mode)
-          document.documentElement.dataset.theme = resolved
-          document.documentElement.dataset.themeMode = mode
-          const btn = document.getElementById('btnTheme')
-          if (btn) btn.textContent = { system: '跟随系统', light: '浅色', dark: '深色' }[mode]
-        },
-      }
-      window.__theme.apply()
       const mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)')
-      if (mq && mq.addEventListener) mq.addEventListener('change', () => { if (window.__theme.mode() === 'system') window.__theme.apply() })
+      const apply = () => { document.documentElement.dataset.theme = mq && mq.matches ? 'dark' : 'light' }
+      apply()
+      if (mq && mq.addEventListener) mq.addEventListener('change', apply)
     })()
   </script>
   <style>
@@ -101,42 +79,25 @@
     }
 
     body {
-      display: flex;
+      display: block;
+      padding: 16px 22px 24px;
       background: var(--bg);
       color: var(--fg);
       font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
       -webkit-font-smoothing: antialiased
     }
 
-    .card {
-      width: min(560px, 100%);
-      margin: auto;
-      padding: 20px 24px 24px;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: var(--shadow)
-    }
-
-    /* ---- 头部：标题 + 连接状态 + 主题 ---- */
-    header {
-      display: flex;
-      align-items: center;
-      gap: 8px
-    }
-
-    h1 {
-      font-size: 15px;
-      font-weight: 600;
-      margin: 0;
-      letter-spacing: .01em
+    /* 窗口本身就是边框：不再套一层卡片（无圆角/无边/无阴影），内容直接铺在窗口里 */
+    .pane {
+      max-width: 680px;
+      margin: 0 auto
     }
 
     .pill {
       display: inline-flex;
       align-items: center;
       gap: 7px;
-      max-width: 46%;
+      max-width: 52%;
       padding: 3px 10px 3px 8px;
       border-radius: 999px;
       background: rgb(139 147 161 / .12);
@@ -167,12 +128,12 @@
       background: var(--danger)
     }
 
-    /* ---- 顶部操作条（保存/重连在最上，改动了才有保存） ---- */
+    /* ---- 顶部一行：状态 + 保存/重连 + 提示（窗口标题已有标题，页内不再重复） ---- */
     .bar {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin: 14px 0 2px;
+      margin: 0 0 2px;
       min-height: 31px
     }
 
@@ -320,7 +281,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      max-width: 46%;
+      max-width: 34%;
       text-align: right
     }
 
@@ -429,15 +390,10 @@
 </head>
 
 <body>
-  <div class="card" id="card">
-    <header>
-      <h1>AIC 本地设置</h1>
+  <main class="pane" id="pane">
+    <div class="bar">
       <span class="pill" id="status" title="后端子进程连接状态"><span class="dot" id="sdot"></span><span
           id="stext">检查中…</span></span>
-      <button id="btnTheme" class="ghost mini" title="主题：跟随系统 / 浅色 / 深色">跟随系统</button>
-    </header>
-
-    <div class="bar">
       <button id="btnSave" hidden>保存</button>
       <button id="btnReconnect" class="ghost">重连</button>
       <span class="spacer"></span>
@@ -473,7 +429,7 @@
     <div class="sec">访问授权</div>
     <p class="hint">deny 恒优先：policy=deny 仅 allow 放行，policy=open 除 deny 全放。保存后重启后端子进程生效。</p>
     <div id="auth"></div>
-  </div>
+  </main>
 
   <script>
     // ---- 设置桥（settings-preload → IPC local:api → 主进程） ----
@@ -495,7 +451,7 @@
     }
 
     const $ = (id) => document.getElementById(id)
-    const card = $('card')
+    const pane = $('pane')
     const msgEl = $('msg')
     const saveBtn = $('btnSave')
 
@@ -532,8 +488,8 @@
       if (dirty) saveBtn.disabled = false
     }
     const markClean = () => { baseline = snapshot(); refreshDirty() }
-    card.addEventListener('input', refreshDirty)
-    card.addEventListener('change', refreshDirty)
+    pane.addEventListener('input', refreshDirty)
+    pane.addEventListener('change', refreshDirty)
 
     // ---- 授权列表编辑器（policy + 拒绝/允许两张名单） ----
     const listEl = (d, st, kind, title) => {
@@ -748,10 +704,8 @@
       refreshStatus()
     }
 
-    $('btnTheme').onclick = () => window.__theme.cycle()
     saveBtn.onclick = save
     $('btnReconnect').onclick = reconnect
-    window.__theme.apply() // 头部按钮就绪后同步主题标签
 
     if (!bridge) setMsg('设置桥不可用（请在 AIC Desktop 中打开设置）', 'err')
     boot()
