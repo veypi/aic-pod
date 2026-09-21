@@ -14,7 +14,7 @@
 //
 // 安全：所有 IPC handler 校验 event.senderFrame.url——
 // 平台能力（local:api/window:*/pet:*）仅白名单 host（配置 host + 默认与旧平台域名）可调；
-// 设置能力（platform:check/open、settings:close）仅设置窗（app://aic 协议）可调；
+// 设置能力（platform:check/open）仅设置窗（app://aic 协议）可调；
 // local:api 的设置面分支两类 frame 都可用，但只落盘 config.yaml（无 HTTP、无端口、无 code）。
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol } = require('electron')
 const { spawn } = require('child_process')
@@ -517,10 +517,6 @@ function openSettings() {
   settingsWin.on('closed', () => { settingsWin = null })
 }
 
-function closeSettings() {
-  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close()
-}
-
 // 绑定/解绑完成后：若本地配置窗口开着，原地重载（等价「重新打开这个界面」，
 // 展示 pod 侧最新凭证/连接状态）——配置页只在打开时取数，需要主进程这一推。
 function reloadSettingsIfOpen() {
@@ -655,12 +651,7 @@ function registerIpc() {
     return true
   })
 
-  // 本地配置窗口关闭（设置页「关闭」按钮触发）
-  ipcMain.handle('settings:close', (e) => {
-    if (!isSettingsFrame(e)) return false
-    closeSettings()
-    return true
-  })
+  // 本地配置窗口的关闭走窗口自带按钮（macOS 红绿灯 / win-linux 系统按钮）
 }
 
 // ---- Windows：Alt+Space 抢占（应用内 leader+space = launcher，系统默认弹窗口菜单） ----
