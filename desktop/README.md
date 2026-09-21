@@ -30,8 +30,8 @@ Electron Main (Node, main.js)
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
-窗口控制：壳页面经 preload（`window.aicDesktop`）调 IPC；`/api/window_*` 端点
-保留（cli 浏览器壳下返回 desktop:false）。
+窗口控制：平台页经 preload（`window.aicDesktop`）调 IPC（minimise/maximise/close/
+fullscreen/pet/restore）；外链经 `openExternal` 交系统浏览器；普通浏览器无此能力。
 
 Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢占（否则走系统
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
