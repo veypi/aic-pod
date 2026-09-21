@@ -83,7 +83,9 @@ func Start() error {
 	srv = s
 	mu.Unlock()
 	go func() { _ = s.Run() }()
-	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d (code=%s)", cfg.Global.Port(), cfg.Global.Code)
+	// code 不进日志（2026-09-22）：logv 是终端+文件双写，desktop 壳经 AIC_PORT_FILE
+	// 握手拿 code，CLI 形态的带 code 链接由 cli 层只写 stderr。
+	logv.WithNoCaller.Info().Msgf("local api listening on 127.0.0.1:%d", cfg.Global.Port())
 	logv.WithNoCaller.Info().Msgf("working on: %s", cfg.Global.WorkDir)
 	// 已绑定 → 自动连接 host（失败按指数退避后台重试，不阻断本地服务）
 	if cfg.Global.Key != "" {
