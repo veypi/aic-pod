@@ -8,7 +8,7 @@ require (
 	github.com/pion/ice/v4 v4.4.2
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/vhtml v0.11.1
+	github.com/veypi/vhtml v0.11.3
 	github.com/veypi/vigo v0.7.6
 	golang.org/x/crypto v0.54.0
 	golang.org/x/image v0.44.0

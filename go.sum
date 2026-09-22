@@ -121,6 +121,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/veypi/vhtml v0.11.1 h1:KY+FhDz6QWYJSqrpU+wUfRcwpgyffqnDEGWFg79TPQY=
 github.com/veypi/vhtml v0.11.1/go.mod h1:QXsCyJ5ZvQ+9q0MAJZBhkzP0euI+pIoxzLbss+p8ooY=
+github.com/veypi/vhtml v0.11.3 h1:7vIZiLRw3Whzo+XX0RvswzbCrPUlXi1vNN5ujbVcams=
+github.com/veypi/vhtml v0.11.3/go.mod h1:QXsCyJ5ZvQ+9q0MAJZBhkzP0euI+pIoxzLbss+p8ooY=
 github.com/veypi/vigo v0.7.5 h1:MfG5+OkktbRGoXqwuhlvEdlE78lRNDSsfVBLwhSjHQU=
 github.com/veypi/vigo v0.7.5/go.mod h1:PZH8oc0rTLWCkjTaOGQEDw93ZvcKKGGhgrtDWUbsO2U=
 github.com/veypi/vigo v0.7.6 h1:ptitu/hORqCA1VftQczUGGrcE9zuEgBInsGzTb482Yo=
