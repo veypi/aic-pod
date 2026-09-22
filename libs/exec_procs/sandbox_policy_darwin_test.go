@@ -5,6 +5,7 @@ package exec_procs
 import (
 	"context"
 	"github.com/veypi/aic-pod/libs/fsauth"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,7 @@ func TestHostPolicyNativeEnforcement(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: rw, extra: []string{rw}, deny: []string{deny}, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: rw, extra: []string{rw}, rules: []SandboxRule{{Effect: "deny", Patterns: []string{deny}}}, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +112,7 @@ func TestHostPolicyReadOpenDenyScope(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +159,7 @@ func TestHostPolicyLiteralSpellings(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +205,7 @@ func TestHostPolicyXcodeShimTools(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,5 +234,108 @@ func TestHostPolicyXcodeShimTools(t *testing.T) {
 		if err := run("/usr/bin/cc --version"); err != nil {
 			t.Fatalf("xcode shim cc denied in sandbox: %v", err)
 		}
+	}
+}
+
+// policyRules 把 fsauth 规则表快照映射为沙箱行序输入（测试 helper）。
+func policyRules(pol *fsauth.Policy) []SandboxRule {
+	rows := pol.Rules()
+	out := make([]SandboxRule, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, SandboxRule{Effect: r.Effect, Patterns: r.Patterns})
+	}
+	return out
+}
+
+// TestHostPolicyRuleOverride（darwin 原生探测，M3 行序映射）：后置 ro/rw 行
+// 在内核真实覆盖其上 deny 行——文件写洞、ro 读洞、unix socket 连通三形态
+// （2026-09-23）。
+func TestHostPolicyRuleOverride(t *testing.T) {
+	if os.Getenv("AIC_SANDBOX_PROBE") != "1" {
+		t.Skip("explicit native sandbox probe")
+	}
+	// unix socket 路径限长（sun_path ≤104）：用短基目录（/tmp → /private/tmp）。
+	shortDir, err := os.MkdirTemp("/tmp", "aic-m3-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(shortDir) })
+	work := canonicalRoot(shortDir)
+	sub := filepath.Join(work, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	roFile := filepath.Join(sub, "readme.txt")
+	if err := os.WriteFile(roFile, []byte("ro"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wFile := filepath.Join(sub, "hole.txt")
+	if err := os.WriteFile(wFile, []byte("hole"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(sub, "probe.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	rules := []SandboxRule{
+		{Effect: "deny", Patterns: []string{work + "/**"}},
+		{Effect: "ro", Patterns: []string{roFile}},
+		{Effect: "rw", Patterns: []string{wFile}},
+		{Effect: "rw", Patterns: []string{sock}},
+	}
+	denyOnly := []SandboxRule{{Effect: "deny", Patterns: []string{work + "/**"}}}
+	run := func(rules []SandboxRule, script string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, rules: rules, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, plan.argv[0], plan.argv[1:]...)
+		// 中性 cwd：denied 树内 cwd 会让 shell-init getcwd 与 python import
+		//（importlib 探测 cwd）先于目标操作失败，污染探针结论（2026-09-23）。
+		cmd.Dir = os.TempDir()
+		b, e := cmd.CombinedOutput()
+		if e != nil {
+			t.Logf("sandbox: %s", b)
+		}
+		return e
+	}
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+
+	if err := run(denyOnly, "echo x >> "+q(wFile)); err == nil {
+		t.Fatal("deny without hole must block write")
+	}
+	if err := run(rules, "echo x >> "+q(wFile)); err != nil {
+		t.Fatalf("rw hole write denied: %v", err)
+	}
+	if err := run(rules, "/bin/cat "+q(roFile)); err != nil {
+		t.Fatalf("ro hole read denied: %v", err)
+	}
+	if err := run(rules, "echo x >> "+q(roFile)); err == nil {
+		t.Fatal("ro hole must not allow write")
+	}
+	py := "/usr/bin/python3"
+	if _, err := os.Stat(py); err != nil {
+		t.Skip("python3 unavailable for socket probe")
+	}
+	connect := py + ` -c "import socket; socket.socket(socket.AF_UNIX).connect('` + sock + `')"`
+	if err := run(denyOnly, connect); err == nil {
+		t.Fatal("deny without hole must block unix connect")
+	}
+	if err := run(rules, connect); err != nil {
+		t.Fatalf("rw socket hole connect denied: %v", err)
 	}
 }

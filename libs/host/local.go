@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
@@ -34,20 +35,21 @@ func (c *Client) runProcess(ctx context.Context, sid, msgID, display string, arg
 	logPath := filepath.Join(c.sessionWorkDir(sid), ".exec", msgID+".log")
 	netDeny, netAllow := c.netPol.Snapshot(sid)
 	opts := exec_procs.StartOptions{
-		ID:         fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
-		Command:    strings.TrimSpace(display + " " + strings.Join(argv[1:], " ")),
-		LogPath:    logPath,
-		Workdir:    workdir,
-		Exec:       argv,
-		Level:      level,
-		NoSandbox:  noSandbox,
-		WriteRoots: c.policy.WriteRootsFor(sid), // fs 域：cfg fs_allow + 临时 grant
-		DenyPaths:  c.policy.DenyPatterns(),     // fs 域 deny 名单（默认表 + cfg fs_deny）
-		WritePaths: c.policy.WritePatternsFor(sid),
-		FsOpen:     c.policy.OpenMode(), // fs_policy=open 快照
-		NetOpen:    c.netPol.OpenMode(), // net_policy=open 快照
-		NetDeny:    netDeny,             // net 域 deny/allow 快照（含内建 localhost:*）
-		NetAllow:   netAllow,
+		ID:           fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),
+		Command:      strings.TrimSpace(display + " " + strings.Join(argv[1:], " ")),
+		LogPath:      logPath,
+		Workdir:      workdir,
+		Exec:         argv,
+		Level:        level,
+		NoSandbox:    noSandbox,
+		WriteRoots:   c.policy.WriteRootsFor(sid), // fs 域：cfg fs_allow + 临时 grant
+		DenyPaths:    c.policy.DenyPatterns(),     // fs 域 deny 名单（默认表 + cfg fs_deny）
+		SandboxRules: fsSandboxRules(c.policy),    // fs 域有序规则表快照（M3 行序映射）
+		WritePaths:   c.policy.WritePatternsFor(sid),
+		FsOpen:       c.policy.OpenMode(), // fs_policy=open 快照
+		NetOpen:      c.netPol.OpenMode(), // net_policy=open 快照
+		NetDeny:      netDeny,             // net 域 deny/allow 快照（含内建 localhost:*）
+		NetAllow:     netAllow,
 	}
 	if out := exec_procs.Output(ctx); out != nil {
 		code, err := c.procs.RunProcess(ctx, opts, out)
@@ -93,4 +95,16 @@ func (c *Client) runProcess(ctx context.Context, sid, msgID, display string, arg
 
 func errResp(msgID, msg string) *proto.ToolResponse {
 	return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: msg}
+}
+
+// fsSandboxRules 把 fs 域有序规则表映射为沙箱行序快照（M3 行序映射输入）：
+// 与工具层判定同源（builtin + cfg 拼接序，后规则胜）；darwin 按表序输出，
+// 其余平台消费 deny/writeAllow 字段不受影响。
+func fsSandboxRules(p *fsauth.Policy) []exec_procs.SandboxRule {
+	rows := p.Rules()
+	out := make([]exec_procs.SandboxRule, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, exec_procs.SandboxRule{Effect: r.Effect, Patterns: r.Patterns})
+	}
+	return out
 }

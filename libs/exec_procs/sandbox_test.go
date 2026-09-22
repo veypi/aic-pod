@@ -180,7 +180,7 @@ func TestSeatbeltArgs(t *testing.T) {
 // 修复前仅拒读，纯写打开仍可改写可写根内 deny 文件，实测 2026-09-05；
 // AF_UNIX connect 不走 file-* 判定，docker.sock 文件操作全拒而 curl --unix-socket
 // 直通，须 network-outbound 补拒，实测 2026-09-05）。字面/glob 混合形态；
-// SBPL 规则序无关（deny 恒优先于 allow），此处仅断言产物形态。
+// SBPL 后规则胜（last-match-wins；2026-09-23 探针复核），此处仅断言 deny 行产物形态。
 func TestSeatbeltDenyReads(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix path semantics")
@@ -231,8 +231,8 @@ func TestSeatbeltDenyAfterWriteAllow(t *testing.T) {
 	}
 }
 
-// 读白名单（含系统 CA 放行）已随读开放删除：profile 不得再输出任何
-// file-read* allow 规则（deny 规则照旧）。
+// 旧 deny 全量路径（rules 空）保持零 file-read* allow；rules 行序模式下
+// ro/rw 行的读放行是显式语义（读洞，见 TestSeatbeltRuleOrderEmission）。
 func TestSeatbeltReadAllowRemoved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("seatbelt only")
@@ -270,6 +270,51 @@ func TestSeatbeltDenyWinsOverWriteAllow(t *testing.T) {
 		if strings.Contains(p, `(allow file-write* (subpath "/outside"))`) {
 			t.Fatal("cwd granted access")
 		}
+	}
+}
+
+// TestSeatbeltRuleOrderEmission：rules 非空 = M3 行序映射——按表序逐行输出
+// （SBPL 后规则胜，2026-09-23 探针复核）：deny 行三形态照旧；后置 ro/rw 行
+// 输出 allow（读 + unix 连通为洞；写放行受等级门控），且位于 deny 之后。
+func TestSeatbeltRuleOrderEmission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("seatbelt only")
+	}
+	argv := []string{"bash", "-c", "echo hi"}
+	rules := []SandboxRule{
+		{Effect: "deny", Patterns: []string{"/probe/**"}},
+		{Effect: "ro", Patterns: []string{"/probe/readonly"}},
+		{Effect: "rw", Patterns: []string{"/probe/hole"}},
+	}
+	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, rules: rules})
+	profile := ww[2]
+	denyIdx := strings.Index(profile, `(deny file-write* (regex "^/probe(/.*)?$"))`)
+	roIdx := strings.Index(profile, `(allow file-read* (regex "^/probe/readonly$"))`)
+	rwIdx := strings.Index(profile, `(allow file-write* (regex "^/probe/hole$"))`)
+	if denyIdx < 0 || roIdx < 0 || rwIdx < 0 {
+		t.Fatalf("missing rule forms: %s", profile)
+	}
+	if !(denyIdx < roIdx && roIdx < rwIdx) {
+		t.Fatalf("rules must be emitted in table order (last match wins): %s", profile)
+	}
+	for _, want := range []string{
+		`(allow network-outbound (remote unix (regex "^/probe/readonly$")))`,
+		`(allow network-outbound (remote unix (regex "^/probe/hole$")))`,
+	} {
+		if !strings.Contains(profile, want) {
+			t.Fatalf("rule allow forms must carry unix socket coverage (%s): %s", want, profile)
+		}
+	}
+	if strings.Contains(profile, `(allow file-write* (regex "^/probe/readonly$"))`) {
+		t.Fatalf("ro row must not allow write: %s", profile)
+	}
+	// read-only 等级门控：rw 行只放读 + unix（写不放）。
+	ro := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, rules: rules})
+	if strings.Contains(ro[2], `(allow file-write* (regex "^/probe/hole$"))`) {
+		t.Fatalf("read-only level must not get write allow: %s", ro[2])
+	}
+	if !strings.Contains(ro[2], `(allow file-read* (regex "^/probe/hole$"))`) {
+		t.Fatalf("read-only level must keep read allow: %s", ro[2])
 	}
 }
 

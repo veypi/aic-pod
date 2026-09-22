@@ -100,6 +100,17 @@ var (
 	sandboxVerdict sandboxBackend = -1 // -1 = 未探测
 )
 
+// SandboxRule 是 fs 域有序规则表的一行（M3 行序映射输入）：按表序逐行输出
+// allow/deny，SBPL 后规则胜——cfg / permanent grant 的后置 ro/rw 行可覆盖
+// 其上 builtin deny（deny 行内的 ro/rw 洞在内核真实生效）。darwin 已按此落地
+// （2026-09-23 探针复核：allow-after-deny 覆盖成立、unix socket 覆盖形态有效）；
+// linux/windows 的「先求值后落措施」待做，继续消费 deny/writeAllow 字段
+// （fail-closed 全量隔离）。
+type SandboxRule struct {
+	Effect   string   // deny | ro | rw（fsauth 规则行效果）
+	Patterns []string // 预展开 glob 模式（compileFSRule 产物）
+}
+
 // confineSpec 是一次沙箱包装的完整输入（三域授权模型快照 + 等级/工作区/argv）。
 // 快照语义：每次 Start 读当次值（set_config/grant 动态生效），已启动进程不回溯。
 type confineSpec struct {
@@ -107,7 +118,8 @@ type confineSpec struct {
 	workdir    string          // 进程 cwd，不授予目录权限
 	extra      []string        // 追加可写根（nil = 仅基础白名单）
 	argv       []string        // 被包装命令
-	deny       []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
+	deny       []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照；rules 为空时使用）
+	rules      []SandboxRule   // fs 域有序规则表快照（M3 行序映射；darwin 消费，nil = 旧 deny 全量 fail-closed）
 	writeAllow []string        // 展开的可写 glob（裸路径由 extra 传入）
 	fsOpen     bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
 	netOpen    bool            // net_policy=open：不加网络规则
@@ -469,8 +481,11 @@ func denyWalkRoot(pat string) (string, bool) {
 // 若 /usr/bin/sandbox-exec 被篡改，攻击者已 root——codex 同策略）。
 const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 
-// seatbeltArgs locks writes to the granted scopes (reads stay open; deny rules
-// win) and appends unconditional denies.
+// seatbeltArgs locks writes to the granted scopes (reads stay open) and emits
+// the fs rule table. SBPL 后规则胜（last matching rule wins；2026-09-23 探针
+// 复核）：rules 非空时按表序逐行输出 allow/deny——后置 ro/rw 行（cfg /
+// permanent grant）可覆盖其上 deny 行；空则退回旧口径（deny 行全量
+// fail-closed，仅非生产直调路径使用）。
 func seatbeltArgs(spec confineSpec) []string {
 	forms := []string{
 		"(version 1)",
@@ -480,7 +495,7 @@ func seatbeltArgs(spec confineSpec) []string {
 	}
 	if spec.level >= proto.LevelWrite {
 		if spec.fsOpen {
-			// fs_policy=open：写全放（deny 表在后输出，恒优先）。
+			// fs_policy=open：写全放（表内 deny 行在后输出，继续生效）。
 			forms = append(forms, "(allow file-write*)")
 		} else {
 			for _, root := range spec.extra {
@@ -492,14 +507,49 @@ func seatbeltArgs(spec confineSpec) []string {
 		}
 	}
 	forms = append(forms, seatbeltNetForms(spec)...)
-	for _, pat := range spec.deny {
-		if pat == "" {
-			continue
+	if spec.rules != nil {
+		// M3 行序映射：按规则表序逐行输出（SBPL 后规则胜）。AF_UNIX connect
+		// 不走 file-* 判定（实测 2026-09-05）——deny/allow 行都带
+		// network-outbound (remote unix) 形态，socket 覆盖与文件路径同口径
+		//（2026-09-23 探针复核）。写放行受等级门控（read-only 等级不放写）；
+		// 读与 unix 连通不受等级门控。
+		for _, r := range spec.rules {
+			allowWrite := r.Effect == "rw" && spec.level >= proto.LevelWrite
+			for _, pat := range r.Patterns {
+				if pat == "" {
+					continue
+				}
+				re := sbplString(globToSBPLRegex(pat))
+				switch r.Effect {
+				case "deny":
+					forms = append(forms,
+						"(deny file-read* (regex "+re+"))",
+						"(deny file-write* (regex "+re+"))",
+						"(deny network-outbound (remote unix (regex "+re+")))")
+				case "ro":
+					forms = append(forms,
+						"(allow file-read* (regex "+re+"))",
+						"(allow network-outbound (remote unix (regex "+re+")))")
+				case "rw":
+					forms = append(forms,
+						"(allow file-read* (regex "+re+"))",
+						"(allow network-outbound (remote unix (regex "+re+")))")
+					if allowWrite {
+						forms = append(forms, "(allow file-write* (regex "+re+"))")
+					}
+				}
+			}
 		}
-		re := sbplString(globToSBPLRegex(pat))
-		forms = append(forms, "(deny file-read* (regex "+re+"))")
-		forms = append(forms, "(deny file-write* (regex "+re+"))")
-		forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
+	} else {
+		for _, pat := range spec.deny {
+			if pat == "" {
+				continue
+			}
+			re := sbplString(globToSBPLRegex(pat))
+			forms = append(forms, "(deny file-read* (regex "+re+"))")
+			forms = append(forms, "(deny file-write* (regex "+re+"))")
+			forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
+		}
 	}
 	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {

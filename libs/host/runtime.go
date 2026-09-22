@@ -44,13 +44,15 @@ func Start(o cfg.Options) error {
 	return nil
 }
 
-// Stop 停止 host 会话。
+// Stop 停止 host 会话（状态落盘为未连接：桌面据此看到「未连接」而不是残留的已连接）。
 func Stop() {
 	rtMu.Lock()
 	defer rtMu.Unlock()
 	if rtClient != nil {
+		id, version := rtClient.hostID, rtClient.options().Version
 		rtClient.Close()
 		rtClient = nil
+		writeState(State{Connected: false, HostID: id, Version: version, LastError: "host session stopped"})
 	}
 }
 

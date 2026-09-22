@@ -44,6 +44,11 @@ type StartOptions struct {
 	// 启动前拒绝执行）。来源 = Policy.DenyPatterns()（快照，每次 Start 读当次值）。
 	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
 	DenyPaths []string
+	// SandboxRules 是 fs 域有序规则表快照（M3 行序映射）：darwin 消费——按
+	// 表序输出 allow/deny（SBPL 后规则胜），cfg / permanent grant 的后置
+	// ro/rw 行可覆盖其上 builtin deny（含 unix socket 洞）；nil = 旧 deny
+	// 全量 fail-closed 路径（linux/windows 与直调探针）。来源 = Policy.Rules()。
+	SandboxRules []SandboxRule
 	// WritePaths 是展开的可写 glob（fs_allow 通配条目；裸路径走 WriteRoots）。
 	// 读方向无白名单：读默认开放（除 deny）。
 	WritePaths []string
@@ -81,7 +86,7 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 		var err error
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
-			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
+			deny: opts.DenyPaths, rules: opts.SandboxRules, fsOpen: opts.FsOpen,
 			writeAllow: opts.WritePaths,
 			netOpen:    opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})

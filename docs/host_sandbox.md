@@ -53,7 +53,7 @@ grant 自身 required=4，先经正常云端审批再修改 host 的对应 allow
 
 ## OS 沙箱
 
-- macOS Seatbelt：默认放行（读开放）；写方向先整体关闭再按写白名单放行范围，最后叠加 deny（file-read*/file-write* 双拒 + unix socket 出站拒绝）。网络规则仅对 loopback 可以精确执行；不能表达的域名/IP 条目在启动前拒绝。
+- macOS Seatbelt：默认放行（读开放）；写方向先整体关闭再按写白名单放行范围；随后按 fs 规则表序逐行输出（M3 行序映射，2026-09-23）——deny 行转 file-read*/file-write* 双拒 + unix socket 出站拒绝，后置 ro/rw 行转 allow（读 + unix socket 连通，写放行受等级门控；SBPL 后规则胜），cfg / permanent grant 的覆盖在内核真实生效。网络规则仅对 loopback 可以精确执行；不能表达的域名/IP 条目在启动前拒绝。
 - Linux bubblewrap：整机只读绑定为读视图（fs_policy=open 且写级时改整机读写绑定），写白名单逐个可写绑定；deny 以覆盖挂载落地（目录 tmpfs 黑洞，文件/socket 以 /dev/null 覆盖；后挂载优先），形态不可实例化的 deny 模式（递归超预算、无字面前缀的全 glob）与无法实例化的可写 glob 在启动前拒绝执行。
 - Windows：受限令牌 + ACL 写授权（工作区/缓存/追加根 standing ACE，私有临时目录 per-call）+ per-call deny ACE（随机 SID 加入 restricting list，对每个 deny 目标追加完全拒绝 ACE 并继承到子对象，进程结束后撤销）；对受限令牌本就不可达的对象跳过（语义等价），可达对象加不上 ACE 则拒绝执行。fs_policy=open 写级与网络规则无法用令牌模型表达，携带时在启动前拒绝。
 
