@@ -5,11 +5,13 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.8.0 — 2026-09-23
 
-- **执行策略有序规则表化（破坏性；aic/docs/permission_rules.md M2）**：fs/net/ssh 三域从「deny/allow 两表 + policy 姿态」改为**每域一张有序规则表**——行首效果前缀、按书写顺序逐条匹配、**最后命中者胜**，全表未命中走 `*_policy` 兜底。配置键替换：`fs_deny/fs_allow → fs_rules`（`deny:` 读写双拒 / `ro:` 读开放写拒（从上方 deny 行开读洞）/ `rw:` 读写）与 `fs_grants`；`net_deny/net_allow → net_rules` 与 `net_grants`，ssh 域同（`allow:`/`deny:` + host[:port]）；exec 域保持三键（下一批）。语义变化：**builtin 凭证 deny 不再是特权层**——cfg 行与 permanent grant 后置可合法覆盖（机器是用户的）；唯一硬底线 = session 层（temp grant/审批）不得放宽表判定的 deny 终局；内建便利根（workDir/临时/公共/缓存/会话区）不入表，仅在 resolve≠deny 时授写（便利不压 deny 天然保持）。**全域模式禁写**（加载/保存即报错）：放行类禁字面全域/家目录根/整盘根（`rw:**`、`rw:~`、`rw:C:/` 报错指向 `fs_policy`），deny 禁字面全域；net/ssh 通配 host 保持不可表达。**旧键处理**：配置含 `fs_deny` 等废弃键时 `CheckAuth` 点名报错并附新写法示例，工具与保存被阻直到手工改写（不静默迁移）；设置面视图新增 `deprecated_keys`。
-- **grant 适配规则表**：`--temp` 对 deny 终局目标拒批（错误文案改为规则表口径）；`--permanent` 追加 `rw:`/`allow:` 行到独立 `<域>_grants` 键（幂等归一保留），覆盖 deny 行合法并在响应注明「overrides the deny outcome from rule #N」（fsauth/netauth 新增 `LastDenyRow`）；fs grant 目标过全域校验（`exec grant fs /` 直接报错，`policy.ValidateFSGrantTarget`）。
+- **执行策略有序规则表化（破坏性；aic/docs/permission_rules.md M2）**：fs/net/ssh 三域从「deny/allow 两表 + policy 姿态」改为**每域一张有序规则表**——行首效果前缀、按书写顺序逐条匹配、**最后命中者胜**，全表未命中走 `*_policy` 兜底。配置键替换：`fs_deny/fs_allow → fs_rules`（`deny:` 读写双拒 / `ro:` 读开放写拒（从上方 deny 行开读洞）/ `rw:` 读写）；`net_deny/net_allow → net_rules`，ssh 域同（`allow:`/`deny:` + host[:port]）；exec 域保持三键（下一批）。语义变化：**builtin 凭证 deny 不再是特权层**——cfg 行与 permanent grant 后置可合法覆盖（机器是用户的）；唯一硬底线 = session 层（temp grant/审批）不得放宽表判定的 deny 终局；内建便利根（workDir/临时/公共/缓存/会话区）不入表，仅在 resolve≠deny 时授写（便利不压 deny 天然保持）。**全域模式禁写**（加载/保存即报错）：放行类禁字面全域/家目录根/整盘根（`rw:**`、`rw:~`、`rw:C:/` 报错指向 `fs_policy`），deny 禁字面全域；net/ssh 通配 host 保持不可表达。**旧键处理**：废弃键（`fs_deny` 等）直接失效、不做迁移；**保存路径不以配置内容为门**——任何保存都落盘，旧键随重写自然清除（表单校验只拦本次提交的值，不拦文件里已有的内容）。
+- **grant 适配规则表**：`--temp` 对 deny 终局目标拒批（错误文案改为规则表口径）；`--permanent` 把 `rw:`/`allow:` 行追加到 `<域>_rules` 表尾（幂等归一保留，无独立 grants 键），覆盖 deny 行合法并在响应注明「overrides the deny outcome from rule #N」（fsauth/netauth 新增 `LastDenyRow`）；fs grant 目标过全域校验（`exec grant fs /` 直接报错，`policy.ValidateFSGrantTarget`）。
 - **沙箱名单同源派生保持**：`DenyPatterns`/`WriteRootsFor`/`WritePatternsFor` 改从规则表派生（deny 行模式、rw 行裸模式根、rw 行通配），exec_procs 接口不变；`fsauth.Rules()` 导出有序表快照供 M3 行序映射与 explain。M3 前内核不表达 deny 行内的 ro/rw 洞（fail-closed，仅工具层放行，permission_rules.md §5 口径）。
+- **M3-darwin 行序沙箱映射**：seatbelt profile 改按 fs 规则表序逐行输出 allow/deny（SBPL 后规则胜，2026-09-23 探针复核）——cfg / permanent grant 的后置 ro/rw 行可覆盖其上 builtin deny，洞在内核真实生效（此前 fail-closed 仅工具层放行）；deny/allow 行均带 network-outbound (remote unix) 形态，AF_UNIX socket 覆盖与文件路径同口径（docker socket 经 permanent grant 可在沙箱内直连）。linux/windows 的「先求值后落措施」待做（M3 其余部分）。
+- **桌面端连接状态真实化（修复「重连假成功」）**：后端在连接成功 / 断开 / 认证失败 / 退避重试失败时原子写 `{UserConfigDir}/aic/state.json`（pid 供桌面核对子进程）；设置窗状态栏三态（已连接 / 未连接+原因 / 重试中），重连与保存后等待真实连接结果再报，认证失败给出「去目标平台重新获取 key」指路。此前「子进程存活 + key 非空」即显示已连接——换平台未换 key 时 NATS `Authorization Violation` 被后台静默重试，桌面假报成功（2026-09-23）。
 - 验证：`go build ./...` + 交叉编译（linux/windows）+ windows `go vet`；`go test` 全仓绿（host 3 例 `.env` 向量为环境性 EPERM，nosandbox 全绿——恰为 builtin deny `**/.env` 内核生效的活体验证）。
 
 - **fs 权限模型重构（破坏性）**：`fs_deny` 改为读写双拒（恒优先，审批/临时 grant 均不可绕过）；`fs_allow` 只授予写，读默认开放（除 deny），废除 `ro:` 只读前缀（配置含 `ro:` 直接报错）；`fs_policy` 收窄为写方向（deny=仅写白名单，open=写除 deny 外全放）。删除读放行名单与系统 CA/运行库读根（`fsauth.ReadPatternsFor`/`RuntimeReadRoots`/`SystemCAReadPatterns`、`StartOptions.ReadPaths`）；判定改为 `deny → 0/0；写白名单/open → 1/2；其余 → 1/0`（此前未命中即 0/0）。
@@ -24,7 +26,7 @@
 - 修复 CUA stdio 写堵塞导致取消/关闭挂起；NATS 重连时停止旧心跳并同步连接访问，避免心跳累积和连接竞争。
 - 桌面包固定 Chrome for Testing 版本与四目标架构 SHA-256，构建时自动同步完整资源，仅打包当前架构，打包后校验缺失/错版资源，移除旧 browser JS 目录的打包入口。
 - 文件权限测试不再依赖 `/var/tmp` 可写，补齐单文件授权写入与 mkdir 符号链接越根回归；清理过时的 allow 覆盖 deny 注释和死代码，不改变权限规则。
-- 修复坏授权配置被静默清空或回退为 open：保留非法规则，解析失败的授权字段显示错误标记；设备工具暂停调用，本地设置仍可打开并显式修复。无关设置保存不能覆盖坏配置，环境变量/flag 中的错误授权也必须显式修正。
+- 修复坏授权配置被静默清空或回退为 open：保留非法规则，解析失败的授权字段显示错误标记；设备工具暂停调用，本地设置仍可打开并显式修复。无关设置保存不以内容为门（任何保存都落盘，坏内容以 INVALID 标记留在文件里，可见可修）；环境变量/flag 中的错误授权也必须显式修正。
 - 补齐 Windows hostfs 原生实现，恢复统一文件服务及 AI read/write/edit/rg/cp/mv/curl -o：读文件拒绝 reparse point，移动基于固定父目录句柄并支持原子禁止覆盖；条件新建不依赖硬链接，写入返回版本在关闭写句柄后保持稳定。文件与配置回归测试纳入 Windows 构建流程。
 - 修复 fs 写便利逻辑把写授权放大到已存在祖先的 bug：write/curl -o/writebin/cp/mv 补父目录与 mkdir -p 的存在性探测不再做策略门控，写检查只覆盖实际创建的层级（先检后建、拒绝时零副作用）；只授权单个文件即可写入，与 edit/mkdir/remove「谁被创建/修改就查谁」同口径。
 - browser/cua 改为 hosts_tools/1 typed 方法声明，RTC 和 NATS 共用鉴权与调用分发器；宿主不再托管其业务 session/operation/resource。
