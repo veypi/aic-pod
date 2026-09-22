@@ -427,7 +427,7 @@
         placeholder="留空 = /（如 /、/a）"></label>
 
     <div class="sec">访问授权</div>
-    <p class="hint">deny 恒优先：policy=deny 仅 allow 放行，policy=open 除 deny 全放。保存后重启后端子进程生效。</p>
+    <p class="hint">有序规则表：按书写顺序逐条匹配，最后命中者胜；未命中走 policy 兜底（deny=仅规则放行，open=除 deny 行外全放）。builtin 凭证 deny 恒在表最前、不可编辑；permanent grant 直接追加在表尾。保存后重启后端子进程生效。</p>
     <div id="auth"></div>
   </main>
 
@@ -468,19 +468,19 @@
     // 表单字段 + 三域授权（policy/deny/allow）全量快照；列表编辑器的「新增输入框」不计入。
     const FIELDS = ['host', 'key', 'work_dir', 'exec_timeout', 'browser_path', 'browser_width', 'browser_height', 'home_path']
     const domains = [
-      { key: 'fs', name: '文件 (fs)', ph: '路径或 glob，如 /Users/x/proj 或 **/.env' },
-      { key: 'net', name: '网络 (net)', ph: 'host:port，如 example.com:443' },
-      { key: 'ssh', name: 'SSH (ssh)', ph: 'host[:port]，如 192.168.1.10' },
+      { key: 'fs', name: '文件 (fs)', ph: '如 deny:~/**/*.pem、rw:~/.cache/**' },
+      { key: 'net', name: '网络 (net)', ph: '如 allow:example.com:443、deny:169.254.169.254:*' },
+      { key: 'ssh', name: 'SSH (ssh)', ph: '如 allow:github.com:22' },
     ]
     const auth = {
-      fs: { policy: 'deny', deny: [], allow: [] },
-      net: { policy: 'open', deny: [], allow: [] },
-      ssh: { policy: 'deny', deny: [], allow: [] },
+      fs: { policy: 'deny', rules: [] },
+      net: { policy: 'open', rules: [] },
+      ssh: { policy: 'deny', rules: [] },
     }
     let baseline = ''
     const snapshot = () => JSON.stringify([
       FIELDS.map((id) => $(id).value.trim()),
-      domains.map((d) => [auth[d.key].policy, auth[d.key].deny, auth[d.key].allow]),
+      domains.map((d) => [auth[d.key].policy, auth[d.key].rules]),
     ])
     const refreshDirty = () => {
       const dirty = snapshot() !== baseline
@@ -491,27 +491,42 @@
     pane.addEventListener('input', refreshDirty)
     pane.addEventListener('change', refreshDirty)
 
-    // ---- 授权列表编辑器（policy + 拒绝/允许两张名单） ----
-    const listEl = (d, st, kind, title) => {
+    // ---- 规则表编辑器（policy + <域>_rules 有序列表；顺序即匹配顺序） ----
+    const listEl = (d, st, title) => {
+      const rules = st.rules
       const wrap = document.createElement('div')
       wrap.className = 'alist'
       const lbl = document.createElement('div')
       lbl.className = 'lbl'
-      lbl.textContent = `${title} (${d.key}_${kind})`
+      lbl.textContent = `${title} (${d.key}_rules)`
       wrap.appendChild(lbl)
       const ul = document.createElement('div')
       ul.className = 'entries'
-      st[kind].forEach((item, i) => {
+      rules.forEach((item, i) => {
         const row = document.createElement('div')
         row.className = 'entry'
         const t = document.createElement('span')
         t.textContent = item
+        const up = document.createElement('button')
+        up.className = 'x'
+        up.textContent = '↑'
+        up.title = '上移'
+        up.disabled = i === 0
+        up.onclick = () => { rules.splice(i - 1, 0, rules.splice(i, 1)[0]); renderAuth() }
+        const down = document.createElement('button')
+        down.className = 'x'
+        down.textContent = '↓'
+        down.title = '下移'
+        down.disabled = i === rules.length - 1
+        down.onclick = () => { rules.splice(i + 1, 0, rules.splice(i, 1)[0]); renderAuth() }
         const del = document.createElement('button')
         del.className = 'x'
         del.textContent = '×'
-        del.title = '删除'
-        del.onclick = () => { st[kind].splice(i, 1); renderAuth() }
+        del.title = '删除（grant --permanent 产物删行即撤销）'
+        del.onclick = () => { rules.splice(i, 1); renderAuth() }
         row.appendChild(t)
+        row.appendChild(up)
+        row.appendChild(down)
         row.appendChild(del)
         ul.appendChild(row)
       })
@@ -526,8 +541,8 @@
       add.textContent = '添加'
       const doAdd = () => {
         const v = inp.value.trim()
-        if (!v || st[kind].includes(v)) return
-        st[kind].push(v)
+        if (!v || rules.includes(v)) return
+        rules.push(v) // 追加表尾 = 生效顺序最后（最后命中者胜）
         renderAuth()
       }
       add.onclick = doAdd
@@ -555,7 +570,7 @@
         for (const v of ['deny', 'open']) {
           const op = document.createElement('option')
           op.value = v
-          op.textContent = v === 'deny' ? 'deny（仅允许名单放行）' : 'open（除拒绝名单全放）'
+          op.textContent = v === 'deny' ? 'deny（仅规则放行）' : 'open（除 deny 行全放）'
           sel.appendChild(op)
         }
         sel.value = st.policy
@@ -563,8 +578,7 @@
         head.appendChild(name)
         head.appendChild(sel)
         box.appendChild(head)
-        box.appendChild(listEl(d, st, 'deny', '拒绝'))
-        box.appendChild(listEl(d, st, 'allow', '允许'))
+        box.appendChild(listEl(d, st, '规则'))
         root.appendChild(box)
       }
       refreshDirty()
@@ -577,18 +591,50 @@
       $('status').title = title || text
     }
 
+    // 状态栏三态：已连接（真实连接，Go state.json 上报）/ 未连接+原因 / 重试中。
+    const renderStatus = (s) => {
+      const short = s.host_id ? s.host_id.slice(0, 8) : ''
+      if (!s.running) {
+        setStatus(false, '未连接' + (short ? ' · ' + short : ''), '后端未运行或未绑定凭证')
+      } else if (s.connected) {
+        setStatus(true, '已连接 ' + short + (s.version ? ' · ' + s.version : ''),
+          '已连接' + (s.host_id ? ' ' + s.host_id : '') + (s.hostname ? ' @' + s.hostname : '') + (s.version ? ' · ' + s.version : ''))
+      } else {
+        setStatus(false, '未连接' + (s.retrying ? '（重试中）' : '') + (short ? ' · ' + short : ''),
+          s.last_error ? '未连接: ' + s.last_error : '未连接（等待连接）')
+      }
+    }
+
     const refreshStatus = async () => {
       try {
         const s = await $pod.get_status()
-        if (s.running) {
-          setStatus(true, '已连接 ' + (s.host_id ? s.host_id.slice(0, 8) : '') + (s.version ? ' · ' + s.version : ''),
-            '已连接' + (s.host_id ? ' ' + s.host_id : '') + (s.hostname ? ' @' + s.hostname : '') + (s.version ? ' · ' + s.version : ''))
-        } else {
-          setStatus(false, '未连接' + (s.host_id ? ' · ' + s.host_id.slice(0, 8) : ''), '未连接（无有效凭证或后端未运行）')
-        }
+        renderStatus(s)
+        return s
       } catch (e) {
         setStatus(false, '状态获取失败', '状态获取失败: ' + e.message)
+        return null
       }
+    }
+
+    // 等待真实连接结果（轮询 get_status，其间持续刷新状态栏）；返回末次状态。
+    const waitConnected = async (ms) => {
+      const deadline = Date.now() + ms
+      let s = null
+      for (;;) {
+        s = await refreshStatus()
+        if (s && s.connected) return s
+        if (Date.now() >= deadline) return s
+        await new Promise((r) => setTimeout(r, 1200))
+      }
+    }
+
+    // 连接失败提示：认证类错误 → 指路去目标平台重新获取 key（换平台未换 key 场景）。
+    const connFailMsg = (s, fallback) => {
+      const err = (s && s.last_error) || ''
+      if (/authoriz|authentic/i.test(err)) {
+        return '凭证不被该平台接受：请打开 ' + normalizeHost($('host').value.trim()) + '/hosts 重新获取 key'
+      }
+      return err ? '未连接: ' + err : fallback
     }
 
     const boot = async () => {
@@ -604,8 +650,7 @@
         $('browser_height').value = cfg.browser_height || 720
         for (const d of domains) {
           auth[d.key].policy = cfg[d.key + '_policy'] || auth[d.key].policy
-          auth[d.key].deny = cfg[d.key + '_deny'] || []
-          auth[d.key].allow = cfg[d.key + '_allow'] || []
+          auth[d.key].rules = cfg[d.key + '_rules'] || []
         }
         renderAuth()
         markClean() // 载入完成 = 无改动（保存按钮此时隐藏）
@@ -633,8 +678,7 @@
         const body = { host, work_dir, exec_timeout, home_path, browser_width, browser_height, browser_path: $('browser_path').value.trim() }
         for (const d of domains) {
           body[d.key + '_policy'] = auth[d.key].policy
-          body[d.key + '_deny'] = auth[d.key].deny
-          body[d.key + '_allow'] = auth[d.key].allow
+          body[d.key + '_rules'] = auth[d.key].rules
         }
         await $pod.set_config(body)
       } catch (e) {
@@ -655,6 +699,12 @@
       }
       setMsg('已保存', 'ok')
       markClean() // 基线刷新 → 保存按钮消失
+      // 保存后等真实连接结果（换平台未换 key 等场景不再假「已连接」）。
+      if (key) {
+        const s = await waitConnected(15000)
+        if (s && s.connected) setMsg('已保存 · 已连接', 'ok')
+        else setMsg(connFailMsg(s, '已保存，但后端未连上平台'), 'warn')
+      }
       refreshStatus()
     }
 
@@ -698,8 +748,15 @@
       try {
         await $pod.stop()
         await $pod.start()
-        setMsg('已重连', 'ok')
-      } catch (e) { setMsg('重连失败: ' + e.message, 'err') }
+      } catch (e) {
+        setMsg('重连失败: ' + e.message, 'err')
+        btn.disabled = false
+        refreshStatus()
+        return
+      }
+      const s = await waitConnected(20000)
+      if (s && s.connected) setMsg('已重连', 'ok')
+      else setMsg(connFailMsg(s, '重连未成功（后端未连上平台）'), 'err')
       btn.disabled = false
       refreshStatus()
     }

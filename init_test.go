@@ -8,6 +8,12 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 )
 
+// 测试替身：退避重试单测不向真实用户目录写 state.json
+// （noteStartFailureFn 生产实现为 host.NoteStartFailure）。
+func init() {
+	noteStartFailureFn = func(cfg.Options, error, bool) {}
+}
+
 func TestNextRetryDelay(t *testing.T) {
 	cases := []struct {
 		delay, max, want time.Duration

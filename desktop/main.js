@@ -20,6 +20,7 @@ const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, sh
 const { spawn } = require('child_process')
 const { browserEnv } = require('./browser-path.cjs')
 const { waitForStartup } = require('./backend-startup.cjs')
+const { composeLocalStatus } = require('./host-state.cjs')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
@@ -285,6 +286,18 @@ function failStartup(error) {
 
 // ---- 本机设置（Go 子命令：config get|set / bind|unbind；stdin 传 JSON / 凭证） ----
 // 设置面 = config.yaml（唯一来源）：与方法名一一对应，无 HTTP、无端口、无 code。
+// 失败信息可读化（2026-09-23）：logv 的 console 输出走 stdout（带 ANSI 颜色），
+// 只收 stderr 会让 UI 只剩「退出码 N」——取 stdout/stderr 里最后一个非空行作为原因。
+const ansiRe = /\x1b\[[0-9;]*m/g
+const zerologPrefixRe = /^\d{1,2}:\d{2}(AM|PM)\s+(TRC|DBG|INF|WRN|ERR|FTL|PNC)\s+\S+\s*>\s*/
+function cmdErrorTail(err, out) {
+  for (const raw of [err, out]) {
+    const lines = String(raw || '').replace(ansiRe, '').split('\n').map((l) => l.trim()).filter(Boolean)
+    if (lines.length) return lines[lines.length - 1].replace(zerologPrefixRe, '')
+  }
+  return ''
+}
+
 function runBackendCmd(args, input, { timeoutMs = 15000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(backendBin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -299,7 +312,7 @@ function runBackendCmd(args, input, { timeoutMs = 15000 } = {}) {
     child.on('error', (e) => { clearTimeout(timer); reject(e) })
     child.on('close', (code) => {
       clearTimeout(timer)
-      if (code !== 0) reject(new Error(err.trim() || `aic-backend ${args.join(' ')} 退出码 ${code}`))
+      if (code !== 0) reject(new Error(cmdErrorTail(err, out) || `aic-backend ${args.join(' ')} 退出码 ${code}`))
       else resolve(out)
     })
     if (input != null) child.stdin.write(String(input))
@@ -324,21 +337,31 @@ async function unbindCredential() {
   await runBackendCmd(['unbind'])
 }
 
-// host_id 从凭证首段解析（与连接状态无关，同 Go 侧 settings.BoundHostID）
-function boundHostID(credential) {
-  const parts = String(credential || '').trim().split('.')
-  return parts.length === 4 ? parts[0] : ''
+// 后端连接状态：读 {appData}/aic/state.json（Go 侧在连接成功 / 断开 / 认证
+// 失败 / 重试失败时原子写；pid 核对防陈旧文件误读）。
+async function readState() {
+  try {
+    const raw = await fs.promises.readFile(path.join(app.getPath('appData'), 'aic', 'state.json'), 'utf8')
+    return JSON.parse(raw)
+  } catch (e) {
+    return null
+  }
 }
 
-// 运行状态：后端子进程存活 + 已绑定凭证（未绑定则 host 会话不启动）
+// 运行状态：后端子进程存活 + 已绑定凭证 + 真实连接（state.json；2026-09-23
+// 「重连假成功」修复——此前只报「进程存活 + key 非空」，认证失败被后台静默
+// 重试时仍显示已连接）。合成逻辑在 host-state.cjs（带 node 单测）。
 async function localStatus() {
   const cfg = await readConfig().catch(() => null)
-  return {
-    running: backendAlive() && !!(cfg && cfg.key),
-    host_id: boundHostID(cfg && cfg.key),
+  const out = composeLocalStatus({
+    alive: backendAlive(),
+    key: (cfg && cfg.key) || '',
+    childPid: backend ? backend.pid : null,
+    state: await readState(),
     hostname: os.hostname(),
-    version: (cfg && cfg.version) || '',
-  }
+  })
+  if (!out.version && cfg && cfg.version) out.version = cfg.version
+  return out
 }
 
 // 日志尾部（Go logv 写 UserConfigDir/aic/aic.log；截断起点落在行中间时丢弃首段）

@@ -33,6 +33,7 @@ func Start() error {
 	if cfg.Global.Key != "" {
 		if err := host.Start(*cfg.Global); err != nil {
 			logv.Warn().Msgf("auto start host failed: %v (retrying with backoff)", err)
+			noteStartFailureFn(*cfg.Global, err, true)
 			go retryHostStart(cfg.Global)
 		}
 	}
@@ -58,6 +59,11 @@ const (
 // hostStartFn 可注入（测试替身），生产实现为 host.Start。
 var hostStartFn = host.Start
 
+// noteStartFailureFn 可注入（测试替身），生产实现为 host.NoteStartFailure：
+// 退避重试期间把「未连接 + 原因（重试中）」落盘，桌面据此显示真实状态
+// （2026-09-23「重连假成功」修复）。
+var noteStartFailureFn = host.NoteStartFailure
+
 // retryHostStart 在后台按指数退避重试 host 启动。
 func retryHostStart(o *cfg.Options) {
 	retryHostStartWith(o, hostStartFn, time.Sleep, hostRetryInitial, hostRetryMax)
@@ -70,9 +76,11 @@ func retryHostStartWith(o *cfg.Options, start func(cfg.Options) error, sleep fun
 		if err := start(*o); err != nil {
 			if isPermanentStartErr(err) {
 				logv.Warn().Msgf("auto start host aborted: %v", err)
+				noteStartFailureFn(*o, err, false)
 				return
 			}
 			logv.Warn().Msgf("auto start host failed: %v (retry in %v)", err, delay)
+			noteStartFailureFn(*o, err, true)
 			delay = nextRetryDelay(delay, max)
 			continue
 		}

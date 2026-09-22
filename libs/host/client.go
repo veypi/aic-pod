@@ -180,11 +180,14 @@ func (c *Client) connect() error {
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			c.logf("NATS reconnected, republishing caps")
 			c.publishCaps(nc)
+			writeState(State{Connected: true, HostID: c.hostID, NATSURL: natsURL, Version: c.options().Version})
 		}),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			c.logf("NATS disconnected: %v", err)
 			if isAuthError(err) {
 				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new credential and restart.")
+				writeState(State{Connected: false, HostID: c.hostID, NATSURL: natsURL, Version: c.options().Version,
+					LastError: "authentication failed — credential expired or revoked (obtain a new credential and restart)"})
 				go func() {
 					c.lifecycleMu.Lock()
 					defer c.lifecycleMu.Unlock()
@@ -193,6 +196,9 @@ func (c *Client) connect() error {
 						c.closeConnection()
 					}
 				}()
+			} else if err != nil {
+				writeState(State{Connected: false, HostID: c.hostID, NATSURL: natsURL, Version: c.options().Version,
+					LastError: err.Error(), Retrying: true})
 			}
 		}),
 	}
@@ -236,6 +242,7 @@ func (c *Client) connect() error {
 		}
 	}
 	c.publishCaps(nc)
+	writeState(State{Connected: true, HostID: c.hostID, NATSURL: natsURL, Version: c.options().Version})
 	return nil
 }
 
