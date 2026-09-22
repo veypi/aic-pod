@@ -5,6 +5,10 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.8.1 — 2026-09-23
+
+- **修复 v0.8.0 发版构建（CI 全挂）**：`cfg` 依赖 vigo 新版 `flags` 四层解析 API（`SetDefaults` / `ConfigIssue` / `LoadCfg` 返回值），此前 go.mod 仍指 `vigo v0.7.5`——本地 `go.work` 工作区掩盖了差异，CI（无工作区、按已发布版本解析）编译失败。依赖升 `vigo v0.7.6`（44af2d0 四层解析、eb5b976 子命令 flag 继承）后重新发版；两版功能面一致，v0.8.0 因构建失败无 Release 产出。
+
 ## v0.8.0 — 2026-09-23
 
 - **执行策略有序规则表化（破坏性；aic/docs/permission_rules.md M2）**：fs/net/ssh 三域从「deny/allow 两表 + policy 姿态」改为**每域一张有序规则表**——行首效果前缀、按书写顺序逐条匹配、**最后命中者胜**，全表未命中走 `*_policy` 兜底。配置键替换：`fs_deny/fs_allow → fs_rules`（`deny:` 读写双拒 / `ro:` 读开放写拒（从上方 deny 行开读洞）/ `rw:` 读写）；`net_deny/net_allow → net_rules`，ssh 域同（`allow:`/`deny:` + host[:port]）；exec 域保持三键（下一批）。语义变化：**builtin 凭证 deny 不再是特权层**——cfg 行与 permanent grant 后置可合法覆盖（机器是用户的）；唯一硬底线 = session 层（temp grant/审批）不得放宽表判定的 deny 终局；内建便利根（workDir/临时/公共/缓存/会话区）不入表，仅在 resolve≠deny 时授写（便利不压 deny 天然保持）。**全域模式禁写**（加载/保存即报错）：放行类禁字面全域/家目录根/整盘根（`rw:**`、`rw:~`、`rw:C:/` 报错指向 `fs_policy`），deny 禁字面全域；net/ssh 通配 host 保持不可表达。**旧键处理**：废弃键（`fs_deny` 等）直接失效、不做迁移；**保存路径不以配置内容为门**——任何保存都落盘，旧键随重写自然清除（表单校验只拦本次提交的值，不拦文件里已有的内容）。

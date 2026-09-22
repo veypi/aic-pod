@@ -26,7 +26,7 @@ const DefaultHost = "https://ivec-ai.com"
 
 // Version 客户端版本：Makefile -X github.com/veypi/aic-pod/cfg.Version 注入 git
 // 版本，未注入时以此兑底。发版只改本变量；desktop 版本由构建同步。
-var Version = "v0.8.0"
+var Version = "v0.8.1"
 
 // DeviceType 客户端类型（cli/desktop），启动时固定（desktop main 覆盖为 "desktop"）。
 var DeviceType = "cli"
