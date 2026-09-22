@@ -10,6 +10,7 @@ files:
   - browser-bundle.cjs
   - browser.json
   - backend-startup.cjs
+  - host-state.cjs
   - loading.html
   - remote-preload.js
   - settings-preload.js
