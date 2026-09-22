@@ -1,6 +1,6 @@
 // Package netauth enforces exact host/port rules for net and ssh as one ordered
 // rule table per domain (aic/docs/permission_rules.md): builtin rows first,
-// then cfg <domain>_rules, then permanent <domain>_grants; the last matching
+// then cfg <domain>_rules (permanent grants append there); the last matching
 // row wins and unmatched targets fall back to <domain>_policy. Session-layer
 // temp grants apply only when the table does not resolve to deny. Rules come
 // from executor-local configuration, never from runtime approval.
@@ -26,21 +26,21 @@ type ruleEntry struct {
 	e     Entry
 }
 
-// Selector 从授权快照选取本实例的（policy, rules, grants）。
-type Selector func(cfg.AuthCfg) (string, []string, []string)
+// Selector 从授权快照选取本实例的（policy, rules）。
+type Selector func(cfg.AuthCfg) (string, []string)
 
-// NetKeys 选取 net 域三键。
-func NetKeys(a cfg.AuthCfg) (string, []string, []string) { return a.NetPolicy, a.NetRules, a.NetGrants }
+// NetKeys 选取 net 域两键。
+func NetKeys(a cfg.AuthCfg) (string, []string) { return a.NetPolicy, a.NetRules }
 
-// SshKeys 选取 ssh 域三键。
-func SshKeys(a cfg.AuthCfg) (string, []string, []string) { return a.SshPolicy, a.SshRules, a.SshGrants }
+// SshKeys 选取 ssh 域两键。
+func SshKeys(a cfg.AuthCfg) (string, []string) { return a.SshPolicy, a.SshRules }
 
 // Policy 是单域目标策略实例（net/ssh 各一）。
 type Policy struct {
 	mu      sync.RWMutex
 	sel     Selector
 	mode    string
-	rules   []ruleEntry        // 有序规则表：builtin + cfg rules + permanent grants
+	rules   []ruleEntry        // 有序规则表：builtin + cfg rules（permanent grant 直接追加在表尾）
 	builtin int                // rules 中内建行数量（Reconcile 重编译时保留前缀）
 	grants  map[string][]Entry // sid → 临时授权（--temp，不入表）
 }
@@ -61,22 +61,17 @@ func New(sel Selector, builtinAllow ...string) *Policy {
 
 // Reconcile 从 cfg 授权快照重载（set_config / grant --permanent 变更后调用）。
 func (p *Policy) Reconcile() {
-	mode, rules, grants := p.sel(cfg.AuthSnapshot())
-	p.Configure(mode, rules, grants)
+	mode, rules := p.sel(cfg.AuthSnapshot())
+	p.Configure(mode, rules)
 }
 
 // Configure 直接配置（坏条目整条跳过，宁缺毋滥——cfg 校验已在加载/保存路径点名）。
-func (p *Policy) Configure(mode string, rules, grants []string) {
+func (p *Policy) Configure(mode string, rules []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.mode = cfg.NormalizePolicy(mode, cfg.PolicyDeny)
 	compiled := p.rules[:p.builtin]
 	for _, raw := range rules {
-		if allow, e, err := policy.ParseTargetRule(raw); err == nil {
-			compiled = append(compiled, ruleEntry{allow: allow, e: e})
-		}
-	}
-	for _, raw := range grants {
 		if allow, e, err := policy.ParseTargetRule(raw); err == nil {
 			compiled = append(compiled, ruleEntry{allow: allow, e: e})
 		}
@@ -181,7 +176,7 @@ func entryMatch(r, q Entry) bool {
 
 // Snapshot 返回独立的 deny/allow 快照，供沙箱 profile 生成使用。
 // deny 为全部 deny 行（M3 前内核不表达行内洞，fail-closed）；allow 为
-// 全部 allow 行（含内建与 permanent grant 行）加 sid 的临时 grant。
+// 全部 allow 行（内建与配置行）加 sid 的临时 grant。
 func (p *Policy) Snapshot(sid string) (deny, allow []Entry) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

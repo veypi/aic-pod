@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -75,7 +76,7 @@ func writeRawConfig(t *testing.T, body string) {
 }
 
 // repairedSettings 是全量修复用的设置 JSON（清空四域授权列表 + 指定 host/home_path）。
-const repairedSettings = `{"host":"http://localhost:4000","home_path":"/agents","exec_policy":"deny","exec_allow":[],"exec_deny":[],"fs_policy":"deny","fs_rules":[],"fs_grants":[],"net_policy":"deny","net_rules":[],"net_grants":[],"ssh_policy":"deny","ssh_rules":[],"ssh_grants":[]}`
+const repairedSettings = `{"host":"http://localhost:4000","home_path":"/agents","exec_policy":"deny","exec_allow":[],"exec_deny":[],"fs_policy":"deny","fs_rules":[],"net_policy":"deny","net_rules":[],"ssh_policy":"deny","ssh_rules":[]}`
 
 // TestInvalidConfigStillLoadsAndCanBeRepaired：坏配置不得阻断启动与修复——
 // `config get` 仍能回显（坏授权字段显式可见），`config set` 能修好并落盘
@@ -167,5 +168,43 @@ func TestBindUnbindRoundTrip(t *testing.T) {
 	// 空凭证必须拒绝
 	if err := withStdin(t, "   \n", runBind); err == nil {
 		t.Fatal("empty credential accepted")
+	}
+}
+
+// TestSaveLandsDespiteLegacyOrBrokenFile：文件内容不构成保存门——旧键/坏 YAML 下
+// bind 与 config set 都照常落盘，旧键随重写自然清除。
+func TestSaveLandsDespiteLegacyOrBrokenFile(t *testing.T) {
+	for index, body := range []string{
+		"host: http://localhost:4000\nfs_deny: [/private/**]\nfs_allow: [/work]\nssh_allow: [example.com:22]\n",
+		"[completely broken yaml\n",
+	} {
+		t.Run(fmt.Sprintf("config%d", index), func(t *testing.T) {
+			isolateConfigDir(t)
+			writeRawConfig(t, body)
+			const cred = "ab62a0c624f2496b8e7cf8f63c735d1d.aabbccdd.1700000000.0123456789abcdef"
+			capture(t, func() error { return withStdin(t, cred+"\n", runBind) })
+			bound, err := cfg.LoadFile()
+			if err != nil || bound.Key != cred {
+				t.Fatalf("bind must land regardless of file content: %+v (%v)", bound, err)
+			}
+			if err := withStdin(t, `{"home_path":"/agents"}`, runConfigSet); err != nil {
+				t.Fatalf("unrelated save must land: %v", err)
+			}
+			got, err := cfg.LoadFile()
+			if err != nil || got.HomePath != "/agents" || got.Key != cred {
+				t.Fatalf("save not persisted: %+v (%v)", got, err)
+			}
+			if index != 0 {
+				return
+			}
+			p, _ := cfg.Path()
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "fs_deny") || strings.Contains(string(data), "ssh_allow") {
+				t.Fatalf("legacy keys should be dropped by rewrite: %s", data)
+			}
+		})
 	}
 }

@@ -46,8 +46,8 @@ func TestParseGrantArgv(t *testing.T) {
 	}
 }
 
-// runGrant 域路由与 deny 拒绝（temp 范围，不触盘——permanent 走 persistGrant
-// 落盘路径，不在单测覆盖）。
+// runGrant 域路由与 deny 拒绝（temp 范围，不触盘——permanent 落盘路径见
+// TestPersistGrantAppendsRuleRow）。
 func TestRunGrantTarget(t *testing.T) {
 	saved := cfg.Global
 	defer func() { cfg.Global = saved }()
@@ -56,7 +56,7 @@ func TestRunGrantTarget(t *testing.T) {
 		netPol: netauth.New(netauth.NetKeys),
 		sshPol: netauth.New(netauth.SshKeys),
 	}
-	c.netPol.Configure("deny", []string{"deny:bad.com:22"}, nil)
+	c.netPol.Configure("deny", []string{"deny:bad.com:22"})
 
 	// deny 重叠 → rejected
 	r := c.runGrant("s1", "m1", []string{"net", "bad.com:22"})
@@ -116,5 +116,31 @@ func TestExecGrantIsLocal(t *testing.T) {
 	}
 	if !c.execAllowed("s1", "json") || c.execAllowed("s2", "json") {
 		t.Fatal("grant crossed session boundary")
+	}
+}
+
+// TestPersistGrantAppendsRuleRow：--permanent 把规则行追加到 <域>_rules 表尾
+// （无独立 grants 键），幂等归一不产生重复行。
+func TestPersistGrantAppendsRuleRow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("APPDATA", dir)
+	saved := cfg.Global
+	t.Cleanup(func() { cfg.Global = saved })
+	c, _ := testClient(t)
+	cfg.Global = cfg.NewOptions()
+	if err := c.persistGrant("net", "example.com:443"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.persistGrant("net", "example.com:443"); err != nil { // 幂等
+		t.Fatal(err)
+	}
+	o, err := cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.NetRules) != 1 || o.NetRules[0] != "allow:example.com:443" {
+		t.Fatalf("net_rules = %v, want exactly [allow:example.com:443]", o.NetRules)
 	}
 }

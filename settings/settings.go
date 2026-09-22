@@ -33,16 +33,10 @@ type View struct {
 	ExecAllow     []string `json:"exec_allow"`
 	FsPolicy      string   `json:"fs_policy"`
 	FsRules       []string `json:"fs_rules"`
-	FsGrants      []string `json:"fs_grants"`
 	NetPolicy     string   `json:"net_policy"`
 	NetRules      []string `json:"net_rules"`
-	NetGrants     []string `json:"net_grants"`
 	SshPolicy     string   `json:"ssh_policy"`
 	SshRules      []string `json:"ssh_rules"`
-	SshGrants     []string `json:"ssh_grants"`
-	// DeprecatedKeys 配置文件中检出的废弃授权键（fs_deny 等）——前端展示修复指引；
-	// 重写保存后自动清除。
-	DeprecatedKeys []string `json:"deprecated_keys,omitempty"`
 }
 
 // Snapshot 返回当前有效配置（cfg.Global：启动解析值；caller 需已 cfg.Load）。
@@ -56,18 +50,18 @@ func Snapshot() *View {
 		HomePath:    o.NormalizedHomePath(),
 		BrowserPath: o.BrowserPath, BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
 		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
-		FsPolicy: a.FsPolicy, FsRules: a.FsRules, FsGrants: a.FsGrants,
-		NetPolicy: a.NetPolicy, NetRules: a.NetRules, NetGrants: a.NetGrants,
-		SshPolicy: a.SshPolicy, SshRules: a.SshRules, SshGrants: a.SshGrants,
-		DeprecatedKeys: o.DeprecatedKeys()}
+		FsPolicy: a.FsPolicy, FsRules: a.FsRules,
+		NetPolicy: a.NetPolicy, NetRules: a.NetRules,
+		SshPolicy: a.SshPolicy, SshRules: a.SshRules}
 }
 
 // Update 是设置面写请求白名单（host/work_dir/exec_timeout/home_path/browser_*
 // 与授权键可写；key 不走这里——只走 bind/unbind 子命令）。
 // 隐藏配置（no_sandbox 等）不可经此修改，只能改配置文件。
 // 授权键：exec 保持 policy/deny/allow；fs/net/ssh 为 policy + 有序规则表 rules
-// + 永久授权表 grants。policy 空串 = 不改；列表 nil = 不改（保持现状），
-// 非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent 的唯一回撤出口。
+// （permanent grant 直接追加在 rules 表尾，无独立键）。policy 空串 = 不改；
+// 列表 nil = 不改（保持现状），非 nil（含空数组）= 整体替换——空数组即清空，
+// 也是撤销 grant --permanent 条目的出口（删行即撤销）。
 type Update struct {
 	BrowserPath   *string   `json:"browser_path"`
 	BrowserWidth  *int      `json:"browser_width"`
@@ -81,13 +75,10 @@ type Update struct {
 	ExecAllow     *[]string `json:"exec_allow"`
 	FsPolicy      string    `json:"fs_policy"`
 	FsRules       *[]string `json:"fs_rules"`
-	FsGrants      *[]string `json:"fs_grants"`
 	NetPolicy     string    `json:"net_policy"`
 	NetRules      *[]string `json:"net_rules"`
-	NetGrants     *[]string `json:"net_grants"`
 	SshPolicy     string    `json:"ssh_policy"`
 	SshRules      *[]string `json:"ssh_rules"`
-	SshGrants     *[]string `json:"ssh_grants"`
 }
 
 // validPolicy 校验 policy 取值（空串 = 不改，合法）。
@@ -97,6 +88,8 @@ func validPolicy(s string) bool {
 
 // Apply 校验并持久化设置：基于文件配置落盘（flag/env 启动覆盖不落盘）。
 // 只写 config.yaml，不碰运行中进程的内存态——生效由调用方重启后端完成。
+// 表单校验只拦本次提交的值；文件里已有的内容不构成保存门——保存永远落盘
+// （坏内容的可见性由运行时 INVALID 标记与工具门控承担）。
 func (u *Update) Apply() error {
 	unlock := cfg.LockUpdate()
 	defer unlock()
@@ -110,18 +103,18 @@ func (u *Update) Apply() error {
 			return &InvalidArg{Field: "exec_timeout", Reason: err.Error()}
 		}
 	}
-	// 授权配置显式校验；坏配置阻止设备工具调用，必须修正后才能保存。
+	// 本次提交内容的表单校验（值域/语法）；不拦文件里已有的内容。
 	if !validPolicy(u.ExecPolicy) || !validPolicy(u.FsPolicy) || !validPolicy(u.NetPolicy) || !validPolicy(u.SshPolicy) {
 		return &InvalidArg{Field: "policy", Reason: "want deny | open"}
 	}
-	for name, list := range map[string]*[]string{"net_rules": u.NetRules, "net_grants": u.NetGrants, "ssh_rules": u.SshRules, "ssh_grants": u.SshGrants} {
+	for name, list := range map[string]*[]string{"net_rules": u.NetRules, "ssh_rules": u.SshRules} {
 		if list != nil {
 			if err := policy.ValidateTargetRules(*list); err != nil {
 				return &InvalidArg{Field: name, Reason: err.Error()}
 			}
 		}
 	}
-	for name, list := range map[string]*[]string{"fs_rules": u.FsRules, "fs_grants": u.FsGrants} {
+	for name, list := range map[string]*[]string{"fs_rules": u.FsRules} {
 		if list != nil {
 			if err := policy.ValidateFSRules(*list); err != nil {
 				return &InvalidArg{Field: name, Reason: err.Error()}
@@ -171,9 +164,6 @@ func (u *Update) Apply() error {
 	} else {
 		fileCfg.HomePath = "/" // 清空 = 恢复默认首页
 	}
-	if err := fileCfg.ValidateAuth(); err != nil {
-		return err
-	}
 	return cfg.Save(fileCfg)
 }
 
@@ -199,9 +189,9 @@ func applyAuth(u *Update, o *cfg.Options) {
 	}
 	for _, field := range []struct{ value, target *[]string }{
 		{u.ExecAllow, &o.ExecAllow}, {u.ExecDeny, &o.ExecDeny},
-		{u.FsRules, &o.FsRules}, {u.FsGrants, &o.FsGrants},
-		{u.NetRules, &o.NetRules}, {u.NetGrants, &o.NetGrants},
-		{u.SshRules, &o.SshRules}, {u.SshGrants, &o.SshGrants},
+		{u.FsRules, &o.FsRules},
+		{u.NetRules, &o.NetRules},
+		{u.SshRules, &o.SshRules},
 	} {
 		if field.value != nil {
 			*field.target = *field.value

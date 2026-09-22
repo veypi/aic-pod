@@ -227,7 +227,9 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	}
 }
 
-func TestMalformedAuthorizationPreservedUntilExplicitRepair(t *testing.T) {
+// TestMalformedAuthorizationDoesNotBlockSave：坏授权（含整体解析失败）不再是保存门——
+// 保存永远落盘（工具仍 fail-closed）；坏内容以原样或 INVALID 标记留在文件里，可见可修。
+func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 	isolateConfigDir(t)
 	saved := Global
 	t.Cleanup(func() { Global = saved })
@@ -235,17 +237,21 @@ func TestMalformedAuthorizationPreservedUntilExplicitRepair(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, body := range []string{
-		"exec_policy: dney\nexec_deny: [sh]\n",
-		"exec_policy: open\nexec_deny: [sh, 'bad rule']\n",
-		"exec_policy: open\nexec_deny: [sh, {}]\n",
-		"fs_policy: open\nfs_deny: [/private, 'ro:/secret']\n",
-		"net_policy: open\nnet_deny: [example.com, '*:443']\n",
-		"ssh_policy: open\nssh_allow: [example.com, '*:22']\n",
-		"[broken yaml\n",
+	for _, tc := range []struct {
+		body  string
+		gated bool   // ValidateAuth 仍失败（工具 fail-closed）
+		keep  string // 保存后仍应可见的片段（空 = 不检查）
+	}{
+		{"exec_policy: dney\nexec_deny: [sh]\n", true, "dney"},
+		{"exec_policy: open\nexec_deny: [sh, 'bad rule']\n", true, "bad rule"},
+		{"exec_policy: open\nexec_deny: [sh, {}]\n", true, "INVALID exec_deny"},
+		{"[broken yaml\n", true, "INVALID"},
+		{"fs_policy: open\nfs_deny: [/private, 'ro:/secret']\n", false, ""}, // 旧键直接失效
+		{"net_policy: open\nnet_deny: [example.com, '*:443']\n", false, ""},
+		{"ssh_policy: open\nssh_allow: [example.com, '*:22']\n", false, ""},
 	} {
-		t.Run(body, func(t *testing.T) {
-			if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Run(tc.body, func(t *testing.T) {
+			if err := os.WriteFile(p, []byte(tc.body), 0600); err != nil {
 				t.Fatal(err)
 			}
 			o, err := Load()
@@ -253,16 +259,29 @@ func TestMalformedAuthorizationPreservedUntilExplicitRepair(t *testing.T) {
 				t.Fatal(err)
 			}
 			o.Normalize() // repeated startup normalization must not erase the error
-			if CheckAuth() == nil {
-				t.Fatal("malformed authorization permits tools")
+			if gated := CheckAuth() != nil; gated != tc.gated {
+				t.Fatalf("CheckAuth gated = %v, want %v (%v)", gated, tc.gated, CheckAuth())
 			}
 			o.HomePath = "/agents"
-			if Save(o) == nil {
-				t.Fatal("unrelated save silently repaired authorization")
+			if err := Save(o); err != nil {
+				t.Fatalf("save must land regardless of file content: %v", err)
 			}
 			data, err := os.ReadFile(p)
-			if err != nil || string(data) != body {
-				t.Fatal("invalid config was overwritten", err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "home_path: /agents") {
+				t.Fatalf("save did not land: %s", data)
+			}
+			if tc.keep != "" && !strings.Contains(string(data), tc.keep) {
+				t.Fatalf("malformed content lost (want %q): %s", tc.keep, data)
+			}
+			// 重载：坏内容没有被静默修好（门控状态一致）
+			if _, err := Load(); err != nil {
+				t.Fatal(err)
+			}
+			if gated := CheckAuth() != nil; gated != tc.gated {
+				t.Fatalf("CheckAuth after reload = %v, want %v", gated, tc.gated)
 			}
 		})
 	}
@@ -274,9 +293,9 @@ func TestMalformedAuthorizationPreservedUntilExplicitRepair(t *testing.T) {
 	}
 }
 
-// TestDeprecatedAuthKeysNamedAndBlockSave：规则表化废弃键被 LoadFile 检出并点名
-// （错误信息带新写法示例），工具与保存被阻直到手工改写——不做静默迁移。
-func TestDeprecatedAuthKeysNamedAndBlockSave(t *testing.T) {
+// TestDeprecatedAuthKeysIgnoredAndDroppedOnSave：规则表化废弃键直接失效——
+// 加载忽略（不迁移），保存永远落盘，旧键随重写自然清除。
+func TestDeprecatedAuthKeysIgnoredAndDroppedOnSave(t *testing.T) {
 	isolateConfigDir(t)
 	p, _ := Path()
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
@@ -290,29 +309,25 @@ func TestDeprecatedAuthKeysNamedAndBlockSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := o.DeprecatedKeys(), []string{"fs_deny", "fs_allow", "net_allow"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("DeprecatedKeys = %v, want %v", got, want)
+	if len(o.FsRules) != 0 || o.ValidateAuth() != nil {
+		t.Fatalf("deprecated keys must be ignored: %+v (%v)", o, o.ValidateAuth())
 	}
-	if err := o.ValidateAuth(); err == nil || !strings.Contains(err.Error(), "fs_deny") || !strings.Contains(err.Error(), "fs_rules") {
-		t.Fatalf("deprecated keys not named with rewrite example: %v", err)
+	o.HomePath = "/agents"
+	if err := Save(o); err != nil {
+		t.Fatalf("save must land regardless of file content: %v", err)
 	}
-	if Save(o) == nil {
-		t.Fatal("save must stay blocked until manual rewrite")
-	}
-	// 手工改写后：标记消失，校验通过
-	body2 := "fs_policy: deny\nfs_rules: ['deny:/private/**', 'rw:/work']\nnet_rules: ['allow:example.com:443']\n"
-	if err := os.WriteFile(p, []byte(body2), 0600); err != nil {
-		t.Fatal(err)
-	}
-	o2, err := LoadFile()
+	data, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(o2.DeprecatedKeys()) != 0 || o2.ValidateAuth() != nil {
-		t.Fatalf("rewritten config should be clean: %v %v", o2.DeprecatedKeys(), o2.ValidateAuth())
+	for _, key := range []string{"fs_deny", "fs_allow", "net_allow"} {
+		if strings.Contains(string(data), key+":") {
+			t.Fatalf("deprecated key %s survived rewrite: %s", key, data)
+		}
 	}
-	if !reflect.DeepEqual(o2.FsRules, []string{"deny:/private/**", "rw:/work"}) {
-		t.Fatalf("fs_rules = %v", o2.FsRules)
+	o2, err := LoadFile()
+	if err != nil || o2.HomePath != "/agents" || o2.ValidateAuth() != nil {
+		t.Fatalf("rewritten config should be clean: %+v (%v)", o2, err)
 	}
 }
 

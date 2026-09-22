@@ -81,3 +81,24 @@ func TestBoundHostID(t *testing.T) {
 		t.Fatalf("malformed credential must yield empty host_id, got %q", got)
 	}
 }
+
+// TestApplyLandsDespiteBrokenFile：文件内容不构成保存门——旧键/坏 YAML 下
+// 设置保存照常落盘。
+func TestApplyLandsDespiteBrokenFile(t *testing.T) {
+	for _, body := range []string{
+		"fs_deny: [/private/**]\nfs_allow: [/work]\n",
+		"[broken yaml\n",
+	} {
+		t.Run(body, func(t *testing.T) {
+			isolateConfigDir(t)
+			writeRawConfig(t, body)
+			if err := (&Update{HomePath: "/agents"}).Apply(); err != nil {
+				t.Fatalf("apply must land regardless of file content: %v", err)
+			}
+			o, err := cfg.LoadFile()
+			if err != nil || o.HomePath != "/agents" {
+				t.Fatalf("home_path = %q (%v)", o.HomePath, err)
+			}
+		})
+	}
+}

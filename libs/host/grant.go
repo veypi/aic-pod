@@ -23,7 +23,7 @@ import (
 //   - --temp（默认）：域 Policy 会话内存授权（重启失效、跨 session 失效）；
 //     不追溯已启动的 bg 任务（沙箱白名单在 Start 时固化）。
 //     规则表判定为 deny 终局的目标拒批——session 层不得放宽表判定的 deny（§2 硬底线）。
-//   - --permanent：追加规则行到独立 <域>_grants 键（fs 为 rw: 行、net/ssh 为
+//   - --permanent：把规则行追加到 <域>_rules 表尾（fs 为 rw: 行、net/ssh 为
 //     allow: 行，基于文件配置修改 + Save 落盘，与 set_config 同路径）——重启/跨
 //     session 生效；覆盖 deny 行合法（机器是用户的），响应注明覆盖行号。
 //   - 两档目标均过 §1 全域校验（fs 全域/家根/盘根不可授；net/ssh 通配 host 本身不可表达）。
@@ -152,7 +152,7 @@ func parseGrantArgv(argv []string) (domain, target string, permanent bool, err e
 	return domain, target, permanent, nil
 }
 
-// persistGrant 把目标作为规则行追加进独立 <域>_grants 键并落盘（fs 为 rw: 行、
+// persistGrant 把目标作为规则行追加到 <域>_rules 表尾并落盘（fs 为 rw: 行、
 // net/ssh 为 allow: 行；基于文件配置修改——flag/env 启动覆盖不落盘，与 settings
 // 同语义）；幂等（归一化口径下已存在跳过——macOS /var → /private/var 类 symlink、
 // 端口零填充不再产生重复条目）。
@@ -195,23 +195,23 @@ func (c *Client) persistGrant(domain, value string) error {
 			}
 			return fsauth.Canonical(expandHomeDir(pat))
 		}
-		if contains(fileCfg.FsGrants, norm) {
+		if contains(fileCfg.FsRules, norm) {
 			c.syncAuth()
 			return nil
 		}
-		fileCfg.FsGrants = append(fileCfg.FsGrants, "rw:"+value)
+		fileCfg.FsRules = append(fileCfg.FsRules, "rw:"+value)
 	case "net":
-		if contains(fileCfg.NetGrants, normEntry) {
+		if contains(fileCfg.NetRules, normEntry) {
 			c.syncAuth()
 			return nil
 		}
-		fileCfg.NetGrants = append(fileCfg.NetGrants, "allow:"+value)
+		fileCfg.NetRules = append(fileCfg.NetRules, "allow:"+value)
 	case "ssh":
-		if contains(fileCfg.SshGrants, normEntry) {
+		if contains(fileCfg.SshRules, normEntry) {
 			c.syncAuth()
 			return nil
 		}
-		fileCfg.SshGrants = append(fileCfg.SshGrants, "allow:"+value)
+		fileCfg.SshRules = append(fileCfg.SshRules, "allow:"+value)
 	default:
 		return fmt.Errorf("unknown domain %q", domain)
 	}

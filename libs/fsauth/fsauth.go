@@ -1,6 +1,6 @@
 // Package fsauth enforces the host's local filesystem policy as one ordered
 // rule table (aic/docs/permission_rules.md): builtin deny rows first, then cfg
-// fs_rules, then permanent fs_grants; the last matching row wins and unmatched
+// fs_rules (permanent grants append there); the last matching row wins and unmatched
 // paths fall back to fs_policy. Reads are open except deny rows; ro rows poke
 // read-only holes into wider deny rows above them. Session-layer write roots
 // (convenience roots, temp grants) take effect only when the table does not
@@ -75,7 +75,7 @@ func (e fsEffect) String() string {
 // fsRule 是一条编译后的规则行（工具层判定与沙箱名单派生共用同一编译产物）。
 type fsRule struct {
 	eff  fsEffect
-	src  string   // builtin | cfg | grant
+	src  string   // builtin | cfg
 	raw  string   // 原始行（explain/快照用）
 	pats []string // resolve 用全形态：canonical + 裸模式子树展开 + 双拼写
 	root []string // rw 行且为裸模式：写根双形态（沙箱 bind 用）
@@ -98,12 +98,12 @@ func New() *Policy {
 }
 
 // rebuildLocked 全量重算派生状态：有序规则表（builtin deny 出厂初始表 +
-// cfg fs_rules + permanent fs_grants，后命中者胜）+ 根基底预计算。
+// cfg fs_rules——permanent grant 直接追加在表尾，后命中者胜）+ 根基底预计算。
 // New/Reconcile 的统一出口；锁内调用。
 func (p *Policy) rebuildLocked() {
 	a := cfg.AuthSnapshot()
 	p.openMode = a.FsPolicy == cfg.PolicyOpen
-	rules := make([]fsRule, 0, len(defaultDenyPaths())+len(a.FsRules)+len(a.FsGrants))
+	rules := make([]fsRule, 0, len(defaultDenyPaths())+len(a.FsRules))
 	for _, d := range defaultDenyPaths() {
 		if r, ok := compileFSRule(policy.EffectDeny+":"+d, "builtin"); ok {
 			rules = append(rules, r)
@@ -111,11 +111,6 @@ func (p *Policy) rebuildLocked() {
 	}
 	for _, raw := range a.FsRules {
 		if r, ok := compileFSRule(raw, "cfg"); ok {
-			rules = append(rules, r)
-		}
-	}
-	for _, raw := range a.FsGrants {
-		if r, ok := compileFSRule(raw, "grant"); ok {
 			rules = append(rules, r)
 		}
 	}
@@ -205,7 +200,7 @@ func (p *Policy) resolveLocked(cpath string) fsEffect {
 // RuleInfo 是规则表的只读快照行（M3 沙箱行序映射与 explain 干跑用）。
 type RuleInfo struct {
 	Effect   string   // deny | ro | rw
-	Source   string   // builtin | cfg | grant
+	Source   string   // builtin | cfg
 	Raw      string   // 原始规则行
 	Patterns []string // 编译后的匹配形态
 }
@@ -224,8 +219,10 @@ func (p *Policy) Rules() []RuleInfo {
 // DenyPatterns 返回全部 deny 行的编译模式快照——exec 沙箱拒绝规则
 // （§5.10 deny 隔离）与 fs 判定同源派生；cfg 变更经 Reconcile 重算后，
 // 本次调用的 Start 即取到新名单（沙箱每次 Start 构造 profile）。
-// 注意（M3 前）：沙箱按 deny 行全量落隔离，不表达 deny 行之内的 ro/rw 洞——
-// 洞内目标在沙箱内仍被拒（fail-closed），仅工具层放行（permission_rules.md §5）。
+// 注意：darwin 已走 M3 行序映射（Rules 快照经 StartOptions.SandboxRules 进入
+// seatbelt profile，后规则胜，ro/rw 洞在内核真实生效）；linux/windows 仍按
+// 本函数全量落隔离，不表达 deny 行之内的 ro/rw 洞（fail-closed，仅工具层
+// 放行，permission_rules.md §5）。
 func (p *Policy) DenyPatterns() []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
