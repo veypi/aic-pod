@@ -639,6 +639,13 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 		if version(now) != e.Version {
 			return hosts.Fail("source_changed", "File changed during range read")
 		}
+		// 路径对象与句柄对象必须是同一对象（替换/删除即失效）。unix 的 version 变化
+		// 由 ctime（unlink 递增）承担；Windows 的 CreationTime/属性不随替换变化，
+		// 需显式 SameFile 校验，否则旧句柄会继续提供已被替换对象的旧内容。
+		current, err := os.Lstat(requested)
+		if err != nil || !os.SameFile(current, now) {
+			return hosts.Fail("source_changed", "File replaced during range read")
+		}
 		return nil
 	})
 	if err != nil {
