@@ -59,43 +59,27 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 	if r.Execution != nil && r.Execution.Epoch != c.procs.Epoch() {
 		return nil, wire.Fail("expired", "Execution belongs to a different device runtime")
 	}
-	if r.Execution == nil && !m.Descriptor.Background {
+	// 控制方法（commands/bg_*/grant）不产生执行记录，直接调用。
+	if !m.Descriptor.Background {
 		return m.Run(ctx, caller, in.Args)
 	}
-	if r.Execution != nil && r.Execution.WaitMS != nil && !m.Descriptor.Background {
-		return nil, wire.Fail("unsupported", "Method does not support background execution")
+	// 等待上限 = 请求 timeout_ms（服务端已按硬上限钳位）。到点未完成即返回执行记录
+	// （background=true + id），执行继续运行——运行预算由执行管理器自有超时决定，
+	// 不受本次等待影响。
+	waitMS := r.TimeoutMS
+	if waitMS <= 0 {
+		waitMS = 30000
 	}
 	id := r.ID
-	waitMS := int64(30000)
-	output := ""
-	if r.Execution != nil {
+	if r.Execution != nil && r.Execution.ID != "" {
 		id = r.Execution.ID
-		output = r.Execution.Output
-		if r.Execution.WaitMS != nil {
-			waitMS = *r.Execution.WaitMS
-		}
 	}
 	owner := executionOwner(caller)
 	hash := sha256.Sum256([]byte(owner))
 	// Ownership is independent of RTC connections and is safe as a path segment.
 	namespace := fmt.Sprintf("%x", hash[:16])
 	fullID := c.hostID + ":" + namespace + ":" + id
-	if output == "" {
-		output = filepath.Join(c.sessionWorkDir(namespace), ".exec", c.procs.Epoch(), id+".log")
-	} else {
-		env := c.newEnv(caller.Origin, "")
-		env.Granted = caller.Level
-		output = expandHomeDir(output)
-		if !filepath.IsAbs(output) {
-			output = filepath.Join(c.options().WorkDir, output)
-		}
-		if err := env.CheckPath("exec", output); err != nil {
-			return nil, err
-		}
-		if err := env.CheckPolicy("exec", output, true); err != nil {
-			return nil, err
-		}
-	}
+	logPath := filepath.Join(c.sessionWorkDir(namespace), ".exec", c.procs.Epoch(), id+".log")
 	// Capture this admission's authority. A new connection never extends it.
 	runCaller := caller
 	runCaller.Expiry = nil
@@ -109,12 +93,11 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 		}
 		return nil
 	}
+	// 幂等去重只绑定调用内容与授权等级：等待时长可以改变，执行内容不能改变。
 	digestRaw, _ := json.Marshal(struct {
-		Call    wire.Invocation
-		Timeout int64
-		Output  string
-		Level   int
-	}{in, r.TimeoutMS, output, caller.Level})
+		Call  wire.Invocation
+		Level int
+	}{in, caller.Level})
 	digest := sha256.Sum256(digestRaw)
 	wait, cancel := context.WithTimeout(ctx, time.Duration(waitMS)*time.Millisecond)
 	defer cancel()
@@ -122,10 +105,7 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 	if m.Required != nil {
 		required = max(required, m.Required(in.Args))
 	}
-	if r.Execution != nil && r.Execution.Output != "" {
-		required = max(required, 2)
-	}
-	res, err := c.procs.StartCall(wait, exec_procs.CallOptions{RequiredLevel: required, KeepOutput: r.Execution != nil && r.Execution.Output != "", ID: fullID, Owner: owner, Digest: fmt.Sprintf("%x", digest), Command: in.Command + " " + in.Method, LogPath: output, Timeout: time.Duration(r.TimeoutMS) * time.Millisecond, AuthorizationDeadline: runCaller.ExpiresAt, Check: runCaller.Validate, Run: func(run context.Context, out io.Writer) (any, error) {
+	res, err := c.procs.StartCall(wait, exec_procs.CallOptions{RequiredLevel: required, ID: fullID, Owner: owner, Digest: fmt.Sprintf("%x", digest), Command: in.Command + " " + in.Method, LogPath: logPath, AuthorizationDeadline: runCaller.ExpiresAt, Check: runCaller.Validate, Run: func(run context.Context, out io.Writer) (any, error) {
 		runCaller.Output = out
 		value, err := m.Run(run, runCaller, in.Args)
 		if value != nil {
@@ -144,9 +124,6 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 	}})
 	if err != nil {
 		return nil, err
-	}
-	if !m.Descriptor.Background && res.Background {
-		_ = c.procs.Kill(fullID)
 	}
 	return res, nil
 }

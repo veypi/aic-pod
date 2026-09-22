@@ -134,6 +134,14 @@ func (s *Service) Configure(path string, width, height int) {
 	}
 }
 func (s *Service) settings() Config { s.mu.Lock(); defer s.mu.Unlock(); return s.cfg }
+func (s *Service) logf(format string, args ...any) {
+	s.mu.Lock()
+	fn := s.cfg.Logf
+	s.mu.Unlock()
+	if fn != nil {
+		fn(format, args...)
+	}
+}
 func (s *Service) Status(ctx context.Context, c tool.Caller, a Empty) (map[string]any, error) {
 	settings := s.settings()
 	path, err := chrome.Resolve(settings.Path)
@@ -210,11 +218,14 @@ func (s *Service) ensure(ctx context.Context) (*chrome.Conn, error) {
 	defer cancel()
 	conn, err := chrome.Start(startup, path, filepath.Join(s.cfg.StateDir, "profile"))
 	if err != nil {
+		s.logf("browser: chrome launch failed: %v", err)
 		s.mu.Lock()
 		s.lastError = err.Error()
 		s.mu.Unlock()
 		return nil, wire.Fail("unavailable", err.Error())
 	}
+	conn.SetLogf(s.logf)
+	s.logf("browser: chrome ready (pid %d, %s)", conn.Pid(), path)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -452,6 +463,7 @@ func (s *Service) Close() error {
 		s.remove(p)
 	}
 	if conn != nil {
+		s.logf("browser: closing chrome (pid %d)", conn.Pid())
 		return conn.Close()
 	}
 	return nil
@@ -468,8 +480,14 @@ func (s *Service) events(conn *chrome.Conn) {
 		for _, p := range s.pages {
 			pages = append(pages, p)
 		}
-		s.lastError = "Chrome disconnected; page IDs expired"
+		cause := conn.Err()
+		if cause != nil {
+			s.lastError = "Chrome disconnected: " + cause.Error() + "; page IDs expired"
+		} else {
+			s.lastError = "Chrome disconnected; page IDs expired"
+		}
 		s.mu.Unlock()
+		s.logf("browser: chrome connection ended (pid %d): %v", conn.Pid(), cause)
 		for _, p := range pages {
 			s.remove(p)
 		}

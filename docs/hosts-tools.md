@@ -56,22 +56,20 @@ RTC 完成 `hello` 后使用 `hosts_rtc/1`。服务器使用签名的 `hosts_nat
   "timeout_ms": 60000,
   "execution": {
     "epoch": "从目录取得的执行 epoch",
-    "id": "e_preallocated",
-    "wait_ms": 0,
-    "output": "/允许写入的路径/wait.log"
+    "id": "e_preallocated"
   }
 }
 ```
 
-- `wait_ms` 只控制本次等待，范围 0–300000，默认 30000。0 立即返回执行记录。
-- `timeout_ms` 控制此次运行上限；Browser/CUA 方法参数里的等待条件仍可另设更短期限。
+- `timeout_ms` 只控制本次等待：到点未完成即返回执行记录（background=true + id），执行继续运行；设备侧上限 1800000，Browser/CUA 方法参数里的等待条件仍可另设更短期限。
+- 执行自身的运行预算由运行时执行管理器的自有超时决定（默认 30 分钟），不随本次等待耗尽而中止。
 - NATS 的 deadline/nonce 控制入场；签名 authorization_until 控制执行授权，最长 30 分钟。RTC 入场后的执行按设备执行策略取得独立预算，断线不续期也不取消合法后台任务。
 - `bg_list` 返回本来源的运行中执行；`bg_wait ID [--wait SECONDS]` 读取同一执行；`bg_kill ID` 发起取消。
 - 进程取消终止该进程树；服务方法通过 context 取消，保留共享服务和其他页面。handler 实际结束后才标记 cancelled。
-- 同一 epoch、主体、来源和 execution.id 去重；不同参数复用 ID 返回 conflict。等待时长可以改变，执行内容、期限和输出不能改变。重启后的旧 epoch、已过期 ID 明确返回 expired。
+- 同一 epoch、主体、来源和 execution.id 去重；不同参数复用 ID 返回 conflict。等待时长可以改变，执行内容不能改变。重启后的旧 epoch、已过期 ID 明确返回 expired。
 - 完成响应包含 id、command、status、output、content、truncated、result/error；只有进程才有 exit_code。bg_wait 的 typed result 与直接完成一致。
 - 每次执行有独立 Writer，进程 stdout/stderr、服务显式进度和最终可读结果写入该 Writer。结构化结果独立保留。
-- 指定 output 需要文件写权限，AI 还需要 fs 工具开启。文件使用排他创建，不覆盖已有文件。默认日志由 exec 分配；显式文件在记录过期后保留。
+- 每次执行的日志由 exec 分配（会话 `.exec` 目录），随执行记录过期一并清理。
 
 执行记录完成后保留 1 小时，最多 512 条；每份日志 16 MiB，预览最多 1000 行/128 KiB，运行中的预留加保留输出最多 256 MiB。截断显式标记。当前运行时最多保留 8192 个已使用身份的防重放记录，达到配额拒绝新执行。首版不承诺重启续跑或跨设备迁移执行。
 

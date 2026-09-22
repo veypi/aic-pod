@@ -21,6 +21,7 @@ type Config struct {
 	DownloadTTL                             time.Duration
 	MaxUploads                              int
 	MaxUploadBytes, MaxTotalUploadBytes     int64
+	Logf                                    func(string, ...any)
 }
 type Empty struct{}
 type PageArgs struct {

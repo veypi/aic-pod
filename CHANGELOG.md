@@ -7,6 +7,16 @@
 
 ## 未发布
 
+- **执行策略有序规则表化（破坏性；aic/docs/permission_rules.md M2）**：fs/net/ssh 三域从「deny/allow 两表 + policy 姿态」改为**每域一张有序规则表**——行首效果前缀、按书写顺序逐条匹配、**最后命中者胜**，全表未命中走 `*_policy` 兜底。配置键替换：`fs_deny/fs_allow → fs_rules`（`deny:` 读写双拒 / `ro:` 读开放写拒（从上方 deny 行开读洞）/ `rw:` 读写）与 `fs_grants`；`net_deny/net_allow → net_rules` 与 `net_grants`，ssh 域同（`allow:`/`deny:` + host[:port]）；exec 域保持三键（下一批）。语义变化：**builtin 凭证 deny 不再是特权层**——cfg 行与 permanent grant 后置可合法覆盖（机器是用户的）；唯一硬底线 = session 层（temp grant/审批）不得放宽表判定的 deny 终局；内建便利根（workDir/临时/公共/缓存/会话区）不入表，仅在 resolve≠deny 时授写（便利不压 deny 天然保持）。**全域模式禁写**（加载/保存即报错）：放行类禁字面全域/家目录根/整盘根（`rw:**`、`rw:~`、`rw:C:/` 报错指向 `fs_policy`），deny 禁字面全域；net/ssh 通配 host 保持不可表达。**旧键处理**：配置含 `fs_deny` 等废弃键时 `CheckAuth` 点名报错并附新写法示例，工具与保存被阻直到手工改写（不静默迁移）；设置面视图新增 `deprecated_keys`。
+- **grant 适配规则表**：`--temp` 对 deny 终局目标拒批（错误文案改为规则表口径）；`--permanent` 追加 `rw:`/`allow:` 行到独立 `<域>_grants` 键（幂等归一保留），覆盖 deny 行合法并在响应注明「overrides the deny outcome from rule #N」（fsauth/netauth 新增 `LastDenyRow`）；fs grant 目标过全域校验（`exec grant fs /` 直接报错，`policy.ValidateFSGrantTarget`）。
+- **沙箱名单同源派生保持**：`DenyPatterns`/`WriteRootsFor`/`WritePatternsFor` 改从规则表派生（deny 行模式、rw 行裸模式根、rw 行通配），exec_procs 接口不变；`fsauth.Rules()` 导出有序表快照供 M3 行序映射与 explain。M3 前内核不表达 deny 行内的 ro/rw 洞（fail-closed，仅工具层放行，permission_rules.md §5 口径）。
+- 验证：`go build ./...` + 交叉编译（linux/windows）+ windows `go vet`；`go test` 全仓绿（host 3 例 `.env` 向量为环境性 EPERM，nosandbox 全绿——恰为 builtin deny `**/.env` 内核生效的活体验证）。
+
+- **fs 权限模型重构（破坏性）**：`fs_deny` 改为读写双拒（恒优先，审批/临时 grant 均不可绕过）；`fs_allow` 只授予写，读默认开放（除 deny），废除 `ro:` 只读前缀（配置含 `ro:` 直接报错）；`fs_policy` 收窄为写方向（deny=仅写白名单，open=写除 deny 外全放）。删除读放行名单与系统 CA/运行库读根（`fsauth.ReadPatternsFor`/`RuntimeReadRoots`/`SystemCAReadPatterns`、`StartOptions.ReadPaths`）；判定改为 `deny → 0/0；写白名单/open → 1/2；其余 → 1/0`（此前未命中即 0/0）。
+- **三平台沙箱同步（破坏性）**：macOS Seatbelt 不再输出 `(deny file-read*)` 与读放行（写方向仍先全关再按白名单放行，deny 读写双拒 + unix socket 出站拒）；Linux bwrap 改为整机 `--ro-bind / /` 读视图 + 写白名单绑定，deny 以覆盖挂载落地（目录 tmpfs / 文件与 socket 以 `/dev/null` 覆盖），形态不可实例化的 deny 与可写 glob 在启动前拒绝（含 `**` 递归枚举预算与父目录剪枝）；Windows 受限令牌新增 per-call deny ACE（随机 SID 加入 restricting list + 目标对象完全拒绝 ACE + 进程结束后撤销），并放开携带 deny 原生调用（写全放与网络规则仍拒绝）。
+- 验证：`go build ./...` + 交叉编译（linux/windows）+ windows `go vet`；`go test ./cfg ./libs/policy ./libs/fsauth ./libs/netauth ./libs/vcore ./libs/exec_procs ./libs/host`（host 仅剩 3 例 `.env` 环境性 EPERM，nosandbox 全绿）；`AIC_SANDBOX_PROBE=1 go test ./libs/exec_procs -run '^TestHostPolicy'` 四项全过（需 nosandbox）；aic `node --test` 338 例全绿。
+- fs 工具错误文案拆分（`libs/vcore`）：deny 命中（读 0 级）→ 「is in the fs_deny list and cannot be granted（remove the deny through local management）」，不再提示无效的 grant；白名单外写（写 0 级）与等级不足保留 grant/审批提示（新增 `env_test.go` 锁定两档）。
+
 - **去本地管理 API（破坏性）**：本机不再监听任何端口、不再有校验码（code）。设置面 = `config.yaml`：CLI 用 `aic config get|set`（JSON 走 stdin/stdout）与 `aic bind|unbind`（凭证走 stdin）读写；删除 `api/` 包（10 端点 + CORS + code 校验）、`ui/` 壳页装配、`AIC_PORT_FILE` 启动握手、`cfg.Code/Port` 与 `HostsURL`；`aic` 主命令只启动 host 会话，不再打印 management 链接。新增 `settings` 包承接原 get/set 逻辑（只落盘，生效由调用方重启进程完成）。
 - **桌面前端设置窗改单文件静态页（破坏性）**：`desktop/settings-ui/settings.html`（无框架、无构建；`app://aic` 自定义协议 + settings-preload 设置桥 + 跟随系统主题）替代 vhtml 壳页与 `AIC_PORT_FILE` 握手；`local:api` 由转发本地 HTTP 改为主进程本地实现（spawn `aic-backend config|bind|unbind` 子命令 / 读 `aic.log` 尾 / 起停后端子进程）；保存·绑定·解绑后自动重启后端子进程生效；删除 localCode/localPort 握手与相关旧用例。
 - 平台侧配套（aic 仓）：清浏览器插件时代遗留——`local_handler.js` 插件通道、hosts 页 `isExtension` 判定与插件文案全部移除（插件早已不存在），本机通道只剩桌面端注入。
@@ -22,6 +32,8 @@
 - cua 驱动、窗口、快照状态迁入独立工具。前端 browser viewer 改为只读帧流和显式输入接管。
 - 当前协议、配置、测试和范围见 [hosts-tools.md](docs/hosts-tools.md)。文件管理与普通 exec 本次不迁移。
 - 移除会话授权撤销与断线清空：删除 `authorization.revoke` 动作、origin 拉黑窗口与 NATS 断线自清；临时授权改为纯进程内存态（按 Session 隔离，仅随进程退出/重启清空），无调用方的 `fsauth/netauth.ResetTemporary` 一并删除。
+
+- **host 执行等待语义回归（破坏性）**：执行等待 = 请求 `timeout_ms`——到点未完成即返回执行记录（background=true + id），进程继续运行，运行预算回归执行管理器自有超时；删除 `execution.wait_ms` 与 `execution.output`（含显式日志留存），执行日志统一由 exec 分配、随记录过期清理；控制方法（commands/bg_*/grant）直呼不建执行记录；幂等摘要只绑定调用内容与授权等级（等待时长可改）。
 
 ## v0.7.0 — 2026-09-20
 

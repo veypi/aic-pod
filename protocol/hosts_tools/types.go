@@ -82,10 +82,8 @@ type Request struct {
 	Ticket    string            `json:"ticket,omitempty"`
 }
 type ExecutionOptions struct {
-	Epoch  string `json:"epoch"`
-	ID     string `json:"id"`
-	WaitMS *int64 `json:"wait_ms,omitempty"`
-	Output string `json:"output,omitempty"`
+	Epoch string `json:"epoch"`
+	ID    string `json:"id"`
 }
 
 type Response struct {
@@ -165,7 +163,7 @@ func (r Request) Validate() error {
 		return Fail("invalid_argument", "Invalid catalog selector")
 	}
 	if r.Execution != nil {
-		if r.Action != "call" || !ValidID(r.Execution.ID) || !ValidID(r.Execution.Epoch) || (r.Execution.WaitMS != nil && (*r.Execution.WaitMS < 0 || *r.Execution.WaitMS > 300000)) || (r.Call != nil && r.Call.Domain != "exec") {
+		if r.Action != "call" || !ValidID(r.Execution.ID) || !ValidID(r.Execution.Epoch) || (r.Call != nil && r.Call.Domain != "exec") {
 			return Fail("invalid_argument", "Invalid exec execution options")
 		}
 	}

@@ -43,7 +43,6 @@ func (c *Client) runProcess(ctx context.Context, sid, msgID, display string, arg
 		NoSandbox:  noSandbox,
 		WriteRoots: c.policy.WriteRootsFor(sid), // fs 域：cfg fs_allow + 临时 grant
 		DenyPaths:  c.policy.DenyPatterns(),     // fs 域 deny 名单（默认表 + cfg fs_deny）
-		ReadPaths:  c.policy.ReadPatternsFor(sid),
 		WritePaths: c.policy.WritePatternsFor(sid),
 		FsOpen:     c.policy.OpenMode(), // fs_policy=open 快照
 		NetOpen:    c.netPol.OpenMode(), // net_policy=open 快照

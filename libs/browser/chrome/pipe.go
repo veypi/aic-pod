@@ -49,7 +49,8 @@ type Conn struct {
 	closeOnce   sync.Once
 	closing     bool
 	err         error
-	identity    *identity // Immutable after startup; published under mu.
+	identity    *identity            // Immutable after startup; published under mu.
+	logf        func(string, ...any) // Diagnostic sink; replaced by SetLogf.
 }
 
 func start(ctx context.Context, path, profile string, args ...string) (*Conn, error) {
@@ -92,7 +93,7 @@ func start(ctx context.Context, path, profile string, args ...string) (*Conn, er
 	}
 	inR.Close()
 	outW.Close()
-	c := &Conn{writeGate: make(chan struct{}, 1), cmd: cmd, read: outR, write: inW, pending: map[int64]chan message{}, events: make(chan Event), eventWake: make(chan struct{}, 1), frameAcks: make(chan Event, 512), done: make(chan struct{}), processDone: make(chan struct{})}
+	c := &Conn{writeGate: make(chan struct{}, 1), cmd: cmd, read: outR, write: inW, pending: map[int64]chan message{}, events: make(chan Event), eventWake: make(chan struct{}, 1), frameAcks: make(chan Event, 512), done: make(chan struct{}), processDone: make(chan struct{}), logf: func(string, ...any) {}}
 	go c.dispatchEvents()
 	go c.ackFrames()
 	go c.loop()
@@ -113,6 +114,39 @@ func start(ctx context.Context, path, profile string, args ...string) (*Conn, er
 }
 func (c *Conn) Events() <-chan Event  { return c.events }
 func (c *Conn) Done() <-chan struct{} { return c.done }
+
+// SetLogf installs a diagnostic logger; nil restores the silent default.
+func (c *Conn) SetLogf(fn func(string, ...any)) {
+	if fn == nil {
+		fn = func(string, ...any) {}
+	}
+	c.mu.Lock()
+	c.logf = fn
+	c.mu.Unlock()
+}
+func (c *Conn) log(format string, args ...any) {
+	c.mu.Lock()
+	fn := c.logf
+	c.mu.Unlock()
+	if fn != nil {
+		fn(format, args...)
+	}
+}
+
+// Err reports why the connection ended; nil while it is healthy.
+func (c *Conn) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+// Pid returns the Chrome process id (0 before the process starts).
+func (c *Conn) Pid() int {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
+}
 func (c *Conn) loop() {
 	r := bufio.NewReaderSize(c.read, 64<<10)
 	for {
@@ -164,6 +198,11 @@ func (c *Conn) fail(err error) {
 		c.eventBytes = 0
 		closing := c.closing
 		c.mu.Unlock()
+		if closing {
+			c.log("chrome: connection closed (pid %d): %v", c.Pid(), err)
+		} else {
+			c.log("chrome: connection lost (pid %d): %v — terminating process group", c.Pid(), err)
+		}
 		close(c.done)
 		c.read.Close()
 		c.write.Close()
@@ -227,12 +266,12 @@ func (c *Conn) call(ctx context.Context, session, method string, params, result 
 		<-c.writeGate
 		return err
 	}
-	finished := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() { c.fail(ctx.Err()); close(finished) })
+	// A caller-side deadline or cancellation must not tear down the whole
+	// browser: the command may already be delivered, so abort only this call
+	// (its late reply is dropped once the pending entry is gone). Only real
+	// transport failures — a write error here, a read error in the loop or
+	// process exit — fail the connection.
 	_, err = c.write.Write(append(raw, 0))
-	if !stop() {
-		<-finished
-	}
 	<-c.writeGate
 	if err != nil {
 		c.fail(err)
@@ -264,6 +303,7 @@ func (c *Conn) Close() error {
 		c.mu.Lock()
 		c.closing = true
 		c.mu.Unlock()
+		c.log("chrome: closing gracefully (pid %d)", c.Pid())
 		// Let Chrome flush cookies and profile databases before terminating it.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = c.Call(ctx, "", "Browser.close", map[string]any{}, nil)

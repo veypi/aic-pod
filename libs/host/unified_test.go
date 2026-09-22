@@ -111,8 +111,7 @@ func TestProcessAndServiceShareExecutionOwnershipAndCancellation(t *testing.T) {
 	if err := c.tools.RegisterCommand(command); err != nil {
 		t.Fatal(err)
 	}
-	zero := int64(0)
-	request := wire.Request{ID: "svc", Action: "call", Argv: []string{"fixture", "wait"}, Execution: &wire.ExecutionOptions{Epoch: c.procs.Epoch(), ID: "once", WaitMS: &zero}, TimeoutMS: 5000}
+	request := wire.Request{ID: "svc", Action: "call", Argv: []string{"fixture", "wait"}, Execution: &wire.ExecutionOptions{Epoch: c.procs.Epoch(), ID: "once"}, TimeoutMS: 50}
 	result := c.HandleTool(context.Background(), testCaller(), request)
 	if result.Error != nil {
 		t.Fatal(result.Error)
@@ -140,7 +139,7 @@ func TestProcessAndServiceShareExecutionOwnershipAndCancellation(t *testing.T) {
 	if _, err := c.executionControl(context.Background(), other, "bg_wait", []string{job.ID}); err == nil {
 		t.Fatal("foreign origin read output")
 	}
-	process := c.HandleTool(context.Background(), testCaller(), wire.Request{ID: "process", Action: "call", Argv: []string{"sh", "-c", "printf 'start\\n'; sleep 30"}, Execution: &wire.ExecutionOptions{Epoch: c.procs.Epoch(), ID: "process", WaitMS: &zero}, TimeoutMS: 5000})
+	process := c.HandleTool(context.Background(), testCaller(), wire.Request{ID: "process", Action: "call", Argv: []string{"sh", "-c", "printf 'start\\n'; sleep 30"}, Execution: &wire.ExecutionOptions{Epoch: c.procs.Epoch(), ID: "process"}, TimeoutMS: 50})
 	if process.Error != nil {
 		t.Fatal(process.Error)
 	}

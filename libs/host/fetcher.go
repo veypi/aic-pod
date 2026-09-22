@@ -88,7 +88,6 @@ func (f shellCurlFetcher) Fetch(ctx context.Context, req vcore.HTTPReq) (io.Read
 		Exec:      argv,
 		Level:     proto.LevelRead, // curl 进程自身零写需求；落盘由 vcore VFS 承担
 		DenyPaths: f.c.policy.DenyPatterns(),
-		ReadPaths: f.c.policy.ReadPatternsFor(f.sid),
 		FsOpen:    f.c.policy.OpenMode(),
 		NetOpen:   f.c.netPol.OpenMode(),
 		NetDeny:   netDeny,

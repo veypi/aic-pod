@@ -41,7 +41,7 @@ func (c *Client) initTools() {
 			root = filepath.Join(dir, "browser", fmt.Sprintf("%x", digest[:16]))
 		}
 	}
-	c.browser = browser.New(browser.Config{Path: c.options().BrowserPath, StateDir: root, Width: c.options().BrowserWidth, Height: c.options().BrowserHeight, CheckFile: func(ctx context.Context, caller tool.Caller, path string, write bool) error {
+	c.browser = browser.New(browser.Config{Path: c.options().BrowserPath, StateDir: root, Width: c.options().BrowserWidth, Height: c.options().BrowserHeight, Logf: c.logf, CheckFile: func(ctx context.Context, caller tool.Caller, path string, write bool) error {
 		if err := caller.Validate(ctx); err != nil {
 			return err
 		}

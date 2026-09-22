@@ -260,8 +260,11 @@ func (c *Conn) prepareAttachment(e Event) bool {
 			stage = "resume"
 			err = c.Call(ctx, event.Session, "Runtime.runIfWaitingForDebugger", map[string]any{}, nil)
 		}
-		if err != nil && !strings.Contains(err.Error(), "Session with given id not found") && !strings.Contains(err.Error(), "Target closed") {
-			c.fail(fmt.Errorf("configure Chrome %s %s: %w", event.Info.Type, stage, err))
+		if err != nil {
+			// Target-level configuration races (detached sessions, navigations,
+			// targets closed while paused) are routine. Never tear down the whole
+			// browser for one target; leave a diagnostic trail instead.
+			c.log("chrome: configure %s (%s) failed for session %s: %v", event.Info.Type, stage, event.Session, err)
 		}
 	}()
 	return true

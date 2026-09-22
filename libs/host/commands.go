@@ -53,7 +53,14 @@ func (c *Client) initFilesystem() error {
 		if err := env.CheckPath("fs", filepath.ToSlash(path)); err != nil {
 			return wire.Fail("permission_denied", err.Error())
 		}
-		if err := env.CheckPolicy("fs", filepath.ToSlash(path), write); err != nil {
+		// remove/move 是 unlink/rename 语义：末段符号链接不跟随（删/挪的是链接
+		// 本身）——否则可写根内的外向链接会被目标路径的策略拒绝（2026-09-22：
+		// fs rm 删 venv 被 .venv/bin/python -> /opt/homebrew/... 挡下）。
+		check := env.CheckPolicy
+		if call.Method == "remove" || call.Method == "move" {
+			check = env.CheckPolicyUnlink
+		}
+		if err := check("fs", filepath.ToSlash(path), write); err != nil {
 			return wire.Fail("permission_denied", err.Error())
 		}
 		return nil
