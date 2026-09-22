@@ -5,6 +5,12 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.8.2 — 2026-09-23
+
+- **修复 desktop 打包（v0.8.1 CI：desktop 全平台失败）**：连接状态新增模块 `host-state.cjs` 未列入 electron-builder `files`，check-asar 校验「缺失/无法解析」——已补进打包清单。
+- **修复 Windows 原生用例**：`TestWindowsRenameUsesPinnedParentsAndNoReplace` 在持有目录持久句柄时改名父目录与 Windows 共享语义冲突（共享冲突拒绝，等价平台级钉住）——用例接受两种平台行为，语义注释随动。
+- 依赖：vigo v0.7.6、vhtml v0.11.3（生态基线同步）。
+
 ## v0.8.1 — 2026-09-23
 
 - **修复 v0.8.0 发版构建（CI 全挂）**：`cfg` 依赖 vigo 新版 `flags` 四层解析 API（`SetDefaults` / `ConfigIssue` / `LoadCfg` 返回值），此前 go.mod 仍指 `vigo v0.7.5`——本地 `go.work` 工作区掩盖了差异，CI（无工作区、按已发布版本解析）编译失败。依赖升 `vigo v0.7.6`（44af2d0 四层解析、eb5b976 子命令 flag 继承）后重新发版；两版功能面一致，v0.8.0 因构建失败无 Release 产出。
