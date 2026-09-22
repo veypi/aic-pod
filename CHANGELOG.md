@@ -5,6 +5,10 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.8.3 — 2026-09-23
+
+- **修复 Windows live source 失效漏检（CI desktop-windows）**：文件被替换后，旧读句柄仍能继续读取——`version()` 在 Windows 由创建时间/属性构成（不随替换变化），unix 依靠 ctime（unlink 递增）失效。read 的 verify 补 `os.SameFile` 路径-句柄同对象校验：替换/删除即 `source_changed`，三平台同口径。
+
 ## v0.8.2 — 2026-09-23
 
 - **修复 desktop 打包（v0.8.1 CI：desktop 全平台失败）**：连接状态新增模块 `host-state.cjs` 未列入 electron-builder `files`，check-asar 校验「缺失/无法解析」——已补进打包清单。
