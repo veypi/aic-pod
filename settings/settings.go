@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/netauth"
+	"github.com/veypi/aic-pod/libs/policy"
 )
 
 // View 是设置面读视图（含 key——设置窗口需显示当前凭证；仅本机同用户进程可见）。
@@ -32,14 +32,17 @@ type View struct {
 	ExecDeny      []string `json:"exec_deny"`
 	ExecAllow     []string `json:"exec_allow"`
 	FsPolicy      string   `json:"fs_policy"`
-	FsDeny        []string `json:"fs_deny"`
-	FsAllow       []string `json:"fs_allow"`
+	FsRules       []string `json:"fs_rules"`
+	FsGrants      []string `json:"fs_grants"`
 	NetPolicy     string   `json:"net_policy"`
-	NetDeny       []string `json:"net_deny"`
-	NetAllow      []string `json:"net_allow"`
+	NetRules      []string `json:"net_rules"`
+	NetGrants     []string `json:"net_grants"`
 	SshPolicy     string   `json:"ssh_policy"`
-	SshDeny       []string `json:"ssh_deny"`
-	SshAllow      []string `json:"ssh_allow"`
+	SshRules      []string `json:"ssh_rules"`
+	SshGrants     []string `json:"ssh_grants"`
+	// DeprecatedKeys 配置文件中检出的废弃授权键（fs_deny 等）——前端展示修复指引；
+	// 重写保存后自动清除。
+	DeprecatedKeys []string `json:"deprecated_keys,omitempty"`
 }
 
 // Snapshot 返回当前有效配置（cfg.Global：启动解析值；caller 需已 cfg.Load）。
@@ -53,17 +56,18 @@ func Snapshot() *View {
 		HomePath:    o.NormalizedHomePath(),
 		BrowserPath: o.BrowserPath, BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
 		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
-		FsPolicy: a.FsPolicy, FsDeny: a.FsDeny, FsAllow: a.FsAllow,
-		NetPolicy: a.NetPolicy, NetDeny: a.NetDeny, NetAllow: a.NetAllow,
-		SshPolicy: a.SshPolicy, SshDeny: a.SshDeny, SshAllow: a.SshAllow}
+		FsPolicy: a.FsPolicy, FsRules: a.FsRules, FsGrants: a.FsGrants,
+		NetPolicy: a.NetPolicy, NetRules: a.NetRules, NetGrants: a.NetGrants,
+		SshPolicy: a.SshPolicy, SshRules: a.SshRules, SshGrants: a.SshGrants,
+		DeprecatedKeys: o.DeprecatedKeys()}
 }
 
 // Update 是设置面写请求白名单（host/work_dir/exec_timeout/home_path/browser_*
-// 与授权十二键可写；key 不走这里——只走 bind/unbind 子命令）。
+// 与授权键可写；key 不走这里——只走 bind/unbind 子命令）。
 // 隐藏配置（no_sandbox 等）不可经此修改，只能改配置文件。
-// 授权十二键（policy/deny/allow × exec/fs/net/ssh）：policy 空串 = 不改；列表 nil = 不改
-// （保持现状），非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent
-// 的唯一回撤出口。
+// 授权键：exec 保持 policy/deny/allow；fs/net/ssh 为 policy + 有序规则表 rules
+// + 永久授权表 grants。policy 空串 = 不改；列表 nil = 不改（保持现状），
+// 非 nil（含空数组）= 整体替换——空数组即清空，是 grant --permanent 的唯一回撤出口。
 type Update struct {
 	BrowserPath   *string   `json:"browser_path"`
 	BrowserWidth  *int      `json:"browser_width"`
@@ -76,14 +80,14 @@ type Update struct {
 	ExecDeny      *[]string `json:"exec_deny"`
 	ExecAllow     *[]string `json:"exec_allow"`
 	FsPolicy      string    `json:"fs_policy"`
-	FsDeny        *[]string `json:"fs_deny"`
-	FsAllow       *[]string `json:"fs_allow"`
+	FsRules       *[]string `json:"fs_rules"`
+	FsGrants      *[]string `json:"fs_grants"`
 	NetPolicy     string    `json:"net_policy"`
-	NetDeny       *[]string `json:"net_deny"`
-	NetAllow      *[]string `json:"net_allow"`
+	NetRules      *[]string `json:"net_rules"`
+	NetGrants     *[]string `json:"net_grants"`
 	SshPolicy     string    `json:"ssh_policy"`
-	SshDeny       *[]string `json:"ssh_deny"`
-	SshAllow      *[]string `json:"ssh_allow"`
+	SshRules      *[]string `json:"ssh_rules"`
+	SshGrants     *[]string `json:"ssh_grants"`
 }
 
 // validPolicy 校验 policy 取值（空串 = 不改，合法）。
@@ -110,9 +114,16 @@ func (u *Update) Apply() error {
 	if !validPolicy(u.ExecPolicy) || !validPolicy(u.FsPolicy) || !validPolicy(u.NetPolicy) || !validPolicy(u.SshPolicy) {
 		return &InvalidArg{Field: "policy", Reason: "want deny | open"}
 	}
-	for name, list := range map[string]*[]string{"net_deny": u.NetDeny, "net_allow": u.NetAllow, "ssh_deny": u.SshDeny, "ssh_allow": u.SshAllow} {
+	for name, list := range map[string]*[]string{"net_rules": u.NetRules, "net_grants": u.NetGrants, "ssh_rules": u.SshRules, "ssh_grants": u.SshGrants} {
 		if list != nil {
-			if err := netauth.ValidateEntries(*list); err != nil {
+			if err := policy.ValidateTargetRules(*list); err != nil {
+				return &InvalidArg{Field: name, Reason: err.Error()}
+			}
+		}
+	}
+	for name, list := range map[string]*[]string{"fs_rules": u.FsRules, "fs_grants": u.FsGrants} {
+		if list != nil {
+			if err := policy.ValidateFSRules(*list); err != nil {
 				return &InvalidArg{Field: name, Reason: err.Error()}
 			}
 		}
@@ -188,9 +199,9 @@ func applyAuth(u *Update, o *cfg.Options) {
 	}
 	for _, field := range []struct{ value, target *[]string }{
 		{u.ExecAllow, &o.ExecAllow}, {u.ExecDeny, &o.ExecDeny},
-		{u.FsAllow, &o.FsAllow}, {u.FsDeny, &o.FsDeny},
-		{u.NetAllow, &o.NetAllow}, {u.NetDeny, &o.NetDeny},
-		{u.SshAllow, &o.SshAllow}, {u.SshDeny, &o.SshDeny},
+		{u.FsRules, &o.FsRules}, {u.FsGrants, &o.FsGrants},
+		{u.NetRules, &o.NetRules}, {u.NetGrants, &o.NetGrants},
+		{u.SshRules, &o.SshRules}, {u.SshGrants, &o.SshGrants},
 	} {
 		if field.value != nil {
 			*field.target = *field.value

@@ -41,7 +41,7 @@ func fsRm(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPath("rm", abs); err != nil {
 		return nil, err
 	}
-	if err := env.CheckPolicy("fs rm", abs, true); err != nil {
+	if err := env.CheckPolicyUnlink("fs rm", abs, true); err != nil {
 		return nil, err
 	}
 	if err := checkRootProtect(env, "rm", abs); err != nil {
@@ -213,17 +213,22 @@ func resolveSrcDst(env *Env, cmd, rawSrc, rawDst string) (string, string, error)
 	if err := env.CheckPath(cmd, dst); err != nil {
 		return "", "", err
 	}
-	// 路径策略（v0.14.5）：cp 读 src 写 dst；mv 两端皆写（src 被移除）
+	// 路径策略（v0.14.5）：cp 读 src 写 dst；mv 两端皆写（src 被移除）。
+	// mv 两端按 unlink/rename 语义判定（POSIX rename 不跟随末段符号链接）。
 	if cmd == "cp" {
 		if err := env.CheckPolicy("fs cp src", src, false); err != nil {
 			return "", "", err
 		}
 	} else {
-		if err := env.CheckPolicy("fs mv src", src, true); err != nil {
+		if err := env.CheckPolicyUnlink("fs mv src", src, true); err != nil {
 			return "", "", err
 		}
 	}
-	if err := env.CheckPolicy("fs "+cmd+" dst", dst, true); err != nil {
+	check := env.CheckPolicy
+	if cmd == "mv" {
+		check = env.CheckPolicyUnlink
+	}
+	if err := check("fs "+cmd+" dst", dst, true); err != nil {
 		return "", "", err
 	}
 	return src, dst, nil

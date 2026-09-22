@@ -75,7 +75,7 @@ func writeRawConfig(t *testing.T, body string) {
 }
 
 // repairedSettings 是全量修复用的设置 JSON（清空四域授权列表 + 指定 host/home_path）。
-const repairedSettings = `{"host":"http://localhost:4000","home_path":"/agents","exec_policy":"deny","exec_allow":[],"exec_deny":[],"fs_policy":"deny","fs_allow":[],"fs_deny":[],"net_policy":"deny","net_allow":[],"net_deny":[],"ssh_policy":"deny","ssh_allow":[],"ssh_deny":[]}`
+const repairedSettings = `{"host":"http://localhost:4000","home_path":"/agents","exec_policy":"deny","exec_allow":[],"exec_deny":[],"fs_policy":"deny","fs_rules":[],"fs_grants":[],"net_policy":"deny","net_rules":[],"net_grants":[],"ssh_policy":"deny","ssh_rules":[],"ssh_grants":[]}`
 
 // TestInvalidConfigStillLoadsAndCanBeRepaired：坏配置不得阻断启动与修复——
 // `config get` 仍能回显（坏授权字段显式可见），`config set` 能修好并落盘

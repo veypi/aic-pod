@@ -31,14 +31,10 @@ func TestHostPolicyNativeEnforcement(t *testing.T) {
 	if err := os.WriteFile(deny, []byte("secret"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	read := []string{rw + "/**", ro + "/**"}
-	for _, r := range fsauth.RuntimeReadRoots() {
-		read = append(read, r+"/**")
-	}
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: rw, extra: []string{rw}, readAllow: read, deny: []string{deny}, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: rw, extra: []string{rw}, deny: []string{deny}, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,20 +47,31 @@ func TestHostPolicyNativeEnforcement(t *testing.T) {
 		return e
 	}
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	if err := run("/bin/cat " + q(filepath.Join(ro, "data"))); err != nil {
-		t.Fatalf("read-only read failed: %v", err)
+	// 读默认开放：白名单外目录（ro/outside）也可读。
+	for _, script := range []string{
+		"/bin/cat " + q(filepath.Join(ro, "data")),
+		"/bin/cat " + q(filepath.Join(out, "data")),
+	} {
+		if err := run(script); err != nil {
+			t.Fatalf("open read failed (%s): %v", script, err)
+		}
 	}
 	if err := run("echo changed > " + q(filepath.Join(rw, "data"))); err != nil {
 		t.Fatalf("allowed write failed: %v", err)
 	}
-	for _, script := range []string{"echo changed > " + q(filepath.Join(ro, "data")), "/bin/cat " + q(filepath.Join(out, "data")), "/bin/cat " + q(deny), "echo changed > " + q(deny)} {
+	// 白名单外写、deny 读、deny 写均被拒。
+	for _, script := range []string{
+		"echo changed > " + q(filepath.Join(ro, "data")),
+		"/bin/cat " + q(deny),
+		"echo changed > " + q(deny),
+	} {
 		if err := run(script); err == nil {
 			t.Fatalf("forbidden effect succeeded: %s", script)
 		}
 	}
 	b, _ := os.ReadFile(filepath.Join(ro, "data"))
 	if string(b) != "original" {
-		t.Fatal("read-only file changed")
+		t.Fatal("write outside allow-list changed file")
 	}
 	b, _ = os.ReadFile(deny)
 	if string(b) != "secret" {
@@ -72,21 +79,24 @@ func TestHostPolicyNativeEnforcement(t *testing.T) {
 	}
 }
 
-// TestHostPolicyReadScopeFromPolicy（darwin 原生探测）：读白名单直接来自
-// Policy.ReadPatternsFor 时也必须收紧——空缓存根曾被展开成 "/**" 而使读锁
-// 失效（2026-09-22 修复），该用例守住这条链路。
-func TestHostPolicyReadScopeFromPolicy(t *testing.T) {
+// TestHostPolicyReadOpenDenyScope（darwin 原生探测）：读默认开放（白名单外
+// 路径可读），deny 仍是读写双拒。读白名单机制已随「读开放」删除，本用例守住
+// 新模型两端（白名单外可读 + deny 生效）。
+func TestHostPolicyReadOpenDenyScope(t *testing.T) {
 	if os.Getenv("AIC_SANDBOX_PROBE") != "1" {
 		t.Skip("explicit native sandbox probe")
 	}
-	t.Setenv("GOCACHE", "")
-	t.Setenv("XDG_CACHE_HOME", "")
 	work := canonicalRoot(t.TempDir())
 	inside := filepath.Join(work, "inside.txt")
 	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	outsideDir, err := os.MkdirTemp("/Users/Shared", "aic-readscope-")
+	// 命中默认 deny 表（**/*.key）的目标：读/写都必须被拒。
+	denied := filepath.Join(work, "secret.key")
+	if err := os.WriteFile(denied, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideDir, err := os.MkdirTemp("/Users/Shared", "aic-readopen-")
 	if err != nil {
 		t.Skipf("no writable outside dir: %v", err)
 	}
@@ -98,17 +108,10 @@ func TestHostPolicyReadScopeFromPolicy(t *testing.T) {
 
 	pol := fsauth.New()
 	pol.SetWorkDir(work)
-	read := pol.ReadPatternsFor("")
-	for _, pat := range read {
-		if pat == "" || pat == "/**" {
-			t.Fatalf("policy produced match-all read pattern: %#v", read)
-		}
-	}
-
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, readAllow: read, deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,10 +125,16 @@ func TestHostPolicyReadScopeFromPolicy(t *testing.T) {
 	}
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 	if err := run("/bin/cat " + q(inside)); err != nil {
-		t.Fatalf("workdir read should succeed: %v", err)
+		t.Fatalf("workdir read failed: %v", err)
 	}
-	if err := run("/bin/cat " + q(outside)); err == nil {
-		t.Fatalf("read outside readAllow succeeded (read lockdown void): %s", outside)
+	if err := run("/bin/cat " + q(outside)); err != nil {
+		t.Fatalf("read outside allow-list denied (read must be open): %v", err)
+	}
+	if err := run("/bin/cat " + q(denied)); err == nil {
+		t.Fatalf("deny read succeeded: %s", denied)
+	}
+	if err := run("echo changed > " + q(denied)); err == nil {
+		t.Fatalf("deny write succeeded: %s", denied)
 	}
 }
 
@@ -149,7 +158,7 @@ func TestHostPolicyLiteralSpellings(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), readAllow: pol.ReadPatternsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -183,8 +192,8 @@ func TestHostPolicyLiteralSpellings(t *testing.T) {
 
 // TestHostPolicyXcodeShimTools（darwin 原生探测）：Xcode 命令行工具 shim
 // （/usr/bin/git、python3、cc 先读 /var/db/xcode_select_link 解析 developer dir，
-// 再去那里执行真实工具）必须在读白名单内可执行——2026-09-22 收紧读锁后缺该
-// 读根，shim 报 "unable to read data link ... (Operation not permitted)"。
+// 再去那里执行真实工具）必须在沙箱内可执行。读默认开放后 shim 读链不再受限，
+// 本用例作为工具链在沙箱内可达的回归点保留。
 func TestHostPolicyXcodeShimTools(t *testing.T) {
 	if os.Getenv("AIC_SANDBOX_PROBE") != "1" {
 		t.Skip("explicit native sandbox probe")
@@ -195,7 +204,7 @@ func TestHostPolicyXcodeShimTools(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), readAllow: pol.ReadPatternsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), deny: pol.DenyPatterns(), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,8 +219,8 @@ func TestHostPolicyXcodeShimTools(t *testing.T) {
 	if err := run("/usr/bin/xcode-select -p"); err != nil {
 		t.Fatalf("xcode-select shim failed in sandbox: %v", err)
 	}
-	// 真实 git 还会读 ~/.gitconfig（用户数据，锁内不可读）而硬退；这里用空全局
-	// 配置验证工具本体可达（沙箱内 git 若需读用户配置，由用户自行 ro: 放行）。
+	// 真实 git 还会读 ~/.gitconfig（用户数据；默认 deny 表不含它，读开放后
+	// 仍可读）；这里用空全局配置验证工具本体可达。
 	if err := run("GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --version"); err != nil {
 		t.Fatalf("xcode shim git denied in sandbox: %v", err)
 	}

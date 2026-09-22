@@ -1,17 +1,20 @@
 //go:build windows
 
 // Windows 沙箱运行时集成测试（需真实 Windows 环境；mbp 交叉编译不执行）。
-// 验证受限令牌 + ACL 写授权的实际行为：
+// 验证受限令牌 + ACL 授权的实际行为：
 //   - read-only：写任意路径被拒
 //   - workspace-write：写工作区成功、写外部路径被拒、TMP/TEMP 指向私有目录
+//   - deny：per-call 拒绝 ACE 使目标读写双拒，进程结束后撤销
 //   - cleanup：私有临时目录在进程结束后被删除
 package exec_procs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -165,7 +168,7 @@ func TestWindowsCreateRestrictedTokenFlagMatrix(t *testing.T) {
 func TestWindowsSandboxReadOnlyDeniesWrite(t *testing.T) {
 	ws := t.TempDir()
 	target := filepath.Join(ws, "ro.txt")
-	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelRead, workdir: ws, argv: writeCmd(target)})
+	plan, err := planConfined(confineSpec{netOpen: true, level: proto.LevelRead, workdir: ws, argv: writeCmd(target)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -178,18 +181,20 @@ func TestWindowsSandboxReadOnlyDeniesWrite(t *testing.T) {
 	}
 }
 
-// workspace-write：写工作区成功；写外部路径被拒；TMP/TEMP 指向私有目录。
-func TestWindowsSandboxRejectsUnsupportedReadScope(t *testing.T) {
-	_, err := planConfined(confineSpec{level: 9, workdir: t.TempDir(), argv: []string{"cmd", "/c", "echo ok"}, netOpen: true})
-	if err == nil || !strings.Contains(err.Error(), "cannot enforce") {
-		t.Fatalf("unsupported closed policy must reject: %v", err)
+// 不可表达的策略仍拒绝：写全放（fs_policy=open 写级）与网络管控。
+func TestWindowsSandboxRejectsUnsupportedPolicy(t *testing.T) {
+	if _, err := planConfined(confineSpec{level: 9, workdir: t.TempDir(), argv: []string{"cmd", "/c", "echo ok"}, netOpen: true, fsOpen: true}); err == nil || !strings.Contains(err.Error(), "cannot enforce") {
+		t.Fatalf("fs_policy=open write must reject: %v", err)
+	}
+	if _, err := planConfined(confineSpec{level: 9, workdir: t.TempDir(), argv: []string{"cmd", "/c", "echo ok"}}); err == nil || !strings.Contains(err.Error(), "cannot enforce") {
+		t.Fatalf("closed network policy must reject: %v", err)
 	}
 }
 
 // TMP/TEMP 注入：受限进程看到的是私有临时目录。
 func TestWindowsSandboxTempEnv(t *testing.T) {
 	ws := t.TempDir()
-	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo TMP=[%TMP%]"}})
+	plan, err := planConfined(confineSpec{netOpen: true, level: proto.LevelWrite, workdir: ws, extra: []string{ws}, argv: []string{"cmd", "/c", "echo TMP=[%TMP%]"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -202,7 +207,7 @@ func TestWindowsSandboxTempEnv(t *testing.T) {
 // cleanup：进程结束后私有临时目录被删除。
 func TestWindowsSandboxCleanupRemovesTemp(t *testing.T) {
 	ws := t.TempDir()
-	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo %TMP%"}})
+	plan, err := planConfined(confineSpec{netOpen: true, level: proto.LevelWrite, workdir: ws, extra: []string{ws}, argv: []string{"cmd", "/c", "echo %TMP%"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
@@ -221,6 +226,80 @@ func TestWindowsSandboxCleanupRemovesTemp(t *testing.T) {
 	runWithPlan(t, plan, plan.argv, ws)
 	if _, err := os.Stat(tmpDir); err == nil {
 		t.Fatal("private temp should be removed after run")
+	}
+}
+
+// aclAceCount 返回对象 DACL 的 ACE 数（deny ACE 增删断言用）。
+func aclAceCount(t *testing.T, path string) int {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	if dacl == nil {
+		return 0
+	}
+	head := (*[8]byte)(unsafe.Pointer(dacl))
+	return int(binary.LittleEndian.Uint16(head[4:6]))
+}
+
+// deny：目标读写双拒（白名单内写也拒），非 deny 路径不受影响；进程结束后
+// 拒绝 ACE 撤销（ACE 计数回落）。
+func TestWindowsDenyACEBlocksAndCleansUp(t *testing.T) {
+	ws := t.TempDir()
+	secret := filepath.Join(ws, "secret.key")
+	if err := os.WriteFile(secret, []byte("top-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	open := filepath.Join(ws, "open.txt")
+	if err := os.WriteFile(open, []byte("open"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := aclAceCount(t, secret)
+
+	// 读 deny：type 目标必须失败且不输出内容
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: []string{"cmd", "/c", "type " + strconv.Quote(secret)}})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	if got := aclAceCount(t, secret); got != before+1 {
+		t.Fatalf("deny ACE not added: before=%d after=%d", before, got)
+	}
+	out, exit := runWithPlan(t, plan, plan.argv, ws)
+	if exit == 0 || strings.Contains(out, "top-secret") {
+		t.Fatalf("deny read should fail: exit=%d out=%q", exit, out)
+	}
+
+	// 写 deny：白名单内可写路径上的 deny 文件写也必须失败
+	plan2, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: writeCmd(secret)})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	out2, exit2 := runWithPlan(t, plan2, plan2.argv, ws)
+	if exit2 == 0 {
+		t.Fatalf("deny write should fail: %s", out2)
+	}
+	if b, _ := os.ReadFile(secret); string(b) != "top-secret" {
+		t.Fatalf("denied file changed: %q", b)
+	}
+
+	// 非 deny 路径：读默认开放、白名单内写正常
+	plan3, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: []string{"cmd", "/c", "type " + strconv.Quote(open)}})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	out3, exit3 := runWithPlan(t, plan3, plan3.argv, ws)
+	if exit3 != 0 || !strings.Contains(out3, "open") {
+		t.Fatalf("open read should succeed: exit=%d out=%q", exit3, out3)
+	}
+
+	// cleanup：拒绝 ACE 撤销，ACE 计数回落
+	if got := aclAceCount(t, secret); got != before {
+		t.Fatalf("deny ACE not revoked: before=%d after=%d", before, got)
 	}
 }
 
@@ -261,7 +340,7 @@ func TestWindowsJobLimits(t *testing.T) {
 
 	// planConfined 集成：job 句柄随 plan 返回，子进程 assign 后正常执行
 	ws := t.TempDir()
-	plan, err := planConfined(confineSpec{fsOpen: true, netOpen: true, level: proto.LevelWrite, workdir: ws, argv: []string{"cmd", "/c", "echo ok"}})
+	plan, err := planConfined(confineSpec{netOpen: true, level: proto.LevelWrite, workdir: ws, extra: []string{ws}, argv: []string{"cmd", "/c", "echo ok"}})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}

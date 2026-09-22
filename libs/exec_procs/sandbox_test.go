@@ -36,9 +36,10 @@ func TestUnsupportedProcessPolicyRejected(t *testing.T) {
 		platform string
 		spec     confineSpec
 	}{
-		{"linux", confineSpec{fsOpen: true, netOpen: true, deny: []string{"/private"}}},
-		{"linux", confineSpec{netOpen: true, readAllow: []string{"/work/*/public/**"}}},
-		{"windows", confineSpec{netOpen: true, readAllow: []string{"C:/work/**"}}},
+		{"linux", confineSpec{netOpen: true, writeAllow: []string{"/work/*/public/**"}}},
+		{"windows", confineSpec{netOpen: false}},
+		{"windows", confineSpec{netOpen: true, fsOpen: true}},
+		{"windows", confineSpec{netOpen: true, netDeny: []netauth.Entry{{Host: "example.com"}}}},
 		{"darwin", confineSpec{fsOpen: true, netOpen: true, netDeny: []netauth.Entry{{Host: "example.com"}}}},
 	} {
 		tc.spec.level = proto.LevelApproved
@@ -111,16 +112,16 @@ func TestUnconfinedIgnoresPolicy(t *testing.T) {
 	}
 }
 
-// bwrap 包装：read-only 无任何可写挂载；workspace-write 有 tmpfs /tmp +
-// 工作区 bind + 缓存目录 bind + 敏感子路径只读覆盖；命令在 -- 之后原样。
-// 两种 profile 均携带资源限制段（rlimitArgs，与文件隔离正交）。
+// bwrap 包装：读视图为整机 ro-bind（读默认开放）；workspace-write 有
+// tmpfs /tmp + 工作区 bind + 缓存目录 bind + 敏感子路径只读覆盖；命令在
+// -- 之后原样。两种 profile 均携带资源限制段（rlimitArgs，与文件隔离正交）。
 func TestBwrapArgs(t *testing.T) {
 	argv := []string{"bash", "-c", "echo hi"}
 	for _, lv := range []int{1, 2, 3, 4, 9} {
 		spec := confineSpec{level: lv, workdir: "/ungranted", argv: argv, netOpen: true}
-		got := bwrapArgs(spec, []string{"/workspace"}, nil)
-		if !contains(got, "--tmpfs", "/") || contains(got, "--ro-bind", "/", "/") {
-			t.Fatalf("closed root required: %v", got)
+		got := bwrapArgs(spec, []string{"/workspace"}, nil, nil)
+		if !contains(got, "--ro-bind", "/", "/") || contains(got, "--tmpfs", "/") {
+			t.Fatalf("read-open root required (ro-bind /): %v", got)
 		}
 		if contains(got, "--bind", "/ungranted", "/ungranted") {
 			t.Fatal("cwd granted access")
@@ -230,57 +231,41 @@ func TestSeatbeltDenyAfterWriteAllow(t *testing.T) {
 	}
 }
 
-// System CA paths grant only reads and cannot override explicit denies.
-func TestSeatbeltSystemCAReadAllow(t *testing.T) {
+// 读白名单（含系统 CA 放行）已随读开放删除：profile 不得再输出任何
+// file-read* allow 规则（deny 规则照旧）。
+func TestSeatbeltReadAllowRemoved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("seatbelt only")
 	}
 	argv := []string{"curl", "https://example.com"}
-	ca := []string{"/etc/ssl/cert.pem", "/opt/homebrew/etc/ca-certificates/**"}
-	wantAllow := `(allow file-read* (regex ` + sbplString(globToSBPLRegex(ca[0])) + `))`
-
-	// 写级：read allow 在 deny 之前，且无对应写放行。
 	ww := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true,
-		deny: []string{"**/*.pem"}, readAllow: ca})
-	profile := ww[2]
-	denyIdx := strings.Index(profile, `(deny file-read* (regex "^(.*)?/[^/]*\\.pem$"))`)
-	allowIdx := strings.Index(profile, wantAllow)
-	if denyIdx < 0 || allowIdx < 0 || denyIdx < allowIdx {
-		t.Fatalf("CA read allow must not override deny (denyIdx=%d allowIdx=%d): %s", denyIdx, allowIdx, profile)
-	}
-	if !strings.Contains(profile, `(allow file-read* (regex `+sbplString(globToSBPLRegex(ca[1]))+`))`) {
-		t.Fatalf("missing CA dir read allow: %s", profile)
-	}
-	if strings.Contains(profile, `(allow file-write* (regex `+sbplString(globToSBPLRegex(ca[0]))+`))`) {
-		t.Fatalf("CA read allow must not come with file-write* allow: %s", profile)
-	}
-
-	// read-only 同样放行（两种 level 都只有只读规则）。
-	ro := seatbeltArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, readAllow: ca})
-	if !strings.Contains(ro[2], wantAllow) {
-		t.Fatalf("read-only profile missing CA read allow: %s", ro[2])
-	}
-
-	// 无 readAllow 时不输出任何 CA 规则（零值安全）。
-	plain := seatbeltArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, extra: []string{"/ws", "/private/tmp"}})
-	if strings.Contains(plain[2], "cert.pem") {
-		t.Fatalf("profile without readAllow must not emit CA rules: %s", plain[2])
+		deny: []string{"**/*.pem"}, writeAllow: []string{"/ws/**/*.pem"}})
+	if strings.Contains(ww[2], "(allow file-read*") {
+		t.Fatalf("profile must not emit file-read* allow rules: %s", ww[2])
 	}
 }
 
-func TestSeatbeltDenyWinsOverAllow(t *testing.T) {
+func TestSeatbeltDenyWinsOverWriteAllow(t *testing.T) {
 	for _, lv := range []int{1, 2, 9} {
 		pat := "/ws/**/.env"
-		spec := confineSpec{level: lv, workdir: "/outside", argv: []string{"true"}, netOpen: true, deny: []string{"**/.env"}, readAllow: []string{pat}, writeAllow: []string{pat}}
+		spec := confineSpec{level: lv, workdir: "/outside", argv: []string{"true"}, netOpen: true, deny: []string{"**/.env"}, writeAllow: []string{pat}}
 		p := seatbeltArgs(spec)[2]
-		read := strings.Index(p, "(allow file-read* (regex "+sbplString(globToSBPLRegex(pat))+")")
-		deny := strings.Index(p, "(deny file-read* (regex "+sbplString(globToSBPLRegex("**/.env"))+")")
-		if read < 0 || deny < read {
-			t.Fatalf("deny must win: %s", p)
+		denyRead := strings.Index(p, "(deny file-read* (regex "+sbplString(globToSBPLRegex("**/.env"))+")")
+		denyWrite := strings.Index(p, "(deny file-write* (regex "+sbplString(globToSBPLRegex("**/.env"))+")")
+		if denyRead < 0 || denyWrite < 0 {
+			t.Fatalf("read/write deny rules missing: %s", p)
 		}
-		hasWrite := strings.Contains(p, "(allow file-write* (regex "+sbplString(globToSBPLRegex(pat))+")")
-		if hasWrite != (lv >= 2) {
+		// 读方向不再有白名单 allow（读默认开放）
+		if strings.Contains(p, "(allow file-read* (regex "+sbplString(globToSBPLRegex(pat))+")") {
+			t.Fatalf("read allow must not be emitted: %s", p)
+		}
+		allowIdx := strings.Index(p, "(allow file-write* (regex "+sbplString(globToSBPLRegex(pat))+")")
+		if (allowIdx >= 0) != (lv >= 2) {
 			t.Fatalf("write glob level %d: %s", lv, p)
+		}
+		// SBPL 后匹配覆盖先匹配：deny 必须在写 allow 之后输出
+		if allowIdx >= 0 && denyWrite < allowIdx {
+			t.Fatalf("deny must come after write allow: %s", p)
 		}
 		if strings.Contains(p, `(allow file-write* (subpath "/outside"))`) {
 			t.Fatal("cwd granted access")
@@ -310,11 +295,12 @@ func TestGlobToSBPLRegex(t *testing.T) {
 }
 
 // bwrap deny 隔离实例化（真实文件系统判定，t.TempDir 场景）：
-// 字面目录 → --tmpfs；字面文件 → --ro-bind /dev/null；尾 /** 剥目录；
-// ** 开头 → $HOME 根级锚定（t.Setenv 指向临时目录）。
+// 字面文件 → /dev/null 覆盖；字面目录 / 尾 /** → tmpfs；** 开头 →
+// $HOME 起步递归（t.Setenv 指向临时目录）；不存在 → 跳过。
 // 注意：fixture 命名必须避开宿主默认 deny 表形态（*.pem/.ssh/id_ed25519* 等）——
 // 本测试跑在平台自身沙箱内（exec 通道）时，对命中默认表名的路径 os.Stat
 // 得 EPERM，覆盖项丢失造成假失败（实测 2026-09-05）。
+// 每个形态单独实例化：父目录目标会剪掉子孙（覆盖等价），混在一组会互相吞并。
 func TestBwrapDenyArgs(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "secret.dat")
@@ -334,14 +320,6 @@ func TestBwrapDenyArgs(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 
-	patterns := []string{
-		dir,                // 字面目录
-		file,               // 字面文件
-		sub + "/**",        // 尾 ** → 目录
-		"**/.testdeny/**",  // home 锚定目录
-		"**/testkey_*",     // home 锚定文件 glob
-		"/nonexistent-zzz", // 不存在 → 跳过
-	}
 	// unix socket → /dev/null 覆盖（connect 隔离，对齐 seatbelt network-outbound）
 	var sockPath string
 	if runtime.GOOS != "windows" {
@@ -351,24 +329,112 @@ func TestBwrapDenyArgs(t *testing.T) {
 			t.Fatalf("listen unix: %v", err)
 		}
 		t.Cleanup(func() { ln.Close() })
-		patterns = append(patterns, sockPath)
 	}
 
-	got := bwrapDenyArgs(patterns)
-	for _, want := range []string{"--tmpfs", dir, "--ro-bind", "/dev/null", file,
-		"--tmpfs", sub, "--tmpfs", filepath.Join(home, ".testdeny"),
-		"--ro-bind", "/dev/null", filepath.Join(home, "testkey_x")} {
-		if !contains(got, want) {
-			t.Fatalf("bwrapDenyArgs missing %q: %v", want, got)
+	overlayFor := func(pat string) []string {
+		t.Helper()
+		return bwrapDenyArgs(mustDenyTargets(t, []string{pat}))
+	}
+	if got := overlayFor(file); !contains(got, "--ro-bind", "/dev/null", file) {
+		t.Fatalf("literal file cover missing: %v", got)
+	}
+	if got := overlayFor(sub + "/**"); !contains(got, "--tmpfs", sub) {
+		t.Fatalf("subtree dir cover missing: %v", got)
+	}
+	if got := overlayFor("**/.testdeny/**"); !contains(got, "--tmpfs", filepath.Join(home, ".testdeny")) {
+		t.Fatalf("home-anchored dir cover missing: %v", got)
+	}
+	if got := overlayFor("**/testkey_*"); !contains(got, "--ro-bind", "/dev/null", filepath.Join(home, "testkey_x")) {
+		t.Fatalf("home-anchored glob cover missing: %v", got)
+	}
+	if sockPath != "" {
+		if got := overlayFor(sockPath); !contains(got, "--ro-bind", "/dev/null", sockPath) {
+			t.Fatalf("socket cover missing: %v", got)
 		}
 	}
-	if sockPath != "" && !contains(got, "--ro-bind", "/dev/null", sockPath) {
-		t.Fatalf("bwrapDenyArgs missing socket cover %q: %v", sockPath, got)
-	}
 	// 不存在的路径不产出覆盖（不可读无害）
-	if contains(got, "/nonexistent-zzz") {
+	if got := overlayFor("/nonexistent-zzz"); len(got) != 0 {
 		t.Fatalf("nonexistent deny target should be skipped: %v", got)
 	}
+	// 父目录剪枝：字面目录目标覆盖其子孙，子目标不再单独覆盖。
+	targets := mustDenyTargets(t, []string{dir, file, sub + "/**"})
+	if len(targets) != 1 || targets[0] != dir {
+		t.Fatalf("nested targets must collapse to parent dir: %v", targets)
+	}
+}
+
+// validateProcessPolicy（windows）：写白名单 + deny（per-call ACE）可落地；
+// 写全放（fs_policy=open 写级）与网络管控仍拒绝；读级 fsOpen 无影响。
+func TestWindowsPolicyValidation(t *testing.T) {
+	for _, ok := range []confineSpec{
+		{level: proto.LevelWrite, netOpen: true, deny: []string{"C:/Users/x/.ssh/**"}},
+		{level: proto.LevelRead, netOpen: true, fsOpen: true},
+		{level: proto.LevelWrite, netOpen: true, writeAllow: []string{"C:/work/**"}},
+	} {
+		if err := validateProcessPolicy(ok, "windows"); err != nil {
+			t.Fatalf("windows policy must be accepted (%+v): %v", ok, err)
+		}
+	}
+	for _, bad := range []confineSpec{
+		{level: proto.LevelWrite, netOpen: true, fsOpen: true},
+		{level: proto.LevelWrite, fsOpen: true},
+		{level: proto.LevelWrite},
+	} {
+		if err := validateProcessPolicy(bad, "windows"); err == nil {
+			t.Fatalf("windows unenforceable policy accepted: %+v", bad)
+		}
+	}
+}
+
+// denyCoverAll 形态判定：支持形态（字面、尾 /**、单 glob、** 递归）；
+// 不可实例化形态（无字面前缀的全 glob）返回错误；子孙目标被父目录剪枝。
+func TestDenyCoverAll(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "secret.dat")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	deep := filepath.Join(sub, "deep")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deepFile := filepath.Join(deep, "probe_key.dat")
+	if err := os.WriteFile(deepFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	targets, err := denyCoverAll([]string{file, sub + "/**", deepFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(targets, file) || !contains(targets, sub) {
+		t.Fatalf("targets = %v", targets)
+	}
+	if contains(targets, deepFile) {
+		t.Fatalf("nested target must be pruned by parent dir: %v", targets)
+	}
+
+	targets, err = denyCoverAll([]string{dir + "/**/probe_key.dat"})
+	if err != nil || !contains(targets, deepFile) {
+		t.Fatalf("recursive ** targets = %v (%v)", targets, err)
+	}
+
+	for _, bad := range []string{"**", "*/x", "*"} {
+		if _, err := denyCoverAll([]string{bad}); err == nil {
+			t.Fatalf("denyCoverAll(%q) accepted unsupported form", bad)
+		}
+	}
+}
+
+// mustDenyTargets 实例化 deny 模式（测试 helper）。
+func mustDenyTargets(t *testing.T, pats []string) []string {
+	t.Helper()
+	targets, err := denyCoverAll(pats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return targets
 }
 
 // rlimitArgs 三端同一组上限：AS 4GiB / NOFILE 1024 / CPU 600 /
@@ -493,21 +559,21 @@ func TestSeatbeltNetForms(t *testing.T) {
 func TestBwrapNetAndFsOpen(t *testing.T) {
 	argv := []string{"bash", "-c", "echo hi"}
 
-	deny := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv}, nil, nil)
+	deny := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv}, nil, nil, nil)
 	if !contains(deny, "--unshare-net") {
 		t.Fatalf("deny mode missing --unshare-net: %v", deny)
 	}
-	open := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true}, nil, nil)
+	open := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true}, nil, nil, nil)
 	if contains(open, "--unshare-net") {
 		t.Fatalf("open mode should not unshare net: %v", open)
 	}
-	// fsOpen（写级）：--bind / /
-	fsOpen := bwrapArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, fsOpen: true}, nil, nil)
+	// fsOpen（写级）：--bind / /（读开放 + 写全放）
+	fsOpen := bwrapArgs(confineSpec{level: proto.LevelWrite, workdir: "/ws", argv: argv, netOpen: true, fsOpen: true}, nil, nil, nil)
 	if !contains(fsOpen, "--bind", "/", "/") {
 		t.Fatalf("fs_open write should rw-bind root: %v", fsOpen)
 	}
 	// fsOpen 不影响 read-only 级（仍是 ro-bind）
-	fsOpenRO := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, fsOpen: true}, nil, nil)
+	fsOpenRO := bwrapArgs(confineSpec{level: proto.LevelRead, workdir: "/ws", argv: argv, netOpen: true, fsOpen: true}, nil, nil, nil)
 	if !contains(fsOpenRO, "--ro-bind", "/", "/") || contains(fsOpenRO, "--bind", "/", "/") {
 		t.Fatalf("fs_open read-only should keep ro-bind root: %v", fsOpenRO)
 	}

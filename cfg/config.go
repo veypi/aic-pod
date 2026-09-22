@@ -76,15 +76,19 @@ type Options struct {
 	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
 	ExecDeny   []string `json:"exec_deny" yaml:"exec_deny" desc:"denied registered command names or *"`
 	ExecAllow  []string `json:"exec_allow" yaml:"exec_allow" desc:"allowed registered command names or *"`
-	FsPolicy   string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs default stance: deny (allow only) | open (all except fs_deny)"`
-	FsDeny     []string `json:"fs_deny" yaml:"fs_deny" desc:"denied path globs (always deny reads and writes)"`
-	FsAllow    []string `json:"fs_allow" yaml:"fs_allow" desc:"allowed paths: read/write by default; ro: prefix grants read only"`
+	FsPolicy   string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write stance: deny (writable via rules/roots only) | open (all writes except deny rules); reads are open except deny rules"`
+	FsRules    []string `json:"fs_rules" yaml:"fs_rules" desc:"ordered fs rules: 'deny:|ro:|rw:' + path glob, last match wins; bare path covers its subtree; global patterns are rejected"`
+	FsGrants   []string `json:"fs_grants" yaml:"fs_grants" desc:"permanent grant rules appended after fs_rules (managed by exec grant --permanent)"`
 	NetPolicy  string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
-	NetDeny    []string `json:"net_deny" yaml:"net_deny" desc:"denied outbound targets host:port (always wins over allow)"`
-	NetAllow   []string `json:"net_allow" yaml:"net_allow" desc:"allowed outbound targets host:port (builtin localhost:*; bare host = all ports)"`
+	NetRules   []string `json:"net_rules" yaml:"net_rules" desc:"ordered net rules: 'allow:|deny:' + host[:port], last match wins (builtin allow localhost:* stays first)"`
+	NetGrants  []string `json:"net_grants" yaml:"net_grants" desc:"permanent grant rules appended after net_rules (managed by exec grant --permanent)"`
 	SshPolicy  string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
-	SshDeny    []string `json:"ssh_deny" yaml:"ssh_deny" desc:"denied ssh targets host[:port] (always wins over allow)"`
-	SshAllow   []string `json:"ssh_allow" yaml:"ssh_allow" desc:"allowed ssh targets host[:port] (bare host = all ports)"`
+	SshRules   []string `json:"ssh_rules" yaml:"ssh_rules" desc:"ordered ssh rules: 'allow:|deny:' + host[:port], last match wins"`
+	SshGrants  []string `json:"ssh_grants" yaml:"ssh_grants" desc:"permanent grant rules appended after ssh_rules (managed by exec grant --permanent)"`
+
+	// deprecated 是 LoadFile 检出的废弃授权键（fs_deny 等）：点名报错直到显式重写
+	// 保存（permission_rules.md §6，不静默迁移）。非序列化字段。
+	deprecated []string
 }
 
 // Global 全局有效配置：NewOptions 初始化 → Load 填充文件值 →
@@ -160,9 +164,9 @@ func (o *Options) Normalize() {
 func (o *Options) ApplyConfigIssues(issues []flags.ConfigIssue) {
 	fields := map[string]any{
 		"exec_policy": &o.ExecPolicy, "exec_allow": &o.ExecAllow, "exec_deny": &o.ExecDeny,
-		"fs_policy": &o.FsPolicy, "fs_allow": &o.FsAllow, "fs_deny": &o.FsDeny,
-		"net_policy": &o.NetPolicy, "net_allow": &o.NetAllow, "net_deny": &o.NetDeny,
-		"ssh_policy": &o.SshPolicy, "ssh_allow": &o.SshAllow, "ssh_deny": &o.SshDeny,
+		"fs_policy": &o.FsPolicy, "fs_rules": &o.FsRules, "fs_grants": &o.FsGrants,
+		"net_policy": &o.NetPolicy, "net_rules": &o.NetRules, "net_grants": &o.NetGrants,
+		"ssh_policy": &o.SshPolicy, "ssh_rules": &o.SshRules, "ssh_grants": &o.SshGrants,
 	}
 	for _, issue := range issues {
 		for name, field := range fields {
@@ -279,10 +283,13 @@ func LogWriter() (io.Writer, error) {
 // 设置面与 bind/unbind 子命令落盘用：基于文件配置修改，flag/env 启动覆盖不落盘。
 // 配置文件不阻断启动和设置：普通字段错误回退默认值；授权字段错误或整体
 // 损坏保留无效标记，阻止设备工具调用和无关配置覆盖，直到显式修正。
+// 检出废弃授权键（fs_deny 等）时记录于 DeprecatedKeys——CheckAuth 点名报错，
+// 经设置面重写保存后自动清除（重写即修复，不做静默迁移）。
 func LoadFile() (*Options, error) {
 	o := NewOptions()
 	if p, err := Path(); err == nil {
 		o.ApplyConfigIssues(flags.LoadCfg(p, o))
+		o.deprecated = scanDeprecatedKeys(p)
 	}
 	o.Normalize()
 	return o, nil
@@ -297,24 +304,25 @@ func Load() (*Options, error) {
 	return o, err
 }
 
-// authMu 守护执行策略十二键的并发读写：api.SetConfig（用户操作）与
+// authMu 守护执行策略配置的并发读写：api.SetConfig（用户操作）与
 // host grant --permanent（AI 经审批）两条写入路径共用。
 var authMu sync.RWMutex
 
-// AuthCfg 是四域执行策略快照（policy/deny/allow × fs/exec/net/ssh）。
+// AuthCfg 是四域执行策略快照（exec 保持 policy/deny/allow 三键；
+// fs/net/ssh 为 policy + 有序规则表 rules + 永久授权表 grants）。
 type AuthCfg struct {
 	ExecPolicy string
 	ExecDeny   []string
 	ExecAllow  []string
 	FsPolicy   string
-	FsDeny     []string
-	FsAllow    []string
+	FsRules    []string
+	FsGrants   []string
 	NetPolicy  string
-	NetDeny    []string
-	NetAllow   []string
+	NetRules   []string
+	NetGrants  []string
 	SshPolicy  string
-	SshDeny    []string
-	SshAllow   []string
+	SshRules   []string
+	SshGrants  []string
 }
 
 // AuthSnapshot 返回当前授权配置快照（fsauth/netauth Reconcile 的数据源）。
@@ -350,22 +358,24 @@ func SetAuth(c AuthCfg) {
 	authMu.Lock()
 	defer authMu.Unlock()
 	Global.ExecPolicy, Global.ExecDeny, Global.ExecAllow = NormalizePolicy(c.ExecPolicy, PolicyOpen), c.ExecDeny, c.ExecAllow
-	Global.FsPolicy, Global.FsDeny, Global.FsAllow = NormalizePolicy(c.FsPolicy, PolicyDeny), c.FsDeny, c.FsAllow
-	Global.NetPolicy, Global.NetDeny, Global.NetAllow = NormalizePolicy(c.NetPolicy, PolicyOpen), c.NetDeny, c.NetAllow
-	Global.SshPolicy, Global.SshDeny, Global.SshAllow = NormalizePolicy(c.SshPolicy, PolicyDeny), c.SshDeny, c.SshAllow
+	Global.FsPolicy, Global.FsRules, Global.FsGrants = NormalizePolicy(c.FsPolicy, PolicyDeny), c.FsRules, c.FsGrants
+	Global.NetPolicy, Global.NetRules, Global.NetGrants = NormalizePolicy(c.NetPolicy, PolicyOpen), c.NetRules, c.NetGrants
+	Global.SshPolicy, Global.SshRules, Global.SshGrants = NormalizePolicy(c.SshPolicy, PolicyDeny), c.SshRules, c.SshGrants
 }
 
 // AuthFrom 从 Options 取授权快照（SetAuth 的入参装配）。
 func AuthFrom(o *Options) AuthCfg {
 	return AuthCfg{
 		ExecPolicy: o.ExecPolicy, ExecDeny: o.ExecDeny, ExecAllow: o.ExecAllow,
-		FsPolicy: o.FsPolicy, FsDeny: o.FsDeny, FsAllow: o.FsAllow,
-		NetPolicy: o.NetPolicy, NetDeny: o.NetDeny, NetAllow: o.NetAllow,
-		SshPolicy: o.SshPolicy, SshDeny: o.SshDeny, SshAllow: o.SshAllow,
+		FsPolicy: o.FsPolicy, FsRules: o.FsRules, FsGrants: o.FsGrants,
+		NetPolicy: o.NetPolicy, NetRules: o.NetRules, NetGrants: o.NetGrants,
+		SshPolicy: o.SshPolicy, SshRules: o.SshRules, SshGrants: o.SshGrants,
 	}
 }
 
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。
+// 含废弃授权键（DeprecatedKeys）时保存被阻——重写丢失旧键内容属于静默迁移，
+// 修复路径 = 手工编辑配置文件翻译为新键（与畸形授权同口径：显式修复前不覆盖）。
 func Save(o *Options) error {
 	if err := o.ValidateAuth(); err != nil {
 		return err
@@ -387,15 +397,21 @@ func Save(o *Options) error {
 
 // ValidateAuth rejects malformed execution rules before they become active.
 func (o *Options) ValidateAuth() error {
+	if len(o.deprecated) > 0 {
+		return fmt.Errorf("deprecated auth keys [%s]: rewrite as ordered rule tables "+
+			"(fs_rules: [\"deny:~/**/*.pem\", \"rw:~/.cache/**\"] with deny:/ro:/rw: prefixes, last match wins; "+
+			"net_rules/ssh_rules use allow:/deny: + host[:port]; *_policy stays the fallback stance)",
+			strings.Join(o.deprecated, ", "))
+	}
 	for _, mode := range []string{o.FsPolicy, o.ExecPolicy, o.NetPolicy, o.SshPolicy} {
 		if mode != "" && mode != PolicyOpen && mode != PolicyDeny {
 			return fmt.Errorf("invalid policy %q", mode)
 		}
 	}
-	if err := policy.ValidateFS(o.FsAllow, true); err != nil {
+	if err := policy.ValidateFSRules(o.FsRules); err != nil {
 		return err
 	}
-	if err := policy.ValidateFS(o.FsDeny, false); err != nil {
+	if err := policy.ValidateFSRules(o.FsGrants); err != nil {
 		return err
 	}
 	if err := policy.ValidateExec(o.ExecAllow); err != nil {
@@ -404,12 +420,36 @@ func (o *Options) ValidateAuth() error {
 	if err := policy.ValidateExec(o.ExecDeny); err != nil {
 		return err
 	}
-	for _, list := range [][]string{o.NetAllow, o.NetDeny, o.SshAllow, o.SshDeny} {
-		if err := policy.ValidateEntries(list); err != nil {
+	for _, list := range [][]string{o.NetRules, o.NetGrants, o.SshRules, o.SshGrants} {
+		if err := policy.ValidateTargetRules(list); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// DeprecatedKeys 返回配置文件检出并已废弃的授权键（LoadFile 填充；重写保存后清除）。
+func (o *Options) DeprecatedKeys() []string { return append([]string{}, o.deprecated...) }
+
+// deprecatedAuthKeys 规则表化（permission_rules.md）废弃的授权键：点名报错，不静默迁移。
+var deprecatedAuthKeys = []string{"fs_deny", "fs_allow", "net_deny", "net_allow", "ssh_deny", "ssh_allow"}
+
+// scanDeprecatedKeys 扫描配置文件顶层键，返回其中的废弃授权键。
+// DumpCfg 输出为平铺映射（顶层键无缩进），行扫描足够，不引 yaml 依赖。
+func scanDeprecatedKeys(p string) []string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		for _, k := range deprecatedAuthKeys {
+			if strings.HasPrefix(line, k+":") {
+				out = append(out, k)
+			}
+		}
+	}
+	return out
 }
 
 // LockUpdate serializes local config read-modify-write transactions.

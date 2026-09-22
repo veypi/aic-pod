@@ -32,8 +32,8 @@ func (m *Manager) Spawn(ctx context.Context, opts StartOptions) (*Spawned, error
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
 			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
-			readAllow: opts.ReadPaths, writeAllow: opts.WritePaths,
-			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+			writeAllow: opts.WritePaths,
+			netOpen:    opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})
 		if err != nil {
 			return nil, err

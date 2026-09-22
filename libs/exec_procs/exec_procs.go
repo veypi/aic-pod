@@ -37,7 +37,6 @@ func Output(ctx context.Context) io.Writer { w, _ := ctx.Value(outputKey{}).(io.
 type Entry struct {
 	ID, Command, LogPath, Owner, Digest string
 	RequiredLevel                       int
-	KeepOutput                          bool
 	Started                             time.Time
 	Timeout                             time.Duration
 	pid                                 atomic.Int64
@@ -81,7 +80,6 @@ type Result struct {
 type CallOptions struct {
 	ID, Owner, Digest, Command, LogPath string
 	RequiredLevel                       int
-	KeepOutput                          bool
 	Timeout                             time.Duration
 	AuthorizationDeadline               time.Time
 	// Check revalidates the captured authorization while the execution is alive.
@@ -186,7 +184,7 @@ func (m *Manager) StartCall(wait context.Context, o CallOptions) (*Result, error
 		return nil, wire.Fail("output_conflict", "Output exists or cannot be created; use bg_wait for an existing execution")
 	}
 	run, cancel := context.WithDeadline(context.Background(), end)
-	e := &Entry{RequiredLevel: o.RequiredLevel, KeepOutput: o.KeepOutput, ID: o.ID, Owner: o.Owner, Digest: o.Digest, Command: o.Command, LogPath: o.LogPath, Started: time.Now(), Timeout: time.Until(end), cancel: cancel, done: make(chan struct{}), status: "running"}
+	e := &Entry{RequiredLevel: o.RequiredLevel, ID: o.ID, Owner: o.Owner, Digest: o.Digest, Command: o.Command, LogPath: o.LogPath, Started: time.Now(), Timeout: time.Until(end), cancel: cancel, done: make(chan struct{}), status: "running"}
 	m.tasks[o.ID] = e
 	m.seen[o.ID] = true
 	m.mu.Unlock()
@@ -363,9 +361,7 @@ func (m *Manager) reapLocked() {
 			e.mu.Unlock()
 			if expired {
 				delete(m.tasks, id)
-				if !e.KeepOutput {
-					_ = os.Remove(e.LogPath)
-				}
+				_ = os.Remove(e.LogPath)
 			}
 		}
 	}

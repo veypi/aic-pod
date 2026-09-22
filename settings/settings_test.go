@@ -35,22 +35,22 @@ func writeRawConfig(t *testing.T, body string) {
 // （空数组是 grant --permanent 的唯一回撤出口，不能被无关保存清掉）。
 func TestApplyListSemantics(t *testing.T) {
 	isolateConfigDir(t)
-	writeRawConfig(t, "fs_policy: deny\nfs_allow: [/workspace]\nssh_allow: [a:22]\n")
+	writeRawConfig(t, "fs_policy: deny\nfs_rules: ['rw:/workspace']\nssh_rules: ['allow:a:22']\n")
 	// nil 列表：不动现有清单
 	if err := (&Update{FsPolicy: "deny"}).Apply(); err != nil {
 		t.Fatal(err)
 	}
 	o, err := cfg.LoadFile()
-	if err != nil || len(o.FsAllow) != 1 || o.FsAllow[0] != "/workspace" || len(o.SshAllow) != 1 {
+	if err != nil || len(o.FsRules) != 1 || o.FsRules[0] != "rw:/workspace" || len(o.SshRules) != 1 {
 		t.Fatalf("nil lists must keep current entries: %+v (%v)", o, err)
 	}
 	// 空数组：整体清空
 	empty := []string{}
-	if err := (&Update{FsAllow: &empty}).Apply(); err != nil {
+	if err := (&Update{FsRules: &empty}).Apply(); err != nil {
 		t.Fatal(err)
 	}
 	o, err = cfg.LoadFile()
-	if err != nil || len(o.FsAllow) != 0 {
+	if err != nil || len(o.FsRules) != 0 {
 		t.Fatalf("empty list must clear entries: %+v (%v)", o, err)
 	}
 }

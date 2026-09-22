@@ -37,16 +37,15 @@ type StartOptions struct {
 	// fs_allow + grant fs 临时授权）——fs 与 exec 共用同一份名单。
 	// 每次 Start 读当次值（配置动态生效）；nil = 仅基础白名单。
 	WriteRoots []string
-	// DenyPaths 是预展开的拒绝模式（deny 隔离）：默认读全开
-	//（seatbelt allow default / bwrap 整机 ro-bind），deny 表（fsauth
-	// defaultDenyPaths + cfg fs_deny）经本字段进入沙箱 profile——
-	// fs 工具与 exec 进程共用同一份名单。darwin 读写双拒（regex 规则）；
-	// linux 覆盖挂载（文件写拒/目录写黑洞）。来源 =
-	// Policy.DenyPatterns()（快照，每次 Start 读当次值）。
+	// DenyPaths 是预展开的拒绝模式（deny 隔离，读写双拒）：deny 表（fsauth
+	// defaultDenyPaths + cfg fs_deny）经本字段进入沙箱 profile——fs 工具与
+	// exec 进程共用同一份名单。darwin 为 regex 规则；linux 为覆盖挂载
+	//（目录 tmpfs / 文件与 socket 以 /dev/null 覆盖；形态不可实例化时
+	// 启动前拒绝执行）。来源 = Policy.DenyPatterns()（快照，每次 Start 读当次值）。
 	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
 	DenyPaths []string
-	// ReadPaths and WritePaths are expanded fs allow patterns; deny always wins.
-	ReadPaths  []string
+	// WritePaths 是展开的可写 glob（fs_allow 通配条目；裸路径走 WriteRoots）。
+	// 读方向无白名单：读默认开放（除 deny）。
 	WritePaths []string
 	// FsOpen 是 fs_policy=open 快照：写除 deny 全放（darwin allow file-write*
 	// 打底 / bwrap 整机 rw bind），deny 覆盖仍生效。
@@ -83,8 +82,8 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 		plan, err = planConfined(confineSpec{
 			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
 			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
-			readAllow: opts.ReadPaths, writeAllow: opts.WritePaths,
-			netOpen: opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+			writeAllow: opts.WritePaths,
+			netOpen:    opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
 		})
 		if err != nil {
 			return 0, err

@@ -1,6 +1,6 @@
 // Native processes enforce the host execution policy independently of runtime
-// approval. Read/write allow rules are additive, deny always wins, and cwd grants
-// no access. A backend that cannot enforce a rule rejects execution.
+// approval. Reads are open (deny always wins); writes are additive allow scopes,
+// and cwd grants no access. A backend that cannot enforce a rule rejects execution.
 package exec_procs
 
 import (
@@ -8,12 +8,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 )
@@ -83,8 +85,8 @@ const (
 //   - job：windows Job Object 句柄（资源限制：内存/进程数；其他平台恒 0；
 //     spawn 成功后由 exec_procs assign 子进程，进程结束后随 cleanup 关闭）
 //   - env：附加环境变量（windows：TMP/TEMP 指向私有临时目录）
-//   - cleanup：进程结束后调用（windows：撤销私有临时目录 ACE 并删除 +
-//     关闭 Job Object；其他平台 nil）
+//   - cleanup：进程结束后调用（windows：撤销 per-call deny ACE + 删除私有
+//     临时目录 + 关闭 Job Object；其他平台 nil）
 type launchPlan struct {
 	argv    []string
 	token   uintptr
@@ -106,7 +108,6 @@ type confineSpec struct {
 	extra      []string        // 追加可写根（nil = 仅基础白名单）
 	argv       []string        // 被包装命令
 	deny       []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照）
-	readAllow  []string        // 展开的可读路径
 	writeAllow []string        // 展开的可写 glob（裸路径由 extra 传入）
 	fsOpen     bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
 	netOpen    bool            // net_policy=open：不加网络规则
@@ -152,13 +153,16 @@ func sandboxUnavailable(level int) error {
 // ---- linux: bubblewrap（跨平台编译的纯 argv 构建，测试直接引用）----
 
 // bwrapArgs 构建 bwrap 包装 argv：
-//   - 基础：整机只读挂载（--ro-bind / /）+ /dev + /proc + --die-with-parent
-//     （host 退出沙箱进程组随之终止，与 killEntry 进程组语义一致）
+//   - 基础：整机只读挂载（--ro-bind / /，读默认开放；fs_policy=open 且写级
+//     时改整机 rw bind）+ /dev + /proc + --die-with-parent（host 退出沙箱
+//     进程组随之终止，与 killEntry 进程组语义一致）
 //   - workspace-write（level 2/3/4）：/tmp 换 tmpfs（全新空目录，临时文件
 //     不落盘）+ 工作区可写 bind + 缓存目录（cacheDirs，cacheRoots 采集）
 //     逐个可写 bind
 //   - protectedReadonly：可写根下的敏感子路径（.git 等）以 --ro-bind 覆盖
 //     为只读（bwrap 后绑定覆盖前绑定）
+//   - denyTargets：deny 模式实例化后的覆盖目标（不存在的目标已在实例化时
+//     跳过）
 //   - read-only（level 1）：无任何可写挂载（/dev/null 由 --dev 提供）
 //
 // rlimitArgs 构建 bwrap 资源限制参数段（--rlimit TYPE VALUE ...）。
@@ -189,24 +193,15 @@ func confineRlimits(argv []string) []string {
 	return append([]string{"/bin/sh", "-c", script, "sh"}, argv...)
 }
 
-func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string) []string {
-	// fs_policy=open（写级）：整机只读改整机可写（deny 覆盖挂载仍在后追加，恒优先）。
+func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string, denyTargets []string) []string {
+	// 读默认开放：整机 ro-bind 读视图；fs_policy=open（写级）整机 rw bind。
+	// deny 覆盖挂载在末尾追加，恒优先。
 	args := []string{"bwrap"}
-	if spec.fsOpen {
-		flag := "--ro-bind"
-		if spec.level >= proto.LevelWrite {
-			flag = "--bind"
-		}
-		args = append(args, flag, "/", "/")
-	} else {
-		args = append(args, "--tmpfs", "/")
-		for _, pat := range spec.readAllow {
-			root := strings.TrimSuffix(pat, "/**")
-			if _, err := os.Stat(root); err == nil {
-				args = append(args, "--ro-bind", root, root)
-			}
-		}
+	flag := "--ro-bind"
+	if spec.fsOpen && spec.level >= proto.LevelWrite {
+		flag = "--bind"
 	}
+	args = append(args, flag, "/", "/")
 	args = append(args, "--dev", "/dev", "--proc", "/proc", "--die-with-parent")
 	if !spec.netOpen {
 		// net_policy=deny：--unshare-net 全断（新 net ns 仅 loopback 且未配置——
@@ -230,23 +225,18 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string)
 	}
 	// deny 隔离覆盖（§5.10）：后挂载优先（bwrap 后绑定覆盖前绑定），
 	// 追加在全部 bind 之后；read-only 与 workspace-write 同隔离。
-	// readAllow（系统 CA）并入覆盖判定：deny 实例化当前不涉系统路径
-	//（** 开头 $HOME 锡定 + 字面表）——并入为对齐/未来防护。
-	args = append(args, bwrapDenyArgs(spec.deny)...)
+	args = append(args, bwrapDenyArgs(denyTargets)...)
 	return append(append(args, "--"), spec.argv...)
 }
 
-// bwrapDenyArgs overlays denied paths after allow mounts. Policy validation
-// rejects scopes the mount backend cannot fully enforce before this is called.
-func bwrapDenyArgs(deny []string) []string {
+// bwrapDenyArgs overlays pre-instantiated deny targets after allow mounts.
+func bwrapDenyArgs(targets []string) []string {
 	var args []string
-	for _, pat := range deny {
-		if pat == "" {
+	for _, p := range targets {
+		if p == "" {
 			continue
 		}
-		for _, p := range denyCoverTargets(pat) {
-			args = append(args, overlayArgs(p)...)
-		}
+		args = append(args, overlayArgs(p)...)
 	}
 	return args
 }
@@ -273,30 +263,94 @@ func overlayArgs(p string) []string {
 	return nil
 }
 
-// denyCoverTargets 把一条 deny 模式实例化为目标路径列表。
-func denyCoverTargets(pat string) []string {
-	pat = filepath.ToSlash(pat)
-	if !strings.ContainsAny(pat, "*?") {
-		return []string{pat}
+// denyCoverAll 把一组 deny 模式实例化为覆盖挂载目标：任何形态不可实例化
+// （无字面前缀的全 glob、递归枚举超预算）即返回错误——启动前拒绝执行，
+// 不静默放行。目标去重并丢弃被其他目标覆盖的子孙（先挂父目录、后挂子孙
+// 会失败；父目录覆盖整棵子树已足够）。
+func denyCoverAll(pats []string) ([]string, error) {
+	var out []string
+	for _, pat := range pats {
+		if pat == "" {
+			continue
+		}
+		targets, ok := denyCoverTargets(pat)
+		if !ok {
+			return nil, &proto.DeniedError{Reason: "sandbox cannot enforce host policy: unsupported deny pattern " + pat}
+		}
+		out = append(out, targets...)
 	}
-	// ** 开头（无字面前缀）：home 根级锚定——此形态的字面前缀为空，
-	// 必须优先于尾段剥离（**/.ssh/** 剥尾会得到伪目录 **/.ssh）
-	if strings.HasPrefix(pat, "**/") {
-		return homeAnchorTargets(pat)
+	return pruneCoverTargets(out), nil
+}
+
+// pruneCoverTargets 去重并用路径前缀丢弃被覆盖的子孙目标（排序保证父目录
+// 先入结果集）。
+func pruneCoverTargets(targets []string) []string {
+	seen := map[string]bool{}
+	kept := make([]string, 0, len(targets))
+	for _, t := range targets {
+		t = filepath.ToSlash(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		kept = append(kept, t)
 	}
-	// 尾 /** 或 /*：剥尾段得目录（前缀必须无 glob——否则仍是跨段形态）
-	if idx := strings.LastIndex(pat, "/"); idx >= 0 && !strings.Contains(pat[idx+1:], "/") && strings.Contains(pat[idx+1:], "*") {
-		// 尾段整段是 * 或 **（无其它字符）且前缀无通配 → 目录级
-		tail := pat[idx+1:]
-		if (tail == "*" || tail == "**") && !strings.ContainsAny(pat[:idx], "*?") {
-			return []string{pat[:idx]}
+	sort.Strings(kept)
+	out := kept[:0]
+	for _, t := range kept {
+		covered := false
+		for _, k := range out {
+			if strings.HasPrefix(t, k+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, t)
 		}
 	}
-	// 段内 glob（含 ** 但非尾整段 **）→ 检查是否有 `**` 或 `[`：无法实例化
-	if strings.Contains(pat, "**") || strings.ContainsAny(pat, "[]") {
-		return nil
+	return out
+}
+
+// denyCoverTargets 把一条 deny 模式实例化为覆盖挂载目标（目录 → tmpfs；
+// 普通文件/socket → /dev/null ro-bind；不存在的目标由 overlayArgs 跳过）。
+// 第二个返回值为 false = 形态无法实例化，调用方拒绝执行（fail-closed）。
+//
+// 形态处理（模式已由 fsauth 预展开为 canonical 字面前缀）：
+//   - 纯字面 → 原样
+//   - 尾 /** 且前缀无通配 → 前缀目录整棵子树
+//   - 无 ** 的单 glob → 字面前缀 readdir 枚举
+//   - 含 ** → 字面前缀（** 开头取 $HOME）下递归匹配（fsauth.MatchPattern 同口径）
+func denyCoverTargets(pat string) ([]string, bool) {
+	pat = filepath.ToSlash(pat)
+	if !strings.ContainsAny(pat, "*?") {
+		return []string{pat}, true
 	}
-	// 无 ** 的单 glob：字面前缀 readdir 枚举
+	if !strings.Contains(pat, "**") {
+		return denyGlobTargets(pat)
+	}
+	if dir, ok := denySubtreeDir(pat); ok {
+		return []string{dir}, true
+	}
+	return denyWalkTargets(pat)
+}
+
+// denySubtreeDir 返回「<字面目录>/**」形态的目录。
+func denySubtreeDir(pat string) (string, bool) {
+	const tail = "/**"
+	if !strings.HasSuffix(pat, tail) {
+		return "", false
+	}
+	dir := strings.TrimSuffix(pat, tail)
+	if dir == "" || strings.ContainsAny(dir, "*?") {
+		return "", false
+	}
+	return dir, true
+}
+
+// denyGlobTargets 处理无 ** 的单 glob 段形态：字面前缀 readdir + 段内匹配。
+// 多 glob 段或无字面前缀的形态不可实例化。
+func denyGlobTargets(pat string) ([]string, bool) {
 	segs := strings.Split(pat, "/")
 	lit := 0
 	for _, s := range segs {
@@ -306,25 +360,25 @@ func denyCoverTargets(pat string) []string {
 		lit++
 	}
 	if lit == 0 || lit >= len(segs) {
-		return nil
+		return nil, false
+	}
+	for _, rest := range segs[lit+1:] {
+		if strings.ContainsAny(rest, "*?") {
+			return nil, false
+		}
 	}
 	prefix := strings.Join(segs[:lit], "/")
-	if strings.HasPrefix(pat, "/") {
-		prefix = "/" + prefix
+	if prefix == "" {
+		return nil, false // 形如 /*/x 的无根形态无法静态枚举
 	}
 	st, err := os.Stat(prefix)
 	if err != nil || !st.IsDir() {
-		return nil
+		return nil, true // 前缀不存在/非目录：当前无目标
 	}
-	want := segs[lit] // 仅支持单 glob 段（其余段须字面）
-	for _, rest := range segs[lit+1:] {
-		if strings.ContainsAny(rest, "*?") {
-			return nil
-		}
-	}
+	want := segs[lit]
 	entries, err := os.ReadDir(prefix)
 	if err != nil {
-		return nil
+		return nil, true
 	}
 	var out []string
 	for _, e := range entries {
@@ -332,38 +386,81 @@ func denyCoverTargets(pat string) []string {
 			out = append(out, filepath.Join(prefix, e.Name()))
 		}
 	}
-	return out
+	return out, true
 }
 
-// homeAnchorTargets 把 ** 开头模式锚定到 $HOME 根级：最后一个非 ** 段
-// 为目录名或段内 glob（filepath.Match 匹配 home 直接子级）。
-func homeAnchorTargets(pat string) []string {
-	segs := strings.Split(pat, "/")
-	var anchor string
-	for i := len(segs) - 1; i >= 0; i-- {
-		if segs[i] != "**" && segs[i] != "" {
-			anchor = segs[i]
-			break
-		}
+// denyWalkMaxDirs 限制 ** 模式递归枚举访问的目录数：超限 = 不可实例化
+// （启动前拒绝执行），不静默放行。
+const denyWalkMaxDirs = 50000
+
+// denyWalkTargets 在 ** 模式的字面前缀（** 开头取 $HOME）下递归匹配。
+// 目录命中即记录并停止下探：整棵子树已被覆盖，同时避免嵌套挂载冲突。
+func denyWalkTargets(pat string) ([]string, bool) {
+	root, ok := denyWalkRoot(pat)
+	if !ok {
+		return nil, false
 	}
-	if anchor == "" {
-		return nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	entries, err := os.ReadDir(home)
-	if err != nil {
-		return nil
+	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+		return nil, true // 前缀不存在：当前无目标
 	}
 	var out []string
-	for _, e := range entries {
-		if ok, _ := filepath.Match(anchor, e.Name()); ok {
-			out = append(out, filepath.Join(home, e.Name()))
+	visited := 0
+	var walk func(dir string) bool
+	walk = func(dir string) bool {
+		visited++
+		if visited > denyWalkMaxDirs {
+			return false
 		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return true
+		}
+		for _, e := range entries {
+			p := dir + "/" + e.Name()
+			if fsauth.MatchPattern(pat, p) {
+				out = append(out, p)
+				continue // 命中即覆盖：不再下探（目录整棵子树已覆盖）
+			}
+			if e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+				if !walk(p) {
+					return false
+				}
+			}
+		}
+		return true
 	}
-	return out
+	if !walk(root) {
+		return nil, false
+	}
+	return out, true
+}
+
+// denyWalkRoot 取 ** 模式的递归起点：** 开头（无字面前缀）→ $HOME；
+// 否则为首个通配段之前的字面前缀（无前缀 → 不可实例化）。
+func denyWalkRoot(pat string) (string, bool) {
+	if strings.HasPrefix(pat, "**/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		return filepath.ToSlash(home), true
+	}
+	segs := strings.Split(pat, "/")
+	lit := 0
+	for _, s := range segs {
+		if strings.ContainsAny(s, "*?") {
+			break
+		}
+		lit++
+	}
+	if lit == 0 {
+		return "", false
+	}
+	root := strings.Join(segs[:lit], "/")
+	if root == "" {
+		return "", false // 形如 /*/**/x 的无根形态无法静态枚举
+	}
+	return root, true
 }
 
 // ---- darwin: Seatbelt (sandbox-exec) ----
@@ -372,27 +469,14 @@ func homeAnchorTargets(pat string) []string {
 // 若 /usr/bin/sandbox-exec 被篡改，攻击者已 root——codex 同策略）。
 const macosSeatbeltExecutable = "/usr/bin/sandbox-exec"
 
-// seatbeltArgs emits explicit read/write scopes, followed by unconditional denies.
+// seatbeltArgs locks writes to the granted scopes (reads stay open; deny rules
+// win) and appends unconditional denies.
 func seatbeltArgs(spec confineSpec) []string {
 	forms := []string{
 		"(version 1)",
 		"(allow default)",
 		"(deny file-write*)",
 		`(allow file-write* (literal "/dev/null"))`,
-	}
-	if !spec.fsOpen {
-		forms = append(forms, "(deny file-read*)")
-		// dyld opens the root directory as an openat base; this literal rule
-		// permits that directory only, never its descendants.
-		forms = append(forms, `(allow file-read-data (literal "/"))`)
-		// Runtime path traversal needs metadata on ancestors of readable roots.
-		// This grants no directory listing or file contents outside those roots.
-		for _, root := range readAncestors(spec.readAllow) {
-			forms = append(forms, "(allow file-read-metadata (literal "+sbplString(root)+"))")
-		}
-		for _, pat := range spec.readAllow {
-			forms = append(forms, "(allow file-read* (regex "+sbplString(globToSBPLRegex(pat))+"))")
-		}
 	}
 	if spec.level >= proto.LevelWrite {
 		if spec.fsOpen {
@@ -649,8 +733,15 @@ func validateProcessPolicy(spec confineSpec, platform string) error {
 	fail := func(why string) error {
 		return &proto.DeniedError{Reason: "sandbox cannot enforce host policy: " + why}
 	}
-	if platform == "windows" && (!spec.fsOpen || len(spec.deny) > 0 || !spec.netOpen || len(spec.netDeny) > 0) {
-		return fail("this Windows backend does not implement path read restrictions or network rules")
+	if platform == "windows" {
+		// 受限令牌 + ACL 模型：写白名单（fs_policy=deny）与 deny ACE 均可落地；
+		// 写全放（fs_policy=open 写级）与网络规则无法表达 → 拒绝执行。
+		if spec.fsOpen && spec.level >= proto.LevelWrite {
+			return fail("this Windows backend cannot enforce fs_policy=open writable-everything")
+		}
+		if !spec.netOpen || len(spec.netDeny) > 0 {
+			return fail("this Windows backend does not implement network rules")
+		}
 	}
 	for _, e := range spec.netDeny {
 		if platform != "darwin" || !isLoopbackHost(e.Host) {
@@ -665,11 +756,10 @@ func validateProcessPolicy(spec confineSpec, platform string) error {
 		}
 	}
 	if platform == "linux" {
-		if len(spec.deny) > 0 {
-			return fail("Linux mount confinement cannot enforce path deny rules")
-		}
-		for _, p := range append(append(append([]string{}, spec.readAllow...), spec.writeAllow...), spec.deny...) {
-			if strings.ContainsAny(strings.TrimSuffix(p, "/**"), "*?[") {
+		// 写 glob 需可实例化为 bind 目标；deny 的形态可实例化性由
+		// denyCoverAll（planConfined 内）判定——不可实例化即拒绝执行。
+		for _, p := range spec.writeAllow {
+			if strings.ContainsAny(strings.TrimSuffix(p, "/**"), "*?") {
 				return fail("Linux mount confinement cannot enforce this path glob: " + p)
 			}
 		}
@@ -683,24 +773,4 @@ func literalWriteRoots(patterns []string) []string {
 		roots = append(roots, strings.TrimSuffix(p, "/**"))
 	}
 	return roots
-}
-
-func readAncestors(patterns []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, p := range patterns {
-		if i := strings.IndexAny(p, "*?"); i >= 0 {
-			p = p[:i]
-		}
-		for p = filepath.Dir(p); p != "."; p = filepath.Dir(p) {
-			if !seen[p] {
-				seen[p] = true
-				out = append(out, p)
-			}
-			if p == "/" {
-				break
-			}
-		}
-	}
-	return out
 }

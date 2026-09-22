@@ -92,14 +92,14 @@ aic-pod/
 两道闸（判定唯一权威见 [host_sandbox.md](host_sandbox.md)，实现见 `libs/fsauth`、`libs/netauth`、`libs/exec_procs`）：
 
 - **三域授权**（fs / net / ssh × policy / deny / allow），统一判定式：
-  `deny 命中 → 拒，除非存在更具体的 allow（具体度优先，同精度 deny 胜）；
-  policy=open → 未命中 deny 一律放；policy=deny → 仅 allow 放行`。
-  fs 域读默认开、写受 policy + 内置可写根 + `fs_allow` + 临时 grant 控制（显式 allow 可覆盖 deny）；
+  `deny 读写双拒且恒优先（不可被 allow/grant/审批绕过）；
+  policy=open → 未命中 deny 一律放；policy=deny → 写仅 allow 放行`。
+  fs 域读默认开（除 deny），写受 fs_policy + 内置可写根 + `fs_allow` + 临时 grant 控制；已废除 `ro:` 只读授权（读本就开放）；
   net 域管沙箱内子进程出站（内建 localhost:*）；ssh 域是 ssh/scp 一级工具的目标闸。
   `set_config` 与 `grant <域> <目标> [--permanent]` 动态生效（已启动进程不回溯）。
 - **进程沙箱**：exec 调用默认进沙箱（darwin seatbelt / linux bubblewrap / windows
-  受限令牌 + 能力 SID ACL），按授予等级选 profile（1=read-only，2/3/4/9=workspace-write），
-  叠加 env 敏感变量清洗、资源限制与网络闸；无可用后端 **fail-closed**。
+  受限令牌 + ACL + per-call deny ACE），按授予等级选 profile（1=read-only，2/3/4/9=workspace-write），
+  叠加 env 敏感变量清洗、资源限制与网络闸；后端无法表达的策略在启动前拒绝，无可用后端 **fail-closed**。
   免沙箱唯一通道 = 请求级 `nosandbox` + 单独人工审批（Critical(4)）——审批通过（9）
   本身不豁免沙箱。
 

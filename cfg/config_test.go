@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -155,7 +156,7 @@ func TestNormalizedHomePath(t *testing.T) {
 
 func TestConfigExecutionPolicyRoundTrip(t *testing.T) {
 	isolateConfigDir(t)
-	o := &Options{FsPolicy: PolicyDeny, FsAllow: []string{"/workspace", "ro:/skills/*/**", "ro:C:/public/**"}, ExecPolicy: PolicyDeny, ExecAllow: []string{"git", "json"}, ExecDeny: []string{"bash"}}
+	o := &Options{FsPolicy: PolicyDeny, FsRules: []string{"rw:/workspace", "rw:/skills/*/**", "rw:C:/public/**"}, ExecPolicy: PolicyDeny, ExecAllow: []string{"git", "json"}, ExecDeny: []string{"bash"}}
 	if err := Save(o); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +164,7 @@ func TestConfigExecutionPolicyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(o.FsAllow, got.FsAllow) || !reflect.DeepEqual(o.ExecAllow, got.ExecAllow) || !reflect.DeepEqual(o.ExecDeny, got.ExecDeny) || o.FsPolicy != got.FsPolicy || o.ExecPolicy != got.ExecPolicy {
+	if !reflect.DeepEqual(o.FsRules, got.FsRules) || !reflect.DeepEqual(o.ExecAllow, got.ExecAllow) || !reflect.DeepEqual(o.ExecDeny, got.ExecDeny) || o.FsPolicy != got.FsPolicy || o.ExecPolicy != got.ExecPolicy {
 		t.Fatalf("policy round trip: %+v != %+v", AuthFrom(o), AuthFrom(got))
 	}
 }
@@ -207,7 +208,7 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		t.Fatal(err)
 	}
-	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nbrowser_width: nope\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_allow: [/workspace]\nexec_allow: [git, {}]\n"
+	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nbrowser_width: nope\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_rules: ['rw:/workspace']\nexec_allow: [git, {}]\n"
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +222,7 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != "typo" {
 		t.Fatal("invalid fields did not fall back to defaults")
 	}
-	if !reflect.DeepEqual(o.FsAllow, []string{"/workspace"}) || o.ValidateAuth() == nil {
+	if !reflect.DeepEqual(o.FsRules, []string{"rw:/workspace"}) || o.ValidateAuth() == nil {
 		t.Fatal("valid rule lost or malformed authorization became valid")
 	}
 }
@@ -270,6 +271,48 @@ func TestMalformedAuthorizationPreservedUntilExplicitRepair(t *testing.T) {
 	o.Normalize()
 	if !reflect.DeepEqual(o.ExecDeny, []string{"sh", "bad rule"}) {
 		t.Fatal("deny entries were discarded")
+	}
+}
+
+// TestDeprecatedAuthKeysNamedAndBlockSave：规则表化废弃键被 LoadFile 检出并点名
+// （错误信息带新写法示例），工具与保存被阻直到手工改写——不做静默迁移。
+func TestDeprecatedAuthKeysNamedAndBlockSave(t *testing.T) {
+	isolateConfigDir(t)
+	p, _ := Path()
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := "fs_policy: deny\nfs_deny: [/private/**]\nfs_allow: [/work]\nnet_allow: [example.com:443]\n"
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := o.DeprecatedKeys(), []string{"fs_deny", "fs_allow", "net_allow"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeprecatedKeys = %v, want %v", got, want)
+	}
+	if err := o.ValidateAuth(); err == nil || !strings.Contains(err.Error(), "fs_deny") || !strings.Contains(err.Error(), "fs_rules") {
+		t.Fatalf("deprecated keys not named with rewrite example: %v", err)
+	}
+	if Save(o) == nil {
+		t.Fatal("save must stay blocked until manual rewrite")
+	}
+	// 手工改写后：标记消失，校验通过
+	body2 := "fs_policy: deny\nfs_rules: ['deny:/private/**', 'rw:/work']\nnet_rules: ['allow:example.com:443']\n"
+	if err := os.WriteFile(p, []byte(body2), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o2, err := LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o2.DeprecatedKeys()) != 0 || o2.ValidateAuth() != nil {
+		t.Fatalf("rewritten config should be clean: %v %v", o2.DeprecatedKeys(), o2.ValidateAuth())
+	}
+	if !reflect.DeepEqual(o2.FsRules, []string{"deny:/private/**", "rw:/work"}) {
+		t.Fatalf("fs_rules = %v", o2.FsRules)
 	}
 }
 

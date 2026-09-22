@@ -1,8 +1,11 @@
-// Package fsauth enforces the host's local filesystem policy. Explicit denies
-// take precedence over all grants. Read-only allow rules grant reads; writable
-// allow rules grant reads and writes. A closed policy rejects unmatched paths.
-// Cloud approval never modifies this policy. Native process sandboxes consume
-// the same read/write scopes and denies; each lookup resolves symlinks first.
+// Package fsauth enforces the host's local filesystem policy as one ordered
+// rule table (aic/docs/permission_rules.md): builtin deny rows first, then cfg
+// fs_rules, then permanent fs_grants; the last matching row wins and unmatched
+// paths fall back to fs_policy. Reads are open except deny rows; ro rows poke
+// read-only holes into wider deny rows above them. Session-layer write roots
+// (convenience roots, temp grants) take effect only when the table does not
+// resolve to deny. Native process sandboxes derive their lists from the same
+// table; each lookup resolves symlinks first.
 package fsauth
 
 import (
@@ -25,19 +28,58 @@ type Policy struct {
 	workDir    string // 工作区（cfg work_dir；空 = 无）
 	sessionDir string // 会话区根（$HOME/.aic/sessions）
 	publicDir  string // 公共区（$HOME/.aic）
-	openMode   bool   // fs_policy=open：写除 deny 名单外全放（2 级）
-	readRoots  []string
-	readGlobs  []string
-	extraWrite []string // cfg fs_allow 裸路径条目（canonical 前缀）
-	allowGlobs []string // cfg fs_allow 通配条目（canonicalPattern 展开：精确授权，仍受 deny 限制）
-	deny       []string // 拒绝模式（平台初始表 + cfg fs_deny 叠加，预展开：expandVars + canonicalPattern）
+	openMode   bool   // fs_policy=open：写除 deny 行外全放（2 级）
+	rules      []fsRule
 	grants     map[string][]string
 
 	// baseRoots/decideCaches 预计算（重建点 = New/SetWorkDir/Reconcile，锁内）：
 	// Decide 热路径零 syscall 的前提。派生自上述字段 + 平台缓存候选，禁止绕过
 	// rebuildBaseRootsLocked 直接赋值。
-	baseRoots    []string // workDir + 系统临时目录 + publicDir + extraWrite（全 canonical）
+	baseRoots    []string // workDir + 系统临时目录 + publicDir（全 canonical）
 	decideCaches []string // 工具链缓存目录候选（cacheRootDirs，无存在性探测）
+}
+
+// fsEffect 是规则行的判定效果（policy 包的字符串形态在包边转换）。
+type fsEffect uint8
+
+const (
+	effNone fsEffect = iota // 未命中（走 fs_policy 兜底）
+	effDeny                 // 读写双拒
+	effRO                   // 读开放、写拒（开读洞）
+	effRW                   // 读写
+)
+
+func fsEffectOf(effect string) fsEffect {
+	switch effect {
+	case policy.EffectDeny:
+		return effDeny
+	case policy.EffectRO:
+		return effRO
+	default:
+		return effRW
+	}
+}
+
+func (e fsEffect) String() string {
+	switch e {
+	case effDeny:
+		return policy.EffectDeny
+	case effRO:
+		return policy.EffectRO
+	case effRW:
+		return policy.EffectRW
+	}
+	return ""
+}
+
+// fsRule 是一条编译后的规则行（工具层判定与沙箱名单派生共用同一编译产物）。
+type fsRule struct {
+	eff  fsEffect
+	src  string   // builtin | cfg | grant
+	raw  string   // 原始行（explain/快照用）
+	pats []string // resolve 用全形态：canonical + 裸模式子树展开 + 双拼写
+	root []string // rw 行且为裸模式：写根双形态（沙箱 bind 用）
+	glob bool     // rw 行且为通配模式：pats 即沙箱写 glob
 }
 
 // New 创建 Policy：会话区/公共区首次调用创建（best-effort，失败不阻断——
@@ -55,33 +97,35 @@ func New() *Policy {
 	return p
 }
 
-// rebuildLocked 全量重算派生状态（cfg 白名单/deny + 根基底预计算）。
+// rebuildLocked 全量重算派生状态：有序规则表（builtin deny 出厂初始表 +
+// cfg fs_rules + permanent fs_grants，后命中者胜）+ 根基底预计算。
 // New/Reconcile 的统一出口；锁内调用。
 func (p *Policy) rebuildLocked() {
 	a := cfg.AuthSnapshot()
 	p.openMode = a.FsPolicy == cfg.PolicyOpen
-	var rw, ro []string
-	for _, raw := range a.FsAllow {
-		item, err := policy.ParseFSAllow(raw)
-		if err != nil {
-			continue
-		}
-		if item.ReadOnly {
-			ro = append(ro, item.Path)
-		} else {
-			rw = append(rw, item.Path)
+	rules := make([]fsRule, 0, len(defaultDenyPaths())+len(a.FsRules)+len(a.FsGrants))
+	for _, d := range defaultDenyPaths() {
+		if r, ok := compileFSRule(policy.EffectDeny+":"+d, "builtin"); ok {
+			rules = append(rules, r)
 		}
 	}
-	p.extraWrite, p.allowGlobs = splitAllow(rw)
-	p.readRoots, p.readGlobs = splitAllow(ro)
-	p.readGlobs = append(p.readGlobs, SystemCAReadPatterns()...)
-	p.readRoots = append(p.readRoots, RuntimeReadRoots()...)
-	p.deny = compileDeny(append(defaultDenyPaths(), a.FsDeny...))
+	for _, raw := range a.FsRules {
+		if r, ok := compileFSRule(raw, "cfg"); ok {
+			rules = append(rules, r)
+		}
+	}
+	for _, raw := range a.FsGrants {
+		if r, ok := compileFSRule(raw, "grant"); ok {
+			rules = append(rules, r)
+		}
+	}
+	p.rules = rules
 	p.rebuildBaseRootsLocked()
 }
 
 // rebuildBaseRootsLocked 重算根基底：workDir 变更（SetWorkDir）与 cfg 变更
-// （rebuildLocked）共用；锁内调用。
+// （rebuildLocked）共用；锁内调用。便利根不入规则表——它们只在表判定非 deny
+// 时授写（permission_rules.md §2），天然保持"便利不压 deny"。
 func (p *Policy) rebuildBaseRootsLocked() {
 	roots := []string{}
 	if p.workDir != "" {
@@ -93,9 +137,6 @@ func (p *Policy) rebuildBaseRootsLocked() {
 	roots = append(roots, dualList(tempRoots())...)
 	if p.publicDir != "" {
 		roots = append(roots, dualForms(p.publicDir)...)
-	}
-	for _, e := range p.extraWrite {
-		roots = append(roots, dualForms(e)...)
 	}
 	p.baseRoots = dedupClean(roots)
 	// Decide 侧缓存目录不做存在性探测：前缀匹配对不存在目录天然生效，白名单
@@ -116,7 +157,7 @@ func (p *Policy) SetWorkDir(wd string) {
 	p.rebuildBaseRootsLocked()
 }
 
-// Reconcile 运行配置变更后重载（cfg.Global 已由调用方更新；重算白名单/deny
+// Reconcile 运行配置变更后重载（cfg.Global 已由调用方更新；重算规则表
 // 与根基底预计算）。
 func (p *Policy) Reconcile() {
 	p.mu.Lock()
@@ -139,34 +180,97 @@ func (p *Policy) Grant(sid, path string) {
 	p.grants[sid] = append(p.grants[sid], path)
 }
 
-// OpenMode 报告 fs_policy 是否为 open（写除 deny 全放）——沙箱 profile
-// 生成用（darwin allow file-write* 打底 / bwrap 整机 rw，deny 覆盖仍生效）。
+// OpenMode 报告 fs_policy 是否为 open（写除 deny 行全放）——沙箱 profile
+// 生成用（darwin allow file-write* 打底 / bwrap 整机 rw，deny 行仍生效）。
 func (p *Policy) OpenMode() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.openMode
 }
 
-// DenyPatterns 返回预展开的 deny 模式快照（compileDeny 产物：变量展开 +
-// canonical 字面前缀）——exec 沙箱拒绝规则（§5.10 deny 隔离）与 fs 判定共用
-// 同一份名单：cfg fs_deny / set_config 变更经 Reconcile 重算后，
-// 本次调用的 Start 即取到新名单（沙箱每次 Start 构造 profile）。
-func (p *Policy) DenyPatterns() []string {
+// resolveLocked 顺序求值规则表：按拼接序逐条匹配，最后命中者胜；未命中返回 effNone。
+func (p *Policy) resolveLocked(cpath string) fsEffect {
+	eff := effNone
+	for _, r := range p.rules {
+		for _, pat := range r.pats {
+			if matchPattern(pat, cpath) {
+				eff = r.eff
+				break
+			}
+		}
+	}
+	return eff
+}
+
+// RuleInfo 是规则表的只读快照行（M3 沙箱行序映射与 explain 干跑用）。
+type RuleInfo struct {
+	Effect   string   // deny | ro | rw
+	Source   string   // builtin | cfg | grant
+	Raw      string   // 原始规则行
+	Patterns []string // 编译后的匹配形态
+}
+
+// Rules 返回有序规则表快照（拼接序 = 匹配序）。
+func (p *Policy) Rules() []RuleInfo {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	out := make([]string, len(p.deny))
-	copy(out, p.deny)
+	out := make([]RuleInfo, len(p.rules))
+	for i, r := range p.rules {
+		out[i] = RuleInfo{Effect: r.eff.String(), Source: r.src, Raw: r.raw, Patterns: append([]string{}, r.pats...)}
+	}
 	return out
 }
 
-// DenyHit rejects grant targets covered by a local deny. No allow overrides it.
+// DenyPatterns 返回全部 deny 行的编译模式快照——exec 沙箱拒绝规则
+// （§5.10 deny 隔离）与 fs 判定同源派生；cfg 变更经 Reconcile 重算后，
+// 本次调用的 Start 即取到新名单（沙箱每次 Start 构造 profile）。
+// 注意（M3 前）：沙箱按 deny 行全量落隔离，不表达 deny 行之内的 ro/rw 洞——
+// 洞内目标在沙箱内仍被拒（fail-closed），仅工具层放行（permission_rules.md §5）。
+func (p *Policy) DenyPatterns() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []string
+	for _, r := range p.rules {
+		if r.eff == effDeny {
+			out = append(out, r.pats...)
+		}
+	}
+	return dedupClean(out)
+}
+
+// DenyHit 报告路径的表判定终局是否为 deny（temp grant 校验用：
+// deny 终局拒绝申请——session 层不得放宽表判定的 deny，§2 硬底线）。
 func (p *Policy) DenyHit(path string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.denyHit(canonical(path))
+	return p.resolveLocked(canonical(path)) == effDeny
 }
 
-// WriteRootsFor 返回 sid 的沙箱 write bind 白名单（基础白名单 + 配置 +
+// LastDenyRow 报告路径最后命中的 deny 行序号（1 起，拼接序）与原始行——
+// grant --permanent 的覆盖提示用（与 DenyHit 配合：仅当终局为 deny 时展示）。
+func (p *Policy) LastDenyRow(path string) (int, string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	cp := canonical(path)
+	idx := -1
+	for i, r := range p.rules {
+		if r.eff != effDeny {
+			continue
+		}
+		for _, pat := range r.pats {
+			if matchPattern(pat, cp) {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return 0, "", false
+	}
+	return idx + 1, p.rules[idx].raw, true
+}
+
+// WriteRootsFor 返回 sid 的沙箱 write bind 白名单（便利根 + rw 行裸模式根 +
 // 临时 grant，canonical + 去重）——exec_procs workspace-write 的可写根。
 func (p *Policy) WriteRootsFor(sid string) []string {
 	p.mu.RLock()
@@ -184,30 +288,41 @@ type View struct {
 	sid string
 }
 
-// Decide 返回 (read, write) 所需等级：deny 和未匹配路径 → 0/0，
-// 可写 allow → 1/2，只读 allow → 1/0；deny 始终优先。
+// Decide 返回 (read, write) 所需等级：deny 行 → 0/0（读写双拒，session 层不可绕）；
+// rw 行或可写根（便利根/会话区/temp grant）→ 1/2；ro 行或未命中 → 1/0
+// （open 姿态未命中 → 1/2）。
 func (v *View) Decide(path string) (int, int) {
 	return v.p.decide(v.sid, canonical(path))
+}
+
+// DecideNoFollow 是 unlink/rename 语义的判定入口：末段符号链接不跟随（删/挪的
+// 是链接本身，不会触达目标），父链展开、规则表判定不变。rm/mv 类操作必须
+// 走此入口——否则可写根内的外向链接会被无关目标路径的策略拒掉（2026-09-22 实测：
+// .venv/bin/python -> /opt/homebrew/... 致 fs rm 整个 venv 目录被阻）。
+func (v *View) DecideNoFollow(path string) (int, int) {
+	return v.p.decide(v.sid, canonicalNoFollow(path))
 }
 
 func (p *Policy) decide(sid, cpath string) (int, int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.denyHit(cpath) {
+	eff := p.resolveLocked(cpath)
+	if eff == effDeny {
 		return 0, 0
 	}
-	if p.openMode || p.allowHitLocked(cpath) || proto.InWriteRoots(cpath, p.decideRootsLocked(sid)) {
+	if eff == effRW {
 		return 1, 2
 	}
-	if proto.InWriteRoots(cpath, p.readRoots) {
-		return 1, 0
+	// eff ∈ {ro, none}：会话写根（便利根/会话区/temp grant）仅在表判定非 deny
+	// 时生效（§3）——ro 不挡会话写根（temp grant 可把 ro 目标提升为可写）。
+	if proto.InWriteRoots(cpath, p.decideRootsLocked(sid)) {
+		return 1, 2
 	}
-	for _, pat := range p.readGlobs {
-		if matchPattern(pat, cpath) {
-			return 1, 0
-		}
+	// open 姿态写全放，ro 行是其唯一约束（§8.5）。
+	if eff == effNone && p.openMode {
+		return 1, 2
 	}
-	return 0, 0
+	return 1, 0
 }
 
 // decideRootsLocked 返回 sid 的判定根集（纯内存拼接，零 syscall）：
@@ -223,10 +338,9 @@ func (p *Policy) decideRootsLocked(sid string) []string {
 	return roots
 }
 
-// bindRootsLocked 返回 sid 的沙箱 bind 白名单根集：缓存目录经存在性探测
-// （bwrap/seatbelt bind 要求源存在；Start 频率低，实时探测不缓存——目录首次
-// 创建后无需重建即可进 bind）。WriteRootsFor 专用，与 Decide 判定根集的
-// 差异仅在缓存目录的存在性过滤。
+// bindRootsLocked 返回 sid 的沙箱 bind 白名单根集：便利根 + rw 行裸模式根
+// + 会话区 + 临时 grant；缓存目录经存在性探测（bwrap/seatbelt bind 要求源存在；
+// Start 频率低，实时探测不缓存）。WriteRootsFor 专用。
 func (p *Policy) bindRootsLocked(sid string) []string {
 	roots := make([]string, 0, len(p.baseRoots)+8)
 	roots = append(roots, p.baseRoots...)
@@ -235,41 +349,36 @@ func (p *Policy) bindRootsLocked(sid string) []string {
 		roots = append(roots, filepath.Join(p.sessionDir, sid))
 	}
 	roots = append(roots, p.grants[sid]...)
+	for _, r := range p.rules {
+		if r.eff == effRW && !r.glob {
+			roots = append(roots, r.root...)
+		}
+	}
 	return roots
 }
 
-// denyHit 判定 canonical 路径命中预展开 deny 表（原始表，不含例外）。
-func (p *Policy) denyHit(cpath string) bool {
-	for _, pat := range p.deny {
-		if matchPattern(pat, cpath) {
-			return true
+// WritePatternsFor 返回 rw 行通配模式（与写根同源派生，沙箱写 glob 放行用）。
+func (p *Policy) WritePatternsFor(sid string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []string
+	for _, r := range p.rules {
+		if r.eff == effRW && r.glob {
+			out = append(out, r.pats...)
 		}
 	}
-	return false
+	return dedupClean(out)
 }
 
-// allowHitLocked 判定显式可写 allow：裸路径覆盖其子树，通配按 glob 匹配。
-// 路径已 canonical，调用方必须先检查 deny；allow 不豁免任何 deny。
-func (p *Policy) allowHitLocked(cpath string) bool {
-	for _, root := range p.extraWrite {
-		if matchPattern(joinPattern(root, "**"), cpath) {
-			return true
-		}
-	}
-	for _, pat := range p.allowGlobs {
-		if matchPattern(pat, cpath) {
-			return true
-		}
-	}
-	return false
-}
+func (p *Policy) DropSession(sid string) { p.mu.Lock(); defer p.mu.Unlock(); delete(p.grants, sid) }
 
 // joinPattern 拼接「根 + 子模式」（根为 "/" 时不产生 "//"——matchPattern 按 / 分段，
 // 双斜杠会引入空段使模式整体失配）。
 func joinPattern(root, sub string) string {
 	if root == "" {
 		// 空 root 绝不允许拼出 "/**"（匹配全部路径）：返回空串，调用方丢弃。
-		// 2026-09-22：GOCACHE/XDG_CACHE_HOME 未设置 → 空缓存根 → 读锁失效。
+		// 2026-09-22：GOCACHE/XDG_CACHE_HOME 未设置 → 空缓存根曾把读放行名单
+		// 退化成全匹配（读锁失效）；该防护对写根同样成立。
 		return ""
 	}
 	if root == "/" {
@@ -278,95 +387,39 @@ func joinPattern(root, sub string) string {
 	return strings.TrimSuffix(root, "/") + "/" + sub
 }
 
-// ReadPatternsFor is the same read scope used by fs and process confinement.
-func (p *Policy) ReadPatternsFor(sid string) []string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	out := append([]string{}, p.readGlobs...)
-	roots := append(append([]string{}, p.readRoots...), p.decideRootsLocked(sid)...)
-	for _, r := range roots {
-		if r == "" {
-			continue // 空 root 展开成 "/**" = 放行全部路径，必须丢弃
+// compileFSRule 编译一条规则行：policy.ParseFSRule（效果前缀 + 全域禁写校验）
+// + expandVars + canonicalPattern（字面前缀段符号链接展开）+ 裸模式子树展开
+// + 双形态（模式自身是符号链接时两形态是不同的路径串，须都在名单内才能双命中：
+// lstat 查字面形、open/connect 查解析形）。展开失败（未定义变量/无家目录）或
+// 非法行整条跳过（宁缺毋滥——cfg 校验已在加载/保存路径点名报错）。
+func compileFSRule(raw, src string) (fsRule, bool) {
+	eff, pat, err := policy.ParseFSRule(raw)
+	if err != nil {
+		return fsRule{}, false
+	}
+	e, ok := expandVars(pat)
+	if !ok || e == "" {
+		return fsRule{}, false
+	}
+	r := fsRule{eff: fsEffectOf(eff), src: src, raw: raw}
+	cp := canonicalPattern(e)
+	r.pats = append(r.pats, cp)
+	if strings.ContainsAny(e, "*?") {
+		r.glob = true
+		if cp != e {
+			r.pats = append(r.pats, e)
 		}
-		if pat := joinPattern(r, "**"); pat != "" {
-			out = append(out, pat)
+	} else {
+		r.pats = append(r.pats, joinPattern(cp, "**"))
+		if lit := filepath.ToSlash(e); lit != cp {
+			r.pats = append(r.pats, lit, joinPattern(lit, "**"))
+		}
+		if r.eff == effRW {
+			r.root = dualForms(e)
 		}
 	}
-	out = append(out, p.allowGlobs...)
-	// 收口：任何空 pattern 都不能进入沙箱 profile（空 root / 异常条目）。
-	dst := out[:0]
-	for _, s := range out {
-		if s != "" {
-			dst = append(dst, s)
-		}
-	}
-	return dst
-}
-
-// WritePatternsFor adds glob grants to the same write roots used by fs.
-func (p *Policy) WritePatternsFor(sid string) []string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return append([]string{}, p.allowGlobs...)
-}
-func (p *Policy) DropSession(sid string) { p.mu.Lock(); defer p.mu.Unlock(); delete(p.grants, sid) }
-
-// splitAllow 拆分 cfg fs_allow 条目：裸路径（无通配）→ 写白名单根（canonical
-// 前缀，覆盖子树）；带通配条目 → 精确 glob（canonicalPattern 只展开字面前缀，
-// 与 compileDeny 同口径）。两类条目均不能覆盖 deny；展开失败
-// （未定义变量/无家目录）的条目整条跳过（宁缺毋滥，同 compileDeny）。
-func splitAllow(entries []string) (roots, globs []string) {
-	for _, raw := range entries {
-		e, ok := expandVars(strings.TrimSpace(raw))
-		if !ok || e == "" {
-			continue
-		}
-		if strings.ContainsAny(e, "*?") {
-			cp := canonicalPattern(e)
-			globs = append(globs, cp)
-			if cp != e {
-				// symlink 前缀的字面拼写也要覆盖（沙箱按传入串匹配，见 dualForms）。
-				globs = append(globs, e)
-			}
-			continue
-		}
-		roots = append(roots, dualForms(e)...)
-	}
-	return roots, globs
-}
-
-// compileDeny 预展开拒绝模式：expandVars（~ / $VAR / %VAR% / $UserConfigDir）
-// + canonicalPattern（字面前缀段展开符号链接——macOS /var 是 /private/var
-// 的 symlink，用户写 /var/tmp/x/** 与 canonical 路径 /private/var/tmp/... 必须
-// 仍能匹配）。展开失败（未定义变量、无家目录）的条目整条跳过——初始名单已按平台
-// 分表，此规则只防御用户 cfg 条目（写了本平台不存在的变量时宁缺毋滥）。
-//
-// 双形态（2026-09-05）：纯字面条目同时输出 canonical 形与原始展开形——沙箱按系统调用
-// 实际传入的路径串匹配，模式自身是符号链接时（/var/run/docker.sock → 厂商 socket）
-// 两形态是不同的路径串，须都在名单内才能双命中（lstat 查字面形、open/connect 查解析形）。
-// glob 条目仅输出 canonical 形（通配形态天然覆盖两路）。
-func compileDeny(pats []string) []string {
-	out := make([]string, 0, len(pats)*2)
-	seen := map[string]bool{}
-	add := func(s string) {
-		if s == "" || seen[s] {
-			return
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	for _, pat := range pats {
-		e, ok := expandVars(pat)
-		if !ok {
-			continue
-		}
-		add(canonicalPattern(e))
-		if !strings.ContainsAny(e, "*?") {
-			add(joinPattern(canonicalPattern(e), "**"))
-			add(filepath.ToSlash(e))
-		}
-	}
-	return out
+	r.pats = dedupClean(r.pats)
+	return r, true
 }
 
 // Canonical 导出 canonical（包外少量场景用：grant fs 落盘幂等比较等）。
@@ -408,18 +461,23 @@ func canonical(p string) string {
 	return canonical(parent) + "/" + base
 }
 
-func canonicalList(paths []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if e, ok := expandVars(p); ok {
-			out = append(out, canonical(e))
-		}
+// CanonicalNoFollow 导出 canonicalNoFollow（rm/mv 判定与 grant 归一用）。
+func CanonicalNoFollow(p string) string { return canonicalNoFollow(p) }
+
+// canonicalNoFollow 展开父目录符号链接、保留末段字面形（unlink/rename 语义：
+// 系统调用作用于链接本身，判定必须同口径）。父链复用 canonical（含最近存在
+// 祖先回退）；末段为根/退化形态时退回跟随版。
+func canonicalNoFollow(p string) string {
+	if isBareDrive(p) {
+		p += `\`
 	}
-	return out
+	p = filepath.Clean(p)
+	parent := filepath.Dir(p)
+	base := filepath.Base(p)
+	if base == "." || base == string(filepath.Separator) || parent == p {
+		return canonical(p)
+	}
+	return filepath.ToSlash(filepath.Join(canonical(parent), base))
 }
 
 func dedupClean(roots []string) []string {
@@ -436,8 +494,8 @@ func dedupClean(roots []string) []string {
 }
 
 // appendEnvDirs 只追加非空环境变量目录：空值经 joinPattern 会变成 "/**"
-// （匹配全部路径），fs_policy=deny（含默认值）时等于放开全部读——
-// 2026-09-22 修复：GOCACHE/XDG_CACHE_HOME 未设置时读锁失效。
+// （匹配全部路径），写白名单会因此放大到全盘——2026-09-22 修复：
+// GOCACHE/XDG_CACHE_HOME 未设置时空根曾使读放行名单退化为全匹配。
 func appendEnvDirs(dirs []string, names ...string) []string {
 	for _, name := range names {
 		if v := os.Getenv(name); v != "" {
@@ -450,7 +508,7 @@ func appendEnvDirs(dirs []string, names ...string) []string {
 // dualForms 返回路径的 canonical 形与原始字面形（去尾斜杠；相同则只给一个）。
 // 沙箱（seatbelt）按系统调用实际传入的路径串匹配规则：macOS 的 /tmp、/etc、
 // $TMPDIR(/var/folders/…) 都是 symlink 前缀，只留 canonical 形会让字面拼写的
-// 访问（含路径解析的 metadata 读）被拒——与 compileDeny 的「双形态」对称
+// 访问（含路径解析的 metadata 读）被拒——与规则编译的「双形态」对称
 // （2026-09-22）。
 func dualForms(p string) []string {
 	p = strings.TrimSpace(p)
@@ -481,7 +539,7 @@ func dualList(paths []string) []string {
 
 // canonicalPattern 对 glob 模式的字面前缀段（首个含通配符段之前）做
 // canonical 展开：/var/tmp/x/** → /private/var/tmp/x/**（macOS /var symlink）。
-// 纯字面模式整串展开；** 开头的模式无前缀可展开（原样返回）。
+// 纯字面模式（无通配符）：整串展开；** 开头的模式无前缀可展开（原样返回）。
 func canonicalPattern(pat string) string {
 	pat = filepath.ToSlash(pat)
 	segs := strings.Split(pat, "/")
@@ -550,7 +608,7 @@ func expandVars(s string) (string, bool) {
 			break
 		}
 		name := s[i+1 : i+1+j]
-		s = s[:i] + expand(name) + s[i+1+j+1:]
+		s = s[:i] + expand(name) + s[i+j+2:]
 	}
 	return filepath.ToSlash(s), ok
 }

@@ -1,11 +1,12 @@
 //go:build windows
 
-// Windows 沙箱后端（路径 A）：受限令牌（CreateRestrictedToken）+ ACL 写授权，
+// Windows 沙箱后端（路径 A）：受限令牌（CreateRestrictedToken）+ ACL 授权，
 // host 进程内创建令牌后经 SysProcAttr.Token 注入子进程，无独立 runner。
 //
 // 机制（与 dsh sandbox-windows-acl 同模型，Go 原生实现）：
-//   - 受限令牌的 restricting list = logon SID + Everyone（两者必须保留——
-//     进程初始化依赖 Everyone）+ 能力 SID（工作区/私有临时目录）
+//   - 受限令牌的 restricting list = logon SID + Everyone + 用户 SID +
+//     INTERACTIVE/Authenticated Users/BUILTIN Users + 能力 SID（工作区/私有
+//     临时目录）+ per-call deny SID
 //   - 能力 SID 是确定性派生（路径哈希）或随机（私有临时目录）的自定义 SID，
 //     对应目录的 DACL 上授予完全访问 ACE：
 //   - 工作区：standing ACE，幂等授权——每次调用先检查 DACL 是否已有该
@@ -17,12 +18,16 @@
 //     检查（restricting SID 视为唯一 SID 集合）。能力 SID 只对授权目录有
 //     权限，因此受限进程只能写工作区与私有临时目录；其余对象写被拒
 //     （Everyone 可写的对象除外——报告 partial 的固有边界）。
+//   - 读默认开放；fs deny 用 per-call 随机 SID 的完全拒绝 ACE 落地（DENY
+//     置于 ACL 首部、继承到子对象；其他进程无该 SID 不受影响），读写双拒；
+//     进程结束后撤销 ACE（子对象继承副本随父对象 ACL 更新消失）。
 //   - read-only：restricting list 无能力 SID → 除 Everyone 可写对象外全部
 //     写被拒。
 //   - TMP/TEMP 环境变量指向私有临时目录（子进程继承）。
 package exec_procs
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -313,21 +318,20 @@ func probeBackend() sandboxBackend {
 	return backendWindowsAcl
 }
 
-// planConfined（windows）：受限令牌 + ACL 写授权 + Job Object 资源限制。
+// planConfined（windows）：受限令牌 + ACL 授权（写白名单）+ per-call deny ACE
+// + Job Object 资源限制。
 //   - read-only：restricting list 无能力 SID → 除 Everyone 可写对象外全拒
-//   - workspace-write：工作区/缓存目录（fsauth.CacheRoots）/追加根（extra，
-//     v0.14.5 统一名单）standing ACE + per-call 私有临时目录（TMP/TEMP 指向它），
-//     进程结束后清理
+//   - workspace-write：工作区/缓存目录（fsauth.CacheRoots）/追加根（extra）
+//     standing ACE + per-call 私有临时目录（TMP/TEMP 指向它），进程结束后清理
+//   - deny：per-call 随机 SID 加入 restricting list，对每个 deny 目标追加完全
+//     拒绝 ACE（读写双拒、继承到子对象，进程结束后撤销）；模式形态不可
+//     实例化或可达对象加不上 ACE → 拒绝执行（fail-closed）
 //   - 资源限制：Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256），
 //     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
 //   - 返回原样 argv + 令牌句柄 + job 句柄（spawn 后由 exec_procs 使用/关闭）
 //
-// deny 拒绝（读/写）与 fsOpen/net 管控：**windows 侧不实现**（no-op，参数仅保持
-// 签名一致）。受限令牌的 restricting
-// list 必须保留 logon/Everyone/用户 SID（进程初始化依赖，见 createRestrictedToken
-// 注释），而文件读权限普遍授予这些组 → 读全开。per-call 隔离不能改全局
-// DACL（deny ACE 会影响宿主机全部进程）；文件级读拒绝需额外 per-call
-// 质询（能力 SID 只对白名单目录有权限），成本/工程比不适合当前阶段。
+// fsOpen（写全放）与网络规则无法用令牌模型表达，已由 validateProcessPolicy
+// 拒绝；fs_allow 通配写授权（writeAllow）同样无法表达——忽略即少授（安全方向）。
 func planConfined(spec confineSpec) (launchPlan, error) {
 	if err := validateProcessPolicy(spec, "windows"); err != nil {
 		return launchPlan{}, err
@@ -337,7 +341,15 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 	}
 	var extraSids []*windows.SID
 	var tmpDir string
-	cleanup := func() {}
+	// per-call deny ACE：随机 SID + 目标对象完全拒绝（进程结束后撤销）
+	denySid, denyProtected, err := applyDenyACEs(spec.deny)
+	if err != nil {
+		return launchPlan{}, err
+	}
+	if denySid != nil {
+		extraSids = append(extraSids, denySid)
+	}
+	cleanup := func() { revokeDenyACEs(denyProtected, denySid) }
 
 	if spec.level >= proto.LevelWrite {
 		dirs := make([]string, 0, 4)
@@ -375,7 +387,7 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 			return launchPlan{}, fmt.Errorf("sandbox: grant temp: %w", err)
 		}
 		extraSids = append(extraSids, tmpSid)
-		cleanup = func() { os.RemoveAll(tmpDir) } // ACE 随目录删除消失
+		cleanup = func() { revokeDenyACEs(denyProtected, denySid); os.RemoveAll(tmpDir) } // ACE 随目录删除消失
 	}
 
 	tok, err := createRestrictedToken(extraSids)
@@ -392,6 +404,7 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 		return launchPlan{}, fmt.Errorf("sandbox: job object: %w", err)
 	}
 	cleanup = func() {
+		revokeDenyACEs(denyProtected, denySid)
 		os.RemoveAll(tmpDir)
 		closeJob(uintptr(job))
 	}
@@ -464,4 +477,220 @@ func closeToken(token uintptr) {
 	if token != 0 {
 		_ = windows.CloseHandle(windows.Handle(token))
 	}
+}
+
+// ---- per-call deny ACE（fs deny 的 windows 落地）----
+//
+// 每次 planConfined 生成一个随机 SID（S-1-4-<a>-<b>）加入受限令牌的
+// restricting list，并对每个 deny 目标对象追加该 SID 的完全拒绝 ACE：
+//   - SetEntriesInAcl 把新 deny ACE 放在 ACL 首部（先于 allow 求值），
+//     受限检查中先命中拒绝 → 读写双拒（WRITE_DAC/WRITE_OWNER 一并拒，
+//     防沙箱进程自行摘除 ACE）；
+//   - ACE 继承到子对象（目录整棵子树）；
+//   - 该 SID 只存在于本次调用的令牌，宿主机其他进程不受 DACL 变更影响；
+//   - 进程结束后以 REVOKE_ACCESS 撤销（子对象继承副本随父对象 ACL 更新消失）。
+//
+// 可达性判定：加不上 ACE（无 WRITE_DAC）时，若 DACL 未向任何通用 restricted
+// SID 授读/写/执行权（沙箱本就不可达）则跳过（语义等价的无操作）；否则
+// fail-closed 拒绝执行。
+
+// denyAceMask 是 deny ACE 的拒绝掩码：完全拒绝（读/写/执行/删除/改
+// DACL/owner；也是可达性判定时排除元数据位的参考值）。
+const denyAceMask = fileAllAccess
+
+// reachMask 是可达性判定的访问位：读/写/执行/删子项（不含 SYNCHRONIZE/
+// READ_CONTROL 这类元数据位，避免过度保守）。
+const reachMask = 0x120089 | 0x120116 | 0x1200A0 | 0x40
+
+// randomDenySID 生成本次调用的随机 deny SID（两段随机 31 位）。
+func randomDenySID() (*windows.SID, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, err
+	}
+	a := binary.BigEndian.Uint32(b[0:4]) & 0x7fffffff
+	c := binary.BigEndian.Uint32(b[4:8]) & 0x7fffffff
+	return windows.StringToSid(fmt.Sprintf("S-1-4-%d-%d", a, c))
+}
+
+// applyDenyACEs 实例化 deny 模式并对每个目标追加完全拒绝 ACE；返回
+// （SID, 已保护目标, error）。形态不可实例化或可达对象加不上 ACE → 错误
+// （fail-closed）；对受限令牌本就不可达的对象跳过。
+func applyDenyACEs(patterns []string) (*windows.SID, []string, error) {
+	if len(patterns) == 0 {
+		return nil, nil, nil
+	}
+	targets, err := denyCoverAll(patterns)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(targets) == 0 {
+		return nil, nil, nil
+	}
+	sid, err := randomDenySID()
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox: deny sid: %w", err)
+	}
+	restricted := restrictedSIDsForReachability()
+	var protected []string
+	for _, t := range targets {
+		ok, err := addDenyACE(t, sid, restricted)
+		if err != nil {
+			revokeDenyACEs(protected, sid)
+			return nil, nil, err
+		}
+		if ok {
+			protected = append(protected, t)
+		}
+	}
+	return sid, protected, nil
+}
+
+// revokeDenyACEs 撤销本调用追加的 deny ACE（best-effort：残留 ACE 只对随机
+// SID 生效，无安全影响）。
+func revokeDenyACEs(protected []string, sid *windows.SID) {
+	if sid == nil {
+		return
+	}
+	for _, t := range protected {
+		revokeDenyACE(t, sid)
+	}
+}
+
+// addDenyACE 在目标对象上追加 deny SID 的完全拒绝 ACE（继承到子对象）。
+// ok=false 表示对象对受限令牌本就不可达（DACL 未向通用 restricted SID 授
+// 访问权）——跳过是语义等价的无操作；其余失败返回错误（fail-closed）。
+func addDenyACE(path string, denySid *windows.SID, restricted []*windows.SID) (bool, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		// 宿主无 READ_CONTROL：读/改该对象 DACL 均不可行；受限令牌同样拿不到
+		// 读授权（READ_CONTROL 普遍对所有用户开放），跳过等价无操作。
+		return false, nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, nil
+	}
+	entries := []windows.EXPLICIT_ACCESS{{
+		AccessPermissions: denyAceMask,
+		AccessMode:        windows.DENY_ACCESS,
+		Inheritance:       subContainersAndObjectsInherit,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeValue: windows.TrusteeValueFromSID(denySid),
+		},
+	}}
+	if dacl == nil {
+		// NULL DACL = 所有人完全访问：追加 Everyone 完全允许条目保持既有
+		// 语义（否则只含 deny 的 DACL 会锁死其他进程）。
+		everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+		if err != nil {
+			return false, fmt.Errorf("sandbox: deny %s: %w", path, err)
+		}
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: fileAllAccess,
+			AccessMode:        windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeValue: windows.TrusteeValueFromSID(everyone),
+			},
+		})
+	}
+	newAcl, err := windows.ACLFromEntries(entries, dacl)
+	if err != nil {
+		return false, fmt.Errorf("sandbox: deny acl %s: %w", path, err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, newAcl, nil); err != nil {
+		if aclReachable(dacl, restricted) {
+			return false, fmt.Errorf("sandbox: deny %s: %w", path, err)
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// revokeDenyACE 撤销本调用追加的 deny ACE（REVOKE_ACCESS 删除该 trustee 的
+// 全部 ACE；子对象继承副本随父对象 ACL 更新自动消失）。best-effort。
+func revokeDenyACE(path string, denySid *windows.SID) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return
+	}
+	entries := []windows.EXPLICIT_ACCESS{{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeValue: windows.TrusteeValueFromSID(denySid),
+		},
+	}}
+	newAcl, err := windows.ACLFromEntries(entries, dacl)
+	if err != nil {
+		return
+	}
+	_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, newAcl, nil)
+}
+
+// restrictedSIDsForReachability 汇总 restricting list 中的通用 SID
+// （Everyone/INTERACTIVE/Authenticated Users/BUILTIN Users/用户/logon）——
+// 「加不上 deny ACE 时对象对沙箱是否可达」的判定集合。
+func restrictedSIDsForReachability() []*windows.SID {
+	out := make([]*windows.SID, 0, 6)
+	for _, wks := range []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinWorldSid,
+		windows.WinInteractiveSid,
+		windows.WinAuthenticatedUserSid,
+		windows.WinBuiltinUsersSid,
+	} {
+		if s, err := windows.CreateWellKnownSid(wks); err == nil {
+			out = append(out, s)
+		}
+	}
+	tok := windows.GetCurrentProcessToken()
+	if s, err := userSidOf(tok); err == nil {
+		out = append(out, s)
+	}
+	if s, err := logonSidOf(tok); err == nil {
+		out = append(out, s)
+	}
+	return out
+}
+
+// aclReachable 判定 DACL 是否向给定 SID 集授予读/写/执行/删子项权。
+// nil DACL = 所有人完全访问 → 恒可达；解析异常按可达处理（保守）。
+func aclReachable(dacl *windows.ACL, sids []*windows.SID) bool {
+	if dacl == nil {
+		return true
+	}
+	head := (*[8]byte)(unsafe.Pointer(dacl))
+	aclSize := int(binary.LittleEndian.Uint16(head[2:4]))
+	aceCount := int(binary.LittleEndian.Uint16(head[4:6]))
+	off := 8
+	for i := 0; i < aceCount; i++ {
+		if off+8 > aclSize {
+			return true
+		}
+		ace := (*windows.ACE_HEADER)(unsafe.Pointer(uintptr(unsafe.Pointer(dacl)) + uintptr(off)))
+		if int(ace.AceSize) < 8 || off+int(ace.AceSize) > aclSize {
+			return true
+		}
+		if ace.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+			aa := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(ace))
+			if aa.Mask&reachMask != 0 {
+				aceSid := (*windows.SID)(unsafe.Pointer(&aa.SidStart))
+				for _, s := range sids {
+					if s != nil && aceSid.String() == s.String() {
+						return true
+					}
+				}
+			}
+		}
+		off += int(ace.AceSize)
+	}
+	return false
 }

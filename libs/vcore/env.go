@@ -43,7 +43,8 @@ type Env struct {
 	ImageData bool
 	// Policy 是统一文件权限模型（aic todo v0.14.5 §2；fsauth.Policy 的会话视图）：
 	// 文件类指令按 canonical 路径动态升级 required——deny → DeniedError（0 级，
-	// 不可审批绕过）；白名单外写 → ApprovalError（3 级，审批/grant fs 后放行）。
+	// 读写双拒，不可审批绕过）；写白名单外（写 0 级）同样 DeniedError——本地
+	// 规则，grant/审批不可绕过；可写白名单/open → 1/2，按 granted 数字比较放行。
 	// nil = 无路径策略（cloud 信任域 GatedFS 独立分级 / page）。
 	Policy PathPolicy
 	// Granted 是当次调用的授予等级（host = req.GrantedLevel；审批通过 = 9）。
@@ -54,24 +55,58 @@ type Env struct {
 // PathPolicy 是 Env 的文件路径策略接口（v0.14.5 §2 注入式：实现由 fsauth 提供，
 // vcore 只依赖签名——fsauth 侧 canonical 判定，注入侧保证 fs 与 exec 同实例）。
 type PathPolicy interface {
-	// Decide 返回路径的 (read, write) 所需等级：deny/未匹配 → 0/0，
-	// 可写 allow → 1/2，只读 allow → 1/0；deny 始终优先。
+	// Decide 返回路径的 (read, write) 所需等级：deny → 0/0；可写白名单/open
+	// → 1/2；其余 → 1/0（读默认开放，写仅白名单）；deny 始终优先。
 	// 入参为 Resolve/CheckPath 之后的绝对路径；实现内部做 canonical 展开。
 	Decide(path string) (read, write int)
 }
 
+// NoFollowPolicy 是可选的策略扩展：rm/mv 等不跟随末段的操作用 unlink 语义判定
+// （fsauth.View 实现；未实现的策略回退 Decide——测试桩与旧实现语义不变）。
+type NoFollowPolicy interface {
+	// DecideNoFollow 同 Decide，但末段符号链接不展开（删/挪的是链接本身）。
+	DecideNoFollow(path string) (read, write int)
+}
+
 // CheckPolicy 文件类指令的路径策略门（Policy 非 nil 时）：write=false 查 read 级。
-// deny（0）→ DeniedError；granted >= need → 放行；否则 ApprovalError（waiting，
-// 审批通过 granted=9 重发放行——与 GatedFS/host checkGranted 同语义）。
+// deny 命中（读 0 级）→ DeniedError（本地 deny 读写双拒，审批/grant 不可绕过）；
+// granted >= need → 放行；否则 DeniedError 并提示可申请 grant（白名单外写可经
+// grant fs 扩写白名单后重发；审批通过 granted=9 重发放行——与 GatedFS/host
+// checkGranted 同语义）。
 // 导出供 vcore 子包（browser 文件交换）使用——文件字节经 VFS 落盘的一切通道都必须过此门。
 func (e *Env) CheckPolicy(op, abs string, write bool) error {
 	if e.Policy == nil {
 		return nil
 	}
 	rd, wr := e.Policy.Decide(abs)
+	return e.checkGrades(op, abs, rd, wr, write)
+}
+
+// CheckPolicyUnlink 同 CheckPolicy，但按 unlink/rename 语义判定（末段不跟随
+// 符号链接；实现 NoFollowPolicy 的策略走 DecideNoFollow）。rm/mv 类入口专用。
+func (e *Env) CheckPolicyUnlink(op, abs string, write bool) error {
+	if e.Policy == nil {
+		return nil
+	}
+	rd, wr := 0, 0
+	if p, ok := e.Policy.(NoFollowPolicy); ok {
+		rd, wr = p.DecideNoFollow(abs)
+	} else {
+		rd, wr = e.Policy.Decide(abs)
+	}
+	return e.checkGrades(op, abs, rd, wr, write)
+}
+
+// checkGrades 是两种路径策略门的共用判定：读 0 级 ⇔ deny 命中（读默认开放），
+// deny 读写双拒、grant/审批不可绕过；其余拒绝（白名单外写 = 写 0 级、等级不够）
+// 可经 grant/审批放行。
+func (e *Env) checkGrades(op, abs string, rd, wr int, write bool) error {
 	need := rd
 	if write {
 		need = wr
+	}
+	if rd == 0 {
+		return &proto.DeniedError{Reason: fmt.Sprintf("%s: %s is in the fs_deny list and cannot be granted (remove the deny through local management)", op, abs)}
 	}
 	if need == 0 || e.Granted < need {
 		return &proto.DeniedError{Reason: fmt.Sprintf("%s: %s is not allowed by host file policy; request access with exec grant fs %s --temp", op, abs, abs)}

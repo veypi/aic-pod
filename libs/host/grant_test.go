@@ -56,7 +56,7 @@ func TestRunGrantTarget(t *testing.T) {
 		netPol: netauth.New(netauth.NetKeys),
 		sshPol: netauth.New(netauth.SshKeys),
 	}
-	c.netPol.Configure("deny", []string{"bad.com:22"}, nil)
+	c.netPol.Configure("deny", []string{"deny:bad.com:22"}, nil)
 
 	// deny 重叠 → rejected
 	r := c.runGrant("s1", "m1", []string{"net", "bad.com:22"})

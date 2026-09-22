@@ -30,6 +30,7 @@ func probeBackend() sandboxBackend {
 // planConfined（linux）：bwrap argv 包装，无令牌。
 // 可写根下的敏感子路径（.git 等）存在时收集为只读覆盖；git 自身豁免
 // （保护对象是 bash/rm 等通用命令，git 等级由 vcore 子命令表承担）。
+// deny 模式先实例化为覆盖目标（形态不可实例化 → 拒绝执行）。
 func planConfined(spec confineSpec) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(spec.level)
@@ -46,5 +47,9 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 	if err := validateProcessPolicy(spec, "linux"); err != nil {
 		return launchPlan{}, err
 	}
-	return launchPlan{argv: bwrapArgs(spec, spec.extra, protected)}, nil
+	denyTargets, err := denyCoverAll(spec.deny)
+	if err != nil {
+		return launchPlan{}, err
+	}
+	return launchPlan{argv: bwrapArgs(spec, spec.extra, protected, denyTargets)}, nil
 }
