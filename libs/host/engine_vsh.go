@@ -268,9 +268,10 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 
 	var res *vshglue.ExecResult
 	var runErr error
-	task := engine.Tasks.Start(p.Script, logPath, func(runCtx context.Context, _ io.Writer) (int, error) {
+	task, err := engine.Tasks.Start(p.Script, logPath, "host", func(runCtx context.Context, _ io.Writer) (int, error) {
 		res, runErr = engine.Exec(runCtx, vshglue.ExecRequest{
 			SessionKey:   sid,
+			Owner:        "host",
 			Script:       p.Script,
 			WorkDir:      workdir,
 			Env:          env,
@@ -285,6 +286,10 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 		}
 		return res.ExitCode, nil
 	}, nil)
+	if err != nil {
+		_ = logFile.Close()
+		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: " + err.Error()}
+	}
 
 	wait := time.Duration(p.Timeout) * time.Second
 	if wait <= 0 || wait > vshglue.MaxForegroundTimeout {

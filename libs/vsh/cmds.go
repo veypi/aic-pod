@@ -85,6 +85,7 @@ const bgHelp = `usage:
   bg run <script...>      后台执行脚本（墙钟 30min，到期退出码 124）
   bg list                 列出后台任务
   bg wait <id> [秒]       等待任务结束并输出其结果
+  bg output <id>          输出任务迄今捕获的内容（不等待）
   bg kill <id>            终止任务`
 
 func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error {
@@ -109,9 +110,12 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 		if inv.FS != nil {
 			cwd = inv.FS.Getwd()
 		}
-		task := d.Tasks.Start(script, "", func(ctx context.Context, log io.Writer) (int, error) {
+		task, err := d.Tasks.Start(script, "", OwnerFromContext(ctx), func(ctx context.Context, log io.Writer) (int, error) {
 			return d.RunBG(ctx, sessionKey, script, cwd, "", log)
 		}, nil)
+		if err != nil {
+			return commands.Exitf(inv, 1, "bg: %s", err)
+		}
 		fmt.Fprintf(inv.Stdout, "%s\n", task.ID)
 		return nil
 	case "list":
@@ -152,6 +156,16 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 		if task.ExitCode != 0 {
 			return &commands.ExitError{Code: task.ExitCode}
 		}
+		return nil
+	case "output":
+		if len(inv.Args) < 2 {
+			return commands.Exitf(inv, 2, "usage: bg output <id>")
+		}
+		out, err := d.Tasks.Output(inv.Args[1])
+		if err != nil {
+			return commands.Exitf(inv, 1, "%s", err)
+		}
+		fmt.Fprint(inv.Stdout, out)
 		return nil
 	case "kill":
 		if len(inv.Args) < 2 {

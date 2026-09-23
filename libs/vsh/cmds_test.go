@@ -129,7 +129,7 @@ func TestTaskTableWallClock(t *testing.T) {
 	t.Parallel()
 	tasks := NewTaskTable()
 	// 直接压任务表墙钟（30min 不可测——验证 run ctx 带 deadline 即可）。
-	task := tasks.Start("check-deadline", "", func(ctx context.Context, log io.Writer) (int, error) {
+	task, err := tasks.Start("check-deadline", "", "o1", func(ctx context.Context, log io.Writer) (int, error) {
 		dl, ok := ctx.Deadline()
 		if !ok {
 			return 1, nil
@@ -139,6 +139,9 @@ func TestTaskTableWallClock(t *testing.T) {
 		}
 		return 0, nil
 	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := tasks.Wait(context.Background(), task.ID, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)

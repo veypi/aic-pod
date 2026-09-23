@@ -2,6 +2,7 @@ package vsh
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,96 @@ func newTestEngine(t *testing.T) *Engine {
 		t.Fatal(err)
 	}
 	return e
+}
+
+// TestTaskTableCapacity 容量闸（2026-09-24 用户拍板：全局 + per-owner 上限，
+// 超额快速拒绝——bg fan-out/多会话并发 yes 可占满全部核的防线）。
+func TestTaskTableCapacity(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTableWithCaps(3, 2)
+	block := func(ctx context.Context, log io.Writer) (int, error) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	start := func(owner string) (Task, error) {
+		return tt.Start("t", "", owner, block, nil)
+	}
+	// per-owner=2：o1 第 3 个拒。
+	if _, err := start("o1"); err != nil {
+		t.Fatal(err)
+	}
+	k2, err := start("o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start("o1"); err == nil || !strings.Contains(err.Error(), "单归属") {
+		t.Fatalf("per-owner 超额应拒: %v", err)
+	}
+	// o2 第 1 个过（此时 running=3 达全局），o2 第 2 个撞全局拒。
+	if _, err := start("o2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start("o2"); err == nil || !strings.Contains(err.Error(), "全局") {
+		t.Fatalf("全局超额应拒: %v", err)
+	}
+	// kill 释放后容量恢复。
+	if err := tt.Kill(k2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tt.Wait(context.Background(), k2.ID, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := start("o1"); err != nil {
+		t.Fatalf("释放后应可启动: %v", err)
+	}
+}
+
+// TestBGRunCapacityEndToEnd bg run 经 Exec 继承 owner 并受容量闸约束（e2e：
+// 生产表 per-owner=4，第 5 个 bg run 拒绝且报错可行动）。
+func TestBGRunCapacityEndToEnd(t *testing.T) {
+	t.Parallel()
+	e := newTestEngine(t)
+	ctx := context.Background()
+	for i := 0; i < MaxRunningTasksPerOwner; i++ {
+		res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Owner: "u:t1", Script: "bg run 'sleep 60'"})
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("bg run #%d: %+v err=%v", i+1, res, err)
+		}
+	}
+	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Owner: "u:t1", Script: "bg run 'sleep 60'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "task table full") {
+		t.Fatalf("第 5 个 bg run 应拒: exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	// 另一 owner 不受 o1 占满影响。
+	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s2", Owner: "u:t2", Script: "bg run 'sleep 1'"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("异 owner bg run 应过: %+v err=%v", res, err)
+	}
+}
+
+// TestBGOutput bg output 子命令：不等待直取任务捕获输出。
+func TestBGOutput(t *testing.T) {
+	t.Parallel()
+	e := newTestEngine(t)
+	ctx := context.Background()
+	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg run 'echo hello-bg'"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("bg run: %+v err=%v", res, err)
+	}
+	tid := strings.TrimSpace(res.Stdout)
+	if _, err := e.Tasks.Wait(ctx, tid, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg output " + tid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Stdout, "hello-bg") {
+		t.Fatalf("bg output = %q", res.Stdout)
+	}
 }
 
 // TestIsPureBGMgmtScript 管理面快路径判定：仅单条纯 bg list/wait/kill/output

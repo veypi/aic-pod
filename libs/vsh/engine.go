@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,7 +45,21 @@ const (
 	MaxForegroundTimeout = 300 * time.Second
 	// BackgroundWallClock 后台任务墙钟：到期以 124 终止（设计 §6：10m → 30min）。
 	BackgroundWallClock = 30 * time.Minute
+
+	// MaxRunningTasksPerOwner 单 owner 同时运行任务上限（容量闸，2026-09-24
+	// 用户拍板）：单任务只有 30min 墙钟不限并发——bg fan-out（一次调用 seq 1..64
+	// bg run yes）/多会话并发可占满全部核。超额快速拒绝（排队本身是 DoS 放大器）。
+	MaxRunningTasksPerOwner = 4
 )
+
+// maxRunningTasksGlobal 全局同时运行任务上限：核数一半（下限 2）——即使全部
+// 任务是 CPU 打满型也给同进程其他负载（消息/推理/网关）永远留一半核。
+func maxRunningTasksGlobal() int {
+	if n := runtime.NumCPU() / 2; n > 2 {
+		return n
+	}
+	return 2
+}
 
 func engineLimits() vshpolicy.Limits {
 	return vshpolicy.Limits{
@@ -103,6 +118,15 @@ type sessionFSKey struct{}
 // netSessionKey 把会话键经 ctx 传给 NetClient（M3c：规则表 per-session 快照，
 // cloud 多用户进程不可用进程级并集——跨用户泄漏授权）。
 type netSessionKey struct{}
+
+// ownerKey 把任务容量闸归属经 ctx 透传（bg run 派生任务继承同一 owner）。
+type ownerKey struct{}
+
+// OwnerFromContext 取 Exec 注入的容量闸归属（无注入 = 空串匿名共池）。
+func OwnerFromContext(ctx context.Context) string {
+	o, _ := ctx.Value(ownerKey{}).(string)
+	return o
+}
 
 // SessionFromContext 取 Exec 注入的会话键（NetClient 规则表快照源用；
 // 无注入 = 空串——快照退化为无 temp 行的基表）。
@@ -181,6 +205,9 @@ func (e *Engine) Registry() *commands.Registry { return e.reg }
 // ExecRequest 一次脚本执行。
 type ExecRequest struct {
 	SessionKey string            // 会话键（cloud=sid；host=sid）
+	// Owner 任务容量闸归属（cloud="u:"+uid；host="host"；空=匿名共池）——
+	// 经 ctx 透传，bg run 派生任务继承同一 owner。
+	Owner      string
 	Script     string            // 脚本正文
 	WorkDir    string            // 空 = 会话默认工作目录
 	Env        map[string]string // 覆盖 BaseEnv
@@ -231,6 +258,7 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 	// 会话键注入 ctx：NetClient 规则表按 sid 取快照（M3c per-session 修复——
 	// cloud 多用户进程不能用进程级并集；bg 路径经 runBG→Exec 同样注入）。
 	ctx = context.WithValue(ctx, netSessionKey{}, req.SessionKey)
+	ctx = context.WithValue(ctx, ownerKey{}, req.Owner)
 	timeout := req.Timeout
 	maxTimeout := MaxForegroundTimeout
 	if req.LongRunning {
@@ -328,6 +356,7 @@ func (e *Engine) runBG(ctx context.Context, sessionKey, script, workdir, logPath
 	defer e.DropSession(bgKey)
 	res, err := e.Exec(ctx, ExecRequest{
 		SessionKey:  bgKey,
+		Owner:       OwnerFromContext(ctx), // 派生任务继承同一容量闸归属
 		Script:      script,
 		WorkDir:     workdir,
 		Timeout:     BackgroundWallClock,
@@ -367,34 +396,64 @@ type taskEntry struct {
 }
 
 // TaskTable 后台任务表（引擎统一承接 bg，exec_procs 退役后此处是唯一来源）。
+// 容量闸（2026-09-24 用户拍板）：全局 max(2, NumCPU/2) + per-owner 4 同时运行
+// 上限，超额快速拒绝——单任务 30min 墙钟只限时长，不限并发时 bg fan-out/多会话
+// 并发 yes 可占满全部核（排队拒绝采用：排队本身是 DoS 放大器）。
 type TaskTable struct {
-	mu    sync.Mutex
-	tasks map[string]*taskEntry
-	seq   int
+	mu             sync.Mutex
+	tasks          map[string]*taskEntry
+	seq            int
+	running        int
+	runningByOwner map[string]int
+	maxGlobal      int
+	maxPerOwner    int
 }
 
 func NewTaskTable() *TaskTable {
-	return &TaskTable{tasks: map[string]*taskEntry{}}
+	return NewTaskTableWithCaps(maxRunningTasksGlobal(), MaxRunningTasksPerOwner)
+}
+
+// NewTaskTableWithCaps 自定义容量闸（测试用；生产走 NewTaskTable）。
+func NewTaskTableWithCaps(maxGlobal, maxPerOwner int) *TaskTable {
+	return &TaskTable{
+		tasks:          map[string]*taskEntry{},
+		runningByOwner: map[string]int{},
+		maxGlobal:      maxGlobal,
+		maxPerOwner:    maxPerOwner,
+	}
 }
 
 // Start 登记并启动后台任务：run 在带 BackgroundWallClock 的 ctx 中执行，
 // 输出落 output 缓冲（bounded）并可 tee 到 logW；墙钟到期 → Status=timeout、
-// ExitCode=124。
-func (t *TaskTable) Start(command, logPath string, run func(ctx context.Context, log io.Writer) (int, error), logW io.Writer) Task {
+// ExitCode=124。owner 为容量闸归属（空=匿名共池）；超额拒绝并返回错误。
+func (t *TaskTable) Start(command, logPath, owner string, run func(ctx context.Context, log io.Writer) (int, error), logW io.Writer) (Task, error) {
 	t.mu.Lock()
+	if t.running >= t.maxGlobal {
+		n := t.running
+		t.mu.Unlock()
+		return Task{}, fmt.Errorf("task table full（全局运行上限 %d，当前 %d）——先 bg list 查看、bg kill 释放或稍后重试", t.maxGlobal, n)
+	}
+	if t.runningByOwner[owner] >= t.maxPerOwner {
+		n := t.runningByOwner[owner]
+		t.mu.Unlock()
+		return Task{}, fmt.Errorf("task table full（单归属运行上限 %d，当前 %d）——先 bg list 查看、bg kill 释放或稍后重试", t.maxPerOwner, n)
+	}
 	t.seq++
 	id := fmt.Sprintf("bg-%d", t.seq)
 	entry := &taskEntry{done: make(chan struct{}), output: newBoundedBuffer(MaxStdoutBytes)}
 	entry.task = Task{ID: id, Command: command, LogPath: logPath, Status: "running", StartedAt: time.Now()}
+	// ctx/cancel 同步建立（goroutine 启动前）——Kill 紧随 Start 时 cancel 必已
+	// 就位（竞态：cancel 在 goroutine 内赋值时，Start 后微秒级 Kill 会读 nil
+	// 跳过 cancel，任务杀不死跑满 30min——TestTaskTableCapacity 实测揪出）。
+	ctx, cancel := context.WithTimeout(context.Background(), BackgroundWallClock)
+	entry.cancel = cancel
 	t.tasks[id] = entry
+	t.running++
+	t.runningByOwner[owner]++
 	t.mu.Unlock()
 
 	go func() {
 		// 后台墙钟（§6：30min，到期 124）——任务表统一施加，执行体不再自带。
-		ctx, cancel := context.WithTimeout(context.Background(), BackgroundWallClock)
-		entry.mu.Lock()
-		entry.cancel = cancel
-		entry.mu.Unlock()
 		defer cancel()
 		var w io.Writer = entry.output
 		if logW != nil {
@@ -402,7 +461,6 @@ func (t *TaskTable) Start(command, logPath string, run func(ctx context.Context,
 		}
 		code, err := run(ctx, w)
 		entry.mu.Lock()
-		defer entry.mu.Unlock()
 		entry.task.FinishedAt = time.Now()
 		entry.task.ExitCode = code
 		switch {
@@ -418,9 +476,16 @@ func (t *TaskTable) Start(command, logPath string, run func(ctx context.Context,
 			entry.task.Status = "done"
 		}
 		entry.finished = true
+		entry.mu.Unlock()
+		// 容量计数必须先于 close(done) 释放——Wait 解除阻塞即代表容量已恢复
+		// （TestTaskTableCapacity 竞态：defer 在 close 后跑，释放晚一拍）。
+		t.mu.Lock()
+		t.running--
+		t.runningByOwner[owner]--
+		t.mu.Unlock()
 		close(entry.done)
 	}()
-	return entry.snapshot()
+	return entry.snapshot(), nil
 }
 
 // List 按启动序返回任务快照。
