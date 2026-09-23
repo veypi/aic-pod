@@ -278,7 +278,8 @@ func TestRgMinifiedName(t *testing.T) {
 	}
 }
 
-// read 大文件（>8MB）流式路径：总行数精确、窗口截取、truncated 标记（§4.2）。
+// read 大文件（>8MB）流式路径：总行数精确、窗口截取、truncated 标记（§4.2）；
+// 越界回退尾窗口 + note。
 func TestReadLargeFile(t *testing.T) {
 	vfs := NewMemVFS()
 	var sb strings.Builder
@@ -313,9 +314,35 @@ func TestReadLargeFile(t *testing.T) {
 		t.Errorf("hint = %q, want %q", res2.Attrs["hint"], wantHint)
 	}
 
-	_, err = RunFS(context.Background(), env, []byte(`{"action":"read","path":"/big.log","offset":200001}`))
-	if err == nil || err.Error() != "fs read: offset 200001 exceeds 200000 lines" {
-		t.Errorf("offset overflow err = %v", err)
+	// 越界回退（§4.2）：offset 超过总行数不再报错——返回文件尾窗口 + note
+	res3, err := RunFS(context.Background(), env, []byte(`{"action":"read","path":"/big.log","offset":200001}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res3.Attrs["rows"] != "100" || res3.Attrs["range"] != "199901-200000" || res3.Attrs["truncated"] != "false" {
+		t.Errorf("overflow attrs = %v", res3.Attrs)
+	}
+	if !strings.HasPrefix(res3.Content, "199901\tline 199900") {
+		t.Errorf("overflow content head = %.60q", res3.Content)
+	}
+	wantNote := "offset 200001 exceeds 200000 lines; returned lines 199901-200000"
+	if res3.Attrs["note"] != wantNote {
+		t.Errorf("overflow note = %q, want %q", res3.Attrs["note"], wantNote)
+	}
+
+	// offset<1 回退文件头窗口（流式路径）
+	res4, err := RunFS(context.Background(), env, []byte(`{"action":"read","path":"/big.log","offset":-1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res4.Attrs["range"] != "1-100" || res4.Attrs["truncated"] != "true" {
+		t.Errorf("head fallback attrs = %v", res4.Attrs)
+	}
+	if !strings.HasPrefix(res4.Content, "1\tline 0") {
+		t.Errorf("head fallback content head = %.60q", res4.Content)
+	}
+	if want := "offset -1 must be >= 1; returned lines 1-100"; res4.Attrs["note"] != want {
+		t.Errorf("head fallback note = %q, want %q", res4.Attrs["note"], want)
 	}
 }
 
@@ -350,6 +377,92 @@ func TestReadTruncatedHint(t *testing.T) {
 	}
 	if _, ok := res2.Attrs["hint"]; ok {
 		t.Errorf("hint should be absent when not truncated: %v", res2.Attrs)
+	}
+}
+
+// read 数值回退（§4.2）：offset 越界/非法不再报错——文件头/尾窗口 + attrs.note；
+// limit<1 用缺省；空文件返回空正文 + note。
+func TestReadFallback(t *testing.T) {
+	vfs := NewMemVFS()
+	var sb strings.Builder
+	for i := 1; i <= 250; i++ {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	vfs.SetFile("/a.txt", []byte(sb.String()), testTime)
+	vfs.SetFile("/empty.txt", []byte(""), testTime)
+	env := &Env{VFS: vfs, Workdir: "/"}
+
+	// offset > total：文件尾窗口（后 100 行）
+	res, err := RunFS(context.Background(), env, []byte(`{"action":"read","path":"/a.txt","offset":9999}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attrs["range"] != "151-250" || res.Attrs["rows"] != "100" || res.Attrs["total_lines"] != "250" || res.Attrs["truncated"] != "false" {
+		t.Errorf("tail attrs = %v", res.Attrs)
+	}
+	if !strings.HasPrefix(res.Content, "151\tline 151") {
+		t.Errorf("tail content head = %.60q", res.Content)
+	}
+	if want := "offset 9999 exceeds 250 lines; returned lines 151-250"; res.Attrs["note"] != want {
+		t.Errorf("tail note = %q, want %q", res.Attrs["note"], want)
+	}
+
+	// offset < 1：文件头窗口（前 100 行）+ 可继续翻页
+	res, err = RunFS(context.Background(), env, []byte(`{"action":"read","path":"/a.txt","offset":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attrs["range"] != "1-100" || res.Attrs["truncated"] != "true" {
+		t.Errorf("head attrs = %v", res.Attrs)
+	}
+	if want := "file has 250 lines; this call returned 1-100; pass offset=101 to continue reading"; res.Attrs["hint"] != want {
+		t.Errorf("head hint = %q, want %q", res.Attrs["hint"], want)
+	}
+	if want := "offset 0 must be >= 1; returned lines 1-100"; res.Attrs["note"] != want {
+		t.Errorf("head note = %q, want %q", res.Attrs["note"], want)
+	}
+
+	// limit < 1：缺省 limit 生效 + note
+	res, err = RunFS(context.Background(), env, []byte(`{"action":"read","path":"/a.txt","limit":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attrs["range"] != "1-250" || res.Attrs["rows"] != "250" {
+		t.Errorf("limit attrs = %v", res.Attrs)
+	}
+	if want := "limit 0 must be >= 1; used the default limit (1000)"; res.Attrs["note"] != want {
+		t.Errorf("limit note = %q, want %q", res.Attrs["note"], want)
+	}
+
+	// offset == total：正常读最后一行（无 note）
+	res, err = RunFS(context.Background(), env, []byte(`{"action":"read","path":"/a.txt","offset":250}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Attrs["range"] != "250-250" || res.Attrs["rows"] != "1" {
+		t.Errorf("last attrs = %v", res.Attrs)
+	}
+	if _, ok := res.Attrs["note"]; ok {
+		t.Errorf("note should be absent: %v", res.Attrs)
+	}
+
+	// 空文件：空正文 + note（正常 / offset 越界两态）
+	res, err = RunFS(context.Background(), env, []byte(`{"action":"read","path":"/empty.txt"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Content != "" || res.Attrs["total_lines"] != "0" || res.Attrs["rows"] != "0" || res.Attrs["range"] != "0-0" {
+		t.Errorf("empty attrs = %v content = %q", res.Attrs, res.Content)
+	}
+	if want := "file is empty (0 lines)"; res.Attrs["note"] != want {
+		t.Errorf("empty note = %q, want %q", res.Attrs["note"], want)
+	}
+	res, err = RunFS(context.Background(), env, []byte(`{"action":"read","path":"/empty.txt","offset":3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "offset 3 exceeds 0 lines; file is empty (0 lines)"; res.Attrs["note"] != want {
+		t.Errorf("empty offset note = %q, want %q", res.Attrs["note"], want)
 	}
 }
 

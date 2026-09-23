@@ -35,21 +35,30 @@
       "cmd": "fs",
       "params": {"action": "read", "path": "/a.txt", "offset": 5},
       "files": {"/a.txt": "l1\nl2\nl3\n"},
-      "expectError": "fs read: offset 5 exceeds 3 lines"
+      "expect": {
+        "content": "1\tl1\n2\tl2\n3\tl3\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "3", "rows": "3", "range": "1-3", "truncated": "false", "note": "offset 5 exceeds 3 lines; returned lines 1-3"}
+      }
     },
     {
       "name": "read offset below 1",
       "cmd": "fs",
       "params": {"action": "read", "path": "/a.txt", "offset": 0},
       "files": {"/a.txt": "l1\n"},
-      "expectError": "fs read: offset must be >= 1, got 0"
+      "expect": {
+        "content": "1\tl1\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "1", "rows": "1", "range": "1-1", "truncated": "false", "note": "offset 0 must be >= 1; returned lines 1-1"}
+      }
     },
     {
       "name": "read limit below 1",
       "cmd": "fs",
       "params": {"action": "read", "path": "/a.txt", "limit": 0},
       "files": {"/a.txt": "l1\n"},
-      "expectError": "fs read: limit must be >= 1, got 0"
+      "expect": {
+        "content": "1\tl1\n",
+        "attrs": {"action": "read", "path": "/a.txt", "mime": "text/plain", "total_lines": "1", "rows": "1", "range": "1-1", "truncated": "false", "note": "limit 0 must be >= 1; used the default limit (1000)"}
+      }
     },
     {
       "name": "read relative path via env workdir",
