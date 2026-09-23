@@ -8,8 +8,10 @@ require (
 	github.com/pion/ice/v4 v4.4.2
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/vhtml v0.11.3
+	github.com/veypi/vbox v0.0.0
 	github.com/veypi/vigo v0.7.6
+	github.com/veypi/vsh v0.0.38
+	github.com/veypi/vsh/contrib/jq v0.0.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/image v0.44.0
 	golang.org/x/sys v0.47.0
@@ -30,6 +32,8 @@ require (
 	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/itchyny/gojq v0.12.18 // indirect
+	github.com/itchyny/timefmt-go v0.1.7 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.8.0 // indirect
@@ -63,6 +67,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/mysql v1.6.0 // indirect
@@ -72,4 +77,12 @@ require (
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
+)
+
+// vsh/vbox 为本地姊妹仓（go.work 接线；replace 供非 workspace 构建——
+// Docker/CI 构建前需先发布或拷贝两仓，见 vsh/docs/design.md 里程碑）。
+replace (
+	github.com/veypi/vbox => ../vbox
+	github.com/veypi/vsh => ../vsh
+	github.com/veypi/vsh/contrib/jq => ../vsh/contrib/jq
 )
