@@ -114,17 +114,18 @@ type SandboxRule struct {
 // confineSpec 是一次沙箱包装的完整输入（三域授权模型快照 + 等级/工作区/argv）。
 // 快照语义：每次 Start 读当次值（set_config/grant 动态生效），已启动进程不回溯。
 type confineSpec struct {
-	level      int             // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
-	workdir    string          // 进程 cwd，不授予目录权限
-	extra      []string        // 追加可写根（nil = 仅基础白名单）
-	argv       []string        // 被包装命令
-	deny       []string        // fs deny 预展开模式（fsauth.DenyPatterns 快照；rules 为空时使用）
-	rules      []SandboxRule   // fs 域有序规则表快照（M3 行序映射；darwin 消费，nil = 旧 deny 全量 fail-closed）
-	writeAllow []string        // 展开的可写 glob（裸路径由 extra 传入）
-	fsOpen     bool            // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
-	netOpen    bool            // net_policy=open：不加网络规则
-	netDeny    []netauth.Entry // net_deny 快照（恒优先于 allow）
-	netAllow   []netauth.Entry // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
+	level      int                  // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
+	workdir    string               // 进程 cwd，不授予目录权限
+	extra      []string             // 追加可写根（nil = 仅基础白名单）
+	argv       []string             // 被包装命令
+	deny       []string             // fs deny 预展开模式（fsauth.DenyPatterns 快照；rules 为空时使用）
+	rules      []SandboxRule        // fs 域有序规则表快照（M3 行序映射；darwin 消费，nil = 旧 deny 全量 fail-closed）
+	writeAllow []string             // 展开的可写 glob（裸路径由 extra 传入）
+	fsOpen     bool                 // fs_policy=open：写除 deny 全放（darwin allow file-write* / bwrap 整机 rw）
+	netOpen    bool                 // net_policy=open：不加网络规则
+	netDeny    []netauth.Entry      // net_deny 快照（恒优先于 allow）
+	netAllow   []netauth.Entry      // net allow 快照（含内建 localhost:* 与 sid 临时 grant）
+	logf       func(string, ...any) // 沙箱阶段计时日志注入（nil = 静默；SetLogf → 生产注入）
 }
 
 // Confine 将 argv 包装为沙箱执行形态（返回替换 argv；windows 的实际
@@ -279,15 +280,40 @@ func overlayArgs(p string) []string {
 // （无字面前缀的全 glob、递归枚举超预算）即返回错误——启动前拒绝执行，
 // 不静默放行。目标去重并丢弃被其他目标覆盖的子孙（先挂父目录、后挂子孙
 // 会失败；父目录覆盖整棵子树已足够）。
+//
+// ** 形态共同走一趟遍历（denyWalkAll）：同一份快照下的目标集合与逐模式
+// 遍历一致，但每调用只付一趟目录枚举代价（此前 ~11 条内置 ** 模式各走
+// 一趟 $HOME 递归，win 实测每次 exec 因此多付 ~17s）。
 func denyCoverAll(pats []string) ([]string, error) {
 	var out []string
+	var walks []string
 	for _, pat := range pats {
 		if pat == "" {
 			continue
 		}
-		targets, ok := denyCoverTargets(pat)
+		pat = filepath.ToSlash(pat)
+		if !strings.ContainsAny(pat, "*?") {
+			out = append(out, pat)
+			continue
+		}
+		if !strings.Contains(pat, "**") {
+			targets, ok := denyGlobTargets(pat)
+			if !ok {
+				return nil, &proto.DeniedError{Reason: "sandbox cannot enforce host policy: unsupported deny pattern " + pat}
+			}
+			out = append(out, targets...)
+			continue
+		}
+		if dir, ok := denySubtreeDir(pat); ok {
+			out = append(out, dir)
+			continue
+		}
+		walks = append(walks, pat)
+	}
+	if len(walks) > 0 {
+		targets, ok := denyWalkAll(walks)
 		if !ok {
-			return nil, &proto.DeniedError{Reason: "sandbox cannot enforce host policy: unsupported deny pattern " + pat}
+			return nil, &proto.DeniedError{Reason: "sandbox cannot enforce host policy: unsupported deny pattern(s): " + strings.Join(walks, " ")}
 		}
 		out = append(out, targets...)
 	}
@@ -322,29 +348,6 @@ func pruneCoverTargets(targets []string) []string {
 		}
 	}
 	return out
-}
-
-// denyCoverTargets 把一条 deny 模式实例化为覆盖挂载目标（目录 → tmpfs；
-// 普通文件/socket → /dev/null ro-bind；不存在的目标由 overlayArgs 跳过）。
-// 第二个返回值为 false = 形态无法实例化，调用方拒绝执行（fail-closed）。
-//
-// 形态处理（模式已由 fsauth 预展开为 canonical 字面前缀）：
-//   - 纯字面 → 原样
-//   - 尾 /** 且前缀无通配 → 前缀目录整棵子树
-//   - 无 ** 的单 glob → 字面前缀 readdir 枚举
-//   - 含 ** → 字面前缀（** 开头取 $HOME）下递归匹配（fsauth.MatchPattern 同口径）
-func denyCoverTargets(pat string) ([]string, bool) {
-	pat = filepath.ToSlash(pat)
-	if !strings.ContainsAny(pat, "*?") {
-		return []string{pat}, true
-	}
-	if !strings.Contains(pat, "**") {
-		return denyGlobTargets(pat)
-	}
-	if dir, ok := denySubtreeDir(pat); ok {
-		return []string{dir}, true
-	}
-	return denyWalkTargets(pat)
 }
 
 // denySubtreeDir 返回「<字面目录>/**」形态的目录。
@@ -405,44 +408,73 @@ func denyGlobTargets(pat string) ([]string, bool) {
 // （启动前拒绝执行），不静默放行。
 const denyWalkMaxDirs = 50000
 
-// denyWalkTargets 在 ** 模式的字面前缀（** 开头取 $HOME）下递归匹配。
-// 目录命中即记录并停止下探：整棵子树已被覆盖，同时避免嵌套挂载冲突。
-func denyWalkTargets(pat string) ([]string, bool) {
-	root, ok := denyWalkRoot(pat)
-	if !ok {
-		return nil, false
+// denyWalkAll 为全部含 ** 的模式共享一趟递归遍历：按 walk 根（denyWalkRoot）
+// 分组，同组只枚举一次目录树，同一目录项同时匹配该组全部模式。命中即记录
+// 且不再下探（整棵子树已被目标覆盖；其内更深命中即便存在也会被
+// pruneCoverTargets 按父目标收敛），因此调用方拿到的目标集合与逐模式遍历
+// 一致。
+//
+// 目录访问预算（denyWalkMaxDirs）按共享遍历计：同组模式此前各自独立走同一
+// 棵树，超限时同样整体不可实例化（fail-closed），分组后语义不变且剪枝使
+// 访问量更低。
+func denyWalkAll(pats []string) ([]string, bool) {
+	type walkGroup struct {
+		root string
+		pats []string
 	}
-	if st, err := os.Stat(root); err != nil || !st.IsDir() {
-		return nil, true // 前缀不存在：当前无目标
+	var groups []*walkGroup
+	index := map[string]*walkGroup{}
+	for _, pat := range pats {
+		root, ok := denyWalkRoot(pat)
+		if !ok {
+			return nil, false
+		}
+		g := index[root]
+		if g == nil {
+			g = &walkGroup{root: root}
+			index[root] = g
+			groups = append(groups, g)
+		}
+		g.pats = append(g.pats, pat)
 	}
 	var out []string
-	visited := 0
-	var walk func(dir string) bool
-	walk = func(dir string) bool {
-		visited++
-		if visited > denyWalkMaxDirs {
-			return false
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return true
-		}
-		for _, e := range entries {
-			p := dir + "/" + e.Name()
-			if fsauth.MatchPattern(pat, p) {
-				out = append(out, p)
-				continue // 命中即覆盖：不再下探（目录整棵子树已覆盖）
+	for _, g := range groups {
+		visited := 0
+		var walk func(dir string) bool
+		walk = func(dir string) bool {
+			visited++
+			if visited > denyWalkMaxDirs {
+				return false
 			}
-			if e.IsDir() && e.Type()&os.ModeSymlink == 0 {
-				if !walk(p) {
-					return false
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return true
+			}
+			for _, e := range entries {
+				p := dir + "/" + e.Name()
+				matched := false
+				for _, pat := range g.pats {
+					if fsauth.MatchPattern(pat, p) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					out = append(out, p)
+					continue // 命中即覆盖：不再下探（目录整棵子树已覆盖）
+				}
+				if e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+					if !walk(p) {
+						return false
+					}
 				}
 			}
+			return true
 		}
-		return true
-	}
-	if !walk(root) {
-		return nil, false
+		// 根不存在/非目录：ReadDir 失败即视为该根下当前无目标（与单模式语义一致）。
+		if !walk(g.root) {
+			return nil, false
+		}
 	}
 	return out, true
 }
@@ -473,6 +505,57 @@ func denyWalkRoot(pat string) (string, bool) {
 		return "", false // 形如 /*/**/x 的无根形态无法静态枚举
 	}
 	return root, true
+}
+
+// ---- deny 实例化缓存（per-call 沙箱提速：B 方案）----
+
+// denyCoverCacheTTL 是 deny 实例化结果的保鲜期：TTL 内同一 deny 模式集的
+// ** 递归枚举结果直接复用（win 实测一趟 $HOME 枚举 1.9-2.6s，共享遍历后
+// 仍是每条沙箱命令的最大单项开销）。语义取舍（2026-09-23 用户批准）：
+// 窗口内新建的匹配对象在下次重算前不会被打 deny ACE / 覆盖挂载（≤TTL）。
+// 变量而非常量：测试可缩短以验证过期重算。
+var denyCoverCacheTTL = 30 * time.Second
+
+// denyCoverCacheEntry 是最近一次实例化结果的快照（键 = 模式列表）。
+type denyCoverCacheEntry struct {
+	key     string
+	at      time.Time
+	targets []string
+	err     error
+}
+
+var (
+	denyCoverCacheMu sync.Mutex
+	denyCoverCache   *denyCoverCacheEntry
+)
+
+// denyCoverAllCached 是 denyCoverAll 的带缓存版本（生产路径使用：windows
+// ensureDenyACEs、linux planConfined；测试直接调 denyCoverAll，与文件系统
+// 实时对齐、不受缓存影响）。缓存以 deny 模式集为键、TTL 为界；锁覆盖整段
+// 计算以合并并发的相同请求（并发不同策略仍串行——单次遍历时长量级，可接受）。
+// cached 报告本次是否命中缓存：windows 侧据此只在重算时做 ACE 校验对账
+// （缓存命中的稳态调用不做任何 ACL 读）。返回的切片是缓存内部快照，调用方
+// 不得修改。err 一并缓存：不可实例化形态与超预算都是确定性判定，复用不改变
+// fail-closed 行为。
+func denyCoverAllCached(pats []string, logf func(string, ...any)) (targets []string, cached bool, err error) {
+	key := strings.Join(pats, "\x00")
+	denyCoverCacheMu.Lock()
+	defer denyCoverCacheMu.Unlock()
+	if e := denyCoverCache; e != nil && e.key == key {
+		if age := time.Since(e.at); age < denyCoverCacheTTL {
+			if logf != nil {
+				logf("sandbox: deny instantiate cache hit: targets=%d age=%s", len(e.targets), age.Round(time.Millisecond))
+			}
+			return e.targets, true, e.err
+		}
+	}
+	start := time.Now()
+	targets, err = denyCoverAll(pats)
+	denyCoverCache = &denyCoverCacheEntry{key: key, at: time.Now(), targets: targets, err: err}
+	if logf != nil {
+		logf("sandbox: deny instantiate: walk=%s targets=%d err=%v", time.Since(start).Round(time.Millisecond), len(targets), err)
+	}
+	return targets, false, err
 }
 
 // ---- darwin: Seatbelt (sandbox-exec) ----

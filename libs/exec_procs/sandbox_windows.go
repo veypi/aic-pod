@@ -34,11 +34,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -355,15 +359,15 @@ func probeBackend() sandboxBackend {
 	return backendWindowsAcl
 }
 
-// planConfined（windows）：受限令牌 + ACL 授权（写白名单）+ per-call deny ACE
+// planConfined（windows）：受限令牌 + ACL 授权（写白名单）+ 持久 deny ACE
 // + Job Object 资源限制。
 //   - read-only：restricting list 无能力 SID → 除 Everyone 可写对象外全拒
 //   - workspace-write：工作区/缓存目录（fsauth.CacheRoots）/追加根（extra）
 //     standing ACE + per-call 私有临时目录（TMP/TEMP 指向它），进程结束后清理
-//   - deny：per-call 随机 SID 加入 restricting list，对每个 deny 目标追加完全
-//     拒绝 ACE（写被拒——WRITE_RESTRICTED 的 pass-2 只覆盖写访问，读不在
-//     受限令牌可表达范围（Windows 边界，与 dsh/codex 一致：读侧隔离需另
-//     一机制，fs 工具层不受影响）；ACE 继承到子对象，进程结束后撤销）；
+//   - deny：稳定 deny SID 加入 restricting list，对 deny 目标确保存在完全拒绝
+//     ACE（写被拒——WRITE_RESTRICTED 的 pass-2 只覆盖写访问，读不在受限令牌
+//     可表达范围（Windows 边界，与 dsh/codex 一致：读侧隔离需另一机制，fs 工具
+//     层不受影响）；ACE 继承到子对象并持久保留，到期对账见持久模型注释）；
 //     模式形态不可实例化或可达对象加不上 ACE → 拒绝执行（fail-closed）
 //   - 资源限制：Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256），
 //     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
@@ -372,23 +376,36 @@ func probeBackend() sandboxBackend {
 // fsOpen（写全放）与网络规则无法用令牌模型表达，已由 validateProcessPolicy
 // 拒绝；fs_allow 通配写授权（writeAllow）同样无法表达——忽略即少授（安全方向）。
 func planConfined(spec confineSpec) (launchPlan, error) {
+	// 阶段计时（打点）：每步耗时随 plan 完成一次性写出（spec.logf 未注入则静默）
+	t0 := time.Now()
+	last := t0
+	mark := func() time.Duration {
+		now := time.Now()
+		d := now.Sub(last)
+		last = now
+		return d.Round(time.Millisecond)
+	}
+	logf := spec.logf
 	if err := validateProcessPolicy(spec, "windows"); err != nil {
 		return launchPlan{}, err
 	}
+	validateD := mark()
 	if selectBackend() == backendUnavailable {
 		return launchPlan{}, sandboxUnavailable(spec.level)
 	}
 	var extraSids []*windows.SID
 	var tmpDir string
-	// per-call deny ACE：随机 SID + 目标对象完全拒绝（进程结束后撤销）
-	denySid, denyProtected, err := applyDenyACEs(spec.deny)
+	var grantD, tmpD time.Duration
+	// fs deny：稳定 SID + 持久拒绝 ACE（幂等 ensure；不按进程撤销）
+	denySid, err := ensureDenyACEs(spec.deny, logf)
 	if err != nil {
 		return launchPlan{}, err
 	}
+	denyD := mark()
 	if denySid != nil {
 		extraSids = append(extraSids, denySid)
 	}
-	cleanup := func() { revokeDenyACEs(denyProtected, denySid) }
+	cleanup := func() {}
 
 	if spec.level >= proto.LevelWrite {
 		dirs := make([]string, 0, 4)
@@ -409,6 +426,7 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 			}
 			extraSids = append(extraSids, sid)
 		}
+		grantD = mark()
 
 		// per-call 私有临时目录：随机路径 + 随机 SID，进程结束后删除
 		var err error
@@ -426,7 +444,8 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 			return launchPlan{}, fmt.Errorf("sandbox: grant temp: %w", err)
 		}
 		extraSids = append(extraSids, tmpSid)
-		cleanup = func() { revokeDenyACEs(denyProtected, denySid); os.RemoveAll(tmpDir) } // ACE 随目录删除消失
+		tmpD = mark()
+		cleanup = func() { os.RemoveAll(tmpDir) } // 私有临时目录随进程结束删除
 	}
 
 	tok, err := createRestrictedToken(extraSids)
@@ -434,6 +453,7 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 		cleanup()
 		return launchPlan{}, fmt.Errorf("sandbox: restricted token: %w", err)
 	}
+	tokenD := mark()
 
 	// Job Object 资源限制（与令牌/ACL 正交，read-only 与 workspace-write 同限）
 	job, err := newJobWithLimits()
@@ -442,10 +462,19 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 		cleanup()
 		return launchPlan{}, fmt.Errorf("sandbox: job object: %w", err)
 	}
+	jobD := mark()
 	cleanup = func() {
-		revokeDenyACEs(denyProtected, denySid)
+		start := time.Now()
 		os.RemoveAll(tmpDir)
 		closeJob(uintptr(job))
+		if logf != nil && tmpDir != "" {
+			logf("sandbox: cleanup tmp-remove+close-job=%s", time.Since(start).Round(time.Millisecond))
+		}
+	}
+
+	if logf != nil {
+		logf("sandbox(windows): plan validate=%s deny=%s ws-grant=%s tmp=%s token=%s job=%s total=%s level=%d",
+			validateD, denyD, grantD, tmpD, tokenD, jobD, time.Since(t0).Round(time.Millisecond), spec.level)
 	}
 
 	env := []string{}
@@ -524,17 +553,16 @@ func closeToken(token uintptr) {
 	}
 }
 
-// ---- per-call deny ACE（fs deny 的 windows 落地）----
+// ---- fs deny 的 windows 落地：持久拒绝 ACE ----
 //
-// 每次 planConfined 生成一个随机 SID（S-1-4-<a>-<b>）加入受限令牌的
-// restricting list，并对每个 deny 目标对象追加该 SID 的完全拒绝 ACE：
-//   - SetEntriesInAcl 把新 deny ACE 放在 ACL 首部（先于 allow 求值），
-//     写访问的 pass-2 检查命中拒绝 → 写被拒（WRITE_DAC/WRITE_OWNER 等
-//     写类位一并拒，防沙箱进程自行摘除 ACE）；读不做 pass-2 检查
-//     （Windows 边界，见文件头注）；
+// 稳定 SID（S-1-4-<a>-<b>，能力 SID 确定性派生）加入受限令牌的 restricting
+// list，并对每个 deny 目标对象确保存在该 SID 的完全拒绝 ACE：
+//   - SetEntriesInAcl 把 deny ACE 放在 ACL 首部（先于 allow 求值），写访问的
+//     pass-2 检查命中拒绝 → 写被拒（WRITE_DAC/WRITE_OWNER 等写类位一并拒，
+//     防沙箱进程自行摘除 ACE）；读不做 pass-2 检查（Windows 边界，见文件头注）；
 //   - ACE 继承到子对象（目录整棵子树）；
-//   - 该 SID 只存在于本次调用的令牌，宿主机其他进程不受 DACL 变更影响；
-//   - 进程结束后以 REVOKE_ACCESS 撤销（子对象继承副本随父对象 ACL 更新消失）。
+//   - 该 SID 只出现在沙箱进程令牌中，宿主机其他进程不受 DACL 变更影响；
+//   - ACE 持久保留（不随进程结束撤销），到期对账见下文持久模型注释。
 //
 // 可达性判定：加不上 ACE（无 WRITE_DAC）时，若 DACL 未向任何通用 restricted
 // SID 授读/写/执行权（沙箱本就不可达）则跳过（语义等价的无操作）；否则
@@ -559,48 +587,309 @@ func randomDenySID() (*windows.SID, error) {
 	return windows.StringToSid(fmt.Sprintf("S-1-4-%d-%d", a, c))
 }
 
-// applyDenyACEs 实例化 deny 模式并对每个目标追加完全拒绝 ACE；返回
-// （SID, 已保护目标, error）。形态不可实例化或可达对象加不上 ACE → 错误
-// （fail-closed）；对受限令牌本就不可达的对象跳过。
-func applyDenyACEs(patterns []string) (*windows.SID, []string, error) {
-	if len(patterns) == 0 {
-		return nil, nil, nil
+// denyACLWorkers 是 deny ACE 校验/施加/撤销的并发度：目标可达上百个，逐个
+// Get/SetNamedSecurityInfo 数毫秒到十几毫秒（win 实测 79 目标一轮 ≈ 1.3s），
+// 这些对象彼此独立，并发跑互不相干。
+const denyACLWorkers = 8
+
+// ---- 持久 deny ACE（codex windows-sandbox-rs 同模型，2026-09-23 改）----
+//
+// 稳定 deny SID + 持久 ACE + 幂等 ensure（有则跳过），不再「每调用随机 SID、
+// 全量打、全量撤」：
+//  1) 旧模型每条命令对上百个目标做两轮 Get/Set（79 目标 ≈ 施加 1.3s + 撤销
+//     1.3s）；codex 的稳定 SID + 幂等 ensure 在稳态下零 ACL 操作；
+//  2) 沙箱进程的后代可能比 launcher 活得久（codex 同款理由）——进程结束即
+//     撤销会把仍在运行的后代暴露在无 deny 状态，持久 ACE 反而更安全；
+//  3) 残留 ACE 只对稳定 deny SID 生效：该 SID 仅出现在沙箱进程令牌的
+//     restricting list 中，宿主机其他进程（含用户自己）不受影响。
+//
+// 代价与对账：文件上会留下拒绕 ACE（icacls 可见，无写权即无害）。不再需要的
+// 目标靠状态文件对账撤销（新目标补打、旧目标撤销、重算时并行校验——对象删除
+// 重建会丢 ACE）；目标对象消失时其 ACE 随对象消亡。
+
+// denyACLStateFile 是持久状态文件名（记录稳定 SID 已打 ACE 的路径）。
+const denyACLStateFile = "deny_acl_state.json"
+
+// denyACLStatePathOverride 供测试改写状态文件路径（空 = 用户配置目录默认位置）。
+var denyACLStatePathOverride string
+
+// denyACLStatePath 返回状态文件路径（{UserConfigDir}/aic/sandbox/deny_acl_state.json）。
+func denyACLStatePath() string {
+	if denyACLStatePathOverride != "" {
+		return denyACLStatePathOverride
 	}
-	targets, err := denyCoverAll(patterns)
+	dir, err := os.UserConfigDir()
 	if err != nil {
-		return nil, nil, err
+		return ""
 	}
-	if len(targets) == 0 {
-		return nil, nil, nil
-	}
-	sid, err := randomDenySID()
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox: deny sid: %w", err)
-	}
-	restricted := restrictedSIDsForReachability()
-	var protected []string
-	for _, t := range targets {
-		ok, err := addDenyACE(t, sid, restricted)
-		if err != nil {
-			revokeDenyACEs(protected, sid)
-			return nil, nil, err
-		}
-		if ok {
-			protected = append(protected, t)
-		}
-	}
-	return sid, protected, nil
+	return filepath.Join(dir, "aic", "sandbox", denyACLStateFile)
 }
 
-// revokeDenyACEs 撤销本调用追加的 deny ACE（best-effort：残留 ACE 只对随机
-// SID 生效，无安全影响）。
-func revokeDenyACEs(protected []string, sid *windows.SID) {
-	if sid == nil {
+// denyACLState 是持久状态（codex deny_read_acl_state.json 同构）。
+type denyACLState struct {
+	SID     string   `json:"sid"`
+	Applied []string `json:"applied"`
+}
+
+var (
+	denyACLMu    sync.Mutex
+	denyACLCache *denyACLState
+)
+
+// stableDenySID 返回跨调用/重启稳定的 deny SID（能力 SID 确定性派生：同一
+// 安装恒得同一 SID，已打 ACE 长期有效）。
+func stableDenySID() (*windows.SID, error) {
+	return capabilitySID("deny", "aic-windows-sandbox")
+}
+
+// denyPathKey 归一化路径键（状态比较用；与状态文件内的字面路径解耦）。
+func denyPathKey(p string) string {
+	return strings.ToLower(filepath.ToSlash(p))
+}
+
+// loadDenyACLState 读状态文件（缺失/损坏 = 空状态：损坏时下次对账以读校验
+// 补齐，不会重复打 ACE）。
+func loadDenyACLState() *denyACLState {
+	path := denyACLStatePath()
+	if path == "" {
+		return &denyACLState{}
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return &denyACLState{}
+	}
+	var st denyACLState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return &denyACLState{}
+	}
+	return &st
+}
+
+// storeDenyACLState 落盘状态（best-effort：失败仅记日志——最坏情形是下次
+// 重算把已有 ACE 再校验一遍）。
+func storeDenyACLState(st *denyACLState, logf func(string, ...any)) {
+	path := denyACLStatePath()
+	if path == "" {
 		return
 	}
-	for _, t := range protected {
-		_ = revokeDenyACE(t, sid)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		if logf != nil {
+			logf("sandbox: deny state dir: %v", err)
+		}
+		return
 	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		if logf != nil {
+			logf("sandbox: deny state write: %v", err)
+		}
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil && logf != nil {
+		logf("sandbox: deny state rename: %v", err)
+	}
+}
+
+// denyParallelPaths 以 denyACLWorkers 并发处理路径列表，返回首个错误。
+func denyParallelPaths(paths []string, fn func(i int, path string) error) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	var (
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, denyACLWorkers)
+		errMu    sync.Mutex
+		firstErr error
+	)
+	for i, p := range paths {
+		i, p := i, p
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := fn(i, p); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// ensureDenyACEs 使 deny 目标集带上稳定 deny SID 的拒绝 ACE（幂等）。目标集
+// 来自 denyCoverAllCached（TTL 缓存）：
+//   - 缓存命中的稳态调用：只做内存差集（仅新目标要读校验），零 ACL 读；
+//   - 缓存重算（TTL 过期/模式变化）：既有目标全部并行校验（对象删除重建会
+//     丢 ACE，需补打），不再需要的旧目标撤销（对账）。
+//
+// 返回 deny SID（无目标 = nil，此时无需放进 restricting list）与错误：
+// 可达对象加不上 ACE → fail-closed（命令不执行；已打上的 ACE 保留并落状态）。
+func ensureDenyACEs(patterns []string, logf func(string, ...any)) (*windows.SID, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	sid, err := stableDenySID()
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: deny sid: %w", err)
+	}
+	targets, cached, err := denyCoverAllCached(patterns, logf)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	restricted := restrictedSIDsForReachability()
+
+	denyACLMu.Lock()
+	if denyACLCache == nil {
+		denyACLCache = loadDenyACLState()
+	}
+	previous := append([]string(nil), denyACLCache.Applied...)
+	denyACLMu.Unlock()
+
+	prevSet := make(map[string]bool, len(previous))
+	for _, p := range previous {
+		prevSet[denyPathKey(p)] = true
+	}
+	desiredSet := make(map[string]bool, len(targets))
+	var toCheck []string
+	for _, p := range targets {
+		desiredSet[denyPathKey(p)] = true
+		if !cached || !prevSet[denyPathKey(p)] {
+			// 重算：全部校验；命中：仅校验不在状态里的新目标（稳态 0 读）
+			toCheck = append(toCheck, p)
+		}
+	}
+	var toRevoke []string
+	for _, p := range previous {
+		if !desiredSet[denyPathKey(p)] {
+			toRevoke = append(toRevoke, p)
+		}
+	}
+
+	start := time.Now()
+	present := make([]bool, len(toCheck))
+	addedFlags := make([]bool, len(toCheck))
+	err = denyParallelPaths(toCheck, func(i int, p string) error {
+		a, ok, err := ensureDenyACE(p, sid, restricted)
+		if err != nil {
+			return err
+		}
+		present[i], addedFlags[i] = ok, a
+		return nil
+	})
+
+	// 组装新的已应用集合（保留旧顺序 + 校验通过的新目标）
+	next := make([]string, 0, len(targets))
+	seen := make(map[string]bool, len(targets))
+	for _, p := range previous {
+		k := denyPathKey(p)
+		if desiredSet[k] && !seen[k] {
+			next = append(next, p)
+			seen[k] = true
+		}
+	}
+	addedCount := 0
+	for i, p := range toCheck {
+		if !present[i] {
+			continue
+		}
+		k := denyPathKey(p)
+		if !seen[k] {
+			next = append(next, p)
+			seen[k] = true
+		}
+		if addedFlags[i] {
+			addedCount++
+		}
+	}
+	// 不再需要的旧目标：撤销（best-effort）
+	if len(toRevoke) > 0 {
+		_ = denyParallelPaths(toRevoke, func(_ int, p string) error {
+			_ = revokeDenyACE(p, sid)
+			return nil
+		})
+	}
+	state := &denyACLState{SID: sid.String(), Applied: next}
+	denyACLMu.Lock()
+	changed := len(next) != len(previous)
+	denyACLCache = state
+	denyACLMu.Unlock()
+	if changed || len(toCheck) > 0 || len(toRevoke) > 0 {
+		storeDenyACLState(state, logf)
+	}
+	if logf != nil {
+		logf("sandbox: deny ensure: desired=%d checked=%d added=%d stale=%d cached=%v took=%s",
+			len(targets), len(toCheck), addedCount, len(toRevoke), cached, time.Since(start).Round(time.Millisecond))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return sid, nil
+}
+
+// ensureDenyACE 确保对象带稳定 SID 的拒绝 ACE（先读校验、缺才写——codex
+// add_deny_write_ace 同款幂等语义）。added = 本次写入；present = 对象当前已
+// 有该 ACE（含本次写入）。对象不可读 → (false, false, nil) 跳过（与
+// addDenyACE 的不可达口径一致）。
+func ensureDenyACE(path string, sid *windows.SID, restricted []*windows.SID) (added, present bool, err error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, false, nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return false, false, nil
+	}
+	if aclHasDenyForSID(dacl, sid) {
+		return false, true, nil
+	}
+	ok, err := addDenyACE(path, sid, restricted)
+	if err != nil {
+		return false, false, err
+	}
+	return ok, ok, nil
+}
+
+// aclHasDenyForSID 检查 DACL 中是否已有该 SID 的有效拒绝 ACE（仅继承位
+// （INHERIT_ONLY）的 ACE 对对象自身不生效，不算）。
+func aclHasDenyForSID(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	head := (*[8]byte)(unsafe.Pointer(acl))
+	aclSize := int(binary.LittleEndian.Uint16(head[2:4]))
+	aceCount := int(binary.LittleEndian.Uint16(head[4:6]))
+	off := 8
+	for i := 0; i < aceCount; i++ {
+		if off+8 > aclSize {
+			return false
+		}
+		ace := (*windows.ACE_HEADER)(unsafe.Pointer(uintptr(unsafe.Pointer(acl)) + uintptr(off)))
+		if int(ace.AceSize) < 8 || off+int(ace.AceSize) > aclSize {
+			return false
+		}
+		if ace.AceType == windows.ACCESS_DENIED_ACE_TYPE && ace.AceFlags&windows.INHERIT_ONLY_ACE == 0 {
+			// ACCESS_DENIED_ACE 与 ACCESS_ALLOWED_ACE 布局一致（头 + 掩码 + SidStart）
+			da := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(ace))
+			aceSid := (*windows.SID)(unsafe.Pointer(&da.SidStart))
+			if aceSid.String() == sid.String() {
+				return true
+			}
+		}
+		off += int(ace.AceSize)
+	}
+	return false
 }
 
 // addDenyACE 在目标对象上追加 deny SID 的完全拒绝 ACE（继承到子对象）。
@@ -715,7 +1004,7 @@ func removeAcesForSID(dacl *windows.ACL, sid *windows.SID) (*windows.ACL, bool, 
 // 合并——win11 26200 实测该路径返回 ERROR_SUCCESS 但 deny 类 ACE 残留
 // （带/不带继承位均如此；同样形态在 codex/dsh 环境可用，本机行为未再归因），
 // 字节级重建与 ACL 编辑器删除 ACE 同语义。返回错误供诊断/调用方处理
-// （revokeDenyACEs 仍为 best-effort 语义）。
+// （撤销调用方仍为 best-effort 语义）。
 func revokeDenyACE(path string, denySid *windows.SID) error {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {

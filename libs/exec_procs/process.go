@@ -81,6 +81,7 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 	// 无可用后端时 fail-closed 返回错误（命令不执行，绝不静默裸跑）。
 	execArgv := opts.Exec
 	var plan launchPlan
+	logf := m.logFunc()
 	confined := !opts.NoSandbox && !m.noSandbox.Load()
 	if confined {
 		var err error
@@ -89,6 +90,7 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 			deny: opts.DenyPaths, rules: opts.SandboxRules, fsOpen: opts.FsOpen,
 			writeAllow: opts.WritePaths,
 			netOpen:    opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
+			logf: logf,
 		})
 		if err != nil {
 			return 0, err
@@ -125,6 +127,7 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 		}
 	}
 
+	spawnStart := time.Now()
 	if err := cmd.Start(); err != nil {
 		closeToken(plan.token)
 		if plan.cleanup != nil {
@@ -147,6 +150,9 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 			}
 			return 0, fmt.Errorf("exec: assign job object: %v", err)
 		}
+	}
+	if confined && logf != nil {
+		logf("exec: spawn=%s level=%d", time.Since(spawnStart).Round(time.Millisecond), opts.Level)
 	}
 
 	if plan.cleanup != nil {

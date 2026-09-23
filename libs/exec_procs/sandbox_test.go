@@ -472,6 +472,42 @@ func TestDenyCoverAll(t *testing.T) {
 	}
 }
 
+// 多个 ** 模式共享一趟遍历：同一快照下目标集合与逐模式遍历一致——文件命中
+// 逐条产出，目录命中（.probe_ssh）剪枝后其内更深命中由父目标收敛。修复前
+// ~11 条内置 ** 模式各走一趟 $HOME（win 实测每次 exec 多付 ~17s），现同根只走一趟。
+// 文件名用中性词（不对撞环境自身的内置 deny 表，如 **/id_rsa*、**/.ssh/**）。
+func TestDenyWalkAllSharedTraversal(t *testing.T) {
+	dir := filepath.ToSlash(t.TempDir())
+	mk := func(rel string) string {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.ToSlash(p)
+	}
+	secret := mk("app/a.secret")
+	probe := mk("keys/id_probe")
+	inner := mk(".probe_ssh/id_probe")
+	probeDir := dir + "/.probe_ssh"
+
+	targets := mustDenyTargets(t, []string{dir + "/**/*.secret", dir + "/**/id_probe*", dir + "/**/.probe_ssh/**"})
+	if !contains(targets, secret) || !contains(targets, probe) {
+		t.Fatalf("file targets missing: %v", targets)
+	}
+	if !contains(targets, probeDir) {
+		t.Fatalf("matched dir target missing: %v", targets)
+	}
+	if contains(targets, inner) {
+		t.Fatalf("nested target under matched dir must be pruned: %v", targets)
+	}
+	if len(targets) != 3 {
+		t.Fatalf("targets = %v, want 3 entries", targets)
+	}
+}
+
 // mustDenyTargets 实例化 deny 模式（测试 helper）。
 func mustDenyTargets(t *testing.T, pats []string) []string {
 	t.Helper()
@@ -480,6 +516,82 @@ func mustDenyTargets(t *testing.T, pats []string) []string {
 		t.Fatal(err)
 	}
 	return targets
+}
+
+// deny 实例化缓存（B 方案）：TTL 内同一模式集复用快照（跳过 $HOME 递归）；
+// 过期重算反映当前文件系统；模式集不同即不命中。语义取舍：TTL 窗口内新建的
+// 匹配对象在下次重算前不会被实例化（2026-09-23 用户批准）。生产路径走
+// denyCoverAllCached，测试直接调 denyCoverAll 不受缓存影响。
+func TestDenyCoverAllCached(t *testing.T) {
+	oldTTL := denyCoverCacheTTL
+	denyCoverCacheTTL = time.Minute
+	defer func() { denyCoverCacheTTL = oldTTL }()
+	denyCoverCacheMu.Lock()
+	denyCoverCache = nil // 清空，免与同进程其他用例互相污染
+	denyCoverCacheMu.Unlock()
+
+	dir := filepath.ToSlash(t.TempDir())
+	first := filepath.Join(dir, "a.probecache")
+	if err := os.WriteFile(first, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pats := []string{dir + "/**/*.probecache"}
+
+	targets, cached, err := denyCoverAllCached(pats, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached {
+		t.Fatalf("first instantiation must not be cached")
+	}
+	if !contains(targets, filepath.ToSlash(first)) {
+		t.Fatalf("first instantiation must contain %s: %v", first, targets)
+	}
+
+	// 文件系统变化（删旧建新）：TTL 内命中缓存 → 返回旧快照
+	second := filepath.Join(dir, "b.probecache")
+	if err := os.WriteFile(second, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(first); err != nil {
+		t.Fatal(err)
+	}
+	targets, cached, err = denyCoverAllCached(pats, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached {
+		t.Fatalf("second call within TTL must be served from cache")
+	}
+	if !contains(targets, filepath.ToSlash(first)) || contains(targets, filepath.ToSlash(second)) {
+		t.Fatalf("TTL 内必须复用旧快照（含已删的 %s、不含新建的 %s）: %v", first, second, targets)
+	}
+
+	// TTL 过期：重算反映当前文件系统
+	denyCoverCacheTTL = 0
+	targets, cached, err = denyCoverAllCached(pats, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached {
+		t.Fatalf("expired entry must be recomputed")
+	}
+	if contains(targets, filepath.ToSlash(first)) || !contains(targets, filepath.ToSlash(second)) {
+		t.Fatalf("TTL 过期必须重算（不含 %s、含 %s）: %v", first, second, targets)
+	}
+
+	// 模式集不同：不命中（同一缓存槽直接替换）
+	other := []string{dir + "/**/*.probemiss"}
+	targets, cached, err = denyCoverAllCached(other, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached {
+		t.Fatalf("different pattern set must recompute")
+	}
+	if len(targets) != 0 {
+		t.Fatalf("不同模式集必须重算（当前无目标）: %v", targets)
+	}
 }
 
 // rlimitArgs 三端同一组上限：AS 4GiB / NOFILE 1024 / CPU 600 /

@@ -284,11 +284,25 @@ func aclDenyAceCount(t *testing.T, path string) int {
 	return n
 }
 
-// deny（Windows 边界）：per-call 拒绝 ACE 使目标【写】被拒（pass-2 写检查
-// 命中 deny）；读不在 WRITE_RESTRICTED 的交叉检查范围——deny 不拦读
-// （Windows 受限令牌的数据边界，与 dsh/codex 一致；读侧隔离需另一机制，
-// fs 工具层 deny 不受影响）；进程结束后拒绝 ACE 撤销（计数回落）。
+// deny（Windows 边界，持久 ACE 模型）：稳定 SID 的拒绝 ACE 使目标【写】被拒
+// （pass-2 写检查命中 deny）；读不在 WRITE_RESTRICTED 的交叉检查范围——deny
+// 不拦读（Windows 受限令牌的数据边界，与 dsh/codex 一致；读侧隔离需另一机制，
+// fs 工具层 deny 不受影响）；ACE 持久保留（不随进程结束撤销，codex 同款：
+// 后代可能比 launcher 活得久），幂等 ensure 不重复打。
 func TestWindowsDenyWriteACEAndCleanup(t *testing.T) {
+	// 状态文件隔离：不污染真实用户状态，并清进程内快照
+	oldOverride := denyACLStatePathOverride
+	denyACLStatePathOverride = filepath.Join(t.TempDir(), "deny_acl_state.json")
+	defer func() {
+		denyACLStatePathOverride = oldOverride
+		denyACLMu.Lock()
+		denyACLCache = nil
+		denyACLMu.Unlock()
+	}()
+	denyACLMu.Lock()
+	denyACLCache = nil
+	denyACLMu.Unlock()
+
 	ws := t.TempDir()
 	secret := filepath.Join(ws, "secret.key")
 	if err := os.WriteFile(secret, []byte("top-secret"), 0o600); err != nil {
@@ -311,9 +325,16 @@ func TestWindowsDenyWriteACEAndCleanup(t *testing.T) {
 	if b, _ := os.ReadFile(secret); string(b) != "top-secret" {
 		t.Fatalf("denied file changed: %q", b)
 	}
-	// runWithPlan 已触发 cleanup：拒绝 ACE 撤销，计数回落
-	if got := aclDenyAceCount(t, secret); got != before {
-		t.Fatalf("deny ACE not revoked: before=%d after=%d", before, got)
+	// 持久 ACE：runWithPlan 已触发 cleanup，但拒绝 ACE 不撤销（计数不回落）
+	if got := aclDenyAceCount(t, secret); got != before+1 {
+		t.Fatalf("deny ACE must persist after run: before=%d after=%d", before, got)
+	}
+	// 幂等：再次 plan 同一目标不重复打 ACE（状态对账命中，零 ACL 写）
+	if _, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: writeCmd(secret)}); err != nil {
+		t.Fatalf("planConfined (again): %v", err)
+	}
+	if got := aclDenyAceCount(t, secret); got != before+1 {
+		t.Fatalf("deny ACE must not duplicate: before=%d after=%d", before, got)
 	}
 
 	// 读边界：WRITE_RESTRICTED 只交叉检查写访问——deny 不拦读（文档化行为；
@@ -338,6 +359,50 @@ func TestWindowsDenyWriteACEAndCleanup(t *testing.T) {
 	out3, exit3 := runWithPlan(t, plan3, plan3.argv, ws)
 	if exit3 != 0 {
 		t.Fatalf("non-deny write should succeed: %s", out3)
+	}
+}
+
+// 持久 deny ACE 对账：换 deny 目标后，不再需要的旧目标被撤销（状态文件对账），
+// 新目标打上；对账只在实例化重算/目标集变化时发生（稳态零 ACL 写）。
+func TestWindowsDenyStaleRevocation(t *testing.T) {
+	oldOverride := denyACLStatePathOverride
+	denyACLStatePathOverride = filepath.Join(t.TempDir(), "deny_acl_state.json")
+	defer func() {
+		denyACLStatePathOverride = oldOverride
+		denyACLMu.Lock()
+		denyACLCache = nil
+		denyACLMu.Unlock()
+	}()
+	denyACLMu.Lock()
+	denyACLCache = nil
+	denyACLMu.Unlock()
+
+	ws := t.TempDir()
+	a := filepath.Join(ws, "a.key")
+	b := filepath.Join(ws, "b.key")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeA := aclDenyAceCount(t, a)
+
+	if _, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{a}, netOpen: true, argv: writeCmd(a)}); err != nil {
+		t.Fatalf("planConfined(a): %v", err)
+	}
+	if got := aclDenyAceCount(t, a); got != beforeA+1 {
+		t.Fatalf("deny ACE for a not added: before=%d after=%d", beforeA, got)
+	}
+
+	// 目标集变化（a → b）：a 的 ACE 应被对账撤销，b 打上
+	if _, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{b}, netOpen: true, argv: writeCmd(b)}); err != nil {
+		t.Fatalf("planConfined(b): %v", err)
+	}
+	if got := aclDenyAceCount(t, a); got != beforeA {
+		t.Fatalf("stale deny ACE for a must be revoked: before=%d after=%d", beforeA, got)
+	}
+	if got := aclDenyAceCount(t, b); got != 1 {
+		t.Fatalf("deny ACE for b not added: %d", got)
 	}
 }
 

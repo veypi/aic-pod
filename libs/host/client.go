@@ -111,6 +111,7 @@ func New(opts Options) *Client {
 	}
 	procs := exec_procs.NewManager(opts.ExecTimeout)
 	procs.SetNoSandbox(opts.NoSandbox)
+	procs.SetLogf(logf)
 	policy := fsauth.New()
 	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{

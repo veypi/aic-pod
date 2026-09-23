@@ -98,7 +98,7 @@ aic-pod/
   net 域管沙箱内子进程出站（内建 localhost:*）；ssh 域是 ssh/scp 一级工具的目标闸。
   `set_config` 与 `grant <域> <目标> [--permanent]` 动态生效（已启动进程不回溯）。
 - **进程沙箱**：exec 调用默认进沙箱（darwin seatbelt / linux bubblewrap / windows
-  受限令牌 + ACL + per-call deny ACE），按授予等级选 profile（1=read-only，2/3/4/9=workspace-write），
+  受限令牌 + ACL + 持久 deny ACE），按授予等级选 profile（1=read-only，2/3/4/9=workspace-write），
   叠加 env 敏感变量清洗、资源限制与网络闸；后端无法表达的策略在启动前拒绝，无可用后端 **fail-closed**。
   免沙箱唯一通道 = 请求级 `nosandbox` + 单独人工审批（Critical(4)）——审批通过（9）
   本身不豁免沙箱。

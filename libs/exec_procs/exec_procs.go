@@ -95,6 +95,7 @@ type Manager struct {
 	execTimeout time.Duration
 	tasks       map[string]*Entry
 	noSandbox   atomic.Bool
+	logf        atomic.Value // func(string, ...any)
 	closed      bool
 	epoch       string
 	seen        map[string]bool
@@ -444,3 +445,19 @@ func readHeadLines(path string, maxLines int) (content string, lines int, trunca
 func (m *Manager) Epoch() string { return m.epoch }
 
 func (m *Manager) SetNoSandbox(value bool) { m.noSandbox.Store(value) }
+
+// SetLogf 注入沙箱/执行阶段计时日志（pod 侧接 host 的 OnLog；nil 忽略）。
+// 不注入则全链路静默（测试与库内直用）。
+func (m *Manager) SetLogf(fn func(string, ...any)) {
+	if fn != nil {
+		m.logf.Store(fn)
+	}
+}
+
+// logFunc 返回注入的日志函数（未注入 = nil）。
+func (m *Manager) logFunc() func(string, ...any) {
+	if v := m.logf.Load(); v != nil {
+		return v.(func(string, ...any))
+	}
+	return nil
+}
