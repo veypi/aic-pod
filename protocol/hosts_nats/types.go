@@ -42,9 +42,21 @@ func signature(key string, r Request) string {
 	m.Write(b)
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
+
+// 跨机时效校验的时钟容差：校验方以平台时钟为基准（设备侧对时见 libs/host/clock.go），
+// 校准误差与漂移是毫秒~秒级——窗口判定不能零余量：平台签发的 AuthorizationUntil 恒为
+// 「平台 now+30min」，零容差时「设备校准时间略慢于平台」会把整段会话的请求全部拒掉；
+// Deadline 上限须覆盖平台工具请求的最长等待（aic MaxToolReqTimeout=10min，此前 5min
+// 上限让所有 >5min 的调用（如 curl 600s）必然被拒）。
+const (
+	clockSlack          = 2 * time.Minute
+	authorizationWindow = 30*time.Minute + clockSlack
+	deadlineHorizon     = 15 * time.Minute
+)
+
 func Sign(key string, r *Request) { r.Signature = signature(key, *r) }
 func Verify(key, host, subject string, r Request, now time.Time) error {
-	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(30*time.Minute).UnixMilli() || r.Request.Protocol != Protocol || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.GrantedLevel < 1 || r.GrantedLevel > 9 || r.Deadline <= now.UnixMilli() || r.Deadline > now.Add(5*time.Minute).UnixMilli() {
+	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.Request.Protocol != Protocol || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.GrantedLevel < 1 || r.GrantedLevel > 9 || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
 		return tools.Fail("unauthorized", "Invalid request destination, identity or validity window")
 	}
 	if !hmac.Equal([]byte(signature(key, r)), []byte(r.Signature)) {

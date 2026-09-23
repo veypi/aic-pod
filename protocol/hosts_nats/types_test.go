@@ -24,3 +24,35 @@ func TestSignatureBindsEveryExecutionField(t *testing.T) {
 		}
 	}
 }
+
+// 对时校准误差容差：零容差时「设备校准时间略慢于平台」会把整段会话的请求全部
+// 拒掉；Deadline 上限也需覆盖平台工具请求最长等待（10min）而非 5min。
+func TestVerifyClockSlackToleratesCalibrationError(t *testing.T) {
+	subject, _ := Subject("u1", "h1")
+	base := time.Now()
+	mk := func(deadline, authorization time.Time) Request {
+		r := Request{HostID: "h1", Subject: subject, Caller: "u1", GrantedLevel: 2, Nonce: "nonce", Deadline: deadline.UnixMilli(), AuthorizationUntil: authorization.UnixMilli(), Request: wire.Request{Protocol: Protocol, ID: "req", Action: "call", Call: &wire.Invocation{Domain: "exec", Command: "browser", Method: "page.list", Args: json.RawMessage(`{}`)}}}
+		Sign("secret", &r)
+		return r
+	}
+	// 误差负侧：平台零余量签发 now+30min，设备校准时间慢 1min（零容差会全拒）。
+	r := mk(base.Add(time.Minute), base.Add(30*time.Minute))
+	if err := Verify("secret", "h1", subject, r, base.Add(-time.Minute)); err != nil {
+		t.Fatal("clock slack (authorization) rejected: ", err)
+	}
+	// 误差正侧：Deadline 已过 1min，容差内仍接受。
+	r = mk(base, base.Add(30*time.Minute))
+	if err := Verify("secret", "h1", subject, r, base.Add(time.Minute)); err != nil {
+		t.Fatal("clock slack (deadline) rejected: ", err)
+	}
+	// 长等待：平台 timeout 上限 10min（Deadline=now+timeout），5min 上限时代必然被拒。
+	r = mk(base.Add(8*time.Minute), base.Add(30*time.Minute))
+	if err := Verify("secret", "h1", subject, r, base); err != nil {
+		t.Fatal("long deadline rejected: ", err)
+	}
+	// 超窗仍拒：授权 40min、Deadline 20min 均超界。
+	r = mk(base.Add(20*time.Minute), base.Add(40*time.Minute))
+	if err := Verify("secret", "h1", subject, r, base); err == nil {
+		t.Fatal("oversized validity windows accepted")
+	}
+}
