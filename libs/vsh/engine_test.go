@@ -31,6 +31,91 @@ func newTestEngine(t *testing.T) *Engine {
 	return e
 }
 
+// TestIsPureBGMgmtScript 管理面快路径判定：仅单条纯 bg list/wait/kill/output
+// （或裸 bg）放行；bg run（cwd 继承依赖基会话）与一切复合/动态形态排除。
+func TestIsPureBGMgmtScript(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"bg":                      true,
+		"bg list":                 true,
+		"bg kill bg-3":            true,
+		"bg wait bg-3 5":          true,
+		"bg output bg-3":          true,
+		"  bg   kill   bg-3  ":    true,
+		"bg run 'sleep 1'":        false, // cwd 继承依赖基会话，非救场命令
+		"bg list; echo done":      false,
+		"bg list | grep bg":       false,
+		"bg list > out.txt":       false,
+		"bg kill bg-3 &":          false,
+		"echo bg list":            false,
+		"x=1 bg list":             false,
+		"bg $SUB":                 false,
+		"bg kill $(cat /tmp/id)":  false,
+		"grant fs /u/u1/x":        false,
+		"bg kill bg-3 # 注释":     true,
+	}
+	for script, want := range cases {
+		if got := isPureBGMgmtScript(script); got != want {
+			t.Errorf("isPureBGMgmtScript(%q) = %v, want %v", script, got, want)
+		}
+	}
+}
+
+// TestBGMgmtBypassesSessionLock 管理面快路径 e2e：基会话被长任务持锁时，
+// 纯 bg 管理命令仍即时到达执行层（2026-09-24 实测会话活锁漏洞：前台长任务
+// 超时转 bg 后仍持基会话执行锁，救场的 bg kill 排队到不了执行层）。
+func TestBGMgmtBypassesSessionLock(t *testing.T) {
+	t.Parallel()
+	e := newTestEngine(t)
+	ctx := context.Background()
+
+	// 先起一个 bg 长任务供 kill。
+	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg run 'sleep 60'"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("bg run: %+v err=%v", res, err)
+	}
+	tid := strings.TrimSpace(res.Stdout)
+
+	// 基会话长任务持锁（模拟前台超时转 bg 后仍占位的执行，sleep 10 >> 快路径阈值）。
+	go func() {
+		_, _ = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "sleep 10", LongRunning: true, Timeout: BackgroundWallClock})
+	}()
+	time.Sleep(500 * time.Millisecond) // 等基会话锁被占
+
+	// kill 应即时执行（不排基会话锁），任务被杀。
+	start := time.Now()
+	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg kill " + tid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("bg kill blocked %v（排在基会话锁后）", el)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("bg kill exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	task, err := e.Tasks.Wait(ctx, tid, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "killed" {
+		t.Fatalf("task status = %q, want killed", task.Status)
+	}
+
+	// list 同样快路径，且能看到任务表。
+	start = time.Now()
+	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("bg list blocked %v", el)
+	}
+	if !strings.Contains(res.Stdout, tid) {
+		t.Fatalf("bg list missing %s: %q", tid, res.Stdout)
+	}
+}
+
 // TestEngineSessionKeyInContext Exec 把会话键注入 ctx（M3c：NetClient
 // per-sid 规则表与平台命令共用此通道）——平台 grant 回调应能取到。
 func TestEngineSessionKeyInContext(t *testing.T) {

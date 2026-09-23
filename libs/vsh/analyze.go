@@ -317,3 +317,47 @@ func ddTargets(args []string) []string {
 	}
 	return nil
 }
+
+// isPureBGMgmtScript 判定脚本是否为单条纯 bg 管理命令（list/wait/kill/output
+// 或裸 bg 帮助）——管理面快路径用（2026-09-24 实测漏洞：前台长任务超时转 bg
+// 后仍持有基会话执行锁，救场的 bg kill 排在锁后到不了执行层，会话活锁至 30min
+// 墙钟）。纯管理命令路由到派生会话执行（Tasks 表引擎级共享，功能不变），不占用
+// 基会话。bg run 刻意排除——它要继承调用方 cwd（基会话 FS 状态），且本身秒回，
+// 不是救场命令。
+// 判定保守：恰好一条语句、无重定向/管道/后台符/赋值/命令替换，argv 全字面量。
+func isPureBGMgmtScript(script string) bool {
+	f, err := syntax.NewParser().Parse(strings.NewReader(script), "mgmt")
+	if err != nil || len(f.Stmts) != 1 {
+		return false
+	}
+	stmt := f.Stmts[0]
+	if stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 {
+		return false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 || len(call.Assigns) != 0 {
+		return false
+	}
+	argv := make([]string, 0, len(call.Args))
+	for _, arg := range call.Args {
+		if len(arg.Parts) != 1 {
+			return false
+		}
+		lit, ok := arg.Parts[0].(*syntax.Lit)
+		if !ok {
+			return false
+		}
+		argv = append(argv, lit.Value)
+	}
+	if argv[0] != "bg" {
+		return false
+	}
+	if len(argv) == 1 {
+		return true // 裸 bg = 帮助
+	}
+	switch argv[1] {
+	case "list", "wait", "kill", "output":
+		return true
+	}
+	return false
+}

@@ -215,7 +215,16 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 			res, err = nil, fmt.Errorf("vsh engine panic: %v", r)
 		}
 	}()
-	sess, err := e.session(ctx, req.SessionKey)
+	// 管理面快路径：纯 bg 管理命令（list/wait/kill/output）路由派生会话，
+	// 不占用基会话执行锁（vshcore Session.Exec 全程持 s.mu）——2026-09-24 实测
+	// 漏洞：前台长任务超时转 bg 后仍持基会话锁，救场的 bg kill 排在锁后到不了
+	// 执行层，整个会话活锁至 30min 墙钟。Tasks 表引擎级共享，派生会话功能不变。
+	sessionKey := req.SessionKey
+	if isPureBGMgmtScript(req.Script) {
+		sessionKey = fmt.Sprintf("%s#mgmt-%d", baseSessionKey(req.SessionKey), time.Now().UnixNano())
+		defer e.DropSession(sessionKey)
+	}
+	sess, err := e.session(ctx, sessionKey)
 	if err != nil {
 		return nil, err
 	}
