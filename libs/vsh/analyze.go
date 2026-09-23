@@ -6,8 +6,10 @@ import (
 	"github.com/veypi/vsh/shell/syntax"
 )
 
-// maxAnalyzeScriptDepth 脚本递归分析限深（bash x.sh / source / ./x.sh 套娃防爆）。
-const maxAnalyzeScriptDepth = 8
+// maxAnalyzeScriptDepth 脚本递归分析限深（bash x.sh / source / ./x.sh 套娃防爆；
+// todo 2.5.3：2-3 层。TOCTOU 记录在案：分析时的脚本内容与执行时可能不同——
+// 本分析仅作预检报错材料，拦截由运行期 FS 适配器规则表门兜底）。
+const maxAnalyzeScriptDepth = 3
 
 // Analysis 是脚本静态分析结果（design §4 analyze.go；两端共用）。
 // 只收集字面量目标——含变量/glob 的动态目标跳过（运行期由 FS 适配器
