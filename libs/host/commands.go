@@ -29,7 +29,7 @@ func (c *Client) newAccess() (*hostauth.Access, error) {
 	if err != nil {
 		return nil, err
 	}
-	return hostauth.NewAccess(hostauth.AccessConfig{HostID: parts[0], UserID: parts[3], CredentialVersion: version, Key: key})
+	return hostauth.NewAccess(hostauth.AccessConfig{HostID: parts[0], UserID: parts[3], CredentialVersion: version, Key: key, Now: clockNow})
 }
 func (c *Client) initFilesystem() error {
 	store, err := hostfs.NewBytes(hostfs.BytesConfig{MaxSources: c.options().Transfers.MaxSources, MaxSourceBytes: c.options().Transfers.MaxUploadBytes})

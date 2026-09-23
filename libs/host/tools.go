@@ -76,7 +76,7 @@ func (c *Client) HandleNATS(ctx context.Context, subject string, data []byte) wi
 	if err != nil || subject != destination {
 		return wire.Reply(natswire.Protocol, r.Request.ID, nil, wire.Fail("unauthorized", "Wrong tool route"))
 	}
-	if err = natswire.Verify(c.kTool, c.hostID, subject, r, time.Now()); err != nil {
+	if err = natswire.Verify(c.kTool, c.hostID, subject, r, clockNow()); err != nil {
 		return wire.Reply(natswire.Protocol, r.Request.ID, nil, err)
 	}
 	if r.Caller != c.uid {

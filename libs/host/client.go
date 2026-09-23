@@ -173,13 +173,14 @@ func (c *Client) connect() error {
 		nats.Name("aic-host-" + c.hostID),
 		nats.TokenHandler(func() string {
 			return proto.GenerateConnectToken(c.hostID, c.uid, c.options().Version, c.options().DeviceType, c.options().DeviceName,
-				time.Now().UnixMilli(), mustNonce(), kConnect)
+				clockNowMS(), mustNonce(), kConnect)
 		}),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			c.logf("NATS reconnected, republishing caps")
 			c.publishCaps(nc)
+			go c.syncClock()
 			writeState(State{Connected: true, HostID: c.hostID, NATSURL: natsURL, Version: c.options().Version})
 		}),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
@@ -209,6 +210,9 @@ func (c *Client) connect() error {
 			c.logf("ws proxy path: %s → %s", u.proxyPath, natsURL)
 		}
 	}
+
+	// 链前对时：连接 token 与后续请求时效窗口都以平台时间为基准
+	c.syncClock()
 
 	nc, err := nats.Connect(natsURL, opts...)
 	if err != nil {
@@ -572,10 +576,15 @@ func (c *Client) closeConnection() {
 func (c *Client) heartbeatLoop(ctx context.Context, nc *nats.Conn) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
+	syncTicker := time.NewTicker(clockSyncInterval)
+	defer syncTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-syncTicker.C:
+			c.syncClock()
+			continue
 		case <-ticker.C:
 		}
 		if nc.IsClosed() {
@@ -589,7 +598,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, nc *nats.Conn) {
 			"host_id":        c.hostID,
 			"credential_ver": c.credVer,
 			"running":        1,
-			"sent_at":        time.Now().UTC().Format(time.RFC3339),
+			"sent_at":        clockNow().UTC().Format(time.RFC3339),
 		}
 		data, _ := json.Marshal(presence)
 		nc.Publish(subj, data)
