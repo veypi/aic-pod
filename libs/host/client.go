@@ -1,11 +1,11 @@
 // Package host 是 AIC host agent 运行时（docs/instruction_sets_v2.md §6.2）：
 // NATS 连接与认证、能力上报、心跳、fs/exec 方法分发、执行管理器装配、
-// granted_level 纵深检查（与 vcore 分级表同源）。
+// granted_level 纵深检查。
 //
-// 物理 host 命令空间 = 统一命令声明表（§5.1）：恒声明（exec 核心虚拟指令 +
-// json + commands + bg_*）+ 启动探测（shell/git，exec.LookPath）。browser/cua
-// 一并注册为 exec.commands。未声明的命令一律拒绝，
-// 不存在「未知命令透传」。
+// 物理 host 命令空间（vsh 引擎化）：exec 唯一 wire 命令（script 契约）——
+// 内建 90 + jq + 平台命令（commands/bg/grant/list_hosts/send_user）由引擎
+// Registry 收口，原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd
+// 扩充）；白名单外一律 127，不存在「未知命令透传」。
 package host
 
 import (
@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +28,6 @@ import (
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
-	"github.com/veypi/aic-pod/libs/vcore"
 
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
@@ -420,69 +418,25 @@ func (c *Client) handleRTCSignal(data []byte) {
 
 // ---- caps v2 上报（§6.3） ----
 
-// commandDefinitions builds raw-argv declarations before registering them alongside service commands:
-//   - 恒声明：exec 核心虚拟指令（curl）+ json + commands + bg_list/bg_wait/bg_kill
-//     （vcore 元数据同源）；文件类指令属 fs 指令集（fs.actions 声明）
-//   - 启动探测（exec.LookPath，探测到才声明）：
-//     shell（bash/zsh/sh/fish；Windows: powershell/pwsh/cmd）→ level 3（逃生舱）；
-//     git → level 1（本地凭证天然可用）；ssh/scp → level 3（目标闸独立通道）
-//
-// browser/cua 由 initTools 一次声明到 hosts_tool，不进入普通进程命令表。
-func commandDefinitions() []proto.CommandDecl {
-	var cmds []proto.CommandDecl
-	seen := map[string]bool{}
-	add := func(d proto.CommandDecl) {
-		if seen[d.Name] {
-			return
-		}
-		seen[d.Name] = true
-		cmds = append(cmds, d)
-	}
-	for _, name := range vcore.CoreCommandNames() {
-		if d, ok := vcore.Decl(name); ok {
-			add(d)
-		}
-	}
-	for _, name := range []string{"commands", "json", "bg_list", "bg_wait", "bg_kill", "grant"} {
-		if d, ok := vcore.Decl(name); ok {
-			add(d)
-		}
-	}
-	// 启动探测：未安装的命令不声明（AI 经 commands 自然发现不可用）
-	for _, sh := range []string{"bash", "zsh", "sh", "fish", "powershell", "pwsh", "cmd"} {
-		if _, err := exec.LookPath(sh); err == nil {
-			add(proto.CommandDecl{
-				Name: sh, Desc: "run shell commands (escape hatch)",
-				Help:          sh + " -c \"<command>\"\n  run arbitrary shell commands with full host semantics (escape hatch)",
-				RequiredLevel: proto.LevelDanger,
-			})
-		}
-	}
-	if _, err := exec.LookPath("git"); err == nil {
-		if d, ok := vcore.Decl("git"); ok {
-			add(d)
-		}
-	}
-	// ssh 一级工具：ssh 二进制存在才声明（目标闸在 ssh 域 Policy，独立通道）
-	if _, err := exec.LookPath("ssh"); err == nil {
-		if d, ok := vcore.Decl("ssh"); ok {
-			add(d)
-		}
-	}
-	// scp 一级工具：scp 二进制存在才声明（目标闸同 ssh 域，本地侧 fsauth 门控）
-	if _, err := exec.LookPath("scp"); err == nil {
-		if d, ok := vcore.Decl("scp"); ok {
-			add(d)
-		}
-	}
-	return cmds
-}
-
 // buildCaps 构造物理 host 的 caps v2（§6.3）：
 // FS 与 exec 元数据均从实际注册声明生成。
+// exec 命令面（vsh 引擎化）：注册 wire 命令（exec/cua/browser）+ native
+// 白名单名（广告用——AI 经 host_list 了解该 host 的原生命令面；内建 90
+// 命令各端一致不逐项广告，完整表以脚本内 `commands` 为准）。
 func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
 	decls := c.tools.Commands(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)})
+	seen := map[string]bool{}
+	for _, d := range decls {
+		seen[d.Name] = true
+	}
+	if _, native, err := c.vshEngine(); err == nil {
+		for _, name := range native.Names() {
+			if !seen[name] {
+				decls = append(decls, proto.CommandDecl{Name: name, Desc: "native command (vsh whitelist)", RequiredLevel: 2})
+			}
+		}
+	}
 	return &proto.Caps{
 		HostID:        c.hostID,
 		CredentialVer: c.credVer,

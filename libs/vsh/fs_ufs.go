@@ -303,9 +303,15 @@ func (a *ufsAdapter) Chmod(ctx context.Context, name string, mode stdfs.FileMode
 	if a.isMem(abs) {
 		return a.mem.Chmod(ctx, abs, mode)
 	}
-	// UFS 无 chmod API（验收 8：可执行位不持久化 → 工具描述引导 bash x.sh）。
 	if err := a.gate(abs, vbox.OpWrite, false); err != nil {
 		return err
+	}
+	// backing 支持则委派（host OS 可持久化执行位——脚本 chmod +x 生效）；
+	// cloud UFS 无 chmod API（验收 8：可执行位不持久化 → 工具描述引导 bash x.sh）。
+	if cb, ok := a.backing.(interface {
+		Chmod(name string, mode stdfs.FileMode) error
+	}); ok {
+		return cb.Chmod(abs, mode)
 	}
 	return &stdfs.PathError{Op: "chmod", Path: abs, Err: ErrUnsupportedOp}
 }

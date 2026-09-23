@@ -193,6 +193,16 @@ func (OSVFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(p, data, perm)
 }
 
+// Chmod 真实修改权限位（host OS 可持久化执行位——vsh 脚本 chmod +x 生效；
+// glue ufsAdapter 经接口断言委派到这里）。
+func (OSVFS) Chmod(name string, mode fs.FileMode) error {
+	p, err := toOS(name)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(p, mode)
+}
+
 // Search 委托 ufs 通用搜索实现。ufs.Search 内部 validatePath 会剥掉前导
 // 斜杠（fs.FS 相对路径语义），经 osAbsFS 适配器补回绝对路径。
 func (OSVFS) Search(searchPath, glob, pattern string, limit int, ignoreCase bool) ([]ufs.SearchMatch, error) {

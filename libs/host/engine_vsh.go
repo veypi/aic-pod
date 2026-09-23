@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	vshglue "github.com/veypi/aic-pod/libs/vsh"
 	"github.com/veypi/vbox"
@@ -165,6 +167,18 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 	}
 }
 
+// fsSandboxRules 把 fs 域有序规则表映射为沙箱行序快照（M3 行序映射输入）：
+// 与工具层判定同源（builtin + cfg 拼接序）；darwin 按表序输出，
+// 其余平台消费 deny/writeAllow 字段不受影响。
+func fsSandboxRules(p *fsauth.Policy) []exec_procs.SandboxRule {
+	rows := p.Rules()
+	out := make([]exec_procs.SandboxRule, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, exec_procs.SandboxRule{Effect: r.Effect, Patterns: r.Patterns})
+	}
+	return out
+}
+
 // nativePolicy 是 native 包装器的当次策略快照（sid/level 经 inv.Env 透传）。
 func (c *Client) nativePolicy(inv *commands.Invocation) vshglue.NativePolicy {
 	sid := inv.Env["AIC_VSH_SESSION"]
@@ -196,7 +210,8 @@ type execScriptParams struct {
 
 // execScript 执行 script：analyze 预检（grant 恒 4 级纵深）→ 引擎执行 →
 // 超时转 bg（任务表独立墙钟，不取消 ctx）。输出契约：Content = stdout 前
-// 1000 行；attrs exit_code/background/id/output（.exec/{msg_id}.log 全量 tee）。
+// 1000 行；attrs exit_code/background/output（.exec/{short}.log 全量 tee；
+// id 仅在 background=true 时作为后台句柄携带）。
 func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequest, p execScriptParams) *proto.ToolResponse {
 	if strings.TrimSpace(p.Script) == "" {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: script is required"}
@@ -222,7 +237,7 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 	if err := c.ensureSessionWorkDir(sid); err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: err.Error()}
 	}
-	logPath := filepath.Join(c.sessionWorkDir(sid), ".exec", req.MsgID+".log")
+	logPath := c.execLogPath(sid, req.MsgID)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: prepare log: " + err.Error()}
 	}

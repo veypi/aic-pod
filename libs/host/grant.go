@@ -13,36 +13,16 @@ import (
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
-// grant（统一授权申请，四域同形）：
-//
-//	exec grant fs  <path>        [--temp|--permanent]
-//	exec grant net <host:port>   [--temp|--permanent]
-//	exec grant ssh <host[:port]> [--temp|--permanent]
-//
-// required 4（vcore 分级表）⇒ 必人工审批；批准后 granted 9 到达本函数。
-//   - --temp（默认）：域 Policy 会话内存授权（重启失效、跨 session 失效）；
+// grant（统一授权申请，四域同形）：引擎内 `grant` 命令的执行体（vshGrant
+// 按域分派到 grantFS/grantTarget；cmd 域走 native 白名单；ssh 域 M3c 归拢）。
+// 审批已在服务端完成（脚本含字面 grant → 恒 4 级），到达本包即已授权。
+//   - temp（默认）：域 Policy 会话内存授权（重启失效、跨 session 失效）；
 //     不追溯已启动的 bg 任务（沙箱白名单在 Start 时固化）。
 //     规则表判定为 deny 终局的目标拒批——session 层不得放宽表判定的 deny（§2 硬底线）。
 //   - --permanent：把规则行追加到 <域>_rules 表尾（fs 为 rw: 行、net/ssh 为
 //     allow: 行，基于文件配置修改 + Save 落盘，与 set_config 同路径）——重启/跨
 //     session 生效；覆盖 deny 行合法（机器是用户的），响应注明覆盖行号。
 //   - 两档目标均过 §1 全域校验（fs 全域/家根/盘根不可授；net/ssh 通配 host 本身不可表达）。
-func (c *Client) runGrant(sid, msgID string, argv []string) *proto.ToolResponse {
-	domain, target, permanent, err := parseGrantArgv(argv)
-	if err != nil {
-		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: "exec grant: " + err.Error()}
-	}
-	switch domain {
-	case "exec":
-		return c.grantExec(sid, msgID, target, permanent)
-	case "fs":
-		return c.grantFS(sid, msgID, target, permanent)
-	case "net", "ssh":
-		return c.grantTarget(sid, msgID, domain, target, permanent)
-	}
-	return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-		Error: fmt.Sprintf("exec grant: unknown domain %q (supported: fs, exec, net, ssh)", domain)}
-}
 
 // grantFS 处理 fs 域：路径写白名单申请（原 grant_apply 语义）。
 func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolResponse {
@@ -119,37 +99,6 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 			domain, e.String(), scope, note, domain, len(list), strings.Join(list, "\n")),
 		Attrs: map[string]string{"action": "grant", "domain": domain, "target": e.String(), "scope": scope},
 	}
-}
-
-// parseGrantArgv 解析 grant 参数：<域> <目标> [--temp|--permanent]（默认 --temp）。
-func parseGrantArgv(argv []string) (domain, target string, permanent bool, err error) {
-	for _, a := range argv {
-		switch a {
-		case "--temp":
-			permanent = false
-		case "--permanent":
-			permanent = true
-		default:
-			if strings.HasPrefix(a, "-") {
-				return "", "", false, fmt.Errorf("unknown flag %q (supported: --temp, --permanent)", a)
-			}
-			if domain == "" {
-				domain = strings.ToLower(a)
-				continue
-			}
-			if target != "" {
-				return "", "", false, fmt.Errorf("multiple targets given: %q and %q", target, a)
-			}
-			target = a
-		}
-	}
-	if domain == "" {
-		return "", "", false, fmt.Errorf("domain is required (usage: grant <fs|exec|net|ssh> <target> [--temp|--permanent])")
-	}
-	if strings.TrimSpace(target) == "" {
-		return "", "", false, fmt.Errorf("target is required (usage: grant %s <target> [--temp|--permanent])", domain)
-	}
-	return domain, target, permanent, nil
 }
 
 // persistGrant 把目标作为规则行追加到 <域>_rules 表尾并落盘（fs 为 rw: 行、
@@ -253,43 +202,7 @@ func (c *Client) execAllowed(sid, name string) bool {
 	}
 	a := cfg.AuthSnapshot()
 	c.execGrantMu.RLock()
-	allow := append(append([]string{"commands", "grant"}, a.ExecAllow...), c.execGrants[sid]...)
+	allow := append(append([]string{"exec"}, a.ExecAllow...), c.execGrants[sid]...)
 	c.execGrantMu.RUnlock()
 	return policy.CommandAllowed(a.ExecPolicy, a.ExecDeny, allow, name)
-}
-func (c *Client) grantExec(sid, msgID, name string, permanent bool) *proto.ToolResponse {
-	if err := policy.ValidateExec([]string{name}); err != nil {
-		return reject(msgID, err.Error())
-	}
-	declared := c.tools != nil && c.tools.HasCommand(name)
-	if !declared {
-		return reject(msgID, "grant exec requires a registered command name")
-	}
-	a := cfg.AuthSnapshot()
-	if !policy.CommandAllowed("open", a.ExecDeny, nil, name) {
-		return reject(msgID, "command is in exec_deny and cannot be granted")
-	}
-	scope := "session"
-	if permanent {
-		if err := c.persistGrant("exec", name); err != nil {
-			return reject(msgID, err.Error())
-		}
-		scope = "permanent"
-	} else {
-		c.execGrantMu.Lock()
-		if c.execGrants == nil {
-			c.execGrants = map[string][]string{}
-		}
-		found := false
-		for _, old := range c.execGrants[sid] {
-			if old == name {
-				found = true
-			}
-		}
-		if !found {
-			c.execGrants[sid] = append(c.execGrants[sid], name)
-		}
-		c.execGrantMu.Unlock()
-	}
-	return &proto.ToolResponse{MsgID: msgID, State: proto.StateCompleted, Content: fmt.Sprintf("granted exec %s (scope=%s)", name, scope)}
 }

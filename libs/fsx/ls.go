@@ -1,4 +1,4 @@
-package vcore
+package fsx
 
 import (
 	"context"
@@ -99,7 +99,7 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPolicy("fs ls", abs, false); err != nil {
 		return nil, err
 	}
-	info, err := env.VFS.Stat(abs)
+	info, err := env.FS.Stat(abs)
 	if err != nil {
 		return nil, fsErr("ls", "%s", err)
 	}
@@ -140,7 +140,7 @@ func buildLsDir(ctx context.Context, env *Env, dir string, remain int, all bool,
 	if st.truncated {
 		return nil
 	}
-	entries, err := env.VFS.ReadDir(dir)
+	entries, err := env.FS.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
@@ -191,16 +191,17 @@ func buildLsDir(ctx context.Context, env *Env, dir string, remain int, all bool,
 // 路径策略 deny 的 .git 直接跳过探测（不泄露分支名）。
 func gitRepoInfo(env *Env, dir string) (bool, string) {
 	gitDir := path.Join(dir, ".git")
-	info, err := env.VFS.Stat(gitDir)
+	info, err := env.FS.Stat(gitDir)
 	if err != nil || !info.IsDir() {
 		return false, ""
 	}
-	if env.Policy != nil {
-		if rd, _ := env.Policy.Decide(gitDir); rd == 0 {
+	// 规则表读拒的 .git 直接跳过探测（不泄露分支名）。
+	if env.Gate != nil {
+		if err := env.Gate("fs ls", gitDir, false); err != nil {
 			return false, ""
 		}
 	}
-	data, err := env.VFS.ReadFile(path.Join(gitDir, "HEAD"))
+	data, err := env.FS.ReadFile(path.Join(gitDir, "HEAD"))
 	if err != nil {
 		return true, ""
 	}

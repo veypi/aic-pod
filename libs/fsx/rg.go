@@ -1,4 +1,4 @@
-package vcore
+package fsx
 
 import (
 	"bufio"
@@ -117,7 +117,7 @@ func isMinified(env *Env, p string) bool {
 	if isMinifiedName(p) {
 		return true
 	}
-	info, err := env.VFS.Stat(p)
+	info, err := env.FS.Stat(p)
 	if err != nil || info.Size() < minifiedMinBytes {
 		return false
 	}
@@ -126,7 +126,7 @@ func isMinified(env *Env, p string) bool {
 	if n > minifiedHeadBytes {
 		n = minifiedHeadBytes
 	}
-	f, err := env.VFS.Open(p)
+	f, err := env.FS.Open(p)
 	if err != nil {
 		return false
 	}
@@ -146,7 +146,7 @@ func isMinified(env *Env, p string) bool {
 	// （行数 = \n 计数，与 JS 端 indexOf 一致）
 	var lines int64
 	if size <= streamThreshold {
-		data, err := env.VFS.ReadFile(p)
+		data, err := env.FS.ReadFile(p)
 		if err != nil {
 			return false
 		}
@@ -249,7 +249,7 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPolicy("fs rg", abs, false); err != nil {
 		return nil, err
 	}
-	info, err := env.VFS.Stat(abs)
+	info, err := env.FS.Stat(abs)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
 	}
@@ -285,7 +285,7 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := env.VFS.ReadDir(dir)
+	entries, err := env.FS.ReadDir(dir)
 	if err != nil {
 		return err
 	}
@@ -316,6 +316,34 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 		}
 	}
 	return nil
+}
+
+// globMatch 是 rg 文件名 glob（自 vcore argv.go 移植：* 任意序列、? 单字符，
+// 完整匹配）。线性双指针：O(len(s)) 时间、O(1) 额外空间。
+func globMatch(pattern, s string) bool {
+	p, t := []rune(pattern), []rune(s)
+	i, j := 0, 0
+	star, mark := -1, 0
+	for i < len(t) {
+		switch {
+		case j < len(p) && (p[j] == '?' || p[j] == t[i]):
+			i++
+			j++
+		case j < len(p) && p[j] == '*':
+			star, mark = j, i
+			j++
+		case star >= 0:
+			mark++
+			i = mark
+			j = star + 1
+		default:
+			return false
+		}
+	}
+	for j < len(p) && p[j] == '*' {
+		j++
+	}
+	return j == len(p)
 }
 
 // globOK：include glob OR 任一命中即通过；! 前缀 = 排除 glob（命中任一
@@ -364,7 +392,7 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	if err := env.CheckPolicy("fs rg", abs, false); err != nil {
 		return nil, err
 	}
-	info, err := env.VFS.Stat(abs)
+	info, err := env.FS.Stat(abs)
 	if err != nil {
 		return nil, fsErr("rg", "%s", err)
 	}
@@ -626,13 +654,13 @@ func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Reg
 // rgFileRows 扫描单文件：小文件整读逐行，>8MB 候选走流式（同一遍算法）。
 // 二进制文件返回空（跳过）。
 func rgFileRows(env *Env, p string, re *regexp.Regexp, rgCtx, maxRows int) ([]rgRow, bool, error) {
-	info, err := env.VFS.Stat(p)
+	info, err := env.FS.Stat(p)
 	if err != nil {
 		return nil, false, err
 	}
 
 	if info.Size() <= streamThreshold {
-		data, err := env.VFS.ReadFile(p)
+		data, err := env.FS.ReadFile(p)
 		if err != nil || !isTextContent(data) {
 			return nil, false, err
 		}
@@ -654,7 +682,7 @@ func rgFileRows(env *Env, p string, re *regexp.Regexp, rgCtx, maxRows int) ([]rg
 		return rows, truncated, nil
 	}
 
-	f, err := env.VFS.Open(p)
+	f, err := env.FS.Open(p)
 	if err != nil {
 		return nil, false, err
 	}

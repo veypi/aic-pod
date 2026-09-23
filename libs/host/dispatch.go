@@ -2,9 +2,9 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,11 +12,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/exec_procs"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/proto"
-	"github.com/veypi/aic-pod/libs/vcore"
 )
 
 // handleMsg 处理一条入站消息：rtc.in 信令路由到 RTC 服务（不参与验签流程——
@@ -33,201 +29,46 @@ func (c *Client) handleMsg(msg *nats.Msg) {
 	}
 }
 
-// newEnv 构建 OS 文件系统执行环境。
-// workdir 为空时使用 host 端配置工作区（§2.1.1 缺省值）；sid 绑定文件权限
-// 视图的会话上下文（临时 grant/会话区，v0.14.5 §2）——checkGranted 的
-// FSRequiredIn 探测传空 sid（仅 Resolve/VFS，不触发策略判定）；
-// 有文件副作用的指令（provider 转发等）传真实 sid（deny/grant 判定需要会话上下文）。
-func (c *Client) newEnv(sid, workdir string) *vcore.Env {
-	if workdir == "" {
-		workdir = c.options().WorkDir
-	}
-	return &vcore.Env{
-		VFS:          OSVFS{},
-		Workdir:      workdir,
-		ProtectRoots: filesystemRoots(),
-		VirtualRoot:  runtime.GOOS == "windows",        // windows "/" = 盘符挂载列表（虚拟根）
-		Fetcher:      shellCurlFetcher{c: c, sid: sid}, // 外部 http(s) 走真 curl + 统一沙箱（net 域出站闸）
-		ImageData:    true,                             // host 端图片经 image_data 返回（§2.2）
-		Policy:       c.policy.View(sid),
-	}
-}
-
-// execCmd implements registered raw-argv commands after common admission.
+// execCmd 是 exec 工具请求的 pod 入口（vsh 引擎化，todo 3.1.3）：唯一契约 =
+// script（{script, workdir?, timeout?, stdin?, nosandbox?}），pod 侧引擎执行。
+// 旧 action/argv 通道（curl/git/json/bg_*/本地命令逐名注册）已随 vcore 删除
+// 退役——命令发现经脚本内 `commands`，后台经脚本内 `bg`，授权经脚本内 `grant`。
 func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest) *proto.ToolResponse {
-	var p struct {
-		Action    string   `json:"action"`
-		Argv      []string `json:"argv"`
-		Workdir   string   `json:"workdir"`
-		NoSandbox bool     `json:"nosandbox"`
-		Script    string   `json:"script"`
-		Timeout   int      `json:"timeout"`
-		Stdin     string   `json:"stdin"`
-	}
+	var p execScriptParams
 	if err := json.Unmarshal(req.Data, &p); err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "invalid exec data: " + err.Error()}
 	}
-	// script 分支（vsh 引擎化，todo 3.1.3）：新 exec 工具的脚本下发路径，
-	// pod 侧引擎执行。其余原生命令通道（ssh/scp/grant/json/commands/bg_*）
-	// 保持 action 路径，随 M3b/3c 逐域归拢。
-	if p.Script != "" {
-		return c.execScript(ctx, sid, req, execScriptParams{
-			Script:    p.Script,
-			Workdir:   p.Workdir,
-			Timeout:   p.Timeout,
-			Stdin:     p.Stdin,
-			NoSandbox: p.NoSandbox,
-		})
-	}
-	if p.Action == "" {
+	if strings.TrimSpace(p.Script) == "" {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
-			Error: "exec: action is required"}
+			Error: "exec: script is required（action/argv 通道已下线——命令发现用脚本内 `commands`，授权用 `grant`，后台用 `bg`）"}
 	}
-	declared := c.tools.HasCommand(p.Action)
-	if !declared {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
-			Error: fmt.Sprintf("exec: unknown action %q (not declared by this host; run commands to discover available commands)", p.Action)}
-	}
-
-	if !c.execAllowed(sid, p.Action) {
-		return reject(req.MsgID, "exec "+p.Action+" is denied by host exec policy; request access with grant exec "+p.Action+" --temp")
-	}
-	env := c.newEnv(sid, p.Workdir)
-	env.Granted = req.GrantedLevel
-	if c.files != nil {
-		env.VFS = c.files.View(ctx, tool.Caller{Subject: c.uid, Origin: sid, Level: req.GrantedLevel})
-	}
-	// 任务托管（curl 无 -o）：输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log，
-	// 超时自动后台化（与本地命令同一 exec_procs 机制，§5.9）。
-	env.Tasks = &hostTaskRunner{c: c, sid: sid}
-	env.TaskID = req.MsgID
-	switch p.Action {
-	case "commands":
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
-			Content: c.commandsJSON(), Attrs: map[string]string{"action": "commands"}}
-	case "json":
-		// json 虚拟指令（vcore 内存实现）：view/set/del/append/merge
-		res, err := vcore.Run(ctx, env, p.Action, p.Argv)
-		return resultToResponse(req.MsgID, res, err)
-	case "grant":
-		// 统一授权申请（fs/net/ssh 三域；required 4 必审批在 checkGranted 门控）。
-		return c.runGrant(sid, req.MsgID, p.Argv)
-	case "ssh":
-		// ssh 一级工具（独立通道：目标闸 = ssh 域 Policy；免沙箱内置执行）
-		return c.runSSH(ctx, sid, req, p.Argv)
-	case "scp":
-		// scp 一级工具（目标闸同 ssh 域；本地侧过 fsauth 门控；免沙箱内置执行）
-		return c.runSCP(ctx, sid, req, p.Argv)
-
-	}
-
-	if isCoreCommand(p.Action) {
-		res, err := vcore.Run(ctx, env, p.Action, p.Argv)
-		return resultToResponse(req.MsgID, res, err)
-	}
-
-	// 本地命令（§5.9：探测声明的 shell/git）：PATH 查找、workdir = 进程 cwd、
-	// 日志文件、deadline 超时自动后台化，统一经 exec_procs 托管；
-	// granted level 与 nosandbox 随行传给 exec_procs（§5.10：沙箱去留只由
-	// 显式 nosandbox 决定——审批通过（9）不豁免沙箱）
-	// workdir 缺省回落：请求未携带时用 host 端配置工作区（与虚拟指令 newEnv 同语义）
-	workdir := p.Workdir
-	if workdir == "" {
-		workdir = c.options().WorkDir
-	}
-	return c.runLocal(ctx, sid, req.MsgID, p.Action, p.Argv, workdir, req.GrantedLevel, p.NoSandbox)
+	return c.execScript(ctx, sid, req, p)
 }
 
-// isCoreCommand 判定 action 是否为 exec 核心虚拟指令（vcore 内存执行）。
-// 文件类指令（ls/rg/cp/mv/rm）属 fs 指令集，不在此列。
-func isCoreCommand(action string) bool {
-	for _, n := range vcore.CoreCommandNames() {
-		if n == action {
-			return true
-		}
-	}
-	return false
-}
-
-// sessionWorkDir allocates execution output under a trusted source namespace.
 func (c *Client) sessionWorkDir(sid string) string {
 	if c.sessionRoot != "" {
 		return filepath.Join(c.sessionRoot, sid)
 	}
-	if dir, err := cfg.PublicDir(); err == nil {
-		return filepath.Join(dir, "sessions", sid)
-	}
 	return filepath.Join(os.TempDir(), "aic", sid)
+}
+
+// execLogPath 返回会话执行日志路径 .exec/{short}.log（2026-09-23 用户定稿：
+// 原 exec_{epoch}/{id}.log 名过长；短名 = sha256(epoch + "\x00" + id) 前 6 字节
+// （12 hex）——同 epoch 内唯一、可复现，且不再随请求 id 长度膨胀）。
+func (c *Client) execLogPath(sid, id string) string {
+	sum := sha256.Sum256([]byte(c.procs.Epoch() + "\x00" + id))
+	return filepath.Join(c.sessionWorkDir(sid), ".exec", fmt.Sprintf("%x.log", sum[:6]))
 }
 
 // ensureSessionWorkDir 确保会话工作区（含父级）就绪。嵌套执行路径
 // （exec_procs.Output(ctx) 非空，平台命令的常态）不经 StartCall 的
 // LogPath 建目录动作，必须显式确保：windows 沙箱的可写根授予要求目录
-// 已存在（fsauth 基础白名单含会话区），否则会话内首次执行即失败
-// （grant workspace ... cannot find the file）；日志与沙箱两侧共用此目录。
+// 已存在（grant 时枚举），缺目录会让首个嵌套命令沙箱初始化失败。
 func (c *Client) ensureSessionWorkDir(sid string) error {
 	if err := os.MkdirAll(c.sessionWorkDir(sid), 0o700); err != nil {
-		return fmt.Errorf("exec: prepare session workspace: %w", err)
+		return fmt.Errorf("prepare session workdir: %s", err)
 	}
 	return nil
-}
-
-// hostTaskRunner 实现 vcore.TaskRunner：托管任务（curl 无 -o）经 exec_procs
-// 统一托管，输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log（与本地命令同一机制，§5.9）。
-type hostTaskRunner struct {
-	c   *Client
-	sid string
-}
-
-func (r *hostTaskRunner) StartTask(ctx context.Context, opts vcore.TaskOptions) (*vcore.TaskResult, error) {
-	if err := r.c.ensureSessionWorkDir(r.sid); err != nil {
-		return nil, err
-	}
-	if out := exec_procs.Output(ctx); out != nil {
-		return &vcore.TaskResult{}, opts.Run(ctx, out)
-	}
-	id := fmt.Sprintf("%s:%s:%s", r.c.hostID, r.sid, opts.ID)
-	logPath := filepath.Join(r.c.sessionWorkDir(r.sid), ".exec", opts.ID+".log")
-	res, err := r.c.procs.StartTask(ctx, exec_procs.TaskOptions{
-		ID:      id,
-		Command: opts.Command,
-		LogPath: logPath,
-		Run:     opts.Run,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &vcore.TaskResult{
-		Content:    res.Content,
-		Lines:      res.Lines,
-		Truncated:  res.Truncated,
-		Background: res.Background,
-		ID:         res.ID,
-		LogPath:    res.LogPath,
-	}, nil
-}
-
-// commandsJSON 返回本 host 的命令表（§5.2：{name, desc} 视图——
-// level 仅供审批判断，help 由服务端 procs 拦截 `-h` 返回，均不暴露给 AI）。
-func (c *Client) commandsJSON() string {
-	cmds := c.tools.Commands(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)})
-	data, _ := json.Marshal(map[string]any{"commands": cmds})
-	return string(data)
-}
-
-// resultToResponse 将 vcore.Result/错误映射为响应信封（§6.2 错误模型）。
-func resultToResponse(msgID string, res *vcore.Result, err error) *proto.ToolResponse {
-	if err != nil {
-		state := proto.StateOf(err)
-		if state == proto.StateWaiting {
-			state = proto.StateRejected
-		}
-		resp := &proto.ToolResponse{MsgID: msgID, State: state, Error: err.Error()}
-
-		return resp
-	}
-	return &proto.ToolResponse{MsgID: msgID, State: proto.StateCompleted,
-		Content: res.Content, Attrs: res.Attrs}
 }
 
 func reject(msgID, reason string) *proto.ToolResponse {
@@ -269,5 +110,3 @@ func parseWSURL(raw string) (*wsURL, error) {
 	}
 	return &wsURL{base: raw}, nil
 }
-
-var _ = nats.ErrNoResponders

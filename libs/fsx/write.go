@@ -1,4 +1,4 @@
-package vcore
+package fsx
 
 import (
 	"context"
@@ -28,7 +28,7 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, err
 	}
 	content := *p.Content
-	if err := env.VFS.MkdirAll(path.Dir(abs), 0o755); err != nil {
+	if err := env.FS.MkdirAll(path.Dir(abs), 0o755); err != nil {
 		return nil, fsVFSErr("write", err, "%s", err)
 	}
 
@@ -37,7 +37,7 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	r.set("lines", lines)
 	r.set("bytes", len(content))
 
-	if err := env.VFS.WriteFile(abs, []byte(content), 0o644); err != nil {
+	if err := env.FS.WriteFile(abs, []byte(content), 0o644); err != nil {
 		return nil, fsVFSErr("write", err, "%s", err)
 	}
 	r.Content = fmt.Sprintf("wrote file: %s (%d lines, %d bytes)", abs, lines, len(content))
@@ -104,7 +104,7 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := env.CheckPolicy("fs edit", abs, true); err != nil {
 		return nil, err
 	}
-	data, err := env.VFS.ReadFile(abs)
+	data, err := env.FS.ReadFile(abs)
 	if err != nil {
 		return nil, fsErr("edit", "%s", err)
 	}
@@ -147,7 +147,7 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		}
 		return nil, fsErr("edit", "no edits applied: %s", strings.Join(failed, "; "))
 	}
-	if err := env.VFS.WriteFile(abs, []byte(content), 0o644); err != nil {
+	if err := env.FS.WriteFile(abs, []byte(content), 0o644); err != nil {
 		return nil, fsVFSErr("edit", err, "%s", err)
 	}
 	r := newResult("edit", abs)

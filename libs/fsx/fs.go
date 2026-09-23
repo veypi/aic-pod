@@ -1,20 +1,22 @@
-package vcore
+package fsx
+
+// fs.go 是 fsx 的入口分发（自 vcore fs.go 移植，v4.1 瘦身）：五 action
+// write/edit/read/ls/rg；cp/mv/rm 下线——报可读错误引导 exec（壳层动作
+// 由引擎内建承接，D11）。
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
-// fsParams 是 fs 指令集的原生 JSON 参数（§4：8 action，三端 schema 完全一致）。
-// fs 是文件服务工具：read/write/edit/ls/rg/cp/mv/rm，全部经此分发。
+// fsParams 是 fs 指令集的原生 JSON 参数（三端 schema 一致）。
 // 无 workdir 参数：路径一律绝对（ls/rg 省略 path 时缺省 = env.Workdir）。
 type fsParams struct {
 	Action string `json:"action"`
 
-	// 目标路径：read/write/edit/ls/rg/rm
+	// 目标路径：read/write/edit/ls/rg
 	Path string `json:"path,omitempty"`
 
 	// read（offset/limit，limit 上限 1000）；rg 复用 limit = 全局输出行数上限
@@ -28,7 +30,7 @@ type fsParams struct {
 	// edit
 	Edits []editOp `json:"edits,omitempty"`
 
-	// ls（depth>1 即递归树，吸收原 tree 指令）
+	// ls（depth>1 即递归树）
 	Depth *int `json:"depth,omitempty"` // 默认 1，上限 5
 	All   bool `json:"all,omitempty"`   // 收录点开头隐藏项（默认跳过）；rg 同义
 
@@ -37,16 +39,7 @@ type fsParams struct {
 	// 文件名 glob（basename，include OR 语义；! 前缀 = 排除 glob；不支持 **）
 	Glob []string `json:"glob,omitempty"`
 	// rg：context = 命中行上下各 N 行上下文（grep -C 语义，0-10 默认 0）。
-	// 上下文行输出为 JSON 中 ctx:true 的 match（见 rg.go 头注释），与命中行同池
-	// 计入 limit；不连续命中组之间无分隔符（行序即上下文序）。
 	Context *int `json:"context,omitempty"`
-
-	// cp / mv
-	Src string `json:"src,omitempty"`
-	Dst string `json:"dst,omitempty"`
-
-	// rm（非空目录）；cp 目录自动递归，无需确认
-	Recursive bool `json:"recursive,omitempty"`
 }
 
 type editOp struct {
@@ -54,20 +47,20 @@ type editOp struct {
 	NewText string `json:"newText"`
 }
 
-// FSActions 是 fs 的全部 action（§4）。
-var FSActions = []string{"read", "write", "edit", "ls", "rg", "cp", "mv", "rm"}
+// FSActions 是 fs 的全部 action（v4.1：五 action；cp/mv/rm 移入 exec 内建）。
+var FSActions = []string{"read", "write", "edit", "ls", "rg"}
 
-// RunFS 执行 fs action（原生 JSON 参数，无 argv）。
-// 未知字段宽忽略（用户定：AI 按 schema 全量传参是常态，多传参数当看不见）。
+// RunFS 执行 fs action（原生 JSON 参数）。
+// 未知字段宽忽略（AI 按 schema 全量传参是常态，多传参数当看不见）。
 func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) {
 	var p fsParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fsErr("", "invalid params: %s", err)
 	}
 	if p.Action == "" {
-		return nil, fsErr("", "action is required (supported: read, write, edit, ls, rg, cp, mv, rm)")
+		return nil, fsErr("", "action is required (supported: read, write, edit, ls, rg)")
 	}
-	if env.VFS == nil {
+	if env.FS == nil {
 		return nil, fsErr(p.Action, "file service is not enabled")
 	}
 	switch p.Action {
@@ -81,13 +74,11 @@ func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) 
 		return fsLs(ctx, env, &p)
 	case "rg":
 		return fsRg(ctx, env, &p)
-	case "cp":
-		return fsCp(ctx, env, &p)
-	case "mv":
-		return fsMv(ctx, env, &p)
-	case "rm":
-		return fsRm(ctx, env, &p)
+	case "cp", "mv", "rm":
+		// 壳层动作下线（D11/v4.1）：引导 exec 内建（引擎 90 内建承接）。
+		return nil, &proto.ExecError{Tool: proto.ToolFS, Action: p.Action,
+			Reason: "fs 不再提供 " + p.Action + "——壳层动作（cp/mv/rm）请用 exec（如 `exec cp a b`）；fs 只保留结构化读写编辑（read/write/edit/ls/rg）"}
 	}
 	return nil, &proto.ExecError{Tool: proto.ToolFS,
-		Reason: fmt.Sprintf("unknown action %q (supported: read, write, edit, ls, rg, cp, mv, rm)", p.Action)}
+		Reason: "unknown action " + p.Action + " (supported: read, write, edit, ls, rg)"}
 }

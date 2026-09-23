@@ -5,30 +5,31 @@ package hostfs
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/veypi/aic-pod/libs/vcore"
+	"github.com/veypi/aic-pod/libs/fsx"
 	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 // Exercise the AI adapter as well as the binary FS methods: the Windows
 // regression only became visible when AI tools switched from OSVFS to View.
+// （cp/mv/rm 随 v4.1 下线由引擎内建承接；curl 由引擎 NetClient 承接——
+// 两者均不在 fsx 五 action 面。）
 func TestAIFileOperationsUseNativeView(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	root := f.fs.roots["home"].Path
 	path := func(name string) string { return filepath.ToSlash(filepath.Join(root, name)) }
-	env := func() *vcore.Env {
-		return &vcore.Env{VFS: f.fs.View(ctx, f.caller), Workdir: filepath.ToSlash(root), Granted: 9}
+	env := func() *fsx.Env {
+		return &fsx.Env{FS: f.fs.View(ctx, f.caller), Workdir: filepath.ToSlash(root)}
 	}
-	run := func(args map[string]any) *vcore.Result {
+	run := func(args map[string]any) *fsx.Result {
 		t.Helper()
 		raw, _ := json.Marshal(args)
-		result, err := vcore.RunFS(ctx, env(), raw)
+		result, err := fsx.RunFS(ctx, env(), raw)
 		if err != nil {
 			t.Fatalf("%s: %v", args["action"], err)
 		}
@@ -45,23 +46,10 @@ func TestAIFileOperationsUseNativeView(t *testing.T) {
 			t.Fatalf("missing file content: %s", data)
 		}
 	}
-	run(map[string]any{"action": "cp", "src": path("note.txt"), "dst": path("copy.txt")})
-	run(map[string]any{"action": "mv", "src": path("copy.txt"), "dst": path("moved.txt")})
-	if data, err := os.ReadFile(path("moved.txt")); err != nil || string(data) != "second\n" {
-		t.Fatalf("copy/move: %q %v", data, err)
-	}
-	if _, err := os.Stat(path("copy.txt")); !os.IsNotExist(err) {
-		t.Fatal("move left its source", err)
-	}
-	download := env()
-	download.Fetcher = vcore.FetchFunc(func(context.Context, vcore.HTTPReq) (io.ReadCloser, int64, error) {
-		return io.NopCloser(strings.NewReader("download")), 8, nil
-	})
-	if _, err := vcore.Run(ctx, download, "curl", []string{"-o", path("download.bin"), "https://example.test/file"}); err != nil {
-		t.Fatal(err)
-	}
-	if data, err := os.ReadFile(path("download.bin")); err != nil || string(data) != "download" {
-		t.Fatalf("curl output: %q %v", data, err)
+	// 下线 action 报可读错误（引导 exec）。
+	raw, _ := json.Marshal(map[string]any{"action": "cp", "src": path("note.txt"), "dst": path("copy.txt")})
+	if _, err := fsx.RunFS(ctx, env(), raw); err == nil || !strings.Contains(err.Error(), "exec") {
+		t.Fatalf("cp 应报已下线引导 exec: %v", err)
 	}
 }
 
@@ -107,9 +95,9 @@ func TestAIWriteWithOnlyTargetFileAllowed(t *testing.T) {
 				return nil
 			}
 			ctx := context.Background()
-			env := &vcore.Env{VFS: f.fs.View(ctx, f.caller), Workdir: filepath.ToSlash(root), Granted: 9}
+			env := &fsx.Env{FS: f.fs.View(ctx, f.caller), Workdir: filepath.ToSlash(root)}
 			raw, _ := json.Marshal(map[string]any{"action": "write", "path": filepath.ToSlash(file), "content": "granted file"})
-			_, err := vcore.RunFS(ctx, env, raw)
+			_, err := fsx.RunFS(ctx, env, raw)
 			if parentsExist {
 				if err != nil {
 					t.Fatal("file-only grant failed", err)

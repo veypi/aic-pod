@@ -22,7 +22,7 @@ func (c *Client) initTools() {
 		if err := cfg.CheckAuth(); err != nil {
 			return wire.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
 		}
-		if caller.Subject != "catalog" && name != "fs" && !c.execAllowed(caller.Origin, name) {
+		if caller.Subject != "catalog" && name != "fs" && name != "exec" && !c.execAllowed(caller.Origin, name) {
 			return wire.Fail("permission_denied", "Tool is denied by device policy")
 		}
 		return nil
@@ -45,12 +45,7 @@ func (c *Client) initTools() {
 		if err := caller.Validate(ctx); err != nil {
 			return err
 		}
-		env := c.newEnv(caller.Origin, "")
-		env.Granted = caller.Level
-		if err := env.CheckPath("browser", filepath.ToSlash(path)); err != nil {
-			return err
-		}
-		return env.CheckPolicy("browser", filepath.ToSlash(path), write)
+		return c.fsGate(caller.Origin)("browser", filepath.ToSlash(path), write)
 	}})
 	native := cua.New(cua.Config{Logf: c.logf})
 	if err := c.tools.RegisterCommand(native.Tool()); err != nil {

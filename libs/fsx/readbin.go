@@ -1,4 +1,4 @@
-package vcore
+package fsx
 
 import (
 	"io"
@@ -39,7 +39,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 	if err := env.CheckPolicy("readbin", abs, false); err != nil {
 		return nil, "", 0, err
 	}
-	info, err := env.VFS.Stat(abs)
+	info, err := env.FS.Stat(abs)
 	if err != nil {
 		return nil, "", 0, fsErr("readbin", "%s", err)
 	}
@@ -58,7 +58,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 		return nil, "", 0, fsErr("readbin", "requested %d bytes exceeds max %d", want, MaxReadBinBytes)
 	}
 
-	f, err := env.VFS.Open(abs)
+	f, err := env.FS.Open(abs)
 	if err != nil {
 		return nil, "", 0, fsErr("readbin", "%s", err)
 	}
@@ -88,7 +88,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 	// mime 按文件头探测：off=0 时复用已读数据，否则单独补读头部。
 	head := data
 	if off > 0 || len(head) == 0 {
-		head = readHead(env.VFS, abs, 512)
+		head = readHead(env.FS, abs, 512)
 	} else if len(head) > 512 {
 		head = head[:512]
 	}

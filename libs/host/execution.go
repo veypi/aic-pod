@@ -5,61 +5,66 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"time"
+
 	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/aic-pod/libs/fsx"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/proto"
-	"github.com/veypi/aic-pod/libs/vcore"
+	vshglue "github.com/veypi/aic-pod/libs/vsh"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
-	"io"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
 )
 
-type commandArgs struct {
-	Argv      []string `json:"argv"`
-	Workdir   string   `json:"workdir,omitempty"`
-	NoSandbox bool     `json:"nosandbox,omitempty"`
-}
-
+// registerCommands 注册 exec 的 wire 面（vsh 引擎化，todo 3.1.3）：唯一命令
+// "exec" + 唯一方法 run（{script, workdir?, timeout?, stdin?, nosandbox?}）。
+// 旧逐名命令注册（curl/git/json/bg_*/shell 逃生舱）随 vcore 删除退役——
+// 命令发现 = 脚本内 `commands`；后台 = 脚本内 `bg`；授权 = 脚本内 `grant`。
+//
+// 等级（正交模型）：基线 Write(2)（规则表内操作不审批）；script 含字面
+// grant 或 nosandbox → Critical(4)（dispatcher 经 Required 强制，与 aic 侧
+// 审批同源纵深）。
 func (c *Client) registerCommands() {
-	for _, decl := range commandDefinitions() {
-		name := decl.Name
-		managed := name != "commands" && name != "bg_list" && name != "bg_wait" && name != "bg_kill" && name != "grant"
-		method := tool.Bind(tool.Spec{Name: "run", Access: decl.RequiredLevel, Background: managed}, func(ctx context.Context, caller tool.Caller, a commandArgs) (any, error) {
-			data, _ := json.Marshal(map[string]any{"action": name, "argv": a.Argv, "workdir": a.Workdir, "nosandbox": a.NoSandbox})
-			req := &proto.ToolRequest{Tool: proto.ToolExec, MsgID: caller.RequestID, SessionID: caller.Origin, GrantedLevel: caller.Level, Data: data}
-			if strings.HasPrefix(name, "bg_") {
-				return c.executionControl(ctx, caller, name, a.Argv)
-			}
-			response := c.execCmd(ctx, caller.Origin, req)
-			if response.Error != "" {
-				return nil, wire.Fail(string(response.State), response.Error)
-			}
-			return &vcore.Result{Content: response.Content, Attrs: response.Attrs}, nil
-		})
-		method.Required = func(raw json.RawMessage) int {
-			var a commandArgs
-			_ = json.Unmarshal(raw, &a)
-			level := vcore.ExecRequired(name, a.Argv)
-			if a.NoSandbox {
-				level = max(level, 4)
-			}
-			return level
+	run := tool.Bind(tool.Spec{Name: "run", Access: 2, Description: "run a vsh shell script"}, func(ctx context.Context, caller tool.Caller, a execScriptParams) (any, error) {
+		data, _ := json.Marshal(a)
+		req := &proto.ToolRequest{Tool: proto.ToolExec, MsgID: caller.RequestID, SessionID: caller.Origin, GrantedLevel: caller.Level, Data: data}
+		response := c.execCmd(ctx, caller.Origin, req)
+		if response.Error != "" {
+			return nil, wire.Fail(string(response.State), response.Error)
 		}
-		command := tool.Command{Name: name, Desc: decl.Desc, Help: decl.Help, Access: decl.RequiredLevel, RawArgv: true, Methods: []tool.Method{method}}
-		if err := c.tools.RegisterCommand(command); err != nil {
-			panic(err)
+		return &fsx.Result{Content: response.Content, Attrs: response.Attrs}, nil
+	})
+	run.Required = func(raw json.RawMessage) int {
+		var a execScriptParams
+		_ = json.Unmarshal(raw, &a)
+		level := 2
+		if a.NoSandbox || len(vshglue.Analyze(a.Script, nil).GrantRequests) > 0 {
+			level = 4
 		}
+		return level
+	}
+	if err := c.tools.RegisterCommand(tool.Command{
+		Name: "exec", Desc: "run a vsh shell script on this host",
+		Help: "exec run {script, workdir?, timeout?, stdin?, nosandbox?}\n" +
+			"  Execute a vsh shell script (90 builtins: ls/rg/cp/mv/rm/cat/jq/tar/sed/awk...).\n" +
+			"  Discovery: run `commands` in a script; usage: `<cmd> --help`.\n" +
+			"  Background: `bg` in a script; grants: `grant fs|net|cmd <target>` (level 4).",
+		Methods: []tool.Method{run},
+	}); err != nil {
+		panic(err)
 	}
 }
+
 func executionOwner(c tool.Caller) string { return c.Subject + "\x00" + c.Origin }
+
+// executeCommand 是 wire 执行准入（hosts_tool Execute 回调）：epoch 校验 +
+// 长任务托管（Background 方法经 exec_procs 幂等去重/断线续跑）。控制方法
+// （Background=false，exec.run 即此类——bg 由引擎任务表承接）直接调用。
 func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.Request, in wire.Invocation, m tool.Method) (any, error) {
 	if r.Execution != nil && r.Execution.Epoch != c.procs.Epoch() {
 		return nil, wire.Fail("expired", "Execution belongs to a different device runtime")
 	}
-	// 控制方法（commands/bg_*/grant）不产生执行记录，直接调用。
+	// 控制方法（exec.run/cua/browser 的短调用）不产生执行记录，直接调用。
 	if !m.Descriptor.Background {
 		return m.Run(ctx, caller, in.Args)
 	}
@@ -79,7 +84,7 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 	// Ownership is independent of RTC connections and is safe as a path segment.
 	namespace := fmt.Sprintf("%x", hash[:16])
 	fullID := c.hostID + ":" + namespace + ":" + id
-	logPath := filepath.Join(c.sessionWorkDir(namespace), ".exec", c.procs.Epoch(), id+".log")
+	logPath := c.execLogPath(namespace, id)
 	// Capture this admission's authority. A new connection never extends it.
 	runCaller := caller
 	runCaller.Expiry = nil
@@ -109,7 +114,7 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 		runCaller.Output = out
 		value, err := m.Run(run, runCaller, in.Args)
 		if value != nil {
-			if result, ok := value.(*vcore.Result); ok {
+			if result, ok := value.(*fsx.Result); ok {
 				if result.Content != "" {
 					fmt.Fprintln(out, result.Content)
 				}
@@ -126,43 +131,4 @@ func (c *Client) executeCommand(ctx context.Context, caller tool.Caller, r wire.
 		return nil, err
 	}
 	return res, nil
-}
-func (c *Client) executionControl(ctx context.Context, caller tool.Caller, name string, argv []string) (any, error) {
-	owner := executionOwner(caller)
-	if name == "bg_list" {
-		items := []map[string]any{}
-		for _, e := range c.procs.List() {
-			if e.Owner == owner && caller.Level >= e.RequiredLevel && c.execAllowed(caller.Origin, strings.Fields(e.Command)[0]) {
-				items = append(items, map[string]any{"id": e.ID, "command": e.Command, "status": e.Status(), "output": e.LogPath, "started": e.Started, "pid": e.PID()})
-			}
-		}
-		return items, nil
-	}
-	if len(argv) == 0 {
-		return nil, wire.Fail("invalid_argument", "Execution ID required")
-	}
-	e := c.procs.Get(argv[0])
-	if e == nil || e.Owner != owner {
-		return nil, wire.Fail("not_found", "Execution unavailable or expired")
-	}
-	if caller.Level < e.RequiredLevel || !c.execAllowed(caller.Origin, strings.Fields(e.Command)[0]) {
-		return nil, wire.Fail("permission_denied", "Execution result requires the original command permission")
-	}
-	if name == "bg_kill" {
-		if err := c.procs.Kill(e.ID); err != nil {
-			return nil, err
-		}
-		return map[string]any{"id": e.ID, "status": e.Status()}, nil
-	}
-	wait := 30 * time.Second
-	if len(argv) == 3 && argv[1] == "--wait" {
-		seconds, err := strconv.Atoi(argv[2])
-		if err != nil || seconds < 0 || seconds > 300 {
-			return nil, wire.Fail("invalid_argument", "wait must be 0..300 seconds")
-		}
-		wait = time.Duration(seconds) * time.Second
-	} else if len(argv) != 1 {
-		return nil, wire.Fail("invalid_argument", "Expected bg_wait ID [--wait SECONDS]")
-	}
-	return c.procs.Wait(ctx, e.ID, wait)
 }

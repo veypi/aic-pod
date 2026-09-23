@@ -1,4 +1,4 @@
-package vcore
+package fsx
 
 import (
 	"path"
@@ -36,10 +36,10 @@ func WriteBin(env *Env, filePath string, data []byte) (int, error) {
 	if err := env.CheckPolicy("writebin", abs, true); err != nil {
 		return 0, err
 	}
-	if err := env.VFS.MkdirAll(path.Dir(abs), 0o755); err != nil {
+	if err := env.FS.MkdirAll(path.Dir(abs), 0o755); err != nil {
 		return 0, fsVFSErr("writebin", err, "%s", err)
 	}
-	if err := env.VFS.WriteFile(abs, data, 0o644); err != nil {
+	if err := env.FS.WriteFile(abs, data, 0o644); err != nil {
 		return 0, fsVFSErr("writebin", err, "%s", err)
 	}
 	return len(data), nil

@@ -1,7 +1,9 @@
 package vsh
 
 import (
+	"context"
 	"fmt"
+	stdfs "io/fs"
 	"strings"
 
 	"github.com/veypi/vbox"
@@ -26,12 +28,28 @@ func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 	if cfg.Backing == nil {
 		return nil, fmt.Errorf("vsh glue: host backing required")
 	}
-	return NewUFSAdapter(UFSAdapterConfig{
+	fsys, err := NewUFSAdapter(UFSAdapterConfig{
 		Backing: cfg.Backing,
 		Rules:   cfg.Rules,
 		// 无 jail：host 的边界由规则表表达（读默认开放、写白名单制）。
 		// 无内存层：stub 落 {session_root}/{sid}/bin 真实目录。
 	})
+	if err != nil {
+		return nil, err
+	}
+	return hostLayoutFS{fsys}, nil
+}
+
+// hostLayoutFS host 布局特化：布局初始化（每次 NewSession）会对 /tmp 做
+// Chmod(sticky|0777)——真实 OS 的 /tmp 本就是 sticky|1777 且非 root  chmod
+// 必 EPERM，精确路径 noop（只拦 /tmp 本身；/tmp 下文件 chmod 照常委派 OS）。
+type hostLayoutFS struct{ gbfs.FileSystem }
+
+func (h hostLayoutFS) Chmod(ctx context.Context, name string, mode stdfs.FileMode) error {
+	if gbfs.Clean(name) == "/tmp" {
+		return nil
+	}
+	return h.FileSystem.Chmod(ctx, name, mode)
 }
 
 // StubDirFor 返回会话 stub 目录（design §4.2：PATH 钉 {session_root}/{sid}/bin，

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/veypi/aic-pod/libs/vcore"
+	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/protocol/ui"
 )
 
@@ -282,7 +282,7 @@ func (e *nativeUI) observe(ctx context.Context, s *nativeSession, t *nativeTarge
 		if err != nil {
 			return nil, err
 		}
-		encoded, note, err := vcore.EncodeImageData(raw, mime)
+		encoded, note, err := fsx.EncodeImageData(raw, mime)
 		if err != nil {
 			return nil, err
 		}

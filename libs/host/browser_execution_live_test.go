@@ -42,7 +42,7 @@ func TestChromeWaitUsesSharedExecutionWithoutClosingPage(t *testing.T) {
 	if !run.Background || run.LogPath == "" {
 		t.Fatal(run)
 	}
-	if _, err := c.executionControl(context.Background(), caller, "bg_kill", []string{run.ID}); err != nil {
+	if err := c.procs.Kill(run.ID); err != nil {
 		t.Fatal(err)
 	}
 	done, err := c.procs.Wait(context.Background(), run.ID, 2*time.Second)

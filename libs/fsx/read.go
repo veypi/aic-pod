@@ -1,4 +1,4 @@
-package vcore
+package fsx
 
 import (
 	"bufio"
@@ -44,12 +44,12 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, err
 	}
 
-	info, statErr := env.VFS.Stat(abs)
+	info, statErr := env.FS.Stat(abs)
 	if statErr == nil && !info.IsDir() && info.Size() > streamThreshold {
 		return fsReadLarge(env, abs, offset, limit, limitNote)
 	}
 
-	data, err := env.VFS.ReadFile(abs)
+	data, err := env.FS.ReadFile(abs)
 	if err != nil {
 		return nil, fsErr("read", "%s", err)
 	}
@@ -174,7 +174,7 @@ func readHint(total, offset, end int) string {
 // 仅缓冲窗口内且在 128KB 预算内的行（§4.2，三端一致）。
 // offset<1 先按文件头窗口回退；offset>total 在总行数已知后重扫取文件尾窗口。
 func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Result, error) {
-	f, err := env.VFS.Open(abs)
+	f, err := env.FS.Open(abs)
 	if err != nil {
 		return nil, fsErr("read", "%s", err)
 	}
@@ -265,7 +265,7 @@ func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Re
 // readTailWindow 重扫文件收集 [start, start+limit) 窗口的行（文件尾回退专用；
 // 行号与预算规则与主流式扫描一致，§4.2）。
 func readTailWindow(env *Env, abs string, start, limit int) (string, int, error) {
-	f, err := env.VFS.Open(abs)
+	f, err := env.FS.Open(abs)
 	if err != nil {
 		return "", 0, err
 	}
@@ -312,7 +312,7 @@ func binaryResult(env *Env, abs string, data []byte) (*Result, error) {
 
 // largeBinaryResult 生成大二进制结果：不整读，size 取自 Stat，图片跳过尺寸探测（§4.2）。
 func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
-	info, err := env.VFS.Stat(abs)
+	info, err := env.FS.Stat(abs)
 	if err != nil {
 		return nil, fsErr("read", "%s", err)
 	}
@@ -323,7 +323,7 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 	if isViewableImageMime(mime) {
 		if env.ImageData {
 			// host/page 端图片仍需整读以压缩产出 image_data（§4.2 环境能力差异）
-			data, err := env.VFS.ReadFile(abs)
+			data, err := env.FS.ReadFile(abs)
 			if err != nil {
 				return nil, fsErr("read", "%s", err)
 			}

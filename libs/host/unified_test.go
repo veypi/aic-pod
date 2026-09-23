@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/aic-pod/libs/fsx"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
-	"github.com/veypi/aic-pod/libs/vcore"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
@@ -70,7 +70,7 @@ func TestCatalogContainsOnlyFSAndExec(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"browser", "cua", "sh", "json", "bg_wait"} {
+	for _, name := range []string{"browser", "cua", "exec"} {
 		if !found[name] {
 			t.Fatalf("missing exec command %s", name)
 		}
@@ -82,7 +82,7 @@ func TestCatalogContainsOnlyFSAndExec(t *testing.T) {
 	if strings.Contains(string(raw), `"tools":`) {
 		t.Fatal("third capability returned")
 	}
-	if _, err := c.tools.Translate([]string{"sh", "-c", "echo --literal"}); err != nil {
+	if _, err := c.tools.Translate([]string{"exec", "run"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.tools.Translate([]string{"browser", "page.frames"}); err == nil {
@@ -134,25 +134,8 @@ func TestProcessAndServiceShareExecutionOwnershipAndCancellation(t *testing.T) {
 	if value["answer"] != 42 || !strings.Contains(done.Content, "waiting") {
 		t.Fatal("typed result/output lost", done)
 	}
-	other := testCaller()
-	other.Origin = "other"
-	if _, err := c.executionControl(context.Background(), other, "bg_wait", []string{job.ID}); err == nil {
-		t.Fatal("foreign origin read output")
-	}
-	process := c.HandleTool(context.Background(), testCaller(), wire.Request{ID: "process", Action: "call", Argv: []string{"sh", "-c", "printf 'start\\n'; sleep 30"}, Execution: &wire.ExecutionOptions{Epoch: c.procs.Epoch(), ID: "process"}, TimeoutMS: 50})
-	if process.Error != nil {
-		t.Fatal(process.Error)
-	}
-	proc := decoded[exec_procs.Result](t, process.Result)
-	if _, err := c.executionControl(context.Background(), testCaller(), "bg_kill", []string{proc.ID}); err != nil {
-		t.Fatal(err)
-	}
-	stopped, err := c.procs.Wait(context.Background(), proc.ID, 2*time.Second)
-	if err != nil || stopped.Background || stopped.Status != "cancelled" {
-		t.Fatalf("process cancel %+v %v", stopped, err)
-	}
 	if closed.Load() != 0 {
-		t.Fatal("bg_kill closed shared service")
+		t.Fatal("cancel closed shared service")
 	}
 }
 func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
@@ -203,7 +186,7 @@ func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
 	if write.Error != nil {
 		t.Fatal(write.Error)
 	}
-	text := decoded[vcore.Result](t, write.Result)
+	text := decoded[fsx.Result](t, write.Result)
 	_ = text
 	if got, _ := os.ReadFile(path); string(got) != "changed" {
 		t.Fatal(string(got))
@@ -256,10 +239,5 @@ func TestExecutionRejectsOldEpochAndReducedGrant(t *testing.T) {
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
-	result := decoded[exec_procs.Result](t, r.Result)
-	low := testCaller()
-	low.Level = 1
-	if _, err := c.executionControl(context.Background(), low, "bg_wait", []string{result.ID}); err == nil {
-		t.Fatal("reduced grant read result")
-	}
+	_ = decoded[exec_procs.Result](t, r.Result)
 }
