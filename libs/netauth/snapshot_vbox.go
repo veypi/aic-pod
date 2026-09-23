@@ -34,32 +34,3 @@ func (p *Policy) SnapshotVbox(sid string) vbox.NetRuleSet {
 	return vbox.NetRuleSet{Rules: rules, Default: p.mode == cfg.PolicyOpen}
 }
 
-// SnapshotAllVbox 返回全部 sid 的并集规则表（temp grants 跨会话并集）。
-// host NetClient 是 Runtime 级组件（请求路径无 sid 上下文），per-sid 语义
-// 在 host 网络域弱化为进程级——记录在案（design 偏差；host 上多会话同属
-// 一台设备的同一用户代理，风险面可接受）。
-func (p *Policy) SnapshotAllVbox() vbox.NetRuleSet {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	var rules []vbox.NetRule
-	seen := map[string]bool{}
-	for _, grants := range p.grants {
-		for _, g := range grants {
-			s := g.String()
-			if seen[s] {
-				continue
-			}
-			seen[s] = true
-			rules = append(rules, vbox.NetRule{HostPort: s, Allow: true})
-		}
-	}
-	for i := len(p.rules) - 1; i >= p.builtin; i-- {
-		r := p.rules[i]
-		rules = append(rules, vbox.NetRule{HostPort: r.e.String(), Allow: r.allow})
-	}
-	for i := p.builtin - 1; i >= 0; i-- {
-		r := p.rules[i]
-		rules = append(rules, vbox.NetRule{HostPort: r.e.String(), Allow: r.allow})
-	}
-	return vbox.NetRuleSet{Rules: rules, Default: p.mode == cfg.PolicyOpen}
-}

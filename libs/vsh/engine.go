@@ -100,6 +100,17 @@ type engineSession struct {
 // Factory.New(ctx) 在 NewSession 时调用——以此把会话身份带进工厂）。
 type sessionFSKey struct{}
 
+// netSessionKey 把会话键经 ctx 传给 NetClient（M3c：规则表 per-session 快照，
+// cloud 多用户进程不可用进程级并集——跨用户泄漏授权）。
+type netSessionKey struct{}
+
+// SessionFromContext 取 Exec 注入的会话键（NetClient 规则表快照源用；
+// 无注入 = 空串——快照退化为无 temp 行的基表）。
+func SessionFromContext(ctx context.Context) string {
+	sid, _ := ctx.Value(netSessionKey{}).(string)
+	return sid
+}
+
 // layoutInitEnv 是 Runtime 级 BaseEnv：仅服务于 NewSession 的布局初始化
 // （initializeSandboxLayout 用 r.cfg.BaseEnv 做 MkdirAll(HOME)/Chmod(/tmp)/写
 // PATH stub）。HOME 钉进内存层（/tmp 前缀）——真实 HOME（cloud=/u/{uid}）
@@ -208,6 +219,9 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 	if err != nil {
 		return nil, err
 	}
+	// 会话键注入 ctx：NetClient 规则表按 sid 取快照（M3c per-session 修复——
+	// cloud 多用户进程不能用进程级并集；bg 路径经 runBG→Exec 同样注入）。
+	ctx = context.WithValue(ctx, netSessionKey{}, req.SessionKey)
 	timeout := req.Timeout
 	maxTimeout := MaxForegroundTimeout
 	if req.LongRunning {
@@ -300,12 +314,13 @@ func baseSessionKey(key string) string {
 // bg 在派生会话执行（key 加 "#bg-" 后缀）：与前台同 backing（UFS/宿主盘状态
 // 共享）、独立内存层与工作目录（per-exec 内存层语义），且不与前台 Session.Exec
 // 串行化互等（同会话 bg 会死锁——前台 wait 等后台、后台排队等前台）。
-func (e *Engine) runBG(ctx context.Context, sessionKey, script, logPath string, log io.Writer) (int, error) {
+func (e *Engine) runBG(ctx context.Context, sessionKey, script, workdir, logPath string, log io.Writer) (int, error) {
 	bgKey := fmt.Sprintf("%s#bg-%d", sessionKey, time.Now().UnixNano())
 	defer e.DropSession(bgKey)
 	res, err := e.Exec(ctx, ExecRequest{
 		SessionKey:  bgKey,
 		Script:      script,
+		WorkDir:     workdir,
 		Timeout:     BackgroundWallClock,
 		LongRunning: true,
 		Log:         log,

@@ -22,6 +22,22 @@ func TestAnalyzeRedirects(t *testing.T) {
 	}
 }
 
+// TestAnalyzeVirtualDevicesExcluded /dev 虚拟设备与 std 别名不算写目标（引擎
+// 运行时自管，不到达 FS 适配器——2026-09-24 实测：`>/dev/null`、`>/dev/stdout`
+// 被静态预检误判越界写而整段拒绝）。
+func TestAnalyzeVirtualDevicesExcluded(t *testing.T) {
+	t.Parallel()
+	a := Analyze(`echo x > /dev/null; echo e 2>/dev/null; cat f > /dev/zero; echo o > /dev/stdout; echo e > /dev/stderr; echo y > out.txt`, nil)
+	if len(a.WriteTargets) != 1 || a.WriteTargets[0] != "out.txt" {
+		t.Fatalf("writes = %v, want [out.txt]", a.WriteTargets)
+	}
+	// /dev/random 不在豁免单（写 random 无意义），照常拒。
+	a = Analyze(`echo x > /dev/random`, nil)
+	if len(a.WriteTargets) != 1 || a.WriteTargets[0] != "/dev/random" {
+		t.Fatalf("writes = %v, want [/dev/random]", a.WriteTargets)
+	}
+}
+
 func TestAnalyzeWriteArgTable(t *testing.T) {
 	t.Parallel()
 	a := Analyze(`cp a.txt b.txt; mv x y; tee t1 t2 < /dev/null; mkdir -p d1 d2; rm -rf junk; sed -i s/a/b/ f.txt; curl -o dl.bin https://x/y`, nil)

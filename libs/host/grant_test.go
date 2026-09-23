@@ -8,9 +8,10 @@ import (
 	"github.com/veypi/aic-pod/libs/proto"
 )
 
-// grantTarget 域路由与 deny 拒绝（temp 范围，不触盘——permanent 落盘路径见
+// grantTarget 域路由与 temp 授权（不触盘——permanent 落盘路径见
 // TestPersistGrantAppendsRuleRow）。argv 解析在 glue 平台命令层
 //（aic-pod/libs/vsh/cmds.go），本包只承接已解析的域+目标。
+// M3c：DenyHit 拒批已废（temp 行插表头可覆盖 deny——「用户点就点了」）。
 func TestRunGrantTarget(t *testing.T) {
 	saved := cfg.Global
 	defer func() { cfg.Global = saved }()
@@ -21,10 +22,13 @@ func TestRunGrantTarget(t *testing.T) {
 	}
 	c.netPol.Configure("deny", []string{"deny:bad.com:22"})
 
-	// deny 重叠 → rejected
+	// deny 目标同样可授（temp 行插表头压一切——2.7.4 拒批删除后的新语义）
 	r := c.grantTarget("s1", "m1", "net", "bad.com:22", false)
-	if r.State != proto.StateRejected {
-		t.Fatalf("grant net bad.com:22 state = %s, want rejected (%s)", r.State, r.Error)
+	if r.State != proto.StateCompleted {
+		t.Fatalf("grant net bad.com:22 state = %s, want completed（deny 不再拒批）(%s)", r.State, r.Error)
+	}
+	if !c.netPol.Allowed("s1", "bad.com", 22) {
+		t.Fatal("temp grant over deny row not effective for s1")
 	}
 	// temp 授权生效（目标入 sid 名单）
 	r = c.grantTarget("s1", "m2", "net", "example.com:443", false)

@@ -151,16 +151,18 @@ func (p *Policy) Allowed(sid, host string, port int) bool {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	// temp 插表头（v4 新语义：首命中压一切，含 deny 行——与 SnapshotVbox
+	// 行序一致；旧「表判定 deny 则 temp 不生效」硬底线已废）。
+	for _, e := range p.grants[sid] {
+		if entryMatch(e, q) {
+			return true
+		}
+	}
 	if allow, hit := p.resolve(q); hit {
 		return allow
 	}
 	if p.mode == cfg.PolicyOpen {
 		return true
-	}
-	for _, e := range p.grants[sid] {
-		if entryMatch(e, q) {
-			return true
-		}
 	}
 	return false
 }

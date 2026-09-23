@@ -10,7 +10,7 @@ package fsauth
 //   - old: 便利根仅在表判定非 deny 时授写（不入表）→ new: 便利根 rw 行排表尾，
 //     builtin deny 在其上——"便利不压 deny"保持。
 //   - old: 未命中 effNone → fs_policy 兜底 → new: DefaultWrite = open?RW:Deny。
-// grant.go DenyHit 拒批（session 硬底线）按 2.7.4 于 M3c 删除——新行序下 temp
+// grant.go DenyHit 拒批（session 硬底线）已按 2.7.4 于 M3c 删除——新行序下 temp
 // 行在表头，天然压一切（含 builtin deny），语义由行序表达。
 
 import (

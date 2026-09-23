@@ -8,18 +8,16 @@ package host
 //     的 vbox 表门（first-wins 行序：temp→cfg→builtin deny→便利根）；
 //   - 原生子进程 → native 白名单包装器 → exec_procs OS 沙箱（per-call 按当次
 //     策略生成，fail-closed）；
-//   - 网络 → NetClient 对接 netauth.SnapshotAllVbox（host 不做私网阻断——
-//     LAN 访问是合法场景，AllowPrivate=true）。
+//   - 网络 → NetClient 对接 netauth.SnapshotVbox（按 ctx 会话键取快照，
+//     M3c per-session 修复；host 不做私网阻断——LAN 访问是合法场景，
+//     AllowPrivate=true）。
 //
 // 记录在案的设计偏差（详见 §4.2/§4.3）：
 //  1. stub 目录用进程级 {session_root}/.vsh-host/bin 而非 {sid}/bin——引擎
 //     布局初始化（stub 写入、HOME MkdirAll）吃 Runtime 级 BaseEnv（NewSession
 //     时无 sid 上下文），per-sid 目录需 fork 补丁，违背零补丁红线；D14
 //     registry 优先下同名文件无法 shadow 平台命令，安全性等价。
-//  2. NetClient 规则表为全 sid temp grant 并集（Runtime 级组件无 sid 上下文）；
-//     host 网络 temp 授权语义由会话级弱化为进程级（同一设备同一用户代理，
-//     风险面可接受）。
-//  3. exec_procs 的授权复核（revoke 杀运行中任务）在引擎任务表下不保留——
+//  2. exec_procs 的授权复核（revoke 杀运行中任务）在引擎任务表下不保留——
 //     bg 由引擎 TaskTable 统一承接（30min 墙钟到期 124）。
 
 import (
@@ -104,7 +102,7 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 		},
 		Network: vshglue.NewNetClient(vshglue.NetClientConfig{
 			AllowPrivate: true, // host LAN 合法（2.4.3：私网阻断仅 cloud）
-			Rules:        func() vbox.NetRuleSet { return c.netPol.SnapshotAllVbox() },
+			Rules:        func(ctx context.Context) vbox.NetRuleSet { return c.netPol.SnapshotVbox(vshglue.SessionFromContext(ctx)) },
 		}),
 		Platform: vshglue.PlatformDeps{
 			Grant: c.vshGrant,
@@ -131,8 +129,8 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 
 // vshGrant 是引擎内 grant 命令的执行体（审批已在服务端完成——脚本含字面
 // grant → 恒 4 级；此处只执行授权动作）。复用 grant.go 的成熟实现：
-// fs/net 域 temp 授权（DenyHit 拒批在 M3c 按 2.7.4 删除——当前仍生效），
-// cmd 域扩充 native 白名单并即时注册。
+// fs/net/ssh 域 temp 授权（temp 行插表头、首命中压一切——DenyHit 拒批已按
+// 2.7.4 删除），cmd 域扩充 native 白名单并即时注册。
 func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string) (string, error) {
 	sid := sessionKey
 	switch domain {
@@ -144,6 +142,13 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		return resp.Content, nil
 	case "net":
 		resp := c.grantTarget(sid, "", "net", target, false)
+		if resp.Error != "" {
+			return "", fmt.Errorf("%s", resp.Error)
+		}
+		return resp.Content, nil
+	case "ssh":
+		// ssh 域授权入 sshPol（执行面 = 免沙箱内置通道，随 ssh 工具重建另接）。
+		resp := c.grantTarget(sid, "", "ssh", target, false)
 		if resp.Error != "" {
 			return "", fmt.Errorf("%s", resp.Error)
 		}
@@ -163,7 +168,7 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		}
 		return fmt.Sprintf("granted cmd: %s（注意：授予解释器 = 授予该进程一切能力）", name), nil
 	default:
-		return "", fmt.Errorf("grant: host 暂支持 fs/net/cmd 域（ssh 域走一级工具通道，M3c 归拢）")
+		return "", fmt.Errorf("grant: host 支持 fs/net/cmd/ssh 域")
 	}
 }
 

@@ -219,11 +219,14 @@ func TestOrderedLastMatchWins(t *testing.T) {
 	setRules(t, p, "deny:"+base+"/secure/**", "rw:"+base+"/secure/cache/**")
 	assertGrades(t, p, base+"/secure/cache/x", 1, 2)
 	assertGrades(t, p, base+"/secure/key.pem", 0, 0)
-	// 反序：deny 终局——会话写根/temp grant 不可放宽，open 姿态也不放宽
+	// 反序：deny 终局——便利根/open 姿态不可放宽；temp grant 插表头可覆盖
+	//（v4 新语义，2.7.4「用户点就点了」）
 	setRules(t, p, "rw:"+base+"/secure/cache/**", "deny:"+base+"/secure/**")
 	assertGrades(t, p, base+"/secure/cache/x", 0, 0)
 	p.Grant("s1", base+"/secure/cache")
-	assertGradesSid(t, p, "s1", base+"/secure/cache/x", 0, 0)
+	assertGradesSid(t, p, "s1", base+"/secure/cache/x", 1, 2)
+	// 会话隔离：别的 sid 仍被 deny
+	assertGradesSid(t, p, "s2", base+"/secure/cache/x", 0, 0)
 	p.openMode = true
 	assertGrades(t, p, base+"/secure/cache/x", 0, 0)
 	p.openMode = false
@@ -237,14 +240,17 @@ func TestOrderedLastMatchWins(t *testing.T) {
 	}
 }
 
-// TestDenyFinalAgainstSessionLayer：deny 终局是 session 层唯一硬底线——
-// 临时 grant、便利根与 open 姿态都不可放宽表判定的 deny。
-func TestDenyFinalAgainstSessionLayer(t *testing.T) {
+// TestDenyFinalExceptTempGrant：deny 终局对便利根与 open 姿态仍是硬约束；
+// 临时 grant 插表头可覆盖（v4 新语义，2.7.4「用户点就点了」——旧 session
+// 硬底线作废）。
+func TestDenyFinalExceptTempGrant(t *testing.T) {
 	base := mkBase(t)
 	p := newTestPolicy(t, "")
 	setRules(t, p, "rw:"+base, "deny:"+base+"/secret/**")
 	p.Grant("s1", base+"/secret")
-	assertGradesSid(t, p, "s1", base+"/secret/key", 0, 0)
+	assertGradesSid(t, p, "s1", base+"/secret/key", 1, 2)
+	// 会话隔离：别的 sid 仍被 deny
+	assertGradesSid(t, p, "s2", base+"/secret/key", 0, 0)
 	assertGrades(t, p, base+"/ordinary", 1, 2)
 	p.openMode = true
 	assertGrades(t, p, base+"/secret/key", 0, 0)
@@ -497,9 +503,10 @@ func TestGrantTemp(t *testing.T) {
 	if p.DenyHit(ext + "/x") {
 		t.Error("DenyHit should miss outside deny")
 	}
-	// grant 与 deny 终局重叠时 deny 优先（session 层不得放宽表判定的 deny）
+	// grant 插表头压 deny（v4 新语义——旧「deny 优先」硬底线作废）；会话隔离
 	p.Grant("s3", base+"/secrets")
-	assertGradesSid(t, p, "s3", base+"/secrets/x", 0, 0)
+	assertGradesSid(t, p, "s3", base+"/secrets/x", 1, 2)
+	assertGradesSid(t, p, "s4", base+"/secrets/x", 0, 0)
 }
 
 // TestCanonicalSymlinkBypass：canonical 判定防 symlink 绕过（评审必修项向量）。

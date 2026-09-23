@@ -18,7 +18,9 @@ import (
 // 审批已在服务端完成（脚本含字面 grant → 恒 4 级），到达本包即已授权。
 //   - temp（默认）：域 Policy 会话内存授权（重启失效、跨 session 失效）；
 //     不追溯已启动的 bg 任务（沙箱白名单在 Start 时固化）。
-//     规则表判定为 deny 终局的目标拒批——session 层不得放宽表判定的 deny（§2 硬底线）。
+//     temp 行插 vbox 表头、首命中生效，可覆盖 deny 行（「用户点就点了」，
+//     2026-09-23 拍板——permission_rules.md §3 session 硬底线作废，DenyHit
+//     拒批随之删除）。
 //   - --permanent：把规则行追加到 <域>_rules 表尾（fs 为 rw: 行、net/ssh 为
 //     allow: 行，基于文件配置修改 + Save 落盘，与 set_config 同路径）——重启/跨
 //     session 生效；覆盖 deny 行合法（机器是用户的），响应注明覆盖行号。
@@ -39,9 +41,6 @@ func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolRes
 		if row, raw, ok := c.policy.LastDenyRow(abs); ok && c.policy.DenyHit(abs) {
 			note = fmt.Sprintf("\nnote: this rule overrides the deny outcome from rule #%d (%s)", row, raw)
 		}
-	} else if c.policy.DenyHit(abs) {
-		return &proto.ToolResponse{MsgID: msgID, State: proto.StateRejected,
-			Error: fmt.Sprintf("exec grant fs: %s resolves to deny in the fs rule table and cannot be granted to a session (append a permanent rule through local management instead)", abs)}
 	}
 	scope := "session"
 	if permanent {
@@ -78,9 +77,6 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 		if row, raw, ok := pol.LastDenyRow(e); ok && pol.DenyHit(e) {
 			note = fmt.Sprintf("\nnote: this rule overrides the deny outcome from rule #%d (%s)", row, raw)
 		}
-	} else if pol.DenyHit(e) {
-		return &proto.ToolResponse{MsgID: msgID, State: proto.StateRejected,
-			Error: fmt.Sprintf("exec grant %s: %s resolves to deny in the %s_rules table and cannot be granted to a session (append a permanent rule through local management instead)", domain, e.String(), domain)}
 	}
 	scope := "session"
 	if permanent {

@@ -176,6 +176,21 @@ func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 	return nil
 }
 
+// gateMeta 元数据读的 jail 放宽（2026-09-24 实测修复）：内建命令的祖先链
+// 走访（mkdir -p 从 / 逐级 Stat、cd/ls 的符号链接解析）会读到 jail 根的祖先
+//（/、/u）——只放行「jail 根祖先」的 Stat/Lstat/Realpath（存在性元数据不
+// 泄露内容）；Open/ReadDir/OpenFile 仍走 gate 严格判定（ReadDir("/") 会泄露
+// 用户列表，不放行）。
+func (a *ufsAdapter) gateMeta(abs string) error {
+	if a.jail != "" && abs != a.jail && !strings.HasPrefix(abs, a.jail+"/") {
+		if strings.HasPrefix(a.jail, abs+"/") || abs == "/" {
+			return nil // jail 根的祖先：元数据放行
+		}
+		return &stdfs.PathError{Op: "read", Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, a.jail)}
+	}
+	return a.gate(abs, vbox.OpRead, false)
+}
+
 // --- gbfs.FileSystem 实现 ---
 
 func (a *ufsAdapter) Open(ctx context.Context, name string) (gbfs.File, error) {
@@ -233,7 +248,7 @@ func (a *ufsAdapter) Stat(ctx context.Context, name string) (stdfs.FileInfo, err
 	if a.isMem(abs) {
 		return a.mem.Stat(ctx, abs)
 	}
-	if err := a.gate(abs, vbox.OpRead, false); err != nil {
+	if err := a.gateMeta(abs); err != nil {
 		return nil, err
 	}
 	return a.backing.Stat(abs)
@@ -245,7 +260,7 @@ func (a *ufsAdapter) Lstat(ctx context.Context, name string) (stdfs.FileInfo, er
 		return a.mem.Lstat(ctx, abs)
 	}
 	// UFS 无符号链接：Lstat = Stat（但门控用 NoFollow 口径——查的是路径本身）。
-	if err := a.gate(abs, vbox.OpRead, true); err != nil {
+	if err := a.gateMeta(abs); err != nil {
 		return nil, err
 	}
 	return a.backing.Stat(abs)
@@ -276,7 +291,7 @@ func (a *ufsAdapter) Realpath(ctx context.Context, name string) (string, error) 
 		return a.mem.Realpath(ctx, abs)
 	}
 	// UFS 无符号链接：realpath = 词法归一。
-	if err := a.gate(abs, vbox.OpRead, false); err != nil {
+	if err := a.gateMeta(abs); err != nil {
 		return "", err
 	}
 	return abs, nil
@@ -307,13 +322,15 @@ func (a *ufsAdapter) Chmod(ctx context.Context, name string, mode stdfs.FileMode
 		return err
 	}
 	// backing 支持则委派（host OS 可持久化执行位——脚本 chmod +x 生效）；
-	// cloud UFS 无 chmod API（验收 8：可执行位不持久化 → 工具描述引导 bash x.sh）。
+	// cloud UFS 无权限位模型——chmod 语义上即 noop（不是错误：mkdir/cp 内建
+	// 的收尾 Chmod 不应因此假失败）。可执行位不持久化（验收 8：Stat 不带 x
+	// 位 → ./x.sh 不可执行，工具描述引导 bash x.sh）。
 	if cb, ok := a.backing.(interface {
 		Chmod(name string, mode stdfs.FileMode) error
 	}); ok {
 		return cb.Chmod(abs, mode)
 	}
-	return &stdfs.PathError{Op: "chmod", Path: abs, Err: ErrUnsupportedOp}
+	return nil
 }
 
 func (a *ufsAdapter) Chown(ctx context.Context, name string, uid, gid uint32, follow bool) error {

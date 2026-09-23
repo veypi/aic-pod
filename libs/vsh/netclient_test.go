@@ -68,7 +68,7 @@ func TestNetClientRuleTableDeny(t *testing.T) {
 		Default: true, // net_policy open
 	}
 	c := NewNetClient(NetClientConfig{
-		Rules:       func() vbox.NetRuleSet { return rules },
+		Rules:       func(context.Context) vbox.NetRuleSet { return rules },
 		Resolver:    fakeResolver{},
 		DialContext: hijackDial(server),
 	})
@@ -84,6 +84,27 @@ func TestNetClientRuleTableDeny(t *testing.T) {
 	}
 	if resp.StatusCode != 200 || strings.TrimSpace(string(resp.Body)) != "ok" {
 		t.Fatalf("resp = %d %q", resp.StatusCode, resp.Body)
+	}
+}
+
+// TestNetClientRulesReceivesCtx 规则表快照源收到 Do 的 ctx（M3c per-session
+// 修复的底座：Engine.Exec 注入的会话键经此传到 Rules）。
+func TestNetClientRulesReceivesCtx(t *testing.T) {
+	t.Parallel()
+	type markKey struct{}
+	c := NewNetClient(NetClientConfig{
+		Rules: func(ctx context.Context) vbox.NetRuleSet {
+			if v, _ := ctx.Value(markKey{}).(string); v != "marked" {
+				t.Errorf("Rules ctx marker = %q, want marked", v)
+			}
+			return vbox.NetRuleSet{Default: false} // 规则表兜底拒——不进网络
+		},
+		Resolver: fakeResolver{},
+	})
+	ctx := context.WithValue(context.Background(), markKey{}, "marked")
+	_, err := c.Do(ctx, &vshnet.Request{Method: "GET", URL: "http://example.com/x"})
+	if err == nil || !strings.Contains(err.Error(), "grant net") {
+		t.Fatalf("default-deny = %v, want rule table denial", err)
 	}
 }
 

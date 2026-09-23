@@ -115,8 +115,26 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 	})
 }
 
+// virtualDeviceWrites 是引擎运行时自管的 /dev 路径——重定向到这些路径
+// 不到达 FS 适配器，不算写目标（2026-09-24 实测：`>/dev/null`、`>/dev/stdout`
+// 被静态预检误判越界写）：
+//   - 虚拟设备（vsh internal/runtime/virtual_devices.go）：写 null/zero 丢弃、
+//     full 报 ENOSPC（darwin EPERM）、tty/console/urandom 各有语义；
+//   - std 别名（vsh internal/shell/interp runner.go openShellStdDevice）：
+//     stdin/stdout/stderr 映射到 runner fd 表（per-exec 流），与 bash 一致。
+var virtualDeviceWrites = map[string]bool{
+	"/dev/console": true,
+	"/dev/full":    true,
+	"/dev/null":    true,
+	"/dev/stderr":  true,
+	"/dev/stdout":  true,
+	"/dev/tty":     true,
+	"/dev/urandom": true,
+	"/dev/zero":    true,
+}
+
 func (a *Analysis) addWrite(p string) {
-	if p == "" || p == "-" {
+	if p == "" || p == "-" || virtualDeviceWrites[p] {
 		return
 	}
 	for _, existing := range a.WriteTargets {

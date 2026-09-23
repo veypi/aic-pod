@@ -45,6 +45,24 @@ func TestSnapshotCfgOverridesBuiltinDeny(t *testing.T) {
 	}
 }
 
+// TestSnapshotCfgTailAppendWins permanent 追加语义钉死（todo 3.4.3）：新行
+// append 到 config <域>_rules 文件尾 → cfg 组内反转（old last-wins → new
+// first-wins 映射）使其位于 cfg 段最前 → 首命中压过同段更早的 deny 行。
+func TestSnapshotCfgTailAppendWins(t *testing.T) {
+	old := cfg.AuthSnapshot()
+	t.Cleanup(func() { cfg.SetAuth(old) })
+	a := old
+	a.FsPolicy = cfg.PolicyDeny
+	dir := t.TempDir()
+	// 文件行序 = persistGrant 落盘形态：deny 在先、rw 追加在尾。
+	a.FsRules = []string{"deny:" + dir, "rw:" + dir}
+	cfg.SetAuth(a)
+	p := New()
+	if d := p.Snapshot("s1").Match(dir+string(filepath.Separator)+"x", vbox.OpWrite); !d.Allow {
+		t.Fatalf("appended tail row should win within cfg segment under first-wins: %+v", d)
+	}
+}
+
 // TestSnapshotTempGrantBeatsAll temp grant 插表头压一切（含 builtin deny——
 // 2.7.4 DenyHit 拒批删除后的新语义：行序表达，无硬底线）。
 func TestSnapshotTempGrantBeatsAll(t *testing.T) {

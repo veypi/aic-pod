@@ -235,8 +235,8 @@ func (p *Policy) DenyPatterns() []string {
 	return dedupClean(out)
 }
 
-// DenyHit 报告路径的表判定终局是否为 deny（temp grant 校验用：
-// deny 终局拒绝申请——session 层不得放宽表判定的 deny，§2 硬底线）。
+// DenyHit 报告路径的表判定终局是否为 deny（M3c 起仅作 grant --permanent
+// 覆盖提示的信息性判定——temp 拒批已废：temp 行插表头可覆盖 deny）。
 func (p *Policy) DenyHit(path string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -304,14 +304,19 @@ func (p *Policy) decide(sid, cpath string) (int, int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	eff := p.resolveLocked(cpath)
+	// temp grant 插表头、首命中压一切（含 deny——v4 新语义，2.7.4：DenyHit
+	// 拒批废除，「用户点就点了」）；便利根/会话区仍在 deny 之下（行序表达）。
+	if proto.InWriteRoots(cpath, p.grants[sid]) {
+		return 1, 2
+	}
 	if eff == effDeny {
 		return 0, 0
 	}
 	if eff == effRW {
 		return 1, 2
 	}
-	// eff ∈ {ro, none}：会话写根（便利根/会话区/temp grant）仅在表判定非 deny
-	// 时生效（§3）——ro 不挡会话写根（temp grant 可把 ro 目标提升为可写）。
+	// eff ∈ {ro, none}：会话写根（便利根/会话区）仅在表判定非 deny 时生效
+	//（§3）——ro 不挡会话写根。
 	if proto.InWriteRoots(cpath, p.decideRootsLocked(sid)) {
 		return 1, 2
 	}

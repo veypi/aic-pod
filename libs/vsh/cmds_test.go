@@ -94,7 +94,7 @@ func TestCmdBGClosedLoop(t *testing.T) {
 	reg := commands.NewRegistry()
 	deps := PlatformDeps{
 		Tasks: tasks,
-		RunBG: func(ctx context.Context, sessionKey, script, logPath string, log io.Writer) (int, error) {
+		RunBG: func(ctx context.Context, sessionKey, script, workdir, logPath string, log io.Writer) (int, error) {
 			if _, err := log.Write([]byte("bg-output\n")); err != nil {
 				return 1, err
 			}

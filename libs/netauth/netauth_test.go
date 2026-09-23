@@ -135,12 +135,17 @@ func TestOrderedLastMatchWins(t *testing.T) {
 	if !p.Allowed("s1", "bad.com", 80) {
 		t.Error("all-port allow should allow other ports")
 	}
-	// 临时 grant 不压 deny 终局
+	// 临时 grant 插表头压一切（v4 新语义，2026-09-23 拍板「用户点就点了」——
+	// 旧「temp 不压 deny 终局」硬底线作废，DenyHit 拒批随 M3c 删除）
 	p.Configure("deny", []string{"deny:bad.com"})
 	e, _ := ParseEntry("bad.com:443")
 	p.Grant("s1", e)
-	if p.Allowed("s1", "bad.com", 443) {
-		t.Error("temp grant must not override a deny outcome")
+	if !p.Allowed("s1", "bad.com", 443) {
+		t.Error("temp grant should top the table (override deny)")
+	}
+	// 会话隔离：别的 sid 仍被 deny
+	if p.Allowed("s2", "bad.com", 443) {
+		t.Error("temp grant must be session-scoped")
 	}
 	// Snapshot 按效果分列（deny 行与 allow 行各归其列）
 	p.Configure("deny", []string{"deny:bad.com", "deny:other.com:22", "allow:bad.com:443"})

@@ -36,8 +36,10 @@ type NetAudit struct {
 
 // NetClientConfig cloud NetClient 装配（唯一网络权威；网络不触发审批）。
 type NetClientConfig struct {
-	// Rules NetRuleSet 快照源（default open + grant net 动态行）；nil = 全开放。
-	Rules func() vbox.NetRuleSet
+	// Rules NetRuleSet 快照源（default open + grant net 动态行）；ctx 携带
+	// Exec 注入的会话键（SessionFromContext）——快照按 sid 取，temp grant
+	// 会话隔离。nil = 全开放。
+	Rules func(ctx context.Context) vbox.NetRuleSet
 	// Audit 每次请求结束（含阻断）回调；nil = 不审计。
 	Audit func(NetAudit)
 	// OnResponseSize 下载配额预检（cloudenv.go:116 Fetcher 迁移）：响应
@@ -207,7 +209,7 @@ func (c *NetClient) checkTarget(ctx context.Context, rawURL string) error {
 	}
 	// 规则表（首命中生效；default open——grant net 动态行插表头）。
 	if c.cfg.Rules != nil {
-		if !c.cfg.Rules().Match(net.JoinHostPort(host, port)) {
+		if !c.cfg.Rules(ctx).Match(net.JoinHostPort(host, port)) {
 			return &vshnet.AccessDeniedError{URL: rawURL, Reason: "denied by net rule table（如需访问请 grant net " + net.JoinHostPort(host, port) + "）"}
 		}
 	}

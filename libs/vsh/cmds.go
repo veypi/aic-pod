@@ -16,8 +16,10 @@ import (
 // NewEngine 自动接线，调用方无需填。
 type PlatformDeps struct {
 	Tasks *TaskTable
-	// RunBG bg run 的执行体（引擎注入；签名：会话键、脚本、日志路径、日志 writer）。
-	RunBG func(ctx context.Context, sessionKey, script, logPath string, log io.Writer) (int, error)
+	// RunBG bg run 的执行体（引擎注入；签名：会话键、脚本、workdir、日志路径、
+	// 日志 writer）。workdir = 调用方会话当前 cwd（2026-09-24 实测修复：bg 不再
+	// 固定回落 HOME——相对路径写在 bg 里与前台一致）。
+	RunBG func(ctx context.Context, sessionKey, script, workdir, logPath string, log io.Writer) (int, error)
 	// Grant 发起授权申请（sessionKey=调用会话；domain: fs/net/cmd；
 	// target: 路径/host:port/命令名）。返回给用户的可读结果文案；拒绝/失败
 	// 返回 error。审批在工具层完成（脚本含字面 grant → 恒 4 级，analyze
@@ -103,8 +105,12 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 		}
 		script := strings.Join(inv.Args[1:], " ")
 		sessionKey := inv.Env["AIC_VSH_SESSION"]
+		cwd := ""
+		if inv.FS != nil {
+			cwd = inv.FS.Getwd()
+		}
 		task := d.Tasks.Start(script, "", func(ctx context.Context, log io.Writer) (int, error) {
-			return d.RunBG(ctx, sessionKey, script, "", log)
+			return d.RunBG(ctx, sessionKey, script, cwd, "", log)
 		}, nil)
 		fmt.Fprintf(inv.Stdout, "%s\n", task.ID)
 		return nil
