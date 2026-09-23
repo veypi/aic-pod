@@ -4,17 +4,17 @@
 // 验证受限令牌 + ACL 授权的实际行为：
 //   - read-only：写任意路径被拒
 //   - workspace-write：写工作区成功、写外部路径被拒、TMP/TEMP 指向私有目录
-//   - deny：per-call 拒绝 ACE 使目标读写双拒，进程结束后撤销
+//   - deny：per-call 拒绝 ACE 拦写（读侧为 windows 沙箱的文档化边界，不拦），进程结束后撤销
 //   - cleanup：私有临时目录在进程结束后被删除
 package exec_procs
 
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -38,7 +38,9 @@ func runWithPlan(t *testing.T, plan launchPlan, argv []string, workdir string) (
 	if plan.env != nil {
 		cmd.Env = append(os.Environ(), plan.env...)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(plan.token)}
+	// 控制台策略与生产一致：SetSysProcAttr（HideWindow + CREATE_NO_WINDOW）= 受限
+	// spawn 的实际生产配置；令牌经 SysProcAttr.Token 注入（applyToken）。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(plan.token), HideWindow: true, CreationFlags: 0x08000000}
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -128,10 +130,10 @@ func TestWindowsCreateRestrictedTokenFlagMatrix(t *testing.T) {
 		var tokA windows.Token
 		r1, _, e1 := procCreateRestrictedToken.Call(
 			uintptr(allTok), 0x1,
-			0, 0,
+			0, 0, // DisableSidCount, SidsToDisable
+			0, 0, // DeletePrivilegeCount, PrivilegesToDelete
 			uintptr(len(restrictions)),
 			uintptr(unsafe.Pointer(&restrictions[0])),
-			0, 0,
 			uintptr(unsafe.Pointer(&tokA)),
 		)
 		if r1 == 0 {
@@ -149,10 +151,10 @@ func TestWindowsCreateRestrictedTokenFlagMatrix(t *testing.T) {
 		var tok windows.Token
 		r1, _, e1 := procCreateRestrictedToken.Call(
 			uintptr(procToken), flags,
-			0, 0,
+			0, 0, // DisableSidCount, SidsToDisable
+			0, 0, // DeletePrivilegeCount, PrivilegesToDelete
 			uintptr(len(restrictions)),
 			uintptr(unsafe.Pointer(&restrictions[0])),
-			0, 0,
 			uintptr(unsafe.Pointer(&tok)),
 		)
 		if r1 == 0 {
@@ -247,59 +249,126 @@ func aclAceCount(t *testing.T, path string) int {
 	return int(binary.LittleEndian.Uint16(head[4:6]))
 }
 
-// deny：目标读写双拒（白名单内写也拒），非 deny 路径不受影响；进程结束后
-// 拒绝 ACE 撤销（ACE 计数回落）。
-func TestWindowsDenyACEBlocksAndCleansUp(t *testing.T) {
+// aclDenyAceCount 返回对象 DACL 中的拒绝类 ACE 数（deny 增删断言用）。
+func aclDenyAceCount(t *testing.T, path string) int {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	if dacl == nil {
+		return 0
+	}
+	head := (*[8]byte)(unsafe.Pointer(dacl))
+	aclSize := int(binary.LittleEndian.Uint16(head[2:4]))
+	aceCount := int(binary.LittleEndian.Uint16(head[4:6]))
+	off := 8
+	n := 0
+	for i := 0; i < aceCount; i++ {
+		if off+8 > aclSize {
+			t.Fatalf("acl parse: ace header out of range")
+		}
+		ace := (*windows.ACE_HEADER)(unsafe.Pointer(uintptr(unsafe.Pointer(dacl)) + uintptr(off)))
+		if int(ace.AceSize) < 8 || off+int(ace.AceSize) > aclSize {
+			t.Fatalf("acl parse: ace size out of range")
+		}
+		if ace.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+			n++
+		}
+		off += int(ace.AceSize)
+	}
+	return n
+}
+
+// deny（Windows 边界）：per-call 拒绝 ACE 使目标【写】被拒（pass-2 写检查
+// 命中 deny）；读不在 WRITE_RESTRICTED 的交叉检查范围——deny 不拦读
+// （Windows 受限令牌的数据边界，与 dsh/codex 一致；读侧隔离需另一机制，
+// fs 工具层 deny 不受影响）；进程结束后拒绝 ACE 撤销（计数回落）。
+func TestWindowsDenyWriteACEAndCleanup(t *testing.T) {
 	ws := t.TempDir()
 	secret := filepath.Join(ws, "secret.key")
 	if err := os.WriteFile(secret, []byte("top-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	open := filepath.Join(ws, "open.txt")
-	if err := os.WriteFile(open, []byte("open"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	before := aclAceCount(t, secret)
+	before := aclDenyAceCount(t, secret)
 
-	// 读 deny：type 目标必须失败且不输出内容
-	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: []string{"cmd", "/c", "type " + strconv.Quote(secret)}})
+	// 写 deny：白名单内可写路径上的 deny 文件写也必须失败且内容不变
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: writeCmd(secret)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
-	if got := aclAceCount(t, secret); got != before+1 {
+	if got := aclDenyAceCount(t, secret); got != before+1 {
 		t.Fatalf("deny ACE not added: before=%d after=%d", before, got)
 	}
 	out, exit := runWithPlan(t, plan, plan.argv, ws)
-	if exit == 0 || strings.Contains(out, "top-secret") {
-		t.Fatalf("deny read should fail: exit=%d out=%q", exit, out)
-	}
-
-	// 写 deny：白名单内可写路径上的 deny 文件写也必须失败
-	plan2, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: writeCmd(secret)})
-	if err != nil {
-		t.Fatalf("planConfined: %v", err)
-	}
-	out2, exit2 := runWithPlan(t, plan2, plan2.argv, ws)
-	if exit2 == 0 {
-		t.Fatalf("deny write should fail: %s", out2)
+	if exit == 0 {
+		t.Fatalf("deny write should fail: %s", out)
 	}
 	if b, _ := os.ReadFile(secret); string(b) != "top-secret" {
 		t.Fatalf("denied file changed: %q", b)
 	}
+	// runWithPlan 已触发 cleanup：拒绝 ACE 撤销，计数回落
+	if got := aclDenyAceCount(t, secret); got != before {
+		t.Fatalf("deny ACE not revoked: before=%d after=%d", before, got)
+	}
 
-	// 非 deny 路径：读默认开放、白名单内写正常
-	plan3, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: []string{"cmd", "/c", "type " + strconv.Quote(open)}})
+	// 读边界：WRITE_RESTRICTED 只交叉检查写访问——deny 不拦读（文档化行为；
+	// 若未来引入读侧隔离机制，此断言需随之更新）。
+	// 用相对路径：os/exec 会把 argv 内嵌引号转义成 \"，cmd 解析后报"文件名…
+	// 语法不正确"；cmd cwd 即 ws，相对路径避开引号。
+	plan2, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: []string{"cmd", "/c", "type secret.key"}})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	out2, exit2 := runWithPlan(t, plan2, plan2.argv, ws)
+	if exit2 != 0 || !strings.Contains(out2, "top-secret") {
+		t.Fatalf("windows read boundary changed: deny must not block reads: exit=%d out=%q", exit2, out2)
+	}
+
+	// 非 deny 路径：白名单内写正常
+	open := filepath.Join(ws, "open.txt")
+	plan3, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, deny: []string{secret}, netOpen: true, argv: writeCmd(open)})
 	if err != nil {
 		t.Fatalf("planConfined: %v", err)
 	}
 	out3, exit3 := runWithPlan(t, plan3, plan3.argv, ws)
-	if exit3 != 0 || !strings.Contains(out3, "open") {
-		t.Fatalf("open read should succeed: exit=%d out=%q", exit3, out3)
+	if exit3 != 0 {
+		t.Fatalf("non-deny write should succeed: %s", out3)
+	}
+}
+
+// workspace-write 边界：授权根（workspace）内写成功；根外写被拒
+// （pass-2 写白名单——受限令牌只放行 restricting list 所授权的对象）。
+func TestWindowsSandboxWriteConfinement(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	inFile := filepath.Join(ws, "in.txt")
+	outFile := filepath.Join(outside, "out.txt")
+
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, netOpen: true, argv: writeCmd(inFile)})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	if out, exit := runWithPlan(t, plan, plan.argv, ws); exit != 0 {
+		t.Fatalf("granted workspace write should succeed: exit=%d out=%q", exit, out)
+	}
+	if _, err := os.Stat(inFile); err != nil {
+		t.Fatalf("granted workspace write did not materialize: %v", err)
 	}
 
-	// cleanup：拒绝 ACE 撤销，ACE 计数回落
-	if got := aclAceCount(t, secret); got != before {
-		t.Fatalf("deny ACE not revoked: before=%d after=%d", before, got)
+	plan2, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, netOpen: true, argv: writeCmd(outFile)})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	if out, exit := runWithPlan(t, plan2, plan2.argv, ws); exit == 0 {
+		t.Fatalf("write outside granted roots should fail: %q", out)
+	}
+	if _, err := os.Stat(outFile); err == nil {
+		t.Fatal("outside file must not exist")
 	}
 }
 
@@ -351,4 +420,241 @@ func TestWindowsJobLimits(t *testing.T) {
 	if exit != 0 || !strings.Contains(out, "ok") {
 		t.Fatalf("job-attached run failed: exit=%d out=%q", exit, out)
 	}
+}
+
+// 诊断矩阵：受限令牌（WRITE_RESTRICTED|LUA）下各控制台模式的可启动性——
+// dsh 实测记录 CREATE_NO_WINDOW / CREATE_NEW_CONSOLE 子进程 DLL init 必死
+// （STATUS_DLL_INIT_FAILED 0xC0000142），共享控制台可存活。用
+// cmd /c exit /b 7 观察退出码即可判定（7 = 正常启动）。
+func TestWindowsConsoleModeMatrix(t *testing.T) {
+	runConsoleModeMatrix(t, t.Logf)
+}
+
+// 模拟 GUI pod 后端（无控制台父进程）重跑同一矩阵：先 spawn 一个 DETACHED
+// 无控制台子进程（本测试的二阶段），在它里面执行矩阵并回传日志——生产
+// 形态（桌面后端无控制台）下的控制台策略验证。
+func TestWindowsConsoleModeDetachedParent(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run", "^TestWindowsConsoleModeDetachedStage$", "-test.v")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000008} // CREATE_DETACHED_PROCESS：无控制台
+	cmd.Env = append(os.Environ(), "AIC_SBX_STAGE=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("detached-parent child (err=%v):\n%s", err, out)
+}
+
+func TestWindowsConsoleModeDetachedStage(t *testing.T) {
+	if os.Getenv("AIC_SBX_STAGE") != "1" {
+		t.Skip("stage child: only run from TestWindowsConsoleModeDetachedParent")
+	}
+	runConsoleModeMatrix(t, func(format string, args ...any) { fmt.Printf(format+"\n", args...) })
+}
+
+// 诊断：grantDirWrite 幂等授权 + 受限令牌 restricting SID 与 workspace ACE
+// 的实际状态（定位“授权目录内写仍被拒”的成因）。
+func TestWindowsGrantDiag(t *testing.T) {
+	ws := t.TempDir()
+	plan, err := planConfined(confineSpec{level: proto.LevelWrite, workdir: ws, extra: []string{ws}, netOpen: true, argv: []string{"cmd", "/c", "exit /b 0"}})
+	if err != nil {
+		t.Fatalf("planConfined: %v", err)
+	}
+	defer func() { plan.cleanup(); closeToken(plan.token) }()
+	logAceDump(t, "ws", ws)
+	logTokenRestrictedSids(t, "token", windows.Token(plan.token))
+	sid, err := capabilitySID("ws", ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(ws, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := aclHasFullGrant(dacl, sid)
+	t.Logf("capSid=%s aclHasFullGrant=%v err=%v", sid, ok, err)
+
+	// 写探针：现有文件追加（创建时已继承 cap ACE） vs 新建文件（新对象安全描述符）
+	existing := filepath.Join(ws, "existing.txt")
+	if err := os.WriteFile(existing, []byte("e"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := exec.Command("cmd", "/c", "echo y >> "+existing)
+	app.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(plan.token), CreationFlags: 0x00000008}
+	out, werr := app.CombinedOutput()
+	t.Logf("append existing: err=%v out=%q", werr, out)
+	newf := filepath.Join(ws, "newfile.txt")
+	crt := exec.Command("cmd", "/c", "echo x > "+newf)
+	crt.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(plan.token), CreationFlags: 0x00000008}
+	out2, werr2 := crt.CombinedOutput()
+	t.Logf("create new: err=%v out=%q", werr2, out2)
+}
+
+// 诊断：deny ACE 增删链路（add → 计数 → revoke → 计数 + 错误）。
+func TestWindowsDenyRevokeDiag(t *testing.T) {
+	ws := t.TempDir()
+	f := filepath.Join(ws, "x.key")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sid, err := randomDenySID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := aclDenyAceCount(t, f)
+	ok, err := addDenyACE(f, sid, restrictedSIDsForReachability())
+	t.Logf("add ok=%v err=%v count=%d→%d", ok, err, before, aclDenyAceCount(t, f))
+	logAceDump(t, "after-add", f)
+
+	// 隔离点：仅做 SetEntriesInAcl 合并（应用前），观察 REVOKE 是否真的移除
+	sd2, err := windows.GetNamedSecurityInfo(f, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl2, _, err := sd2.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, merr := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessMode:  windows.REVOKE_ACCESS,
+		Inheritance: subContainersAndObjectsInherit,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, dacl2)
+	t.Logf("merge-only err=%v", merr)
+	if merr == nil {
+		dumpACL(t, "merge-only", merged)
+	}
+
+	rerr := revokeDenyACE(f, sid)
+	t.Logf("revoke err=%v count=%d", rerr, aclDenyAceCount(t, f))
+	logAceDump(t, "after-revoke", f)
+}
+
+// logAceDump 输出对象 DACL 的全部 ACE（诊断：trustee SID/掩码/类型/标志）。
+func logAceDump(t *testing.T, label, path string) {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Logf("%s %s: GetNamedSecurityInfo: %v", label, path, err)
+		return
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		t.Logf("%s %s: DACL: %v", label, path, err)
+		return
+	}
+	dumpACL(t, label, dacl)
+}
+
+// dumpACL 输出一个 DACL 指针的全部 ACE（诊断用）。
+func dumpACL(t *testing.T, label string, dacl *windows.ACL) {
+	t.Helper()
+	if dacl == nil {
+		t.Logf("%s: <nil dacl>", label)
+		return
+	}
+	head := (*[8]byte)(unsafe.Pointer(dacl))
+	aclSize := int(binary.LittleEndian.Uint16(head[2:4]))
+	aceCount := int(binary.LittleEndian.Uint16(head[4:6]))
+	off := 8
+	for i := 0; i < aceCount; i++ {
+		if off+8 > aclSize {
+			t.Logf("%s: truncated", label)
+			return
+		}
+		ace := (*windows.ACE_HEADER)(unsafe.Pointer(uintptr(unsafe.Pointer(dacl)) + uintptr(off)))
+		if int(ace.AceSize) < 8 || off+int(ace.AceSize) > aclSize {
+			t.Logf("%s: bad ace size", label)
+			return
+		}
+		switch ace.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+			aa := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(ace))
+			sid := (*windows.SID)(unsafe.Pointer(&aa.SidStart))
+			t.Logf("%s[%d]: allow %s mask=%#x flags=%#x", label, i, sid.String(), aa.Mask, ace.AceFlags)
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			// ACCESS_DENIED_ACE 与 ACCESS_ALLOWED_ACE 同布局（x/sys 未导出前者）
+			da := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(ace))
+			sid := (*windows.SID)(unsafe.Pointer(&da.SidStart))
+			t.Logf("%s[%d]: deny  %s mask=%#x flags=%#x", label, i, sid.String(), da.Mask, ace.AceFlags)
+		default:
+			t.Logf("%s[%d]: type=%d flags=%#x", label, i, ace.AceType, ace.AceFlags)
+		}
+		off += int(ace.AceSize)
+	}
+}
+
+// logTokenRestrictedSids 输出受限令牌的 restricting SID 列表（诊断用）。
+func logTokenRestrictedSids(t *testing.T, label string, tok windows.Token) {
+	t.Helper()
+	var need uint32
+	err := windows.GetTokenInformation(tok, windows.TokenRestrictedSids, nil, 0, &need)
+	if err != nil && need == 0 {
+		t.Logf("%s: restricted sids size query failed: %v", label, err)
+		return
+	}
+	buf := make([]byte, need)
+	if err := windows.GetTokenInformation(tok, windows.TokenRestrictedSids, &buf[0], need, &need); err != nil {
+		t.Logf("%s: restricted sids read failed: %v", label, err)
+		return
+	}
+	groups := (*windows.Tokengroups)(unsafe.Pointer(&buf[0]))
+	for _, g := range groups.AllGroups() {
+		t.Logf("%s: restricted sid %s (attr=%#x)", label, g.Sid.String(), g.Attributes)
+	}
+}
+
+// runConsoleModeMatrix 对每种控制台模式创建受限令牌并启动 cmd /c exit /b 7，
+// 记录退出码（7 = 正常启动；-1073741502 = 0xC0000142 DLL init 失败）。
+func runConsoleModeMatrix(t *testing.T, logf func(string, ...any)) {
+	t.Helper()
+	modes := []struct {
+		name  string
+		flags uint32
+	}{
+		{"inherit", 0},
+		{"no-window", 0x08000000}, // CREATE_NO_WINDOW（历史生产形态）
+		{"detached", 0x00000008},  // CREATE_DETACHED_PROCESS
+		{"new-console", 0x00000010},
+	}
+	for _, m := range modes {
+		tok, err := createRestrictedToken(nil)
+		if err != nil {
+			logf("%-12s createRestrictedToken: %v", m.name, err)
+			continue
+		}
+		cmd := exec.Command("cmd", "/c", "exit /b 7")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(tok), CreationFlags: m.flags}
+		out, werr := cmd.CombinedOutput()
+		code := -1
+		if ee, ok := werr.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+			werr = nil
+		}
+		logf("%-12s exit=%d err=%v out=%q", m.name, code, werr, strings.TrimSpace(string(out)))
+		closeToken(uintptr(tok))
+	}
+	// PowerShell（pod 常用解释器）在 DETACHED 策略下的启动确认
+	tok, err := createRestrictedToken(nil)
+	if err != nil {
+		logf("powershell   createRestrictedToken: %v", err)
+		return
+	}
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", "exit 7")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(tok), CreationFlags: 0x00000008}
+	out, werr := cmd.CombinedOutput()
+	code := -1
+	if ee, ok := werr.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+		werr = nil
+	}
+	logf("powershell   exit=%d err=%v out=%q", code, werr, strings.TrimSpace(string(out)))
+	closeToken(uintptr(tok))
 }

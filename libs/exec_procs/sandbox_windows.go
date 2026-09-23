@@ -3,10 +3,13 @@
 // Windows 沙箱后端（路径 A）：受限令牌（CreateRestrictedToken）+ ACL 授权，
 // host 进程内创建令牌后经 SysProcAttr.Token 注入子进程，无独立 runner。
 //
-// 机制（与 dsh sandbox-windows-acl 同模型，Go 原生实现）：
-//   - 受限令牌的 restricting list = logon SID + Everyone + 用户 SID +
-//     INTERACTIVE/Authenticated Users/BUILTIN Users + 能力 SID（工作区/私有
-//     临时目录）+ per-call deny SID
+// 机制（与 dsh sandbox-windows-acl / codex windows-sandbox-rs 同模型，
+// Go 原生实现）：
+//   - 受限令牌：flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED，
+//     restricting list = logon SID + Everyone + 能力 SID（工作区/私有临时）+
+//     per-call deny SID。写类访问做两次检查（正常 SID + restricting SID），
+//     两次都通过才放行 —— restricting 列表即进程的写白名单；读不做第二次
+//     检查（WRITE_RESTRICTED 只交叉检查写访问，dsh/codex 同边界）。
 //   - 能力 SID 是确定性派生（路径哈希）或随机（私有临时目录）的自定义 SID，
 //     对应目录的 DACL 上授予完全访问 ACE：
 //   - 工作区：standing ACE，幂等授权——每次调用先检查 DACL 是否已有该
@@ -14,15 +17,16 @@
 //     后 ACE 消失，下次调用自动重新授权（无进程级缓存，无陈旧状态）
 //   - 私有临时目录：per-call 随机创建 + 随机 SID，进程结束后删除目录
 //     （ACE 随目录消失，无需显式撤销）
-//   - 进程访问对象时 Windows 做两次检查：正常 SID 检查 + restricting SID
-//     检查（restricting SID 视为唯一 SID 集合）。能力 SID 只对授权目录有
-//     权限，因此受限进程只能写工作区与私有临时目录；其余对象写被拒
-//     （Everyone 可写的对象除外——报告 partial 的固有边界）。
-//   - 读默认开放；fs deny 用 per-call 随机 SID 的完全拒绝 ACE 落地（DENY
-//     置于 ACL 首部、继承到子对象；其他进程无该 SID 不受影响），读写双拒；
-//     进程结束后撤销 ACE（子对象继承副本随父对象 ACL 更新消失）。
 //   - read-only：restricting list 无能力 SID → 除 Everyone 可写对象外全部
 //     写被拒。
+//   - fs deny：per-call 随机 SID 的完全拒绝 ACE（DENY 置于 ACL 首部、继承
+//     到子对象；其他进程无该 SID 不受影响）——写被拒（pass-2 命中 deny）；
+//     读不在 WRITE_RESTRICTED 检查范围（Windows 边界：读侧隔离需另一机制，
+//     与 dsh/codex 一致）；进程结束后撤销。
+//   - spawn 控制台策略：保持既有 CREATE_NO_WINDOW（proc_windows.go
+//     SetSysProcAttr）——restricting 列表正确时各控制台模式均可启动
+//
+// （TestWindowsConsoleModeMatrix 真机矩阵）。
 //   - TMP/TEMP 环境变量指向私有临时目录（子进程继承）。
 package exec_procs
 
@@ -74,18 +78,30 @@ const (
 	subContainersAndObjectsInherit = 3 // 子目录 + 文件继承 ACE
 	fileAllAccess                  = 0x001F01FF
 
-	// CreateRestrictedToken Flags（当前仅 DISABLE_MAX_PRIVILEGE）。
-	// 排查记录：WRITE_RESTRICTED/LUA 下受限进程初始化 DLL 全灭
-	// （STATUS_DLL_INIT_FAILED，cmd/powershell/git 实测）；restricting list
-	// 已含 logon/Everyone/用户 SID/INTERACTIVE/Auth Users/Users 仍失败。
-	// 暂退到最小 flags 保证进程可运行，写隔离后续以完整性级别/ACL 方案补。
+	// CreateRestrictedToken Flags（dsh sandbox-windows-acl / codex
+	// windows-sandbox-rs 同款组合，Win11 26200 实测）：
+	//   - DISABLE_MAX_PRIVILEGE：除 SeChangeNotifyPrivilege 外特权全禁；
+	//   - LUA_TOKEN：LUA 令牌；
+	//   - WRITE_RESTRICTED：restricting SID 仅参与写访问的第二次检查
+	//     （pass-2）——写隔离的唯一开关：缺它时 restricting 列表整体惰性
+	//     （实测读写均不拦截）。
+	// 历史排查结论（2026-09-23 真机矩阵复核）：bfe547d 的 "加 flags 后
+	// cmd/powershell/git 全灭 0xC0000142" 根因是 CreateRestrictedToken 参数
+	// 错位——restricting SID 数组被传进 PrivilegesToDelete 槽位，列表实际
+	// 为空。flag 恢复 + 参数修正后各控制台模式（含 CREATE_NO_WINDOW）在
+	// 有无控制台父进程下均正常启动，无需换 spawn 侧控制台策略。
 	disableMaxPrivilege = 0x1
+	luaToken            = 0x4
+	writeRestricted     = 0x8
 )
 
-// createRestrictedToken 创建受限令牌：restricting list = logon SID +
-// Everyone + 能力 SIDs；WRITE_RESTRICTED + LUA + 禁用最大特权。
-// 随后设置宽松默认 DACL：沙箱进程创建 pipe/IPC 对象（PowerShell 管道）
-// 不因 ACCESS_DENIED 失败（codex 同策略）。
+// createRestrictedToken 创建受限令牌（dsh sandbox-windows-acl / codex
+// windows-sandbox-rs 同款组合）：restricting list = logon SID + Everyone +
+// 能力 SIDs（工作区/私有临时）+ per-call deny SID；flags =
+// DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED。
+// 随后设置宽松默认 DACL：沙箱进程新建对象（pipe/IPC 等）的自身 DACL
+// 必须能命中 restricting SID，否则新建即被 pass-2 写检查拒
+// （codex/dsh 同策略）；结尾显式启用 SeChangeNotifyPrivilege。
 // 现有令牌必须以 TOKEN_ALL_ACCESS 打开——实测 TOKEN_QUERY|TOKEN_DUPLICATE
 // 句柄调用 CreateRestrictedToken 返回 Access denied（win11 26200）。
 func createRestrictedToken(extraSids []*windows.SID) (windows.Token, error) {
@@ -103,33 +119,25 @@ func createRestrictedToken(extraSids []*windows.SID) (windows.Token, error) {
 	if err != nil {
 		return 0, err
 	}
-	userSid, err := userSidOf(procToken)
-	if err != nil {
-		return 0, err
-	}
+	// 列表刻意不含用户 SID 与 INTERACTIVE/Authenticated Users/BUILTIN
+	// Users：这些身份在宿主上有大量环境写授权（用户自有文件、C:\ 根树、
+	// Public 树、WMI 命名空间等），进入 restricting 列表等于把这些写路径
+	// 全部放行——写白名单的唯一粒度 = 能力 SID（dsh 同款裁剪）。
+	// [logon SID, Everyone] 保底：缺它们在 Win11 下早期 DLL 初始化即
+	// STATUS_DLL_INIT_FAILED、CNG 写失败（pwsh 崩溃）——dsh 实测记录。
 	restrictions := []windows.SIDAndAttributes{
 		{Sid: logonSid},
 		{Sid: everyone},
-		{Sid: userSid},
 	}
-	// 进程初始化依赖的基础组（系统 DLL/注册表/命名对象普遍授这些组）：
-	// restricting list 只有 logon SID + Everyone 时，kernel32/ntdll 加载器
-	// 访问被拒 → STATUS_DLL_INIT_FAILED (0xC0000142)，实测 cmd/powershell/
-	// git 全部启动失败。加 INTERACTIVE/Authenticated Users/BUILTIN Users
-	// 后进程可正常初始化；写边界仍由 WRITE_RESTRICTED + 能力 SID 控制
-	// （Users 可写对象属 partial 固有边界，与 Everyone 同级）。
-	for _, wks := range []windows.WELL_KNOWN_SID_TYPE{
-		windows.WinInteractiveSid,
-		windows.WinAuthenticatedUserSid,
-		windows.WinBuiltinUsersSid,
-	} {
-		s, err := windows.CreateWellKnownSid(wks)
-		if err != nil {
-			return 0, err
-		}
-		restrictions = append(restrictions, windows.SIDAndAttributes{Sid: s})
-	}
+	// 去重：planConfined 的 dirs（工作区/缓存/公共/extra）可能重复出现同一
+	// 路径（如 workdir 同时作为 extra），能力 SID 随之重复——restricting
+	// 列表保持每个 SID 一条。
+	seen := map[string]bool{logonSid.String(): true, everyone.String(): true}
 	for _, s := range extraSids {
+		if s == nil || seen[s.String()] {
+			continue
+		}
+		seen[s.String()] = true
 		restrictions = append(restrictions, windows.SIDAndAttributes{Sid: s})
 	}
 
@@ -137,15 +145,18 @@ func createRestrictedToken(extraSids []*windows.SID) (windows.Token, error) {
 	if procCreateRestrictedToken == nil {
 		return 0, procMissing("CreateRestrictedToken")
 	}
-	// CreateRestrictedToken(Existing, Flags, DisableCount, Disable,
-	//   RestrictCount, Restrict, PrivDelCount, PrivDel, NewToken)
+	// CreateRestrictedToken(Existing, Flags, DisableCount, SidsToDisable,
+	//   DeletePrivilegeCount, PrivilegesToDelete, RestrictCount, SidsToRestrict,
+	//   NewToken)——注意 PrivilegesToDelete 对在 SidsToRestrict 之前；
+	// 参数错位会把 restricting SID 数组当成特权列表传入（空 restricting
+	// 列表，写全拒而任何 ACE 都无关——2026-09-23 实测定位）。
 	r1, _, e1 := procCreateRestrictedToken.Call(
 		uintptr(procToken),
-		uintptr(disableMaxPrivilege),
-		0, 0,
+		uintptr(disableMaxPrivilege|luaToken|writeRestricted),
+		0, 0, // DisableSidCount, SidsToDisable
+		0, 0, // DeletePrivilegeCount, PrivilegesToDelete
 		uintptr(len(restrictions)),
 		uintptr(unsafe.Pointer(&restrictions[0])),
-		0, 0,
 		uintptr(unsafe.Pointer(&newToken)),
 	)
 	if r1 == 0 {
@@ -155,7 +166,33 @@ func createRestrictedToken(extraSids []*windows.SID) (windows.Token, error) {
 		newToken.Close()
 		return 0, err
 	}
+	if err := enableChangeNotify(newToken); err != nil {
+		newToken.Close()
+		return 0, err
+	}
 	return newToken, nil
+}
+
+// enableChangeNotify 显式启用 SeChangeNotifyPrivilege（目录遍历旁路）。
+// 该特权本应被 DISABLE_MAX_PRIVILEGE 保留，显式启用为对齐已实测的参考
+// 实现（codex windows-sandbox-rs 同做法），防 LUA 令牌下被禁。
+func enableChangeNotify(token windows.Token) error {
+	name, err := windows.UTF16PtrFromString("SeChangeNotifyPrivilege")
+	if err != nil {
+		return err
+	}
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, name, &luid); err != nil {
+		return err
+	}
+	tp := windows.Tokenprivileges{
+		PrivilegeCount: 1,
+		Privileges: [1]windows.LUIDAndAttributes{{
+			Luid:       luid,
+			Attributes: windows.SE_PRIVILEGE_ENABLED,
+		}},
+	}
+	return windows.AdjustTokenPrivileges(token, false, &tp, 0, nil, nil)
 }
 
 // procMissing 是 win32 过程缺失错误。
@@ -324,8 +361,10 @@ func probeBackend() sandboxBackend {
 //   - workspace-write：工作区/缓存目录（fsauth.CacheRoots）/追加根（extra）
 //     standing ACE + per-call 私有临时目录（TMP/TEMP 指向它），进程结束后清理
 //   - deny：per-call 随机 SID 加入 restricting list，对每个 deny 目标追加完全
-//     拒绝 ACE（读写双拒、继承到子对象，进程结束后撤销）；模式形态不可
-//     实例化或可达对象加不上 ACE → 拒绝执行（fail-closed）
+//     拒绝 ACE（写被拒——WRITE_RESTRICTED 的 pass-2 只覆盖写访问，读不在
+//     受限令牌可表达范围（Windows 边界，与 dsh/codex 一致：读侧隔离需另
+//     一机制，fs 工具层不受影响）；ACE 继承到子对象，进程结束后撤销）；
+//     模式形态不可实例化或可达对象加不上 ACE → 拒绝执行（fail-closed）
 //   - 资源限制：Job Object（进程内存 4GiB / job 内存 8GiB / 活动进程 256），
 //     spawn 后由 exec_procs assign 子进程（assignJob）；job 句柄随 cleanup 关闭
 //   - 返回原样 argv + 令牌句柄 + job 句柄（spawn 后由 exec_procs 使用/关闭）
@@ -467,6 +506,12 @@ func closeJob(job uintptr) {
 }
 
 // applyToken 把受限令牌注入子进程启动属性（windows）。
+// 控制台策略保持 SetSysProcAttr 的 CREATE_NO_WINDOW：2026-09-23 真机矩阵
+// （TestWindowsConsoleModeMatrix）证实 restricting list 正确携带
+// [logon, Everyone]+能力 SID 时，各控制台模式（含 NO_WINDOW/NEW_CONSOLE）
+// 在有无控制台父进程下均正常启动——历史 "WRITE_RESTRICTED 下子进程全灭"
+// 与 CREATE_NO_WINDOW 无关（实为 CreateRestrictedToken 参数错位致
+// restricting 列表为空，见 createRestrictedToken 注）。
 func applyToken(cmd *exec.Cmd, token uintptr) error {
 	cmd.SysProcAttr.Token = syscall.Token(token)
 	return nil
@@ -484,8 +529,9 @@ func closeToken(token uintptr) {
 // 每次 planConfined 生成一个随机 SID（S-1-4-<a>-<b>）加入受限令牌的
 // restricting list，并对每个 deny 目标对象追加该 SID 的完全拒绝 ACE：
 //   - SetEntriesInAcl 把新 deny ACE 放在 ACL 首部（先于 allow 求值），
-//     受限检查中先命中拒绝 → 读写双拒（WRITE_DAC/WRITE_OWNER 一并拒，
-//     防沙箱进程自行摘除 ACE）；
+//     写访问的 pass-2 检查命中拒绝 → 写被拒（WRITE_DAC/WRITE_OWNER 等
+//     写类位一并拒，防沙箱进程自行摘除 ACE）；读不做 pass-2 检查
+//     （Windows 边界，见文件头注）；
 //   - ACE 继承到子对象（目录整棵子树）；
 //   - 该 SID 只存在于本次调用的令牌，宿主机其他进程不受 DACL 变更影响；
 //   - 进程结束后以 REVOKE_ACCESS 撤销（子对象继承副本随父对象 ACL 更新消失）。
@@ -553,7 +599,7 @@ func revokeDenyACEs(protected []string, sid *windows.SID) {
 		return
 	}
 	for _, t := range protected {
-		revokeDenyACE(t, sid)
+		_ = revokeDenyACE(t, sid)
 	}
 }
 
@@ -610,29 +656,80 @@ func addDenyACE(path string, denySid *windows.SID, restricted []*windows.SID) (b
 	return true, nil
 }
 
-// revokeDenyACE 撤销本调用追加的 deny ACE（REVOKE_ACCESS 删除该 trustee 的
-// 全部 ACE；子对象继承副本随父对象 ACL 更新自动消失）。best-effort。
-func revokeDenyACE(path string, denySid *windows.SID) {
+// removeAcesForSID 返回 DACL 的字节级重建副本：删除 trustee 为该 SID 的
+// 全部 ACE（allow/deny 同删），其余 ACE 原样保留。ACL 结构自包含（ACE 内联
+// SID），重建 = 拷贝 + 修正头（AclSize/AceCount）。第二个返回值为 false 表示
+// DACL 中没有该 SID 的 ACE（无需变更）。
+func removeAcesForSID(dacl *windows.ACL, sid *windows.SID) (*windows.ACL, bool, error) {
+	if dacl == nil || sid == nil {
+		return nil, false, nil
+	}
+	head := (*[8]byte)(unsafe.Pointer(dacl))
+	aclSize := int(binary.LittleEndian.Uint16(head[2:4]))
+	aceCount := int(binary.LittleEndian.Uint16(head[4:6]))
+	if aclSize < 8 {
+		return nil, false, fmt.Errorf("sandbox: acl parse: implausible size %d", aclSize)
+	}
+	buf := make([]byte, 8, aclSize)
+	copy(buf, head[:])
+	want := sid.String()
+	kept := 0
+	removed := false
+	off := 8
+	for i := 0; i < aceCount; i++ {
+		if off+8 > aclSize {
+			return nil, false, fmt.Errorf("sandbox: acl parse: ace header out of range")
+		}
+		ace := (*windows.ACE_HEADER)(unsafe.Pointer(uintptr(unsafe.Pointer(dacl)) + uintptr(off)))
+		size := int(ace.AceSize)
+		if size < 8 || off+size > aclSize {
+			return nil, false, fmt.Errorf("sandbox: acl parse: ace size out of range")
+		}
+		match := false
+		switch ace.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+			aa := (*windows.ACCESS_ALLOWED_ACE)(unsafe.Pointer(ace))
+			aceSid := (*windows.SID)(unsafe.Pointer(&aa.SidStart))
+			match = aceSid.String() == want
+		}
+		if match {
+			removed = true
+		} else {
+			buf = append(buf, (*[(1 << 16) - 1]byte)(unsafe.Pointer(ace))[:size:size]...)
+			kept++
+		}
+		off += size
+	}
+	if !removed {
+		return nil, false, nil
+	}
+	buf[2] = byte(len(buf))
+	buf[3] = byte(len(buf) >> 8)
+	buf[4] = byte(kept)
+	buf[5] = byte(kept >> 8)
+	return (*windows.ACL)(unsafe.Pointer(&buf[0])), true, nil
+}
+
+// revokeDenyACE 撤销本调用追加的 deny ACE：取对象当前 DACL，字节级重建副本
+// （删除该 SID 的全部 ACE）后应用。不走 SetEntriesInAcl 的 REVOKE_ACCESS
+// 合并——win11 26200 实测该路径返回 ERROR_SUCCESS 但 deny 类 ACE 残留
+// （带/不带继承位均如此；同样形态在 codex/dsh 环境可用，本机行为未再归因），
+// 字节级重建与 ACL 编辑器删除 ACE 同语义。返回错误供诊断/调用方处理
+// （revokeDenyACEs 仍为 best-effort 语义）。
+func revokeDenyACE(path string, denySid *windows.SID) error {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return
+		return err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return
+		return err
 	}
-	entries := []windows.EXPLICIT_ACCESS{{
-		AccessMode: windows.REVOKE_ACCESS,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeValue: windows.TrusteeValueFromSID(denySid),
-		},
-	}}
-	newAcl, err := windows.ACLFromEntries(entries, dacl)
-	if err != nil {
-		return
+	newAcl, changed, err := removeAcesForSID(dacl, denySid)
+	if err != nil || !changed {
+		return err
 	}
-	_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION, nil, nil, newAcl, nil)
 }
 

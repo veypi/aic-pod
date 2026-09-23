@@ -13,7 +13,7 @@ import (
 // SetSysProcAttr 抑制子进程控制台窗口（本包直连起进程点用）：
 // GUI 进程（-H windowsgui）无控制台，Windows 会为 CUI 子进程（bash/git/node）
 // 新分配一个控制台窗口（每执行一次命令闪一次黑框）——CREATE_NO_WINDOW 不为
-// 子进程分配控制台（输出本就重定向到日志文件，无影响），HideWindow 双保险。
+// 子进程分配控制台窗口（输出本就重定向到日志文件，无影响），HideWindow 双保险。
 // 0x08000000 = CREATE_NO_WINDOW（stdlib syscall 不导出该常量，用字面量避免引入依赖）。
 func SetSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
