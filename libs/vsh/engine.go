@@ -2,7 +2,7 @@
 //
 // 职责（design v4.3 §4）：Engine 生命周期（Runtime 单例 + Session 池 +
 // limits/墙钟 + panic recover + 后台任务表 + 日志 tee）、FS 适配器
-//（fs_ufs.go / fs_host.go，唯一进程内路径权威）、NetClient（netclient.go）、
+// （fs_ufs.go / fs_host.go，唯一进程内路径权威）、NetClient（netclient.go）、
 // 静态分析（analyze.go）、平台命令（cmds.go）、原生命令包装器（native.go）。
 //
 // 引擎路径权威分工（v4.1 强制项）：引擎 Policy 的 SymlinkMode 必须显式覆盖为
@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,10 @@ type EngineConfig struct {
 	// BaseEnv 每次 exec 注入的基础环境（HOME/PATH 钉死由调用方给；
 	// 不跨 exec 持久，ExecRequest.Env 覆盖同名键）。
 	BaseEnv map[string]string
+	// LayoutEnv 覆盖 Runtime 级布局初始化环境（默认 layoutInitEnv：HOME 钉
+	// 内存层 /tmp/.vsh-layout-home）。host 端无内存层，必须显式给可写布局
+	// HOME 与 PATH（PATH 目录 = stub 写入目标，须在规则表可写区）。
+	LayoutEnv map[string]string
 	// Logf 可选日志。
 	Logf func(format string, args ...any)
 }
@@ -96,7 +101,7 @@ type engineSession struct {
 type sessionFSKey struct{}
 
 // layoutInitEnv 是 Runtime 级 BaseEnv：仅服务于 NewSession 的布局初始化
-//（initializeSandboxLayout 用 r.cfg.BaseEnv 做 MkdirAll(HOME)/Chmod(/tmp)/写
+// （initializeSandboxLayout 用 r.cfg.BaseEnv 做 MkdirAll(HOME)/Chmod(/tmp)/写
 // PATH stub）。HOME 钉进内存层（/tmp 前缀）——真实 HOME（cloud=/u/{uid}）
 // 由平台每次 exec 经 ExecRequest.Env 注入（executionEnv 覆盖 BaseEnv），
 // Runtime 单例因此可跨用户/会话共享（布局初始化不触碰 jail 内真实路径）。
@@ -137,10 +142,14 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		}
 		return fsys, nil
 	})
+	layoutEnv := cfg.LayoutEnv
+	if layoutEnv == nil {
+		layoutEnv = layoutInitEnv
+	}
 	opts := []vshcore.Option{
 		vshcore.WithRegistry(reg),
 		vshcore.WithPolicy(pol),
-		vshcore.WithBaseEnv(layoutInitEnv),
+		vshcore.WithBaseEnv(layoutEnv),
 		vshcore.WithFileSystem(vshcore.CustomFileSystem(factory, "/")),
 		vshcore.WithTracing(vshcore.TraceConfig{Mode: vshcore.TraceRedacted}),
 	}
@@ -164,8 +173,14 @@ type ExecRequest struct {
 	Script     string            // 脚本正文
 	WorkDir    string            // 空 = 会话默认工作目录
 	Env        map[string]string // 覆盖 BaseEnv
-	Stdin      io.Reader
-	Timeout    time.Duration // ≤0 或超上限 = MaxForegroundTimeout
+	// GrantedLevel 当次授予等级（host native 子进程沙箱 profile 选择用；
+	// 经 env AIC_VSH_LEVEL 透传给 native 包装器）。
+	GrantedLevel int
+	Stdin        io.Reader
+	Timeout      time.Duration // ≤0 = MaxForegroundTimeout；上限见 LongRunning
+	// LongRunning 后台语义：Timeout 上限放宽到 BackgroundWallClock（bg 任务
+	// 的执行体走 Exec 但需要 30min 墙钟而非前台 300s 钳制）。
+	LongRunning bool
 	// Log 非空时 stdout/stderr 全量 tee 进该 writer（.exec/{msg_id}.log 约定）。
 	Log io.Writer
 }
@@ -194,14 +209,21 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 		return nil, err
 	}
 	timeout := req.Timeout
-	if timeout <= 0 || timeout > MaxForegroundTimeout {
-		timeout = MaxForegroundTimeout
+	maxTimeout := MaxForegroundTimeout
+	if req.LongRunning {
+		maxTimeout = BackgroundWallClock
+	}
+	if timeout <= 0 || timeout > maxTimeout {
+		timeout = maxTimeout
 	}
 	env := map[string]string{}
 	maps.Copy(env, e.cfg.BaseEnv)
 	maps.Copy(env, req.Env)
-	// 会话键经 env 透传给平台命令（bg run 回到同会话，不用隔离键）。
+	// 会话键/授予等级经 env 透传给平台命令与 native 包装器。
 	env["AIC_VSH_SESSION"] = req.SessionKey
+	if lvl := req.GrantedLevel; lvl > 0 {
+		env["AIC_VSH_LEVEL"] = strconv.Itoa(lvl)
+	}
 	workDir := req.WorkDir
 	if workDir == "" {
 		workDir = sess.workDir
@@ -266,7 +288,7 @@ func (e *Engine) DropSession(key string) {
 }
 
 // baseSessionKey 派生会话（"sid#bg-..."）归一到基键——NewSessionFS 只见基键
-//（backing/规则表按基键路由；派生会话独立内存层）。
+// （backing/规则表按基键路由；派生会话独立内存层）。
 func baseSessionKey(key string) string {
 	if i := strings.IndexByte(key, '#'); i > 0 {
 		return key[:i]
@@ -282,9 +304,11 @@ func (e *Engine) runBG(ctx context.Context, sessionKey, script, logPath string, 
 	bgKey := fmt.Sprintf("%s#bg-%d", sessionKey, time.Now().UnixNano())
 	defer e.DropSession(bgKey)
 	res, err := e.Exec(ctx, ExecRequest{
-		SessionKey: bgKey,
-		Script:     script,
-		Log:        log,
+		SessionKey:  bgKey,
+		Script:      script,
+		Timeout:     BackgroundWallClock,
+		LongRunning: true,
+		Log:         log,
 	})
 	if err != nil {
 		return 1, err

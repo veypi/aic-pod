@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/veypi/vbox"
-	gbfs "github.com/veypi/vsh/fs"
 	"github.com/veypi/vigo/contrib/ufs"
+	gbfs "github.com/veypi/vsh/fs"
 )
 
 // newCloudAdapter 构造 cloud 适配器：localFS backing + jail /u/u1 +

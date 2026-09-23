@@ -31,8 +31,9 @@ type NativePolicy struct {
 // NativeDeps 原生命令包装器依赖。
 type NativeDeps struct {
 	Manager *exec_procs.Manager
-	// Policy 当次策略快照源。
-	Policy func() NativePolicy
+	// Policy 当次策略快照源（按调用取——sid/level 经 inv.Env 透传：
+	// AIC_VSH_SESSION / AIC_VSH_LEVEL，由引擎调用方注入）。
+	Policy func(inv *commands.Invocation) NativePolicy
 	// LookPath name → 真实二进制路径；nil = exec.LookPath。
 	LookPath func(name string) (string, error)
 	// Workdir 进程 cwd（空 = inv.Cwd 直通；host 端会话 cwd 即真实路径）。
@@ -94,7 +95,7 @@ func (n *NativeRegistry) Names() []string {
 
 // RegisterInto 把白名单内全部命令注册进引擎 Registry。每个命令 =
 // 包装器：stdio 接引擎管道，子进程由 exec_procs 的 OS 沙箱兜底
-//（Seatbelt/bwrap/受限令牌，per-call 按当次策略生成，fail-closed）。
+// （Seatbelt/bwrap/受限令牌，per-call 按当次策略生成，fail-closed）。
 func (n *NativeRegistry) RegisterInto(reg *commands.Registry) error {
 	for _, name := range n.Names() {
 		if err := reg.Register(n.command(name)); err != nil {
@@ -137,7 +138,7 @@ func (n *NativeRegistry) command(name string) commands.Command {
 		}
 		var pol NativePolicy
 		if n.deps.Policy != nil {
-			pol = n.deps.Policy()
+			pol = n.deps.Policy(inv)
 		}
 		workdir := inv.Cwd
 		if n.deps.Workdir != nil {

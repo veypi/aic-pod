@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	gbfs "github.com/veypi/vsh/fs"
 	"github.com/veypi/vigo/contrib/ufs"
+	gbfs "github.com/veypi/vsh/fs"
 )
 
 // newTestEngine cloud 形态 Engine：UFS localFS backing + jail /u/u1，无规则表。

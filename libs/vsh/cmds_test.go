@@ -63,7 +63,7 @@ func TestCmdGrantFlow(t *testing.T) {
 	var gotDomain, gotTarget string
 	deps := PlatformDeps{
 		Tasks: NewTaskTable(),
-		Grant: func(ctx context.Context, domain, target string) (string, error) {
+		Grant: func(ctx context.Context, sessionKey, domain, target string) (string, error) {
 			gotDomain, gotTarget = domain, target
 			return "已提交审批", nil
 		},
@@ -154,12 +154,12 @@ func TestCmdSendUserAndHosts(t *testing.T) {
 	var sent string
 	_ = RegisterPlatformCommands(reg, PlatformDeps{
 		Tasks: NewTaskTable(),
-		SendUser: func(ctx context.Context, msg string) error {
+		SendUser: func(ctx context.Context, sessionKey, msg string) error {
 			sent = msg
 			return nil
 		},
-		ListHosts: func(ctx context.Context) ([]HostInfo, error) {
-			return []HostInfo{{ID: "h1", Name: "mbp", OS: "darwin", Online: true}}, nil
+		ListHosts: func(ctx context.Context, sessionKey string) (string, error) {
+			return "| id | name |\n| h1 | mbp |\n", nil
 		},
 	})
 	out, _, err := runCmd(t, reg, "send_user", "hello", "world")
@@ -167,7 +167,7 @@ func TestCmdSendUserAndHosts(t *testing.T) {
 		t.Fatalf("send_user: %q %q %v", out, sent, err)
 	}
 	out, _, err = runCmd(t, reg, "list_hosts")
-	if err != nil || !strings.Contains(out, "h1") || !strings.Contains(out, "online") {
+	if err != nil || !strings.Contains(out, "h1") {
 		t.Fatalf("list_hosts: %q %v", out, err)
 	}
 }

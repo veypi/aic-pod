@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/veypi/vbox"
-	gbfs "github.com/veypi/vsh/fs"
 	"github.com/veypi/vigo/contrib/ufs"
+	gbfs "github.com/veypi/vsh/fs"
 )
 
 // HostFSConfig host 会话文件系统参数（design §4.2）。

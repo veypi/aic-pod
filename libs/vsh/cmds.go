@@ -18,16 +18,19 @@ type PlatformDeps struct {
 	Tasks *TaskTable
 	// RunBG bg run 的执行体（引擎注入；签名：会话键、脚本、日志路径、日志 writer）。
 	RunBG func(ctx context.Context, sessionKey, script, logPath string, log io.Writer) (int, error)
-	// Grant 发起授权申请（domain: fs/net/cmd；target: 路径/host:port/命令名）。
-	// 返回给用户的可读结果文案；拒绝/失败返回 error。
-	Grant func(ctx context.Context, domain, target string) (string, error)
-	// ListHosts 列出可用主机（host exec 目标发现）。
-	ListHosts func(ctx context.Context) ([]HostInfo, error)
-	// SendUser 给用户发消息（通知通道）。
-	SendUser func(ctx context.Context, message string) error
+	// Grant 发起授权申请（sessionKey=调用会话；domain: fs/net/cmd；
+	// target: 路径/host:port/命令名）。返回给用户的可读结果文案；拒绝/失败
+	// 返回 error。审批在工具层完成（脚本含字面 grant → 恒 4 级，analyze
+	// GrantRequests），此处只执行授权动作本身。
+	Grant func(ctx context.Context, sessionKey, domain, target string) (string, error)
+	// ListHosts 返回预格式化的主机表文本（表格形态由平台定——cloud 给
+	// Markdown 表；host 端通常 nil 降级）。sessionKey=调用会话。
+	ListHosts func(ctx context.Context, sessionKey string) (string, error)
+	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话。
+	SendUser func(ctx context.Context, sessionKey, message string) error
 }
 
-// HostInfo 主机摘要（list_hosts 输出）。
+// HostInfo 主机摘要（预格式化提供方不再需要本结构——保留给未来结构化场景）。
 type HostInfo struct {
 	ID     string
 	Name   string
@@ -180,7 +183,7 @@ func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) er
 	if d.Grant == nil {
 		return commands.Exitf(inv, 1, "grant: 此端未接授权通道")
 	}
-	msg, err := d.Grant(ctx, domain, target)
+	msg, err := d.Grant(ctx, inv.Env["AIC_VSH_SESSION"], domain, target)
 	if err != nil {
 		return commands.Exitf(inv, 1, "grant %s %s: %s", domain, target, err)
 	}
@@ -201,21 +204,11 @@ func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation
 	if d.ListHosts == nil {
 		return commands.Exitf(inv, 1, "list_hosts: 此端未接主机目录")
 	}
-	hosts, err := d.ListHosts(ctx)
+	text, err := d.ListHosts(ctx, inv.Env["AIC_VSH_SESSION"])
 	if err != nil {
 		return commands.Exitf(inv, 1, "list_hosts: %s", err)
 	}
-	if len(hosts) == 0 {
-		fmt.Fprintln(inv.Stdout, "(no hosts)")
-		return nil
-	}
-	for _, h := range hosts {
-		online := "offline"
-		if h.Online {
-			online = "online"
-		}
-		fmt.Fprintf(inv.Stdout, "%s\t%s\t%s\t%s\n", h.ID, h.Name, h.OS, online)
-	}
+	fmt.Fprintln(inv.Stdout, text)
 	return nil
 }
 
@@ -232,7 +225,7 @@ func (d PlatformDeps) cmdSendUser(ctx context.Context, inv *commands.Invocation)
 	if d.SendUser == nil {
 		return commands.Exitf(inv, 1, "send_user: 此端未接通知通道")
 	}
-	if err := d.SendUser(ctx, strings.Join(inv.Args, " ")); err != nil {
+	if err := d.SendUser(ctx, inv.Env["AIC_VSH_SESSION"], strings.Join(inv.Args, " ")); err != nil {
 		return commands.Exitf(inv, 1, "send_user: %s", err)
 	}
 	fmt.Fprintln(inv.Stdout, "sent")

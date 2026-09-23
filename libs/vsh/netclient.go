@@ -43,10 +43,13 @@ type NetClientConfig struct {
 	// OnResponseSize 下载配额预检（cloudenv.go:116 Fetcher 迁移）：响应
 	// Content-Length > 0 时读体前调用；返回非 nil 即断流。nil = 不预检
 	//（写盘路径仍由 FS backing 的 QuotaFS 逐块闸门兜底——curl -o 不绕配额）。
-	OnResponseSize func(size int64) error
-	MaxRedirects   int           // ≤0 = DefaultNetMaxRedirects
-	Timeout        time.Duration // ≤0 = DefaultNetTimeout（req.Timeout 优先）
-	MaxResponseBytes int64       // ≤0 = DefaultNetMaxResponseBytes
+	OnResponseSize   func(size int64) error
+	MaxRedirects     int           // ≤0 = DefaultNetMaxRedirects
+	Timeout          time.Duration // ≤0 = DefaultNetTimeout（req.Timeout 优先）
+	MaxResponseBytes int64         // ≤0 = DefaultNetMaxResponseBytes
+	// AllowPrivate 放行私网/环回目标（host 端 LAN 访问是合法场景——2.4.3：
+	// 私网阻断仅 cloud SSRF 防护；host 网络策略全走 Rules 表）。默认 false=阻断。
+	AllowPrivate bool
 	// DialContext/Resolver 测试注入；nil = 系统默认。
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	Resolver    interface {
@@ -152,7 +155,7 @@ func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL strin
 		// 地址再判一次——DNS rebinding（校验与连接解析结果不同）在此兜底。
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, _, err := net.SplitHostPort(addr)
-			if err == nil {
+			if err == nil && !c.cfg.AllowPrivate {
 				if ip, perr := netip.ParseAddr(host); perr == nil && ssrfBlockedIP(ip) {
 					return nil, &vshnet.AccessDeniedError{URL: rawURL, Reason: "dial to loopback/private/link-local address blocked"}
 				}
@@ -209,7 +212,10 @@ func (c *NetClient) checkTarget(ctx context.Context, rawURL string) error {
 		}
 	}
 	// 私网阻断（显式清单：RFC1918 + loopback + link-local 169.254.0.0/16——
-	// 含云 metadata 169.254.169.254，SSRF 首选目标）。
+	// 含云 metadata 169.254.169.254，SSRF 首选目标）；host 端 AllowPrivate 放行。
+	if c.cfg.AllowPrivate {
+		return nil
+	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		if ssrfBlockedIP(ip) {
 			return &vshnet.AccessDeniedError{URL: rawURL, Reason: "loopback/private/link-local address blocked"}

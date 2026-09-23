@@ -48,7 +48,7 @@ func TestNativeCommandRunsThroughManager(t *testing.T) {
 	defer m.Close(context.Background())
 	nr := NewNativeRegistry(NativeDeps{
 		Manager: m,
-		Policy: func() NativePolicy {
+		Policy: func(inv *commands.Invocation) NativePolicy {
 			// NoSandbox：单测不依赖沙箱后端（沙箱收容是 exec_procs 的既有
 			// 测试面，验收 10 在 M4 端到端做）。
 			return NativePolicy{NoSandbox: true}
@@ -80,7 +80,7 @@ func TestNativeExitCodePassthrough(t *testing.T) {
 	defer m.Close(context.Background())
 	nr := NewNativeRegistry(NativeDeps{
 		Manager: m,
-		Policy:  func() NativePolicy { return NativePolicy{NoSandbox: true} },
+		Policy:  func(inv *commands.Invocation) NativePolicy { return NativePolicy{NoSandbox: true} },
 	})
 	nr.Seed("false")
 	reg := commands.NewRegistry()

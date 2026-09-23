@@ -19,12 +19,21 @@ type Analysis struct {
 	WriteTargets []string
 	// UsesNetwork 是否使用网络命令（curl/wget——审计提示用，不升档不审批）。
 	UsesNetwork bool
+	// GrantRequests 字面 grant 调用（domain/target 均为字面量才收录）——
+	// grant 恒 4 级审批（唯一扩权入口）：工具层据此提升 required。
+	GrantRequests []GrantRequest
 	// SyntaxError 语法错误（非空时 exec 直接返回，不进引擎）。
 	SyntaxError string
 }
 
+// GrantRequest 一次字面 grant 调用。
+type GrantRequest struct {
+	Domain string // fs | net | cmd | ssh
+	Target string
+}
+
 // Analyze 解析脚本并收集字面写目标与网络使用。readFile 用于脚本递归
-//（bash x.sh / sh x.sh / source x.sh / ./x.sh 的脚本正文读入后递归分析）；
+// （bash x.sh / sh x.sh / source x.sh / ./x.sh 的脚本正文读入后递归分析）；
 // nil = 不递归（仅分析本脚本）。
 func Analyze(script string, readFile func(path string) ([]byte, error)) Analysis {
 	var a Analysis
@@ -67,6 +76,12 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 		switch name {
 		case "curl", "wget":
 			a.UsesNetwork = true
+		}
+		// grant 调用收录（字面 domain/target 才算——动态构造的 grant 进不了
+		// 预检升档，但 Grant 通道本身仍会执行：服务端/端侧按脚本是否含字面
+		// grant 决定是否抬 4 级，动态 grant 由端侧执行时的审批语义兜底）。
+		if name == "grant" && len(args) >= 2 {
+			a.GrantRequests = append(a.GrantRequests, GrantRequest{Domain: args[0], Target: args[1]})
 		}
 		// 写参表。
 		if fn, ok := writeArgTable[name]; ok {

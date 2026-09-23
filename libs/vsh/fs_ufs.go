@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/veypi/vbox"
-	gbfs "github.com/veypi/vsh/fs"
 	"github.com/veypi/vigo/contrib/ufs"
+	gbfs "github.com/veypi/vsh/fs"
 )
 
 // ErrRuleDenied 规则表拒绝（报错文案引导 grant——v4 正交化：不审批、硬拒）。
@@ -47,13 +47,13 @@ type UFSAdapterConfig struct {
 // ufsAdapter 把 ufs.FS 适配为引擎 gbfs.FileSystem，并在进程内执行
 // canonicalize-then-check 的 vbox 规则表门（唯一进程内路径权威）。
 type ufsAdapter struct {
-	backing    ufs.FS
-	rules      func() vbox.FSRuleSet
-	jail       string
-	mem        *gbfs.MemoryFS
-	memPrefix  []string
-	mu         sync.Mutex
-	cwd        string
+	backing   ufs.FS
+	rules     func() vbox.FSRuleSet
+	jail      string
+	mem       *gbfs.MemoryFS
+	memPrefix []string
+	mu        sync.Mutex
+	cwd       string
 }
 
 // NewUFSAdapter 构造适配器（mem 层种子写入失败即报错——stub 落位是启动契约）。
@@ -539,11 +539,11 @@ func (s synthFileInfo) Name() string {
 	}
 	return s.name
 }
-func (s synthFileInfo) Size() int64        { return s.size }
+func (s synthFileInfo) Size() int64          { return s.size }
 func (s synthFileInfo) Mode() stdfs.FileMode { return 0o644 }
-func (s synthFileInfo) ModTime() time.Time { return time.Now() }
-func (s synthFileInfo) IsDir() bool        { return false }
-func (s synthFileInfo) Sys() any           { return nil }
+func (s synthFileInfo) ModTime() time.Time   { return time.Now() }
+func (s synthFileInfo) IsDir() bool          { return false }
+func (s synthFileInfo) Sys() any             { return nil }
 
 // 接口断言：适配器实现引擎 FS 契约。
 var _ gbfs.FileSystem = (*ufsAdapter)(nil)

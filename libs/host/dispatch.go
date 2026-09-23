@@ -60,9 +60,24 @@ func (c *Client) execCmd(ctx context.Context, sid string, req *proto.ToolRequest
 		Argv      []string `json:"argv"`
 		Workdir   string   `json:"workdir"`
 		NoSandbox bool     `json:"nosandbox"`
+		Script    string   `json:"script"`
+		Timeout   int      `json:"timeout"`
+		Stdin     string   `json:"stdin"`
 	}
 	if err := json.Unmarshal(req.Data, &p); err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "invalid exec data: " + err.Error()}
+	}
+	// script 分支（vsh 引擎化，todo 3.1.3）：新 exec 工具的脚本下发路径，
+	// pod 侧引擎执行。其余原生命令通道（ssh/scp/grant/json/commands/bg_*）
+	// 保持 action 路径，随 M3b/3c 逐域归拢。
+	if p.Script != "" {
+		return c.execScript(ctx, sid, req, execScriptParams{
+			Script:    p.Script,
+			Workdir:   p.Workdir,
+			Timeout:   p.Timeout,
+			Stdin:     p.Stdin,
+			NoSandbox: p.NoSandbox,
+		})
 	}
 	if p.Action == "" {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,

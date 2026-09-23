@@ -1,0 +1,106 @@
+package fsauth
+
+// snapshot_vbox_test.go 语义映射回归（old last-wins + 表外便利根 →
+// new first-wins 全表化）：覆盖关系保持是 2.7.2 的核心风险点。
+
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/vbox"
+)
+
+// TestSnapshotCfgOverridesBuiltinDeny cfg 行可覆盖 builtin deny（old：表尾
+// 后命中胜；new：cfg 排在 builtin deny 前首命中）——覆盖关系必须在两种
+// 语义下一致。
+func TestSnapshotCfgOverridesBuiltinDeny(t *testing.T) {
+	old := cfg.AuthSnapshot()
+	t.Cleanup(func() { cfg.SetAuth(old) })
+	a := old
+	a.FsPolicy = cfg.PolicyDeny
+	// builtin deny 含 SSH 私钥类（默认表）；选一条确定在内建表里的目标验证。
+	denied := defaultDenyPaths()
+	if len(denied) == 0 {
+		t.Skip("no builtin deny on this platform")
+	}
+	target := denied[0]
+	a.FsRules = []string{"rw:" + target}
+	cfg.SetAuth(a)
+
+	p := New()
+	snap := p.Snapshot("s1")
+	d := snap.Match(target, vbox.OpWrite)
+	if !d.Allow {
+		t.Fatalf("cfg rw should override builtin deny under first-wins: %+v", d)
+	}
+	// 未覆盖的 deny 目标仍拒。
+	if len(denied) > 1 {
+		if d2 := snap.Match(denied[1], vbox.OpWrite); d2.Allow {
+			t.Fatalf("uncovered builtin deny should hold: %s %+v", denied[1], d2)
+		}
+		if d3 := snap.Match(denied[1], vbox.OpRead); d3.Allow {
+			t.Fatalf("deny row should block read too: %s", denied[1])
+		}
+	}
+}
+
+// TestSnapshotTempGrantBeatsAll temp grant 插表头压一切（含 builtin deny——
+// 2.7.4 DenyHit 拒批删除后的新语义：行序表达，无硬底线）。
+func TestSnapshotTempGrantBeatsAll(t *testing.T) {
+	old := cfg.AuthSnapshot()
+	t.Cleanup(func() { cfg.SetAuth(old) })
+	a := old
+	a.FsPolicy = cfg.PolicyDeny
+	cfg.SetAuth(a)
+	p := New()
+	denied := defaultDenyPaths()
+	if len(denied) == 0 {
+		t.Skip("no builtin deny on this platform")
+	}
+	p.Grant("s1", denied[0])
+	if d := p.Snapshot("s1").Match(denied[0], vbox.OpWrite); !d.Allow {
+		t.Fatalf("temp grant should top the table: %+v", d)
+	}
+	// 别的 sid 不受影响（会话级）。
+	if d := p.Snapshot("s2").Match(denied[0], vbox.OpWrite); d.Allow {
+		t.Fatalf("temp grant must be session-scoped")
+	}
+}
+
+// TestSnapshotConvenienceBelowDeny 便利根 rw 不压 builtin deny（行尾位置）。
+func TestSnapshotConvenienceBelowDeny(t *testing.T) {
+	old := cfg.AuthSnapshot()
+	t.Cleanup(func() { cfg.SetAuth(old) })
+	a := old
+	a.FsPolicy = cfg.PolicyDeny
+	cfg.SetAuth(a)
+	p := New()
+	wd := t.TempDir()
+	p.SetWorkDir(wd)
+	// 便利根内正常放行。
+	inner := filepath.Join(wd, "ok.txt")
+	if d := p.Snapshot("s1").Match(inner, vbox.OpWrite); !d.Allow {
+		t.Fatalf("workdir should be writable: %+v", d)
+	}
+	// 出便利根未命中 → DefaultWrite deny。
+	if d := p.Snapshot("s1").Match("/definitely/not/covered/path", vbox.OpWrite); d.Allow {
+		t.Fatalf("default write should be deny in closed mode")
+	}
+	if d := p.Snapshot("s1").Match("/definitely/not/covered/path", vbox.OpRead); !d.Allow {
+		t.Fatalf("read default open")
+	}
+}
+
+// TestSnapshotOpenMode fs_policy=open → DefaultWrite rw。
+func TestSnapshotOpenMode(t *testing.T) {
+	old := cfg.AuthSnapshot()
+	t.Cleanup(func() { cfg.SetAuth(old) })
+	a := old
+	a.FsPolicy = cfg.PolicyOpen
+	cfg.SetAuth(a)
+	p := New()
+	if d := p.Snapshot("").Match("/anywhere/else", vbox.OpWrite); !d.Allow {
+		t.Fatalf("open mode should allow unmatched writes")
+	}
+}
