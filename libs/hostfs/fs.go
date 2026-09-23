@@ -569,10 +569,12 @@ func parent(r *root, abs string) (*os.Root, string, error) {
 func entry(p fsp.Path, info fs.FileInfo) fsp.Entry {
 	kind := "other"
 	var size *int64
-	if info.Mode()&os.ModeSymlink != 0 {
-		kind = "symlink"
-	} else if info.IsDir() {
+	// dirLink：Windows 上指向目录的 reparse（junction/目录符号链接）按目录归类——
+	// Go 对 surrogate 型 reparse 不设目录位，不归一会在前端显示成伪文件。
+	if info.IsDir() || dirLink(info) {
 		kind = "directory"
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		kind = "symlink"
 	} else if info.Mode().IsRegular() {
 		kind = "file"
 		n := info.Size()
@@ -744,7 +746,9 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if !p.Hidden && strings.HasPrefix(item.Name(), ".") {
+		// 隐藏条目与点开头同口径：hidden 未开时不显示——Windows 隐藏属性
+		// （NTUSER.DAT、pagefile.sys、旧版兼容联结等）零访问成本取目录扫描元数据。
+		if !p.Hidden && (strings.HasPrefix(item.Name(), ".") || entryHidden(item)) {
 			continue
 		}
 		child := fsp.Path{RootID: p.Path.RootID, Segments: append(append([]string{}, p.Path.Segments...), item.Name())}
@@ -762,7 +766,14 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 		}
 		stat, e := dir.Lstat(item.Name())
 		if e != nil {
-			return nil, e
+			// Windows 上部分条目（系统联结、pagefile/注册表等独占文件）可枚举但拒绝
+			// 打开——单条不可 stat 不应让整个目录列举失败：回退目录扫描自带的元数据
+			// （无需再访问条目），连它都拿不到才跳过该条。
+			if scanned, se := item.Info(); se == nil {
+				stat = scanned
+			} else {
+				continue
+			}
 		}
 		out = append(out, entry(child, stat))
 		visible++

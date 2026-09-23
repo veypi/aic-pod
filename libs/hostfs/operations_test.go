@@ -73,6 +73,67 @@ func TestTreeCopyMoveFindAndRemove(t *testing.T) {
 	}
 }
 
+// find 跳过隐藏条目：点开头者不匹配也不递归（与 list 的 hidden=false 缺省、
+// rg 与 cloud/page 搜索口径一致）；copy/remove/move 的递归不受影响。
+func TestFindSkipsHiddenEntries(t *testing.T) {
+	f := setup(t)
+	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("visible", ".hidden"), Parents: true}))
+	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("visible", "target.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("visible", ".dotfile"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("visible", ".hidden", "secret.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	findNames := func(glob string) []string {
+		found := value[struct {
+			Entries   []fsp.Entry `json:"entries"`
+			Truncated bool        `json:"truncated"`
+		}](t, f.call(t, "find", findArgs{Path: loc("visible"), Glob: glob, Depth: 5, Limit: 20}))
+		names := make([]string, 0, len(found.Entries))
+		for _, e := range found.Entries {
+			names = append(names, e.Name)
+		}
+		return names
+	}
+	if names := findNames("*"); len(names) != 1 || names[0] != "target.txt" {
+		t.Fatalf("find returned hidden entries: %v", names)
+	}
+	if names := findNames("*secret*"); len(names) != 0 {
+		t.Fatalf("find descended into a hidden directory: %v", names)
+	}
+	if names := findNames("*dotfile*"); len(names) != 0 {
+		t.Fatalf("find matched a hidden file: %v", names)
+	}
+}
+
+// find 对子项取信息失败一律跳过——不限于 permission_denied（Windows 的独占文件报
+// filesystem_error）：单条不可访问不应中断整棵搜索；起点自身的非 permission 错误
+// 照常上抛，写侧（remove/copy/move）保持严格。
+func TestFindToleratesUnreadableChildren(t *testing.T) {
+	f := setup(t)
+	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("tree", "flaky"), Parents: true}))
+	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("tree", "ok.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("tree", "flaky", "inner.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	base := f.fs.cfg.Check
+	f.fs.cfg.Check = func(ctx context.Context, call Call, path string, write bool) error {
+		if filepath.Base(path) == "flaky" {
+			return hosts.Fail("flaky_source", "Transient failure")
+		}
+		return base(ctx, call, path, write)
+	}
+	found := value[struct {
+		Entries   []fsp.Entry `json:"entries"`
+		Truncated bool        `json:"truncated"`
+	}](t, f.call(t, "find", findArgs{Path: loc("tree"), Glob: "*", Depth: 5, Limit: 20}))
+	if len(found.Entries) != 1 || found.Entries[0].Name != "ok.txt" {
+		t.Fatalf("find did not tolerate an unreadable child: %+v", found)
+	}
+	if op := f.call(t, "find", findArgs{Path: loc("tree", "flaky"), Glob: "*", Depth: 5, Limit: 20}); op.Error == nil || op.Error.Code != "flaky_source" {
+		t.Fatalf("root error swallowed: %+v", op)
+	}
+	tree := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("tree")}))
+	if op := f.call(t, "remove", removeArgs{Path: tree.Path, IfVersion: tree.Version, Recursive: true}); op.Error == nil || op.Error.Code != "flaky_source" {
+		t.Fatalf("write side did not stay strict: %+v", op)
+	}
+}
+
 func TestTreeOperationsValidateEntirePlanBeforeEffects(t *testing.T) {
 	for _, method := range []string{"copy", "move", "remove"} {
 		t.Run(method, func(t *testing.T) {

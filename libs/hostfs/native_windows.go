@@ -78,3 +78,24 @@ func fileIdentity(info fs.FileInfo) string {
 	}
 	return ""
 }
+
+// entryHidden 报告目录枚举元数据里的 Windows 隐藏属性（FILE_ATTRIBUTE_HIDDEN）：
+// list/find 缺省不显示隐藏条目（与 Explorer 缺省口径一致）。元数据来自目录扫描，
+// 不额外访问条目；属性拿不到时按非隐藏处理。
+func entryHidden(e fs.DirEntry) bool {
+	info, err := e.Info()
+	if err != nil {
+		return false
+	}
+	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	return ok && data.FileAttributes&syscall.FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+// dirLink 报告「指向目录的 reparse point」（junction / 目录符号链接）：Go 对 surrogate
+// 型 reparse 不设目录位（ModeIrregular），这里按目录归类供 entry 使用——否则前端会
+// 把这类别名显示成伪文件。
+func dirLink(info fs.FileInfo) bool {
+	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	return ok && data.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
+		data.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0
+}

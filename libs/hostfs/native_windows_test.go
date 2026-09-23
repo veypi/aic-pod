@@ -5,7 +5,10 @@ package hostfs
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+
+	fsp "github.com/veypi/aic-pod/protocol/fs"
 )
 
 func TestWindowsOpenRegularRejectsLinksAndNonLeafNames(t *testing.T) {
@@ -93,5 +96,100 @@ func TestWindowsRenameUsesPinnedParentsAndNoReplace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "to", "dst")); !os.IsNotExist(err) {
 		t.Fatal("rename used the replaced parent pathname", err)
+	}
+}
+
+// 单条不可 stat 的子项不应让整个目录列举失败：系统联结（C:\Users\All Users 等）与
+// 独占文件（pagefile.sys、NTUSER.DAT）可枚举但拒绝打开——用例用共享模式 0 的独占
+// 句柄构造同样的条目，列举应回退目录扫描元数据正常返回。
+func TestWindowsListToleratesUnstatableChildren(t *testing.T) {
+	f := setup(t)
+	locked := filepath.Join(f.root, "locked.txt")
+	if err := os.WriteFile(locked, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "open.txt"), []byte("y"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := syscall.UTF16PtrFromString(locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := syscall.CreateFile(target, syscall.GENERIC_READ, 0, nil, syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Skipf("cannot take an exclusive handle: %v", err)
+	}
+	defer syscall.CloseHandle(handle)
+	type page struct {
+		Entries []fsp.Entry `json:"entries"`
+		Next    string      `json:"next_cursor"`
+	}
+	got := value[page](t, f.call(t, "list", listArgs{Path: loc()}))
+	if len(got.Entries) != 2 || got.Entries[0].Name != "locked.txt" || got.Entries[1].Name != "open.txt" {
+		t.Fatalf("listing failed or dropped a locked entry: %+v", got.Entries)
+	}
+	if got.Entries[0].Kind != "file" || got.Entries[0].Size == nil || *got.Entries[0].Size != 1 {
+		t.Fatalf("locked entry metadata not from the directory scan: %+v", got.Entries[0])
+	}
+}
+
+// 缺省列表按 Windows 隐藏属性过滤（Explorer 同款）：hidden 未开时不显示，打开后出现；
+// find 同口径（隐藏项不访问不递归）。
+func TestWindowsListSkipsHiddenAttributeEntries(t *testing.T) {
+	f := setup(t)
+	for _, name := range []string{"visible.txt", "hidden.txt"} {
+		if err := os.WriteFile(filepath.Join(f.root, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attrs, err := syscall.UTF16PtrFromString(filepath.Join(f.root, "hidden.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.SetFileAttributes(attrs, syscall.FILE_ATTRIBUTE_HIDDEN); err != nil {
+		t.Fatal(err)
+	}
+	type page struct {
+		Entries []fsp.Entry `json:"entries"`
+	}
+	got := value[page](t, f.call(t, "list", listArgs{Path: loc()}))
+	if len(got.Entries) != 1 || got.Entries[0].Name != "visible.txt" {
+		t.Fatalf("hidden attribute entry not filtered: %+v", got.Entries)
+	}
+	all := value[page](t, f.call(t, "list", listArgs{Path: loc(), Hidden: true}))
+	if len(all.Entries) != 2 {
+		t.Fatalf("hidden=true must reveal attribute-hidden entries: %+v", all.Entries)
+	}
+	found := value[struct {
+		Entries   []fsp.Entry `json:"entries"`
+		Truncated bool        `json:"truncated"`
+	}](t, f.call(t, "find", findArgs{Path: loc(), Glob: "*", Depth: 2, Limit: 10}))
+	if len(found.Entries) != 1 || found.Entries[0].Name != "visible.txt" {
+		t.Fatalf("find did not skip the hidden attribute entry: %+v", found.Entries)
+	}
+}
+
+// 指向目录的 reparse（目录符号链接/junction）按目录显示：不再因 surrogate 型 reparse
+// 被归为 other 而在前端退化成伪文件。
+func TestWindowsListClassifiesDirectoryLinksAsDirectories(t *testing.T) {
+	f := setup(t)
+	if err := os.Mkdir(filepath.Join(f.root, "target"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(f.root, "target"), filepath.Join(f.root, "dirlink")); err != nil {
+		t.Skipf("cannot create a directory symlink: %v", err)
+	}
+	type page struct {
+		Entries []fsp.Entry `json:"entries"`
+	}
+	got := value[page](t, f.call(t, "list", listArgs{Path: loc()}))
+	kind := ""
+	for _, e := range got.Entries {
+		if e.Name == "dirlink" {
+			kind = e.Kind
+		}
+	}
+	if kind != "directory" {
+		t.Fatalf("directory link kind = %q, entries: %+v", kind, got.Entries)
 	}
 }

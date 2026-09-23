@@ -43,7 +43,7 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 		return fsp.Path{RootID: p.Dst.RootID, Segments: append(append([]string{}, p.Dst.Segments...), src.Segments[len(p.Src.Segments):]...)}
 	}
 	var plan []walkEntry
-	err = f.walk(ctx, call, p.Src, 256, false, false, func(e walkEntry) error {
+	err = f.walk(ctx, call, p.Src, 256, false, false, false, func(e walkEntry) error {
 		if !e.info.IsDir() && !e.info.Mode().IsRegular() {
 			return hosts.Fail("unsupported", "Copy does not follow or recreate links")
 		}

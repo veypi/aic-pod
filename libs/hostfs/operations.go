@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 	"syscall"
 
 	fsp "github.com/veypi/aic-pod/protocol/fs"
@@ -48,7 +49,11 @@ func (f *FS) info(ctx context.Context, call Call, p fsp.Path, write bool) (fs.Fi
 	defer h.Close()
 	return h.Lstat(name)
 }
-func (f *FS) walk(ctx context.Context, call Call, p fsp.Path, depth int, write, skipDenied bool, visit func(walkEntry) error) error {
+
+// walk 遍历 p 子树至 depth 层（含 p 自身）。skipDenied 忽略无权限条目；
+// skipHidden 跳过隐藏条目（点开头或 Windows 隐藏属性，不访问不递归——find 用，
+// 与 list 的 hidden=false 缺省、rg 与 cloud/page 搜索的缺省口径一致）。
+func (f *FS) walk(ctx context.Context, call Call, p fsp.Path, depth int, write, skipDenied, skipHidden bool, visit func(walkEntry) error) error {
 	count := 0
 	var walk func(fsp.Path, int) error
 	walk = func(p fsp.Path, level int) error {
@@ -61,7 +66,10 @@ func (f *FS) walk(ctx context.Context, call Call, p fsp.Path, depth int, write, 
 		}
 		info, err := f.info(ctx, call, p, write)
 		if err != nil {
-			if skipDenied && hosts.AsFault(fault(err)).Code == "permission_denied" {
+			// 读侧遍历（find 等）：起点的 permission_denied 与子项的一切取信息失败
+			// （Windows 受保护目录/联结、独占文件等）都跳过——单条不可访问不应中断
+			// 整棵搜索；写侧（remove/copy/move）保持严格，起点其余错误照常上抛。
+			if skipDenied && (level > 0 || hosts.AsFault(fault(err)).Code == "permission_denied") {
 				return nil
 			}
 			return err
@@ -104,6 +112,9 @@ func (f *FS) walk(ctx context.Context, call Call, p fsp.Path, depth int, write, 
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 		for _, e := range entries {
+			if skipHidden && (strings.HasPrefix(e.Name(), ".") || entryHidden(e)) {
+				continue
+			}
 			if err := walk(child(p, e.Name()), level+1); err != nil {
 				return err
 			}
@@ -123,7 +134,8 @@ func (f *FS) find(ctx context.Context, call Call, p findArgs) (any, error) {
 		p.Glob = "*"
 	}
 	out := make([]fsp.Entry, 0, p.Limit)
-	err := f.walk(ctx, call, p.Path, p.Depth, false, true, func(e walkEntry) error {
+	// 隐藏项不访问不递归（与 ls/rg 缺省、cloud/page 搜索口径一致）。
+	err := f.walk(ctx, call, p.Path, p.Depth, false, true, true, func(e walkEntry) error {
 		if len(e.path.Segments) == len(p.Path.Segments) {
 			return nil
 		}
@@ -219,7 +231,7 @@ func (f *FS) removeTree(ctx context.Context, call Call, p removeArgs) (any, erro
 		return nil, hosts.Fail("version_conflict", "Removal source changed")
 	}
 	var planned []walkEntry
-	err = f.walk(ctx, call, p.Path, 256, true, false, func(e walkEntry) error { planned = append(planned, e); return nil })
+	err = f.walk(ctx, call, p.Path, 256, true, false, false, func(e walkEntry) error { planned = append(planned, e); return nil })
 	if errors.Is(err, stopWalk) {
 		return nil, hosts.Fail("overloaded", "Removal exceeds entry budget")
 	}
@@ -274,7 +286,7 @@ func (f *FS) move(ctx context.Context, call Call, p moveArgs) (any, error) {
 		return nil, hosts.Fail("version_conflict", "Move source changed")
 	}
 	// Moving a directory also moves every descendant across policy boundaries.
-	if err = f.walk(ctx, call, p.Src, 256, true, false, func(e walkEntry) error {
+	if err = f.walk(ctx, call, p.Src, 256, true, false, false, func(e walkEntry) error {
 		dst := fsp.Path{RootID: p.Dst.RootID, Segments: append(append([]string{}, p.Dst.Segments...), e.path.Segments[len(p.Src.Segments):]...)}
 		_, _, err := f.check(ctx, call, dst, true)
 		return err

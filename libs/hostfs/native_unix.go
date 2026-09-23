@@ -23,3 +23,7 @@ func fileIdentity(info fs.FileInfo) string {
 	}
 	return fmt.Sprint(s.FieldByName("Dev"), "/", s.FieldByName("Ino"), "/", s.FieldByName("Ctim"), "/", s.FieldByName("Ctimespec"))
 }
+
+// unix 无「隐藏属性」概念：隐藏口径按点开头（由调用方处理）。
+func entryHidden(fs.DirEntry) bool { return false }
+func dirLink(fs.FileInfo) bool     { return false }
