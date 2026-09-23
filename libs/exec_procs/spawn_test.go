@@ -63,6 +63,40 @@ func TestSpawnExitError(t *testing.T) {
 	}
 }
 
+// 短输出（小体量响应）下 EOF 后的 Read 必须持续返回 io.EOF：
+// curl 无 -o 路径先经 LimitReader 嗅探窗（短体直接吃到 EOF），其后 io.Copy 若再读到
+// (0, nil) 会无限空转——执行条目永不完成、回包被拖到请求 wait 到期的回归。
+// 本用例只验证管道流语义，不经沙箱（NoSandbox），嵌套沙箱环境亦可运行。
+func TestSpawnBodyEOFAfterSniffTerminatesCopy(t *testing.T) {
+	m := NewManager(time.Minute)
+	sp, err := m.Spawn(context.Background(), StartOptions{NoSandbox: true,
+		Exec: []string{"sh", "-c", "printf hi"}, Level: proto.LevelRead})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	body := sp.Body()
+	// 模拟 curlToContent 的二进制嗅探窗：LimitReader 读满 8KB（短体在 EOF 处提前结束）
+	head := make([]byte, 8192)
+	n, _ := io.ReadFull(io.LimitReader(body, 8192), head)
+	if n != 2 {
+		t.Fatalf("sniff read = %d bytes, want 2", n)
+	}
+	// 其后 io.Copy 必须在 EOF 处终止（旧实现返回 (0, nil) → 永久空转）
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, io.LimitReader(body, 1<<30))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("copy after sniff: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Read after EOF returned (0, nil): io.Copy spins forever")
+	}
+}
+
 // Abort：提前终止（大输出场景调用方中止），Abort 幂等。
 func TestSpawnAbort(t *testing.T) {
 	m := NewManager(time.Minute)

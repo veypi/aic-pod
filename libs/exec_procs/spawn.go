@@ -152,7 +152,12 @@ func (b *spawnBody) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	if b.eof {
-		return 0, b.s.Wait()
+		// EOF 后必须持续返回 io.EOF：把 Wait 的 nil 当作错误返回会给出 (0, nil)，
+		// 消费端（io.Copy）会无限空转（短体量 curl 任务永不完成、回包拖到 wait 到期的回归）。
+		if err := b.s.Wait(); err != nil {
+			return 0, err
+		}
+		return 0, io.EOF
 	}
 	n, err := b.s.stdout.Read(p)
 	if err == io.EOF {
