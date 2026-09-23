@@ -71,7 +71,7 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 		if !ok {
 			return true // 动态命令名跳过
 		}
-		args := literalArgs(call.Args[1:])
+		args := literalArgsEach(call.Args[1:])
 		// 网络使用（cloud 仅 curl 注册；wget/host 端 native 同名单收录）。
 		switch name {
 		case "curl", "wget":
@@ -80,8 +80,8 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 		// grant 调用收录（字面 domain/target 才算——动态构造的 grant 进不了
 		// 预检升档，但 Grant 通道本身仍会执行：服务端/端侧按脚本是否含字面
 		// grant 决定是否抬 4 级，动态 grant 由端侧执行时的审批语义兜底）。
-		if name == "grant" && len(args) >= 2 {
-			a.GrantRequests = append(a.GrantRequests, GrantRequest{Domain: args[0], Target: args[1]})
+		if name == "grant" && len(args) >= 2 && args[0].ok && args[1].ok {
+			a.GrantRequests = append(a.GrantRequests, GrantRequest{Domain: args[0].lit, Target: args[1].lit})
 		}
 		// 写参表。
 		if fn, ok := writeArgTable[name]; ok {
@@ -94,8 +94,8 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 			var scriptPath string
 			switch name {
 			case "bash", "sh", "source", ".":
-				if len(args) > 0 {
-					scriptPath = args[0]
+				if len(args) > 0 && args[0].ok {
+					scriptPath = args[0].lit
 				}
 			default:
 				if strings.HasPrefix(name, "./") || (strings.Contains(name, "/") && strings.HasSuffix(name, ".sh")) {
@@ -173,22 +173,28 @@ func wordLiteral(w *syntax.Word) (string, bool) {
 	return b.String(), true
 }
 
-// literalArgs 提取字面参数序列（遇非字面参数停止——其后参数归属已不可静态判定）。
-func literalArgs(words []*syntax.Word) []string {
-	out := make([]string, 0, len(words))
+// arg 是一个命令参数的字面判定（逐词独立，2026-09-24 F3 修复：原
+// literalArgs 遇首个动态词截断，导致 `ln -s <字面target> $L` 里真正的末位
+// 写目标丢失、倒数第二个字面词被误报为写目标）。
+type arg struct {
+	lit string
+	ok  bool // 纯字面量；false = 含变量/替换/glob，静态层不猜（运行期门兜底）
+}
+
+// literalArgsEach 逐词提取字面判定（不截断——动态词只影响自己）。
+func literalArgsEach(words []*syntax.Word) []arg {
+	out := make([]arg, 0, len(words))
 	for _, w := range words {
 		lit, ok := wordLiteral(w)
-		if !ok {
-			break
-		}
-		out = append(out, lit)
+		out = append(out, arg{lit, ok})
 	}
 	return out
 }
 
-// --- 写参表（design M2 估足工作量）：命令 → 从字面参数中提取写目标 ---
-// 只处理字面参数；flag 值跳过（-o/-f/of= 等按各自语义取）。
-var writeArgTable = map[string]func(args []string) []string{
+// --- 写参表（design M2 估足工作量）：命令 → 从参数中提取写目标 ---
+// 只收录字面目标；动态词（含变量/替换/glob）逐词跳过（运行期 FS 适配器门
+// 兜底，预检只出报错材料）。flag 值跳过（-o/-f/of= 等按各自语义取）。
+var writeArgTable = map[string]func(args []arg) []string{
 	// cp/mv/ln/install/rsync：末位 positional 是写目标。
 	"cp":      lastPositional,
 	"mv":      lastPositional,
@@ -218,7 +224,9 @@ var writeArgTable = map[string]func(args []string) []string{
 	"dd": ddTargets,
 }
 
-// positional 拆分：flag（-/-- 开头）与值分开；-- 后全为 positional。
+// positional 拆分：flag（-/-- 开头的字面词）与值分开；-- 后全为 positional。
+// 动态词不可能是 flag（flag 必为字面），按 positional 占位保留（ok=false），
+// 由取目标的函数自行决定容忍还是放弃。
 // 注意：表内命令的带值 flag 须在 valueFlags 登记，否则其值会被误当 positional。
 var valueFlags = map[string]bool{
 	"-f": true, "--file": true, "-o": true, "-O": true, "--output": true,
@@ -226,7 +234,7 @@ var valueFlags = map[string]bool{
 	"-C": true, "--directory": true, "-m": true, "--mode": true,
 }
 
-func splitPositionals(args []string) (positionals []string) {
+func splitPositionals(args []arg) (positionals []arg) {
 	noMoreFlags := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -234,13 +242,13 @@ func splitPositionals(args []string) (positionals []string) {
 			positionals = append(positionals, a)
 			continue
 		}
-		if a == "--" {
+		if a.ok && a.lit == "--" {
 			noMoreFlags = true
 			continue
 		}
-		if strings.HasPrefix(a, "-") && a != "-" {
-			if valueFlags[a] {
-				i++ // 跳过 flag 值
+		if a.ok && strings.HasPrefix(a.lit, "-") && a.lit != "-" {
+			if valueFlags[a.lit] {
+				i++ // 跳过 flag 值（无论值是否字面——值位已被占用）
 			}
 			continue
 		}
@@ -249,41 +257,65 @@ func splitPositionals(args []string) (positionals []string) {
 	return positionals
 }
 
-func lastPositional(args []string) []string {
+// literalValues 过滤出字面 positional（动态词丢弃——静态层不猜）。
+func literalValues(pos []arg) []string {
+	var out []string
+	for _, p := range pos {
+		if p.ok {
+			out = append(out, p.lit)
+		}
+	}
+	return out
+}
+
+// lastPositional 取末位 positional 为写目标——仅当末位词本身为字面时才取
+//（F3：末位词动态 = 真写目标不可知，放弃而不是误取倒数第二个字面词）。
+// 已知局限：cp/mv -t <dir> 形态下 positional 全是源（-t 值才是写目标），
+// 本函数会把末位源误报为写目标——预检保守方向（宁可误拦不可漏报），记录在案。
+func lastPositional(args []arg) []string {
 	pos := splitPositionals(args)
 	if len(pos) == 0 {
 		return nil
 	}
-	return []string{pos[len(pos)-1]}
+	last := pos[len(pos)-1]
+	if !last.ok {
+		return nil
+	}
+	return []string{last.lit}
 }
 
-func allPositionals(args []string) []string { return splitPositionals(args) }
+func allPositionals(args []arg) []string { return literalValues(splitPositionals(args)) }
 
-func skipFirstPositional(args []string) []string {
+func skipFirstPositional(args []arg) []string {
 	pos := splitPositionals(args)
 	if len(pos) <= 1 {
 		return nil
 	}
-	return pos[1:]
+	return literalValues(pos[1:])
 }
 
-func flagValueTargets(flags ...string) func(args []string) []string {
+func flagValueTargets(flags ...string) func(args []arg) []string {
 	set := map[string]bool{}
 	for _, f := range flags {
 		set[f] = true
 	}
-	return func(args []string) []string {
+	return func(args []arg) []string {
 		var out []string
 		for i := 0; i < len(args); i++ {
-			if set[args[i]] && i+1 < len(args) {
-				out = append(out, args[i+1])
+			if !args[i].ok {
+				continue // 动态词不可能是 flag
+			}
+			if set[args[i].lit] && i+1 < len(args) {
+				if args[i+1].ok {
+					out = append(out, args[i+1].lit)
+				}
 				i++
 				continue
 			}
 			// --output=x 形态
-			if strings.HasPrefix(args[i], "--") {
-				if idx := strings.Index(args[i], "="); idx > 0 && set[args[i][:idx]] {
-					out = append(out, args[i][idx+1:])
+			if strings.HasPrefix(args[i].lit, "--") {
+				if idx := strings.Index(args[i].lit, "="); idx > 0 && set[args[i].lit[:idx]] {
+					out = append(out, args[i].lit[idx+1:])
 				}
 			}
 		}
@@ -291,10 +323,10 @@ func flagValueTargets(flags ...string) func(args []string) []string {
 	}
 }
 
-func sedTargets(args []string) []string {
+func sedTargets(args []arg) []string {
 	inPlace := false
 	for _, a := range args {
-		if a == "-i" || strings.HasPrefix(a, "-i") || a == "--in-place" {
+		if a.ok && (a.lit == "-i" || strings.HasPrefix(a.lit, "-i") || a.lit == "--in-place") {
 			inPlace = true
 			break
 		}
@@ -306,13 +338,13 @@ func sedTargets(args []string) []string {
 	if len(pos) <= 1 {
 		return nil
 	}
-	return pos[1:] // 首 positional 是脚本表达式
+	return literalValues(pos[1:]) // 首 positional 是脚本表达式
 }
 
-func ddTargets(args []string) []string {
+func ddTargets(args []arg) []string {
 	for _, a := range args {
-		if strings.HasPrefix(a, "of=") {
-			return []string{strings.TrimPrefix(a, "of=")}
+		if a.ok && strings.HasPrefix(a.lit, "of=") {
+			return []string{strings.TrimPrefix(a.lit, "of=")}
 		}
 	}
 	return nil

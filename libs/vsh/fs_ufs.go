@@ -7,6 +7,7 @@ import (
 	"io"
 	stdfs "io/fs"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,21 @@ type CloudFSConfig struct {
 	Stubs map[string][]byte
 }
 
+// CloudMemPrefixes cloud 内存层系统目录（per-session，用完即弃，UFS 零污染）。
+// 导出供 aic 预检使用（F1：字面写目标落内存层前缀 = 运行期放行、永不落
+// UFS，预检不应拦）。
+var CloudMemPrefixes = []string{"/bin", "/usr/bin", "/tmp", "/etc", "/dev", "/proc"}
+
+// UnderMemPrefix 报告绝对路径是否落在内存层前缀之下。
+func UnderMemPrefix(abs string) bool {
+	for _, p := range CloudMemPrefixes {
+		if abs == p || strings.HasPrefix(abs, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // NewCloudFS cloud：UFS 直通 + 系统目录内存层 + 用户根 jail + vbox 规则表门。
 // 用户根在此确保存在（构造期直写 backing，不经规则表门——平台初始化动作；
 // 引擎 init 的 MkdirAll(HOME/workDir) 走门且依赖已存在的根）。
@@ -116,7 +132,7 @@ func NewCloudFS(cfg CloudFSConfig) (gbfs.FileSystem, error) {
 		Backing:     cfg.Backing,
 		Rules:       cfg.Rules,
 		JailRoot:    cfg.UserRoot,
-		MemPrefixes: []string{"/bin", "/usr/bin", "/tmp", "/etc", "/dev", "/proc"},
+		MemPrefixes: CloudMemPrefixes,
 		SeedMem:     cfg.Stubs,
 	})
 }
@@ -144,6 +160,61 @@ func (a *ufsAdapter) isMem(abs string) bool {
 		}
 	}
 	return false
+}
+
+// resolveMemSymlinks 解析内存层路径中的 symlink（F4，2026-09-24 实测修复：
+// 内存层 symlink 指向 backing（如 /tmp/link -> /u/x）时，原实现按词法前缀
+// 路由进内存层——写落影子子树返回假成功、读真实目标失败，静默误导）。
+// 改为先 follow 后路由：逃逸出内存层前缀的路径由调用方改走 backing +
+// 规则表门（读拿到真实内容 / 写 ro 区被门拒，与 host 侧同一语义）。
+//
+// followFinal=false = 不解析末段（unlink/rename/lstat/readlink 语义作用于
+// 链接本身）。仅在 isMem(abs) 时有意义；其他路径原样返回。
+// 解析只发生在内存层（cloud backing = UFS 无 symlink；host 无内存层）。
+func (a *ufsAdapter) resolveMemSymlinks(ctx context.Context, abs string, followFinal bool) string {
+	if !a.isMem(abs) {
+		return abs
+	}
+	cur := abs
+	for depth := 0; depth < 8; depth++ {
+		parts := strings.Split(strings.TrimPrefix(cur, "/"), "/")
+		last := len(parts) - 1
+		prefix := ""
+		rebased := false
+		for i, p := range parts {
+			prefix += "/" + p
+			if i == last && !followFinal {
+				break
+			}
+			fi, err := a.mem.Lstat(ctx, prefix)
+			if err != nil {
+				break // 尾部不存在：剩余段词法保留（创建语义由各层自理）
+			}
+			if fi.Mode()&stdfs.ModeSymlink == 0 {
+				continue
+			}
+			target, err := a.mem.Readlink(ctx, prefix)
+			if err != nil {
+				break
+			}
+			if !strings.HasPrefix(target, "/") {
+				target = gbfs.Clean(path.Dir(prefix) + "/" + target)
+			}
+			if i < last {
+				target = strings.TrimSuffix(target, "/") + "/" + strings.Join(parts[i+1:], "/")
+			}
+			cur = gbfs.Clean(target)
+			rebased = true
+			break
+		}
+		if !rebased {
+			break
+		}
+		if !a.isMem(cur) {
+			break // 逃逸出内存层：backing 无 symlink，解析到此为止
+		}
+	}
+	return cur
 }
 
 // fileOpName 是 vbox.FileOp 的日志/错误文案（vbox 未暴露 String）。
@@ -195,6 +266,7 @@ func (a *ufsAdapter) gateMeta(abs string) error {
 
 func (a *ufsAdapter) Open(ctx context.Context, name string) (gbfs.File, error) {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.Open(ctx, abs)
 	}
@@ -210,6 +282,7 @@ func (a *ufsAdapter) Open(ctx context.Context, name string) (gbfs.File, error) {
 
 func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm stdfs.FileMode) (gbfs.File, error) {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.OpenFile(ctx, abs, flag, perm)
 	}
@@ -245,6 +318,7 @@ func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm s
 
 func (a *ufsAdapter) Stat(ctx context.Context, name string) (stdfs.FileInfo, error) {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.Stat(ctx, abs)
 	}
@@ -268,6 +342,7 @@ func (a *ufsAdapter) Lstat(ctx context.Context, name string) (stdfs.FileInfo, er
 
 func (a *ufsAdapter) ReadDir(ctx context.Context, name string) ([]stdfs.DirEntry, error) {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.ReadDir(ctx, abs)
 	}
@@ -287,6 +362,7 @@ func (a *ufsAdapter) Readlink(ctx context.Context, name string) (string, error) 
 
 func (a *ufsAdapter) Realpath(ctx context.Context, name string) (string, error) {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.Realpath(ctx, abs)
 	}
@@ -299,6 +375,7 @@ func (a *ufsAdapter) Realpath(ctx context.Context, name string) (string, error) 
 
 func (a *ufsAdapter) Symlink(ctx context.Context, target, linkName string) error {
 	abs := a.resolve(linkName)
+	abs = a.resolveMemSymlinks(ctx, abs, false)
 	if a.isMem(abs) {
 		return a.mem.Symlink(ctx, target, abs)
 	}
@@ -307,6 +384,7 @@ func (a *ufsAdapter) Symlink(ctx context.Context, target, linkName string) error
 
 func (a *ufsAdapter) Link(ctx context.Context, oldName, newName string) error {
 	abs := a.resolve(newName)
+	abs = a.resolveMemSymlinks(ctx, abs, false)
 	if a.isMem(abs) {
 		return a.mem.Link(ctx, a.resolve(oldName), abs)
 	}
@@ -315,6 +393,7 @@ func (a *ufsAdapter) Link(ctx context.Context, oldName, newName string) error {
 
 func (a *ufsAdapter) Chmod(ctx context.Context, name string, mode stdfs.FileMode) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.Chmod(ctx, abs, mode)
 	}
@@ -335,6 +414,7 @@ func (a *ufsAdapter) Chmod(ctx context.Context, name string, mode stdfs.FileMode
 
 func (a *ufsAdapter) Chown(ctx context.Context, name string, uid, gid uint32, follow bool) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, follow)
 	if a.isMem(abs) {
 		return a.mem.Chown(ctx, abs, uid, gid, follow)
 	}
@@ -343,6 +423,7 @@ func (a *ufsAdapter) Chown(ctx context.Context, name string, uid, gid uint32, fo
 
 func (a *ufsAdapter) Chtimes(ctx context.Context, name string, atime, mtime time.Time) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.Chtimes(ctx, abs, atime, mtime)
 	}
@@ -361,6 +442,7 @@ func (a *ufsAdapter) Chtimes(ctx context.Context, name string, atime, mtime time
 
 func (a *ufsAdapter) Lchtimes(ctx context.Context, name string, atime, mtime time.Time) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, false)
 	if a.isMem(abs) {
 		return a.mem.Lchtimes(ctx, abs, atime, mtime)
 	}
@@ -369,6 +451,7 @@ func (a *ufsAdapter) Lchtimes(ctx context.Context, name string, atime, mtime tim
 
 func (a *ufsAdapter) MkdirAll(ctx context.Context, name string, perm stdfs.FileMode) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if a.isMem(abs) {
 		return a.mem.MkdirAll(ctx, abs, perm)
 	}
@@ -386,6 +469,7 @@ func (a *ufsAdapter) MkdirAll(ctx context.Context, name string, perm stdfs.FileM
 
 func (a *ufsAdapter) Mkfifo(ctx context.Context, name string, perm stdfs.FileMode) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, false)
 	if a.isMem(abs) {
 		return a.mem.Mkfifo(ctx, abs, perm)
 	}
@@ -394,6 +478,7 @@ func (a *ufsAdapter) Mkfifo(ctx context.Context, name string, perm stdfs.FileMod
 
 func (a *ufsAdapter) Remove(ctx context.Context, name string, recursive bool) error {
 	abs := a.resolve(name)
+	abs = a.resolveMemSymlinks(ctx, abs, false)
 	if a.isMem(abs) {
 		return a.mem.Remove(ctx, abs, recursive)
 	}
@@ -413,7 +498,8 @@ func (a *ufsAdapter) Remove(ctx context.Context, name string, recursive bool) er
 }
 
 func (a *ufsAdapter) Rename(ctx context.Context, oldName, newName string) error {
-	oldAbs, newAbs := a.resolve(oldName), a.resolve(newName)
+	oldAbs := a.resolveMemSymlinks(ctx, a.resolve(oldName), false)
+	newAbs := a.resolveMemSymlinks(ctx, a.resolve(newName), false)
 	oldMem, newMem := a.isMem(oldAbs), a.isMem(newAbs)
 	if oldMem && newMem {
 		return a.mem.Rename(ctx, oldAbs, newAbs)
@@ -441,6 +527,7 @@ func (a *ufsAdapter) Getwd() string {
 func (a *ufsAdapter) Chdir(name string) error {
 	abs := a.resolve(name)
 	ctx := context.Background()
+	abs = a.resolveMemSymlinks(ctx, abs, true)
 	var fi stdfs.FileInfo
 	var err error
 	if a.isMem(abs) {

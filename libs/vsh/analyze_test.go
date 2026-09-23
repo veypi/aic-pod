@@ -61,6 +61,38 @@ func TestAnalyzeDynamicSkipped(t *testing.T) {
 	}
 }
 
+// F3 回归（2026-09-24 实测）：末位词动态时，不得把倒数第二个字面词误报为
+// 写目标（`ln -s <字面target> $L` 里 target 是读操作）。
+func TestAnalyzeLnDynamicLinkName(t *testing.T) {
+	t.Parallel()
+	a := Analyze(`ln -s /u/admin/skills $L`, nil)
+	if len(a.WriteTargets) != 0 {
+		t.Fatalf("ln target (read) must not be flagged when link name is dynamic: %v", a.WriteTargets)
+	}
+	// 对照：末位字面仍取为写目标。
+	b := Analyze(`ln -s /tmp/x /tmp/y`, nil)
+	if len(b.WriteTargets) != 1 || b.WriteTargets[0] != "/tmp/y" {
+		t.Fatalf("literal link name should be flagged: %v", b.WriteTargets)
+	}
+}
+
+// 逐词判定改进：前面的动态词不截断后面的字面写目标。
+func TestAnalyzeDynamicPrefixNotTruncating(t *testing.T) {
+	t.Parallel()
+	a := Analyze(`cp $SRC dst.txt; touch a.txt $B c.txt`, nil)
+	joined := strings.Join(a.WriteTargets, ",")
+	for _, want := range []string{"dst.txt", "a.txt", "c.txt"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in %v", want, a.WriteTargets)
+		}
+	}
+	for _, notWant := range []string{"$SRC", "$B"} {
+		if strings.Contains(joined, notWant) {
+			t.Fatalf("dynamic word leaked into targets: %v", a.WriteTargets)
+		}
+	}
+}
+
 func TestAnalyzeSyntaxError(t *testing.T) {
 	t.Parallel()
 	a := Analyze(`if then fi <<<`, nil)

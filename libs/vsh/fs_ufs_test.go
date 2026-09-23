@@ -236,3 +236,74 @@ func TestCloudFSChdirGetwd(t *testing.T) {
 	}
 	f.Close()
 }
+
+// F4 回归（2026-09-24 实测）：内存层 symlink 指向 backing 必须先 follow 后
+// 路由——读拿到真实内容、写落 backing（不过影子）、ro 区经链接写被门拒。
+func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
+	t.Parallel()
+	fsys, backing := newCloudAdapter(t)
+	ctx := context.Background()
+
+	// rw 区真实目录 + 文件（会话目录 rw）。
+	if err := writeFile(t, fsys, "/u/u1/.sessions/s1/data/real.txt", "real"); err != nil {
+		t.Fatal(err)
+	}
+	// 内存层链接 -> backing rw 区。
+	if err := fsys.Symlink(ctx, "/u/u1/.sessions/s1/data", "/tmp/link"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 读经链接 = 读真实内容。
+	f, err := fsys.Open(ctx, "/tmp/link/real.txt")
+	if err != nil {
+		t.Fatalf("read through link: %v", err)
+	}
+	data, _ := io.ReadAll(f)
+	f.Close()
+	if string(data) != "real" {
+		t.Fatalf("read through link = %q", data)
+	}
+
+	// ReadDir 经链接 = backing 真实条目。
+	entries, err := fsys.ReadDir(ctx, "/tmp/link")
+	if err != nil || len(entries) != 1 || entries[0].Name() != "real.txt" {
+		t.Fatalf("readdir through link = %v, %v", entries, err)
+	}
+
+	// 写经链接落 backing（不落内存层影子）。
+	if err := writeFile(t, fsys, "/tmp/link/new.txt", "new"); err != nil {
+		t.Fatalf("write through link: %v", err)
+	}
+	if fi, err := backing.Stat("/u/u1/.sessions/s1/data/new.txt"); err != nil || fi.IsDir() {
+		t.Fatalf("write should land in backing: %v", err)
+	}
+	// 直接路径读回一致。
+	f2, err := fsys.Open(ctx, "/u/u1/.sessions/s1/data/new.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f2.Close()
+
+	// 内存层链接 -> ro 区：经链接写被规则表门拒（不是假成功）。
+	if err := fsys.Symlink(ctx, "/u/u1", "/tmp/rolink"); err != nil {
+		t.Fatal(err)
+	}
+	err = writeFile(t, fsys, "/tmp/rolink/x.txt", "evil")
+	if !errors.Is(err, ErrRuleDenied) {
+		t.Fatalf("write through link to ro = %v, want ErrRuleDenied", err)
+	}
+	if _, err := backing.Stat("/u/u1/x.txt"); err == nil {
+		t.Fatal("ro area must not be written")
+	}
+
+	// Remove 作用于链接本身（NoFollow）：链接删除、目标完好。
+	if err := fsys.Remove(ctx, "/tmp/link", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backing.Stat("/u/u1/.sessions/s1/data/real.txt"); err != nil {
+		t.Fatalf("remove link must not touch target: %v", err)
+	}
+	if _, err := fsys.Lstat(ctx, "/tmp/link"); err == nil {
+		t.Fatal("link should be removed")
+	}
+}
