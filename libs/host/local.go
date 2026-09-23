@@ -33,6 +33,9 @@ func (c *Client) runLocal(ctx context.Context, sid, msgID, action string, argv [
 func (c *Client) runProcess(ctx context.Context, sid, msgID, display string, argv []string, workdir string, level int, noSandbox bool) *proto.ToolResponse {
 	action := argv[0]
 	logPath := filepath.Join(c.sessionWorkDir(sid), ".exec", msgID+".log")
+	if err := c.ensureSessionWorkDir(sid); err != nil {
+		return errResp(msgID, err.Error())
+	}
 	netDeny, netAllow := c.netPol.Snapshot(sid)
 	opts := exec_procs.StartOptions{
 		ID:           fmt.Sprintf("%s:%s:%s", c.hostID, sid, msgID),

@@ -145,6 +145,18 @@ func (c *Client) sessionWorkDir(sid string) string {
 	return filepath.Join(os.TempDir(), "aic", sid)
 }
 
+// ensureSessionWorkDir 确保会话工作区（含父级）就绪。嵌套执行路径
+// （exec_procs.Output(ctx) 非空，平台命令的常态）不经 StartCall 的
+// LogPath 建目录动作，必须显式确保：windows 沙箱的可写根授予要求目录
+// 已存在（fsauth 基础白名单含会话区），否则会话内首次执行即失败
+// （grant workspace ... cannot find the file）；日志与沙箱两侧共用此目录。
+func (c *Client) ensureSessionWorkDir(sid string) error {
+	if err := os.MkdirAll(c.sessionWorkDir(sid), 0o700); err != nil {
+		return fmt.Errorf("exec: prepare session workspace: %w", err)
+	}
+	return nil
+}
+
 // hostTaskRunner 实现 vcore.TaskRunner：托管任务（curl 无 -o）经 exec_procs
 // 统一托管，输出落盘 {tmp}/aic/{sid}/.exec/{msg_id}.log（与本地命令同一机制，§5.9）。
 type hostTaskRunner struct {
@@ -153,6 +165,9 @@ type hostTaskRunner struct {
 }
 
 func (r *hostTaskRunner) StartTask(ctx context.Context, opts vcore.TaskOptions) (*vcore.TaskResult, error) {
+	if err := r.c.ensureSessionWorkDir(r.sid); err != nil {
+		return nil, err
+	}
 	if out := exec_procs.Output(ctx); out != nil {
 		return &vcore.TaskResult{}, opts.Run(ctx, out)
 	}
