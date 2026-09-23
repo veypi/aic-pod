@@ -268,7 +268,7 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 
 	var res *vshglue.ExecResult
 	var runErr error
-	task, err := engine.Tasks.Start(p.Script, logPath, "host", func(runCtx context.Context, _ io.Writer) (int, error) {
+	task, err := engine.Tasks.Start(p.Script, logPath, "host", func(runCtx context.Context, taskLog io.Writer) (int, error) {
 		res, runErr = engine.Exec(runCtx, vshglue.ExecRequest{
 			SessionKey:   sid,
 			Owner:        "host",
@@ -279,7 +279,8 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 			Stdin:        stdin,
 			Timeout:      vshglue.BackgroundWallClock,
 			LongRunning:  true,
-			Log:          logFile,
+			// 同时喂任务表捕获缓冲（bg output 可见，同 cloud 侧修复）。
+			Log: io.MultiWriter(logFile, taskLog),
 		})
 		if runErr != nil {
 			return 1, runErr

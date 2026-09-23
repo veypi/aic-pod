@@ -74,6 +74,71 @@ func TestTaskTableCapacity(t *testing.T) {
 	}
 }
 
+// TestTaskTableKillReleasesImmediately kill 即释放容量：不等 goroutine 收尾，
+// kill 后紧接着 Start 不撞 full（救场路径：杀失控任务后立刻起新任务）。
+func TestTaskTableKillReleasesImmediately(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTableWithCaps(2, 2)
+	block := func(ctx context.Context, log io.Writer) (int, error) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	k1, err := tt.Start("t", "", "o1", block, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tt.Start("t", "", "o1", block, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Kill(k1.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 不 Wait、不睡觉：容量必须已同步释放。
+	if _, err := tt.Start("t", "", "o1", block, nil); err != nil {
+		t.Fatalf("kill 后应立即可补位: %v", err)
+	}
+	// 收尾后计数不双重释放（goroutine 退出时 released 已置位）。
+	if _, err := tt.Wait(context.Background(), k1.ID, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	tt.mu.Lock()
+	defer tt.mu.Unlock()
+	if tt.running != 2 || tt.runningByOwner["o1"] != 2 {
+		t.Fatalf("running=%d byOwner=%v, want 2/2（双重释放？）", tt.running, tt.runningByOwner)
+	}
+}
+
+// TestTaskTableEviction 完成任务表保留上限：超出逐出最旧（每项带 8MiB 上限
+// 缓冲，不限量累积是内存泄漏面）。
+func TestTaskTableEviction(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTableWithCaps(16, 16)
+	tt.maxRetained = 3
+	quick := func(ctx context.Context, log io.Writer) (int, error) { return 0, nil }
+	var last Task
+	for i := 0; i < 6; i++ {
+		task, err := tt.Start("t", "", "o1", quick, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tt.Wait(context.Background(), task.ID, 3*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		last = task
+	}
+	tasks := tt.List()
+	if len(tasks) > 4 { // maxRetained 3 + 最后一个 running/finished
+		t.Fatalf("retained = %d, want <= 4", len(tasks))
+	}
+	// 最新的必须在，最旧的 bg-1/bg-2 已逐出。
+	if _, ok := tt.Get(last.ID); !ok {
+		t.Fatalf("latest task %s evicted", last.ID)
+	}
+	if _, ok := tt.Get("bg-1"); ok {
+		t.Fatal("oldest bg-1 should be evicted")
+	}
+}
+
 // TestBGRunCapacityEndToEnd bg run 经 Exec 继承 owner 并受容量闸约束（e2e：
 // 生产表 per-owner=4，第 5 个 bg run 拒绝且报错可行动）。
 func TestBGRunCapacityEndToEnd(t *testing.T) {

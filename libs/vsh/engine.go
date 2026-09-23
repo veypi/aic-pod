@@ -50,6 +50,9 @@ const (
 	// 用户拍板）：单任务只有 30min 墙钟不限并发——bg fan-out（一次调用 seq 1..64
 	// bg run yes）/多会话并发可占满全部核。超额快速拒绝（排队本身是 DoS 放大器）。
 	MaxRunningTasksPerOwner = 4
+	// MaxRetainedFinishedTasks 完成任务表保留上限（超出逐出最旧）——每项带
+	// 8MiB 上限输出缓冲，不限量累积是长跑内存泄漏面（2026-09-24 实测观察）。
+	MaxRetainedFinishedTasks = 64
 )
 
 // maxRunningTasksGlobal 全局同时运行任务上限：核数一半（下限 2）——即使全部
@@ -393,6 +396,11 @@ type taskEntry struct {
 	done     chan struct{}
 	output   *boundedBuffer
 	finished bool
+	seq      int
+	owner    string
+	// released 容量计数是否已释放（t.mu 守卫）——Kill 同步释放（kill 即补位，
+	// 救场路径不等 goroutine 收尾）与 goroutine 收尾释放只发生一次。
+	released bool
 }
 
 // TaskTable 后台任务表（引擎统一承接 bg，exec_procs 退役后此处是唯一来源）。
@@ -407,6 +415,7 @@ type TaskTable struct {
 	runningByOwner map[string]int
 	maxGlobal      int
 	maxPerOwner    int
+	maxRetained    int
 }
 
 func NewTaskTable() *TaskTable {
@@ -420,6 +429,7 @@ func NewTaskTableWithCaps(maxGlobal, maxPerOwner int) *TaskTable {
 		runningByOwner: map[string]int{},
 		maxGlobal:      maxGlobal,
 		maxPerOwner:    maxPerOwner,
+		maxRetained:    MaxRetainedFinishedTasks,
 	}
 }
 
@@ -440,7 +450,7 @@ func (t *TaskTable) Start(command, logPath, owner string, run func(ctx context.C
 	}
 	t.seq++
 	id := fmt.Sprintf("bg-%d", t.seq)
-	entry := &taskEntry{done: make(chan struct{}), output: newBoundedBuffer(MaxStdoutBytes)}
+	entry := &taskEntry{done: make(chan struct{}), output: newBoundedBuffer(MaxStdoutBytes), seq: t.seq, owner: owner}
 	entry.task = Task{ID: id, Command: command, LogPath: logPath, Status: "running", StartedAt: time.Now()}
 	// ctx/cancel 同步建立（goroutine 启动前）——Kill 紧随 Start 时 cancel 必已
 	// 就位（竞态：cancel 在 goroutine 内赋值时，Start 后微秒级 Kill 会读 nil
@@ -450,6 +460,7 @@ func (t *TaskTable) Start(command, logPath, owner string, run func(ctx context.C
 	t.tasks[id] = entry
 	t.running++
 	t.runningByOwner[owner]++
+	t.evictFinishedLocked()
 	t.mu.Unlock()
 
 	go func() {
@@ -479,13 +490,42 @@ func (t *TaskTable) Start(command, logPath, owner string, run func(ctx context.C
 		entry.mu.Unlock()
 		// 容量计数必须先于 close(done) 释放——Wait 解除阻塞即代表容量已恢复
 		// （TestTaskTableCapacity 竞态：defer 在 close 后跑，释放晚一拍）。
+		// Kill 可能已同步释放（released 置位）——只释放一次。
 		t.mu.Lock()
-		t.running--
-		t.runningByOwner[owner]--
+		if !entry.released {
+			entry.released = true
+			t.running--
+			t.runningByOwner[owner]--
+		}
 		t.mu.Unlock()
 		close(entry.done)
 	}()
 	return entry.snapshot(), nil
+}
+
+// evictFinishedLocked 逐出最旧的已完成任务至保留上限（t.mu 已持有；
+// 锁序与 List 一致 t.mu→entry.mu）。
+func (t *TaskTable) evictFinishedLocked() {
+	for {
+		var oldest *taskEntry
+		finished := 0
+		for _, e := range t.tasks {
+			e.mu.Lock()
+			fin := e.finished
+			e.mu.Unlock()
+			if !fin {
+				continue
+			}
+			finished++
+			if oldest == nil || e.seq < oldest.seq {
+				oldest = e
+			}
+		}
+		if finished <= t.maxRetained || oldest == nil {
+			return
+		}
+		delete(t.tasks, oldest.task.ID)
+	}
 }
 
 // List 按启动序返回任务快照。
@@ -535,6 +575,7 @@ func (t *TaskTable) Wait(ctx context.Context, id string, d time.Duration) (Task,
 }
 
 // Kill 终止任务（置 killed 并 cancel；wall clock 由 Start 的 ctx 携带）。
+// 容量同步释放——kill 紧接着 bg run 的救场路径不撞异步释放窗口。
 func (t *TaskTable) Kill(id string) error {
 	t.mu.Lock()
 	e, ok := t.tasks[id]
@@ -543,15 +584,25 @@ func (t *TaskTable) Kill(id string) error {
 		return fmt.Errorf("bg: no such task %q", id)
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.finished {
-		return fmt.Errorf("bg: task %q already finished (%s)", id, e.task.Status)
+		status := e.task.Status
+		e.mu.Unlock()
+		return fmt.Errorf("bg: task %q already finished (%s)", id, status)
 	}
 	e.task.Status = "killed"
 	e.task.ExitCode = 130
-	if e.cancel != nil {
-		e.cancel()
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+	t.mu.Lock()
+	if !e.released {
+		e.released = true
+		t.running--
+		t.runningByOwner[e.owner]--
+	}
+	t.mu.Unlock()
 	return nil
 }
 
