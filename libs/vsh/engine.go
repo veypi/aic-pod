@@ -94,6 +94,10 @@ type EngineConfig struct {
 	// 内存层 /tmp/.vsh-layout-home）。host 端无内存层，必须显式给可写布局
 	// HOME 与 PATH（PATH 目录 = stub 写入目标，须在规则表可写区）。
 	LayoutEnv map[string]string
+	// BuiltinCommandDir 重写 shell 内置名（echo/bg/help…）的 stub 解析目录
+	// （空 = vsh 默认 /bin，仅内存层文件系统可用）。host 端无内存层，必须
+	// 指向真实 stub 目录（= LayoutEnv PATH 目录）。
+	BuiltinCommandDir string
 	// Logf 可选日志。
 	Logf func(format string, args ...any)
 }
@@ -194,6 +198,9 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	if cfg.Network != nil {
 		opts = append(opts, vshcore.WithNetworkClient(cfg.Network))
 	}
+	if cfg.BuiltinCommandDir != "" {
+		opts = append(opts, vshcore.WithBuiltinCommandDir(cfg.BuiltinCommandDir))
+	}
 	rt, err := vshcore.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("vsh glue: new runtime: %w", err)
@@ -207,13 +214,13 @@ func (e *Engine) Registry() *commands.Registry { return e.reg }
 
 // ExecRequest 一次脚本执行。
 type ExecRequest struct {
-	SessionKey string            // 会话键（cloud=sid；host=sid）
+	SessionKey string // 会话键（cloud=sid；host=sid）
 	// Owner 任务容量闸归属（cloud="u:"+uid；host="host"；空=匿名共池）——
 	// 经 ctx 透传，bg run 派生任务继承同一 owner。
-	Owner      string
-	Script     string            // 脚本正文
-	WorkDir    string            // 空 = 会话默认工作目录
-	Env        map[string]string // 覆盖 BaseEnv
+	Owner   string
+	Script  string            // 脚本正文
+	WorkDir string            // 空 = 会话默认工作目录
+	Env     map[string]string // 覆盖 BaseEnv
 	// GrantedLevel 当次授予等级（host native 子进程沙箱 profile 选择用；
 	// 经 env AIC_VSH_LEVEL 透传给 native 包装器）。
 	GrantedLevel int

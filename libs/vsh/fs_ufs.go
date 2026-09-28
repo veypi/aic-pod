@@ -249,7 +249,7 @@ func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 
 // gateMeta 元数据读的 jail 放宽（2026-09-24 实测修复）：内建命令的祖先链
 // 走访（mkdir -p 从 / 逐级 Stat、cd/ls 的符号链接解析）会读到 jail 根的祖先
-//（/、/u）——只放行「jail 根祖先」的 Stat/Lstat/Realpath（存在性元数据不
+// （/、/u）——只放行「jail 根祖先」的 Stat/Lstat/Realpath（存在性元数据不
 // 泄露内容）；Open/ReadDir/OpenFile 仍走 gate 严格判定（ReadDir("/") 会泄露
 // 用户列表，不放行）。
 func (a *ufsAdapter) gateMeta(abs string) error {
@@ -309,8 +309,23 @@ func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm s
 		// 并发 append 原子性不保证，记录在案）。
 		return newBufferedWriteFile(a.backing, abs, flag&os.O_APPEND != 0)
 	case flag&(os.O_CREATE|os.O_TRUNC) != 0:
-		// Create = 创建或截断（ufs 语义），覆盖 O_CREATE|O_TRUNC 组合。
-		return a.backing.Create(abs)
+		// Create = 创建或截断（ufs 语义）。ufs.Create 无 perm 参：新建且请求
+		// 执行位时补 Chmod（stub 0755 依赖执行位做 PATH/内置名解析；仅执行位
+		// 请求才补——普通重定向 perm=0666 保持 os.Create 的 umask 结果，避免
+		// 绕过 umask 产出 0666）。已存在文件的截断不动既有位。
+		_, statErr := a.backing.Stat(abs)
+		f, err := a.backing.Create(abs)
+		if err != nil {
+			return nil, err
+		}
+		if statErr != nil && perm&0o111 != 0 {
+			if ch, ok := a.backing.(interface {
+				Chmod(string, stdfs.FileMode) error
+			}); ok {
+				_ = ch.Chmod(abs, perm)
+			}
+		}
+		return f, nil
 	default:
 		return nil, &stdfs.PathError{Op: "open", Path: abs, Err: ErrUnsupportedOp}
 	}

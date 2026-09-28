@@ -43,7 +43,7 @@ func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 // hostLayoutFS host 布局特化：布局初始化（每次 NewSession）会对 /tmp 做
 // MkdirAll + Chmod(sticky|0777)——posix 真实 OS 的 /tmp 本已存在且为
 // sticky|1777，非 root chmod 必 EPERM；windows 的 /tmp 是 OSVFS 虚拟别名
-//（映射 os.TempDir()，必已存在）。两个调用对精确路径 /tmp noop（只拦 /tmp
+// （映射 os.TempDir()，必已存在）。两个调用对精确路径 /tmp noop（只拦 /tmp
 // 本身；/tmp 下子路径照常委派 backing——win 上经虚拟别名落临时目录）。
 type hostLayoutFS struct{ gbfs.FileSystem }
 

@@ -3,10 +3,14 @@ package vsh
 import (
 	"context"
 	"io"
+	stdfs "io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/contrib/ufs"
 	gbfs "github.com/veypi/vsh/fs"
 )
@@ -192,23 +196,23 @@ func TestBGOutput(t *testing.T) {
 func TestIsPureBGMgmtScript(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{
-		"bg":                      true,
-		"bg list":                 true,
-		"bg kill bg-3":            true,
-		"bg wait bg-3 5":          true,
-		"bg output bg-3":          true,
-		"  bg   kill   bg-3  ":    true,
-		"bg run 'sleep 1'":        false, // cwd 继承依赖基会话，非救场命令
-		"bg list; echo done":      false,
-		"bg list | grep bg":       false,
-		"bg list > out.txt":       false,
-		"bg kill bg-3 &":          false,
-		"echo bg list":            false,
-		"x=1 bg list":             false,
-		"bg $SUB":                 false,
-		"bg kill $(cat /tmp/id)":  false,
-		"grant fs /u/u1/x":        false,
-		"bg kill bg-3 # 注释":     true,
+		"bg":                     true,
+		"bg list":                true,
+		"bg kill bg-3":           true,
+		"bg wait bg-3 5":         true,
+		"bg output bg-3":         true,
+		"  bg   kill   bg-3  ":   true,
+		"bg run 'sleep 1'":       false, // cwd 继承依赖基会话，非救场命令
+		"bg list; echo done":     false,
+		"bg list | grep bg":      false,
+		"bg list > out.txt":      false,
+		"bg kill bg-3 &":         false,
+		"echo bg list":           false,
+		"x=1 bg list":            false,
+		"bg $SUB":                false,
+		"bg kill $(cat /tmp/id)": false,
+		"grant fs /u/u1/x":       false,
+		"bg kill bg-3 # 注释":      true,
 	}
 	for script, want := range cases {
 		if got := isPureBGMgmtScript(script); got != want {
@@ -288,7 +292,7 @@ func TestEngineSessionKeyInContext(t *testing.T) {
 			return fsys, "/u/u1", err
 		},
 		Platform: PlatformDeps{
-			Grant: func(ctx context.Context, sessionKey, domain, target string) (string, error) {
+			Grant: func(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
 				gotSid = SessionFromContext(ctx)
 				return "ok", nil
 			},
@@ -310,7 +314,7 @@ func TestEngineSessionKeyInContext(t *testing.T) {
 }
 
 // TestCloudJailAncestorMeta 2026-09-24 实测修复回归：内建命令的祖先链走访
-//（mkdir -p 逐级 Stat、cd/ls 符号链接解析）读 jail 根祖先（/、/u）放行
+// （mkdir -p 逐级 Stat、cd/ls 符号链接解析）读 jail 根祖先（/、/u）放行
 // 元数据；界外内容读写、根列表仍硬拒。mkdir 收尾 Chmod 在无权限位的 UFS
 // backing 上 noop（不假失败）。
 func TestCloudJailAncestorMeta(t *testing.T) {
@@ -521,5 +525,62 @@ func TestEngineWriteAudit(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("write audit missing: %v", res.Writes)
+	}
+}
+
+// chmodBacking 给 localFS 补 Chmod（对齐 host OSVFS 的执行位能力；vigo ufs
+// localFS 无 Chmod，P2 回归需要带执行位语义的 backing）。
+type chmodBacking struct {
+	ufs.FS
+	root string
+}
+
+func (b chmodBacking) Chmod(name string, mode stdfs.FileMode) error {
+	return os.Chmod(filepath.Join(b.root, filepath.FromSlash(strings.TrimPrefix(name, "/"))), mode)
+}
+
+// TestHostBuiltinEchoViaStubDir P1+P2 回归：无内存层的 host 形态引擎（OS
+// backing + 规则表门）上，shell 内置名 echo 经 BuiltinCommandDir 指向真实
+// stub 目录后可解析执行（修复前默认 /bin 在 host 上不存在 → /bin/echo
+// ENOENT）；且布局初始化写出的 stub 带执行位（0644 stub 会被 PATH/type -P
+// 解析跳过）。
+func TestHostBuiltinEchoViaStubDir(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	local, err := ufs.NewLocalFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backing := chmodBacking{FS: local, root: root}
+	const stubDir = "/stub/bin"
+	env := map[string]string{"HOME": "/stub/home", "PATH": stubDir, "USER": "agent"}
+	e, err := NewEngine(EngineConfig{
+		BaseEnv: env,
+		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
+			fsys, err := NewHostFS(HostFSConfig{
+				Backing: backing,
+				Rules:   func() vbox.FSRuleSet { return vbox.FSRuleSet{DefaultWrite: vbox.EffRW} },
+			})
+			return fsys, "/stub", err
+		},
+		LayoutEnv:         env,
+		BuiltinCommandDir: stubDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "echo hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(res.Stdout) != "hi" {
+		t.Fatalf("echo stdout = %q (stderr %q, exit %d)", res.Stdout, res.Stderr, res.ExitCode)
+	}
+	info, err := backing.Stat(stubDir + "/echo")
+	if err != nil {
+		t.Fatalf("stub echo not pinned: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("stub echo mode = %v, want executable", info.Mode())
 	}
 }

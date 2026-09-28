@@ -61,10 +61,11 @@ func TestCmdGrantFlow(t *testing.T) {
 	t.Parallel()
 	reg := commands.NewRegistry()
 	var gotDomain, gotTarget string
+	var gotPermanent bool
 	deps := PlatformDeps{
 		Tasks: NewTaskTable(),
-		Grant: func(ctx context.Context, sessionKey, domain, target string) (string, error) {
-			gotDomain, gotTarget = domain, target
+		Grant: func(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
+			gotDomain, gotTarget, gotPermanent = domain, target, permanent
 			return "已提交审批", nil
 		},
 	}
@@ -73,8 +74,21 @@ func TestCmdGrantFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotDomain != "fs" || gotTarget != "/u/u1/docs" || !strings.Contains(out, "已提交审批") {
-		t.Fatalf("grant: %q %q %q", gotDomain, gotTarget, out)
+	if gotDomain != "fs" || gotTarget != "/u/u1/docs" || gotPermanent || !strings.Contains(out, "已提交审批") {
+		t.Fatalf("grant: %q %q %v %q", gotDomain, gotTarget, gotPermanent, out)
+	}
+	// ssh 域 + --permanent（任意位置）透传。
+	if _, _, err = runCmd(t, reg, "grant", "ssh", "example.com:22", "--permanent"); err != nil {
+		t.Fatal(err)
+	}
+	if gotDomain != "ssh" || gotTarget != "example.com:22" || !gotPermanent {
+		t.Fatalf("grant ssh --permanent: %q %q %v", gotDomain, gotTarget, gotPermanent)
+	}
+	if _, _, err = runCmd(t, reg, "grant", "--permanent", "net", "example.com:443"); err != nil {
+		t.Fatal(err)
+	}
+	if gotDomain != "net" || !gotPermanent {
+		t.Fatalf("grant --permanent net: %q %v", gotDomain, gotPermanent)
 	}
 	// 未知域报错。
 	_, _, err = runCmd(t, reg, "grant", "root", "/")

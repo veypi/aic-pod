@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	stdfs "io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -88,6 +89,7 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 	if err := os.MkdirAll(layoutHome, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("vsh host: layout home: %w", err)
 	}
+	repairStubExecBits(stubBin)
 
 	native := vshglue.NewNativeRegistry(vshglue.NativeDeps{
 		Manager: c.procs,
@@ -128,6 +130,9 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			"PATH": hostCanonical(stubBin),
 			"USER": "agent",
 		},
+		// 内置名（echo/bg/help…）重写后的 stub 解析目录 = host stub bin：vsh
+		// 默认 /bin 只适用于有内存层的 cloud；host 无内存层必须显式指向。
+		BuiltinCommandDir: hostCanonical(stubBin),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -139,28 +144,41 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 	return engine, native, nil
 }
 
+// repairStubExecBits 一次性补齐历史 0644 stub 的执行位（适配层 OpenFile 丢
+// perm 的残留——布局初始化只补缺失文件、不覆盖既有位，旧 stub 会永远卡在
+// 0644 致 PATH/内置名解析跳过）。stub 目录内容全部应为 0755；best-effort。
+func repairStubExecBits(stubBin string) {
+	_ = filepath.WalkDir(stubBin, func(p string, d stdfs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			_ = os.Chmod(p, 0o755)
+		}
+		return nil
+	})
+}
+
 // vshGrant 是引擎内 grant 命令的执行体（审批已在服务端完成——脚本含字面
 // grant → 恒 4 级；此处只执行授权动作）。复用 grant.go 的成熟实现：
 // fs/net/ssh 域 temp 授权（temp 行插表头、首命中压一切——DenyHit 拒批已按
-// 2.7.4 删除），cmd 域扩充 native 白名单并即时注册。
-func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string) (string, error) {
+// 2.7.4 删除）或 --permanent 落盘；cmd 域扩充 native 白名单并即时注册
+// （--permanent 追加 exec_allow 落盘）。
+func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
 	sid := sessionKey
 	switch domain {
 	case "fs":
-		resp := c.grantFS(sid, "", target, false)
+		resp := c.grantFS(sid, "", target, permanent)
 		if resp.Error != "" {
 			return "", fmt.Errorf("%s", resp.Error)
 		}
 		return resp.Content, nil
 	case "net":
-		resp := c.grantTarget(sid, "", "net", target, false)
+		resp := c.grantTarget(sid, "", "net", target, permanent)
 		if resp.Error != "" {
 			return "", fmt.Errorf("%s", resp.Error)
 		}
 		return resp.Content, nil
 	case "ssh":
 		// ssh 域授权入 sshPol（执行面 = 免沙箱内置通道，随 ssh 工具重建另接）。
-		resp := c.grantTarget(sid, "", "ssh", target, false)
+		resp := c.grantTarget(sid, "", "ssh", target, permanent)
 		if resp.Error != "" {
 			return "", fmt.Errorf("%s", resp.Error)
 		}
@@ -178,9 +196,15 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		if err := native.Register(eng.Registry(), name); err != nil {
 			return "", err
 		}
+		if permanent {
+			if err := c.persistGrant("exec", name); err != nil {
+				return "", fmt.Errorf("grant cmd: persist: %w", err)
+			}
+			return fmt.Sprintf("granted cmd: %s（scope=permanent，已追加 exec_allow 落盘；注意：授予解释器 = 授予该进程一切能力）", name), nil
+		}
 		return fmt.Sprintf("granted cmd: %s（注意：授予解释器 = 授予该进程一切能力）", name), nil
 	default:
-		return "", fmt.Errorf("grant: host 支持 fs/net/cmd/ssh 域")
+		return "", fmt.Errorf("grant: host 支持 fs/net/ssh/cmd 域")
 	}
 }
 
