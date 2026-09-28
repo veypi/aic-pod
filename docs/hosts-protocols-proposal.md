@@ -1,6 +1,10 @@
 # 设备能力统一设计：fs + exec 与三个协议
 
-修订：2026-09-21。本文对应已实施的统一架构；调用格式、配额和验证范围见 [hosts-tools.md](hosts-tools.md)。本次修正此前将 `caps.tools` 与 `fs`、`exec` 并列的设计，不保留旧协议兼容入口。
+修订：2026-09-21。2026-09-28 注：hosts-vsh-redesign 已落地，本文的
+hosts_tools/1 调用格式（call/domain/command/method、catalog、execution
+epoch）已被 hosts_tools/2 取代——现行协议与实现以 [hosts-tools.md](hosts-tools.md)
+与 [hosts-vsh-redesign.md](hosts-vsh-redesign.md) 为准；本文保留职责划分
+（fs + exec 两能力、三协议分工、无 caps.tools）的架构说明。
 
 ## 1. 对外能力模型
 

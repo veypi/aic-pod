@@ -1,6 +1,6 @@
 # AIC Pod 设计文档
 
-状态：2026-09-28 目标架构，评审修订中、尚未实施。详细契约以 [vsh、权限与宿主协议设计](hosts-vsh-redesign.md) 为准；[hosts-tools.md](hosts-tools.md) 描述旧实现，不能据此继续添加等级、方法表或 argv 调用接口。
+状态：2026-09-28 目标架构，已实施（阶段 1-6 完成）。详细契约以 [vsh、权限与宿主协议设计](hosts-vsh-redesign.md) 为准；[hosts-tools.md](hosts-tools.md) 描述当前实现。
 
 ## 概述
 
@@ -73,8 +73,6 @@ FS 仍使用领域 method/args；RTC 的 page.frames/page.input 是私有流，�
 
 前端只提交普通脚本。动态值统一经共享 shellQuote 处理；viewer 使用稳定 --json 输出，等待整段脚本成功后仅解析 stdout，截断时读取 stdout 文件，不从混合文本中过滤诊断。
 
-## 迁移与状态
+## 实施状态
 
-详细顺序与验收见 [重设计文档第 5 节](hosts-vsh-redesign.md#5-只做必要改动)。实施必须同步修改 aic 工具描述、Agent 指令说明和前端帮助，不能在运行功能未切换时提前宣称 bg run/output 或旧等级已经删除。
-
-本轮只修订设计。旧代码中的静态 grant 检测不能替代修改入口检查；真实平台的沙箱覆盖、取消和日志行为仍须在实施后验证。不存在以交叉编译代替安全验收的结论。
+阶段 1-6 已落地：可信上下文与 grant_approved、browser/cua 注册为 vsh 指令、exec 统一输出与超时转 bg、三协议切换与 RTC 私有流、aic 调用端与前端收口（shell_quote 单点转义、viewer 改 exec(script) 消费 --json）、旧体系删除。验证为 go build/vet/test 与 node 测试；真实平台的沙箱覆盖、取消和日志行为以实测为准。
