@@ -2,8 +2,8 @@ package vsh
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -12,22 +12,22 @@ import (
 )
 
 // PlatformDeps 平台命令依赖（cmds.go）。零值可用：未注入的能力降级为可读
-// 报错（命令存在、help 自答、执行提示该端不可用）。Tasks/RunBG 由
-// NewEngine 自动接线，调用方无需填。
+// 报错（命令存在、help 自答、执行提示该端不可用）。Tasks 由 NewEngine 自动
+// 接线，调用方无需填。
 type PlatformDeps struct {
+	// Tasks 后台任务登记表（引擎注入）。
 	Tasks *TaskTable
-	// RunBG bg run 的执行体（引擎注入；签名：会话键、脚本、workdir、日志路径、
-	// 日志 writer）。workdir = 调用方会话当前 cwd（2026-09-24 实测修复：bg 不再
-	// 固定回落 HOME——相对路径写在 bg 里与前台一致）。
-	RunBG func(ctx context.Context, sessionKey, script, workdir, logPath string, log io.Writer) (int, error)
-	// Grant 发起授权申请（sessionKey=调用会话；domain: fs/net/ssh/cmd；
+	// Discoverable 命令发现展示过滤（§2.2 展示过滤，不是执行白名单）：
+	// host/cloud 只展示核心自定义指令；nil = 展示全部（page——没有本机
+	// 命令环境可供假定）。未列出的指令照常可执行。
+	Discoverable func(name string) bool
+	// Grant 执行授权修改（sessionKey=调用会话；domain: fs/net/ssh/cmd；
 	// target: 路径/host:port/命令名；permanent=true 落盘永久生效——仅 host
-	// 支持，cloud 无 permanent 档（D6）应拒绝）。返回给用户的可读结果文案；
-	// 拒绝/失败返回 error。审批在工具层完成（脚本含字面 grant → 恒 4 级，
-	// analyze GrantRequests），此处只执行授权动作本身。
+	// 支持，cloud 无 permanent 档应拒绝）。返回给用户的可读结果文案；
+	// 拒绝/失败返回 error。调用前已检查可信 grant_approved（cmds.go 门）。
 	Grant func(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error)
-	// GrantStatus 返回各域授权姿态与规则表（grant status——只读，不升档
-	// 不审批）。nil = 降级报错。
+	// GrantStatus 返回各域授权姿态与规则表（grant status——只读，不要求
+	// grant_approved）。nil = 降级报错。
 	GrantStatus func(ctx context.Context, sessionKey string) (string, error)
 	// ListHosts 返回预格式化的主机表文本（表格形态由平台定——cloud 给
 	// Markdown 表；host 端通常 nil 降级）。sessionKey=调用会话。
@@ -36,19 +36,11 @@ type PlatformDeps struct {
 	SendUser func(ctx context.Context, sessionKey, message string) error
 }
 
-// HostInfo 主机摘要（预格式化提供方不再需要本结构——保留给未来结构化场景）。
-type HostInfo struct {
-	ID     string
-	Name   string
-	OS     string
-	Online bool
-}
-
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
 // send_user。全部自带 help 文本（--help/-h 或无参数子命令自答）。
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	for _, cmd := range []commands.Command{
-		commands.DefineCommand("commands", cmdCommands),
+		commands.DefineCommand("commands", deps.cmdCommands),
 		commands.DefineCommand("bg", deps.cmdBG),
 		commands.DefineCommand("grant", deps.cmdGrant),
 		commands.DefineCommand("list_hosts", deps.cmdListHosts),
@@ -69,28 +61,69 @@ func helpRequested(args []string) bool {
 	return args[0] == "--help" || args[0] == "-h" || args[0] == "help"
 }
 
-// cmdCommands 列出注册表全部命令（发现入口：exec 工具描述引导 commands +
-// <cmd> --help）。
-func cmdCommands(ctx context.Context, inv *commands.Invocation) error {
+// cmdCommands 列出命令（发现入口：exec 工具描述引导 commands +
+// <cmd> --help）。host/cloud 经 Discoverable 只展示核心自定义指令（常见
+// 内建不占发现目录；未列出的指令照常可执行——这是展示过滤不是白名单）；
+// page（Discoverable=nil）展示全部已注册指令。
+func (d PlatformDeps) cmdCommands(ctx context.Context, inv *commands.Invocation) error {
 	if helpRequested(inv.Args) {
-		fmt.Fprintln(inv.Stdout, "usage: commands — 列出当前环境可用的全部命令（用 <cmd> --help 查用法）")
+		fmt.Fprintln(inv.Stdout, "usage: commands — 列出当前环境可用的命令（用 <cmd> --help 查用法）")
 		return nil
 	}
 	if inv.GetRegisteredCommands == nil {
 		return commands.Exitf(inv, 1, "commands: registry unavailable")
 	}
 	for _, name := range inv.GetRegisteredCommands() {
+		if d.Discoverable != nil && !d.Discoverable(name) {
+			continue
+		}
 		fmt.Fprintln(inv.Stdout, name)
 	}
 	return nil
 }
 
 const bgHelp = `usage:
-  bg run <script...>      后台执行脚本（墙钟 30min，到期退出码 124）
-  bg list                 列出后台任务
-  bg wait <id> [秒]       等待任务结束并输出其结果
-  bg output <id>          输出任务迄今捕获的内容（不等待）
-  bg kill <id>            终止任务`
+  bg list [--json]        列出本会话的后台任务（状态/日志路径）
+  bg wait <id> [秒] [--json]  有界等待任务并报告其状态（共享本次 exec 前台预算）
+  bg kill <id>            终止任务（与 cancel 同一执行句柄）
+
+后台任务唯一来源是 exec 前台等待超时；输出读取用 FS 或 cat/tail 读日志路径。`
+
+// bgJSON 是 bg list/wait --json 的固定输出形状（§4.5 黄金样例）：
+// id/state/script/output/error_output 恒在；已完成时有 exit_code。
+// state ∈ running/done/timeout/killed/error。
+type bgJSON struct {
+	ID          string `json:"id"`
+	State       string `json:"state"`
+	Script      string `json:"script"`
+	Output      string `json:"output"`
+	ErrorOutput string `json:"error_output"`
+	ExitCode    *int   `json:"exit_code,omitempty"`
+	Err         string `json:"error,omitempty"`
+}
+
+func taskJSON(t Task) bgJSON {
+	j := bgJSON{ID: t.ID, State: t.Status, Script: t.Command, Output: t.LogOut, ErrorOutput: t.LogErr, Err: t.Err}
+	if t.Status != "running" {
+		code := t.ExitCode
+		j.ExitCode = &code
+	}
+	return j
+}
+
+func writeJSON(inv *commands.Invocation, v any) error {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(inv.Stdout, string(raw))
+	return nil
+}
+
+// bgIdentity 取本次执行的任务归属（user, session）。
+func bgIdentity(ctx context.Context) (string, string) {
+	return OwnerFromContext(ctx), SessionFromContext(ctx)
+}
 
 func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error {
 	if len(inv.Args) == 0 || helpRequested(inv.Args) {
@@ -100,114 +133,130 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 	if d.Tasks == nil {
 		return commands.Exitf(inv, 1, "bg: task table unavailable on this endpoint")
 	}
-	switch inv.Args[0] {
-	case "run":
-		if len(inv.Args) < 2 {
-			return commands.Exitf(inv, 2, "usage: bg run <script...>")
+	owner, session := bgIdentity(ctx)
+	// --json 任意位置生效。
+	jsonOut := false
+	args := make([]string, 0, len(inv.Args))
+	for _, a := range inv.Args {
+		if a == "--json" {
+			jsonOut = true
+			continue
 		}
-		if d.RunBG == nil {
-			return commands.Exitf(inv, 1, "bg: run unavailable on this endpoint")
-		}
-		script := strings.Join(inv.Args[1:], " ")
-		sessionKey := inv.Env["AIC_VSH_SESSION"]
-		cwd := ""
-		if inv.FS != nil {
-			cwd = inv.FS.Getwd()
-		}
-		task, err := d.Tasks.Start(script, "", OwnerFromContext(ctx), func(ctx context.Context, log io.Writer) (int, error) {
-			return d.RunBG(ctx, sessionKey, script, cwd, "", log)
-		}, nil)
-		if err != nil {
-			return commands.Exitf(inv, 1, "bg: %s", err)
-		}
-		fmt.Fprintf(inv.Stdout, "%s\n", task.ID)
-		return nil
+		args = append(args, a)
+	}
+	switch args[0] {
 	case "list":
-		tasks := d.Tasks.List()
+		tasks := d.Tasks.List(owner, session)
+		if jsonOut {
+			out := make([]bgJSON, 0, len(tasks))
+			for _, t := range tasks {
+				out = append(out, taskJSON(t))
+			}
+			return writeJSON(inv, out)
+		}
 		if len(tasks) == 0 {
 			fmt.Fprintln(inv.Stdout, "(no background tasks)")
 			return nil
 		}
 		for _, t := range tasks {
-			fmt.Fprintf(inv.Stdout, "%s\t%s\texit=%d\t%s\n", t.ID, t.Status, t.ExitCode, t.Command)
+			fmt.Fprintf(inv.Stdout, "%s\t%s\texit=%d\t%s\t%s\n", t.ID, t.Status, t.ExitCode, t.LogOut, t.Command)
 		}
 		return nil
 	case "wait":
-		if len(inv.Args) < 2 {
-			return commands.Exitf(inv, 2, "usage: bg wait <id> [秒]")
+		if len(args) < 2 {
+			return commands.Exitf(inv, 2, "usage: bg wait <id> [秒] [--json]")
 		}
+		// 禁止等待自身（后台执行里的 wait 只查询——等待链不派生）。
+		if h := HandleFromContext(ctx); h != nil && h.TaskID() != "" && h.TaskID() == args[1] {
+			return commands.Exitf(inv, 2, "bg wait: cannot wait on self (%s)", args[1])
+		}
+		// 有界等待（§2.4）：实际等待 = min(指定秒数, 本次 exec 剩余前台预算
+		// 减 1 秒)；预算不足或在后台执行时（WaitBudgetRemaining ok=false）
+		// 显式秒数同样归零——只查询不阻塞（阻塞会把整单 exec 耗到转后台，
+		// 等待链反而膨胀）。同一脚本多次 wait 共用剩余预算。
 		wait := time.Duration(0)
-		if len(inv.Args) >= 3 {
-			sec, err := strconv.Atoi(inv.Args[2])
-			if err != nil {
-				return commands.Exitf(inv, 2, "bg wait: invalid seconds %q", inv.Args[2])
+		if len(args) >= 3 {
+			sec, err := strconv.Atoi(args[2])
+			if err != nil || sec < 0 {
+				return commands.Exitf(inv, 2, "bg wait: invalid seconds %q", args[2])
 			}
-			wait = time.Duration(sec) * time.Second
-		} else {
-			wait = 30 * time.Minute // 缺省等到墙钟
+			if remain, ok := WaitBudgetRemaining(ctx); ok {
+				wait = time.Duration(sec) * time.Second
+				if wait > remain {
+					wait = remain
+				}
+			}
+		} else if remain, ok := WaitBudgetRemaining(ctx); ok {
+			wait = remain
 		}
-		task, err := d.Tasks.Wait(ctx, inv.Args[1], wait)
+		task, err := d.Tasks.Wait(ctx, args[1], wait, owner, session)
 		if err != nil {
 			return commands.Exitf(inv, 1, "%s", err)
 		}
-		if out, oerr := d.Tasks.Output(inv.Args[1]); oerr == nil && out != "" {
-			fmt.Fprint(inv.Stdout, out)
+		if jsonOut {
+			if err := writeJSON(inv, taskJSON(task)); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(inv.Stdout, "%s\t%s\texit=%d\t%s\t%s\n", task.ID, task.Status, task.ExitCode, task.LogOut, task.Command)
+			if task.Err != "" {
+				fmt.Fprintf(inv.Stdout, "error: %s\n", task.Err)
+			}
 		}
-		fmt.Fprintf(inv.Stdout, "%s\t%s\texit=%d\n", task.ID, task.Status, task.ExitCode)
 		if task.Status == "running" {
-			return nil // 等待超时但任务仍在跑：退出码 0、状态透出
+			return nil // 预算到期但任务仍在跑：退出码 0、状态透出
 		}
 		if task.ExitCode != 0 {
 			return &commands.ExitError{Code: task.ExitCode}
 		}
 		return nil
-	case "output":
-		if len(inv.Args) < 2 {
-			return commands.Exitf(inv, 2, "usage: bg output <id>")
-		}
-		out, err := d.Tasks.Output(inv.Args[1])
-		if err != nil {
-			return commands.Exitf(inv, 1, "%s", err)
-		}
-		fmt.Fprint(inv.Stdout, out)
-		return nil
 	case "kill":
-		if len(inv.Args) < 2 {
+		if len(args) < 2 {
 			return commands.Exitf(inv, 2, "usage: bg kill <id>")
 		}
-		if err := d.Tasks.Kill(inv.Args[1]); err != nil {
+		if err := d.Tasks.Kill(args[1], owner, session); err != nil {
 			return commands.Exitf(inv, 1, "%s", err)
 		}
-		fmt.Fprintf(inv.Stdout, "%s killed\n", inv.Args[1])
+		fmt.Fprintf(inv.Stdout, "%s killed\n", args[1])
 		return nil
 	default:
-		return commands.Exitf(inv, 2, "bg: unknown subcommand %q\n%s", inv.Args[0], bgHelp)
+		return commands.Exitf(inv, 2, "bg: unknown subcommand %q\n%s", args[0], bgHelp)
 	}
 }
 
 const grantHelp = `usage:
   grant status                          查看各域授权姿态与规则表（只读）
-  grant fs <路径> [--permanent]        申请文件访问（默认会话级临时授权；--permanent 落盘永久生效）
-  grant net <host:port> [--permanent]  申请网络目标访问
-  grant ssh <host:port> [--permanent]  申请 SSH 目标访问（host）
-  grant cmd <命令名> [--permanent]     申请原生命令（host；授予解释器 = 授予该进程一切能力）`
+  grant fs <路径> [--permanent]        授权文件访问（默认会话级临时授权；--permanent 落盘永久生效）
+  grant net <host:port> [--permanent]  授权网络目标访问
+  grant ssh <host:port> [--permanent]  授权 SSH 目标访问（host）
+  grant cmd <命令名> [--permanent]     授权原生命令（host；授予解释器 = 授予该进程一切能力）
+
+授权修改需要服务端审批：含 grant 的脚本在发送前审批（grant_approved），
+无批准事实时本命令报 permission_denied、规则不变。`
 
 func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) error {
 	if len(inv.Args) == 0 || helpRequested(inv.Args) {
 		fmt.Fprintln(inv.Stdout, grantHelp)
 		return nil
 	}
-	// status 只读查询（analyze 只收两参字面 grant，本分支不触 4 级预检）。
+	// status 只读查询（不要求 grant_approved）。
 	if inv.Args[0] == "status" {
 		if d.GrantStatus == nil {
 			return commands.Exitf(inv, 1, "grant: 此端未接状态查询")
 		}
-		text, err := d.GrantStatus(ctx, inv.Env["AIC_VSH_SESSION"])
+		text, err := d.GrantStatus(ctx, SessionFromContext(ctx))
 		if err != nil {
 			return commands.Exitf(inv, 1, "grant status: %s", err)
 		}
 		fmt.Fprintln(inv.Stdout, text)
 		return nil
+	}
+	// grant 修改入口（唯一安全边界，§3.1）：每次实际写规则前读取可信
+	// 上下文——覆盖字面、变量拼接、命令替换、eval/source 与嵌套脚本
+	//（都执行到这里）。无批准事实直接 permission_denied，规则不变，
+	// 不暂停、不转 waiting、不重放脚本。
+	if !GrantApprovedFromContext(ctx) {
+		return commands.Exitf(inv, 126, "permission_denied: grant 修改授权需要审批——由服务端批准本次脚本（grant_approved）后重发；AI 请向用户申请批准该脚本")
 	}
 	// --permanent 任意位置生效（grant fs /x --permanent / grant --permanent fs /x）。
 	permanent := false
@@ -231,7 +280,7 @@ func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) er
 	if d.Grant == nil {
 		return commands.Exitf(inv, 1, "grant: 此端未接授权通道")
 	}
-	msg, err := d.Grant(ctx, inv.Env["AIC_VSH_SESSION"], domain, target, permanent)
+	msg, err := d.Grant(ctx, SessionFromContext(ctx), domain, target, permanent)
 	if err != nil {
 		return commands.Exitf(inv, 1, "grant %s %s: %s", domain, target, err)
 	}
@@ -252,7 +301,7 @@ func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation
 	if d.ListHosts == nil {
 		return commands.Exitf(inv, 1, "list_hosts: 此端未接主机目录")
 	}
-	text, err := d.ListHosts(ctx, inv.Env["AIC_VSH_SESSION"])
+	text, err := d.ListHosts(ctx, SessionFromContext(ctx))
 	if err != nil {
 		return commands.Exitf(inv, 1, "list_hosts: %s", err)
 	}
@@ -273,7 +322,7 @@ func (d PlatformDeps) cmdSendUser(ctx context.Context, inv *commands.Invocation)
 	if d.SendUser == nil {
 		return commands.Exitf(inv, 1, "send_user: 此端未接通知通道")
 	}
-	if err := d.SendUser(ctx, inv.Env["AIC_VSH_SESSION"], strings.Join(inv.Args, " ")); err != nil {
+	if err := d.SendUser(ctx, SessionFromContext(ctx), strings.Join(inv.Args, " ")); err != nil {
 		return commands.Exitf(inv, 1, "send_user: %s", err)
 	}
 	fmt.Fprintln(inv.Stdout, "sent")

@@ -2,16 +2,17 @@ package host
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
+// TestMalformedAuthBlocksRTCAndNATSUntilRepaired 锁定授权配置损坏的
+// fail-closed 语义：RTC（HandleTool）与 NATS（signedCall）两入口在配置
+// 修复前一律拒绝，修复后恢复。
 func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
@@ -21,14 +22,10 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	calls := 0
-	if err := c.tools.RegisterCommand(tool.DefineCommand("fixture", tool.Bind(tool.Spec{Name: "run", Access: 1}, func(context.Context, tool.Caller, struct{}) (bool, error) { calls++; return true, nil }))); err != nil {
-		t.Fatal(err)
-	}
-	writeArgs, _ := json.Marshal(map[string]any{"path": filepath.ToSlash(path), "content": "changed"})
+	marker := filepath.Join(c.options().WorkDir, "marker.txt")
 	requests := []wire.Request{
-		{Action: "call", Call: &wire.Invocation{Domain: "exec", Command: "fixture", Method: "run", Args: json.RawMessage(`{}`)}},
-		{Action: "call", Call: &wire.Invocation{Domain: "fs", Method: "text.write", Args: writeArgs}},
+		execRequest("echo ran > "+filepath.ToSlash(marker), 30000),
+		fsRequest("text.write", map[string]any{"path": filepath.ToSlash(path), "content": "changed"}),
 	}
 	for _, corrupt := range []func(){
 		func() { cfg.Global.ExecPolicy = "dney" },
@@ -42,7 +39,7 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 		cfg.Global.Normalize()
 		for _, request := range requests {
 			request.ID = wire.NewID("r_")
-			for _, response := range []wire.Response{c.HandleTool(context.Background(), testCaller(), request), signedCall(t, c, request, 9, "s1", "")} {
+			for _, response := range []wire.Response{c.HandleTool(context.Background(), testCaller(), request), signedCall(t, c, request, false, "s1", "")} {
 				if response.Error == nil || response.Error.Code != "permission_denied" {
 					t.Fatalf("damaged authorization admitted call: %+v", response)
 				}
@@ -50,19 +47,18 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 		}
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || string(data) != "original" || calls != 0 {
+	if err != nil || string(data) != "original" {
 		t.Fatal("rejected calls had side effects", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("rejected exec had side effects", err)
 	}
 	cfg.Global = cfg.NewOptions()
 	cfg.Global.FsPolicy = cfg.PolicyOpen
-	request := requests[0]
-	request.ID = wire.NewID("r_")
-	if response := c.HandleTool(context.Background(), testCaller(), request); response.Error != nil || calls != 1 {
-		t.Fatalf("repair did not restore calls: %+v", response)
+	if response := c.HandleTool(context.Background(), testCaller(), requests[0]); response.Error != nil {
+		t.Fatalf("repair did not restore exec: %+v", response)
 	}
-	request = requests[1]
-	request.ID = wire.NewID("r_")
-	if response := c.HandleTool(context.Background(), testCaller(), request); response.Error != nil {
+	if response := c.HandleTool(context.Background(), testCaller(), requests[1]); response.Error != nil {
 		t.Fatalf("repair did not restore file calls: %+v", response)
 	}
 	data, err = os.ReadFile(path)

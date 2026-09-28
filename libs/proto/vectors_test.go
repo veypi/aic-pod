@@ -9,7 +9,5 @@ const (
 	vecKServer  = "tXA-GUsQs-n0Bmmt09z7140onDlU1PCZq6qmkbpJoUE"
 	vecKTool    = "VMTmXHIBYWUnxQenEBwsqJKgDG_zZdAQXMRyksiwIIg"
 
-	vecToolReqSig = "k_47wuS-A22foxdJ4pu0j5VNdP3cS-Sp_t11_lYVNRg"
-
 	vecConnectToken = "e1.host_vec01.eyJhZ2VudF92ZXJzaW9uIjoidjAuMy4wIiwiZGV2aWNlX25hbWUiOiJuYXMtMDEiLCJkZXZpY2VfdHlwZSI6ImNsaSJ9.1767225600000.BBBBBBBBBBBBBBBBBBBBBB.1jfc9uC9K-l1-CCI48xkX0yaOgLtkhmcbxPBeDmL1JI"
 )

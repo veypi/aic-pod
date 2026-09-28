@@ -23,7 +23,7 @@ func newTestEngine(t *testing.T) *Engine {
 		t.Fatal(err)
 	}
 	e, err := NewEngine(EngineConfig{
-		// HOME=/u/{uid}、PATH 钉死（design §4.1：env 由平台每次注入）。
+		// HOME=/u/{uid}、PATH 钉死（env 由平台每次注入）。
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
 		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
 			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
@@ -36,74 +36,100 @@ func newTestEngine(t *testing.T) *Engine {
 	return e
 }
 
-// TestTaskTableCapacity 容量闸（2026-09-24 用户拍板：全局 + per-owner 上限，
-// 超额快速拒绝——bg fan-out/多会话并发 yes 可占满全部核的防线）。
+// blockHandle 构造阻塞中的执行句柄（Adopt 测试件）。
+func blockHandle() (*ExecHandle, chan struct{}) {
+	release := make(chan struct{})
+	h := NewExecHandle(func() {})
+	go func() { <-release; h.Finish(&ExecResult{ExitCode: 0}, nil) }()
+	return h, release
+}
+
+// TestTaskTableCapacity 容量闸（全局 + per-owner 上限，超额快速拒绝——
+// fan-out/多会话并发可占满全部核的防线）。Adopt 模型：登记即占容量。
 func TestTaskTableCapacity(t *testing.T) {
 	t.Parallel()
 	tt := NewTaskTableWithCaps(3, 2)
-	block := func(ctx context.Context, log io.Writer) (int, error) {
-		<-ctx.Done()
-		return 0, ctx.Err()
-	}
-	start := func(owner string) (Task, error) {
-		return tt.Start("t", "", owner, block, nil)
+	releases := map[string]chan struct{}{}
+	adopt := func(owner string) (Task, error) {
+		h, release := blockHandle()
+		task, err := tt.Adopt(h, "t", TaskMeta{Owner: owner, Session: "s1"})
+		if err == nil {
+			releases[task.ID] = release
+		}
+		return task, err
 	}
 	// per-owner=2：o1 第 3 个拒。
-	if _, err := start("o1"); err != nil {
+	if _, err := adopt("o1"); err != nil {
 		t.Fatal(err)
 	}
-	k2, err := start("o1")
+	k2, err := adopt("o1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := start("o1"); err == nil || !strings.Contains(err.Error(), "单归属") {
+	if _, err := adopt("o1"); err == nil || !strings.Contains(err.Error(), "单归属") {
 		t.Fatalf("per-owner 超额应拒: %v", err)
 	}
 	// o2 第 1 个过（此时 running=3 达全局），o2 第 2 个撞全局拒。
-	if _, err := start("o2"); err != nil {
+	if _, err := adopt("o2"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := start("o2"); err == nil || !strings.Contains(err.Error(), "全局") {
+	if _, err := adopt("o2"); err == nil || !strings.Contains(err.Error(), "全局") {
 		t.Fatalf("全局超额应拒: %v", err)
 	}
-	// kill 释放后容量恢复。
-	if err := tt.Kill(k2.ID); err != nil {
+	// kill 后执行实际结束（release）→ 容量恢复。
+	if err := tt.Kill(k2.ID, "o1", "s1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tt.Wait(context.Background(), k2.ID, 3*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := start("o1"); err != nil {
-		t.Fatalf("释放后应可启动: %v", err)
-	}
-}
-
-// TestTaskTableKillReleasesImmediately kill 即释放容量：不等 goroutine 收尾，
-// kill 后紧接着 Start 不撞 full（救场路径：杀失控任务后立刻起新任务）。
-func TestTaskTableKillReleasesImmediately(t *testing.T) {
-	t.Parallel()
-	tt := NewTaskTableWithCaps(2, 2)
-	block := func(ctx context.Context, log io.Writer) (int, error) {
-		<-ctx.Done()
-		return 0, ctx.Err()
-	}
-	k1, err := tt.Start("t", "", "o1", block, nil)
+	close(releases[k2.ID])
+	snap, err := tt.Wait(context.Background(), k2.ID, 3*time.Second, "o1", "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tt.Start("t", "", "o1", block, nil); err != nil {
+	if snap.Status != "killed" || snap.ExitCode != 130 {
+		t.Fatalf("killed 任务实际结束后应保持 killed/130: %+v", snap)
+	}
+	if _, err := adopt("o1"); err != nil {
+		t.Fatalf("释放后应可登记: %v", err)
+	}
+}
+
+// TestTaskTableKillSettlesOnCompletion kill 语义：killed 状态即时可见（kill
+// 请求已受理），但终态与容量在执行实际结束后才结算（§2.6 实际结束后才报
+// 终态；kill 后、执行未退出前容量仍反映真实在跑数量）。
+func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTableWithCaps(2, 2)
+	h1, release1 := blockHandle()
+	k1, err := tt.Adopt(h1, "t", TaskMeta{Owner: "o1", Session: "s1"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tt.Kill(k1.ID); err != nil {
+	h2, release2 := blockHandle()
+	if _, err := tt.Adopt(h2, "t", TaskMeta{Owner: "o1", Session: "s1"}); err != nil {
 		t.Fatal(err)
 	}
-	// 不 Wait、不睡觉：容量必须已同步释放。
-	if _, err := tt.Start("t", "", "o1", block, nil); err != nil {
-		t.Fatalf("kill 后应立即可补位: %v", err)
-	}
-	// 收尾后计数不双重释放（goroutine 退出时 released 已置位）。
-	if _, err := tt.Wait(context.Background(), k1.ID, 3*time.Second); err != nil {
+	defer close(release2)
+	if err := tt.Kill(k1.ID, "o1", "s1"); err != nil {
 		t.Fatal(err)
+	}
+	// killed 即时可见。
+	snap, ok := tt.Get(k1.ID, "o1", "s1")
+	if !ok || snap.Status != "killed" || snap.ExitCode != 130 {
+		t.Fatalf("kill 后快照 = %+v ok=%v", snap, ok)
+	}
+	// 执行未实际退出：容量未释放，新登记仍撞满。
+	h3, release3 := blockHandle()
+	defer close(release3)
+	if _, err := tt.Adopt(h3, "t", TaskMeta{Owner: "o1", Session: "s1"}); err == nil {
+		t.Fatal("执行未退出时容量不应提前释放")
+	}
+	// 执行实际结束 → 终态结算 + 容量释放（不双重释放）。
+	close(release1)
+	if _, err := tt.Wait(context.Background(), k1.ID, 3*time.Second, "o1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tt.Adopt(h3, "t", TaskMeta{Owner: "o1", Session: "s1"}); err != nil {
+		t.Fatalf("实际结束后应可补位: %v", err)
 	}
 	tt.mu.Lock()
 	defer tt.mu.Unlock()
@@ -112,173 +138,70 @@ func TestTaskTableKillReleasesImmediately(t *testing.T) {
 	}
 }
 
-// TestTaskTableEviction 完成任务表保留上限：超出逐出最旧（每项带 8MiB 上限
-// 缓冲，不限量累积是内存泄漏面）。
+// TestTaskTableEviction 完成任务表保留上限：超出逐出最旧。
 func TestTaskTableEviction(t *testing.T) {
 	t.Parallel()
 	tt := NewTaskTableWithCaps(16, 16)
 	tt.maxRetained = 3
-	quick := func(ctx context.Context, log io.Writer) (int, error) { return 0, nil }
 	var last Task
 	for i := 0; i < 6; i++ {
-		task, err := tt.Start("t", "", "o1", quick, nil)
+		h := NewExecHandle(func() {})
+		h.Finish(&ExecResult{ExitCode: 0}, nil)
+		// 已完成句柄不能 Adopt——先登记再完成
+		h2, release := blockHandle()
+		task, err := tt.Adopt(h2, "t", TaskMeta{Owner: "o1", Session: "s1"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tt.Wait(context.Background(), task.ID, 3*time.Second); err != nil {
+		close(release)
+		if _, err := tt.Wait(context.Background(), task.ID, 3*time.Second, "o1", "s1"); err != nil {
 			t.Fatal(err)
 		}
 		last = task
 	}
-	tasks := tt.List()
+	tasks := tt.List("o1", "s1")
 	if len(tasks) > 4 { // maxRetained 3 + 最后一个 running/finished
 		t.Fatalf("retained = %d, want <= 4", len(tasks))
 	}
 	// 最新的必须在，最旧的 bg-1/bg-2 已逐出。
-	if _, ok := tt.Get(last.ID); !ok {
+	if _, ok := tt.Get(last.ID, "o1", "s1"); !ok {
 		t.Fatalf("latest task %s evicted", last.ID)
 	}
-	if _, ok := tt.Get("bg-1"); ok {
+	if _, ok := tt.Get("bg-1", "o1", "s1"); ok {
 		t.Fatal("oldest bg-1 should be evicted")
 	}
 }
 
-// TestBGRunCapacityEndToEnd bg run 经 Exec 继承 owner 并受容量闸约束（e2e：
-// 生产表 per-owner=4，第 5 个 bg run 拒绝且报错可行动）。
-func TestBGRunCapacityEndToEnd(t *testing.T) {
+// TestConcurrentExecsDoNotBlock 每次 exec 独立会话：一个长执行不阻塞同会话
+// 另一执行（含 bg 组合脚本——不靠单指令特判，§2.4 救场要求）。
+func TestConcurrentExecsDoNotBlock(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)
 	ctx := context.Background()
-	for i := 0; i < MaxRunningTasksPerOwner; i++ {
-		res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Owner: "u:t1", Script: "bg run 'sleep 60'"})
-		if err != nil || res.ExitCode != 0 {
-			t.Fatalf("bg run #%d: %+v err=%v", i+1, res, err)
-		}
-	}
-	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Owner: "u:t1", Script: "bg run 'sleep 60'"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "task table full") {
-		t.Fatalf("第 5 个 bg run 应拒: exit=%d stderr=%q", res.ExitCode, res.Stderr)
-	}
-	// 另一 owner 不受 o1 占满影响。
-	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s2", Owner: "u:t2", Script: "bg run 'sleep 1'"})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("异 owner bg run 应过: %+v err=%v", res, err)
-	}
-}
-
-// TestBGOutput bg output 子命令：不等待直取任务捕获输出。
-func TestBGOutput(t *testing.T) {
-	t.Parallel()
-	e := newTestEngine(t)
-	ctx := context.Background()
-	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg run 'echo hello-bg'"})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("bg run: %+v err=%v", res, err)
-	}
-	tid := strings.TrimSpace(res.Stdout)
-	if _, err := e.Tasks.Wait(ctx, tid, 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg output " + tid})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Stdout, "hello-bg") {
-		t.Fatalf("bg output = %q", res.Stdout)
-	}
-}
-
-// TestIsPureBGMgmtScript 管理面快路径判定：仅单条纯 bg list/wait/kill/output
-// （或裸 bg）放行；bg run（cwd 继承依赖基会话）与一切复合/动态形态排除。
-func TestIsPureBGMgmtScript(t *testing.T) {
-	t.Parallel()
-	cases := map[string]bool{
-		"bg":                     true,
-		"bg list":                true,
-		"bg kill bg-3":           true,
-		"bg wait bg-3 5":         true,
-		"bg output bg-3":         true,
-		"  bg   kill   bg-3  ":   true,
-		"bg run 'sleep 1'":       false, // cwd 继承依赖基会话，非救场命令
-		"bg list; echo done":     false,
-		"bg list | grep bg":      false,
-		"bg list > out.txt":      false,
-		"bg kill bg-3 &":         false,
-		"echo bg list":           false,
-		"x=1 bg list":            false,
-		"bg $SUB":                false,
-		"bg kill $(cat /tmp/id)": false,
-		"grant fs /u/u1/x":       false,
-		"bg kill bg-3 # 注释":      true,
-	}
-	for script, want := range cases {
-		if got := isPureBGMgmtScript(script); got != want {
-			t.Errorf("isPureBGMgmtScript(%q) = %v, want %v", script, got, want)
-		}
-	}
-}
-
-// TestBGMgmtBypassesSessionLock 管理面快路径 e2e：基会话被长任务持锁时，
-// 纯 bg 管理命令仍即时到达执行层（2026-09-24 实测会话活锁漏洞：前台长任务
-// 超时转 bg 后仍持基会话执行锁，救场的 bg kill 排队到不了执行层）。
-func TestBGMgmtBypassesSessionLock(t *testing.T) {
-	t.Parallel()
-	e := newTestEngine(t)
-	ctx := context.Background()
-
-	// 先起一个 bg 长任务供 kill。
-	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg run 'sleep 60'"})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("bg run: %+v err=%v", res, err)
-	}
-	tid := strings.TrimSpace(res.Stdout)
-
-	// 基会话长任务持锁（模拟前台超时转 bg 后仍占位的执行，sleep 10 >> 快路径阈值）。
+	// 长执行占着（旧模型会持会话锁）
+	done := make(chan struct{})
 	go func() {
-		_, _ = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "sleep 10", LongRunning: true, Timeout: BackgroundWallClock})
+		defer close(done)
+		_, _ = e.Exec(ctx, ExecRequest{SessionKey: "s1", Owner: "u:t1", Script: "sleep 3", Timeout: BackgroundWallClock})
 	}()
-	time.Sleep(500 * time.Millisecond) // 等基会话锁被占
-
-	// kill 应即时执行（不排基会话锁），任务被杀。
+	defer func() { <-done }()
+	time.Sleep(300 * time.Millisecond)
 	start := time.Now()
-	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg kill " + tid})
+	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Owner: "u:t1", Script: "bg list | grep -c running || true"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if el := time.Since(start); el > 3*time.Second {
-		t.Fatalf("bg kill blocked %v（排在基会话锁后）", el)
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("组合脚本被长执行阻塞 %v", el)
 	}
 	if res.ExitCode != 0 {
-		t.Fatalf("bg kill exit=%d stderr=%q", res.ExitCode, res.Stderr)
-	}
-	task, err := e.Tasks.Wait(ctx, tid, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task.Status != "killed" {
-		t.Fatalf("task status = %q, want killed", task.Status)
-	}
-
-	// list 同样快路径，且能看到任务表。
-	start = time.Now()
-	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg list"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if el := time.Since(start); el > 3*time.Second {
-		t.Fatalf("bg list blocked %v", el)
-	}
-	if !strings.Contains(res.Stdout, tid) {
-		t.Fatalf("bg list missing %s: %q", tid, res.Stdout)
+		t.Fatalf("exit=%d stderr=%q", res.ExitCode, res.Stderr)
 	}
 }
 
-// TestEngineSessionKeyInContext Exec 把会话键注入 ctx（M3c：NetClient
-// per-sid 规则表与平台命令共用此通道）——平台 grant 回调应能取到。
-func TestEngineSessionKeyInContext(t *testing.T) {
+// TestEngineTrustedContext Exec 把身份与审批事实注入可信 ctx（不经 env）：
+// 平台命令经 SessionFromContext 取会话；grant 修改走 grant_approved 门。
+func TestEngineTrustedContext(t *testing.T) {
 	t.Parallel()
 	backing, err := ufs.NewLocalFS(t.TempDir())
 	if err != nil {
@@ -301,22 +224,41 @@ func TestEngineSessionKeyInContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 无批准事实：grant 被拒（permission_denied，规则不变）
 	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "sid-42", Script: "grant fs /u/u1/x"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "permission_denied") {
+		t.Fatalf("unapproved grant: exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if gotSid != "" {
+		t.Fatal("Grant called without grant_approved")
+	}
+	// env 伪造无效（脚本可修改的 AIC_VSH_* 不再携带授权）
+	res, err = e.Exec(context.Background(), ExecRequest{SessionKey: "sid-42", Script: "AIC_VSH_LEVEL=9 grant fs /u/u1/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "permission_denied") {
+		t.Fatalf("env-forged grant: exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	// 批准事实：执行；动态形态（变量拼接）也过同一入口
+	res, err = e.Exec(context.Background(), ExecRequest{SessionKey: "sid-42", GrantApproved: true, Script: "g=gra; ${g}nt fs /u/u1/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if res.ExitCode != 0 {
-		t.Fatalf("grant exit=%d stderr=%q", res.ExitCode, res.Stderr)
+		t.Fatalf("approved dynamic grant: exit=%d stderr=%q", res.ExitCode, res.Stderr)
 	}
 	if gotSid != "sid-42" {
 		t.Fatalf("SessionFromContext = %q, want sid-42", gotSid)
 	}
 }
 
-// TestCloudJailAncestorMeta 2026-09-24 实测修复回归：内建命令的祖先链走访
-// （mkdir -p 逐级 Stat、cd/ls 符号链接解析）读 jail 根祖先（/、/u）放行
-// 元数据；界外内容读写、根列表仍硬拒。mkdir 收尾 Chmod 在无权限位的 UFS
-// backing 上 noop（不假失败）。
+// TestCloudJailAncestorMeta 内建命令的祖先链走访（mkdir -p 逐级 Stat、cd/ls
+// 符号链接解析）读 jail 根祖先（/、/u）放行元数据；界外内容读写、根列表仍
+// 硬拒。mkdir 收尾 Chmod 在无权限位的 UFS backing 上 noop（不假失败）。
 func TestCloudJailAncestorMeta(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)
@@ -374,11 +316,13 @@ func TestEngineExecBasic(t *testing.T) {
 	}
 }
 
+// UFS 直通语义：落 backing 的写跨 exec/会话可见（UFS 是持久层）；
+// 内存层 per-exec 隔离（/tmp 不对其他执行可见——per-exec 会话比旧的
+// per-session 更强隔离）。
 func TestEngineSessionPersistsFS(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)
 	ctx := context.Background()
-	// UFS 直通语义：落 backing 的写跨会话可见（UFS 是持久层）。
 	if _, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "echo data > f.txt"}); err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +331,7 @@ func TestEngineSessionPersistsFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(res.Stdout) != "data" {
-		t.Fatalf("session fs not shared: %q", res.Stdout)
+		t.Fatalf("backing fs not shared: %q", res.Stdout)
 	}
 	res2, err := e.Exec(ctx, ExecRequest{SessionKey: "s2", Script: "cat f.txt"})
 	if err != nil {
@@ -396,16 +340,16 @@ func TestEngineSessionPersistsFS(t *testing.T) {
 	if strings.TrimSpace(res2.Stdout) != "data" {
 		t.Fatalf("UFS should persist across sessions: %q", res2.Stdout)
 	}
-	// 内存层 per-session 隔离（验收 7）：s1 的 /tmp 对 s2 不可见。
+	// 内存层 per-exec 隔离：同会话键的下一次 exec 也不可见（独立内存层）。
 	if _, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "echo tmp > /tmp/mem-only.txt"}); err != nil {
 		t.Fatal(err)
 	}
-	res3, err := e.Exec(ctx, ExecRequest{SessionKey: "s2", Script: "cat /tmp/mem-only.txt"})
+	res3, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "cat /tmp/mem-only.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res3.ExitCode == 0 {
-		t.Fatalf("mem layer should be per-session isolated")
+		t.Fatalf("mem layer should be per-exec isolated")
 	}
 }
 
@@ -417,7 +361,7 @@ func TestEngineRegistryHasPlatformCommands(t *testing.T) {
 			t.Fatalf("registry missing %q", name)
 		}
 	}
-	// 内建 --help 冒烟（M1 全覆盖的回归保险丝）。
+	// 内建 --help 冒烟（回归保险丝）。
 	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "ls --help >/dev/null && jq --help >/dev/null && commands | grep -q '^grant$'"})
 	if err != nil {
 		t.Fatal(err)
@@ -445,68 +389,26 @@ func TestEngineTimeoutCap(t *testing.T) {
 	}
 }
 
-func TestEngineLogTee(t *testing.T) {
+// stdio 接线：Stdout/Stderr writer 全量透传（引擎只写不创建不关闭；
+// 返回采集串不受接线影响）。
+func TestEngineLogTeeSplit(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)
-	var log strings.Builder
+	var outLog, errLog strings.Builder
 	res, err := e.Exec(context.Background(), ExecRequest{
-		SessionKey: "s1", Script: "echo teed", Log: &log,
+		SessionKey: "s1", Script: "echo teed; echo oops >&2", Stdout: &outLog, Stderr: &errLog,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(log.String(), "teed") || !strings.Contains(res.Stdout, "teed") {
-		t.Fatalf("tee broken: log=%q stdout=%q", log.String(), res.Stdout)
+	if !strings.Contains(outLog.String(), "teed") || !strings.Contains(res.Stdout, "teed") {
+		t.Fatalf("stdout tee broken: log=%q stdout=%q", outLog.String(), res.Stdout)
 	}
-}
-
-func TestEngineBGClosedLoop(t *testing.T) {
-	t.Parallel()
-	e := newTestEngine(t)
-	ctx := context.Background()
-	// bg run → list → wait 闭环（验收 6）。
-	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg run 'echo bgout; sleep 0.2'"})
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(outLog.String(), "oops") {
+		t.Fatalf("stderr leaked into stdout log: %q", outLog.String())
 	}
-	id := strings.TrimSpace(res.Stdout)
-	if !strings.HasPrefix(id, "bg-") {
-		t.Fatalf("bg run id = %q", id)
-	}
-	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg wait " + id + " 10"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Stdout, "bgout") || !strings.Contains(res.Stdout, "done") {
-		t.Fatalf("bg wait = %q", res.Stdout)
-	}
-	res, err = e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg list"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Stdout, id) {
-		t.Fatalf("bg list missing %s: %q", id, res.Stdout)
-	}
-}
-
-func TestEngineBGKill(t *testing.T) {
-	t.Parallel()
-	e := newTestEngine(t)
-	ctx := context.Background()
-	res, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg run 'sleep 60'"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := strings.TrimSpace(res.Stdout)
-	if _, err := e.Exec(ctx, ExecRequest{SessionKey: "s1", Script: "bg kill " + id}); err != nil {
-		t.Fatal(err)
-	}
-	task, err := e.Tasks.Wait(ctx, id, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task.Status != "killed" {
-		t.Fatalf("status = %s, want killed", task.Status)
+	if !strings.Contains(errLog.String(), "oops") {
+		t.Fatalf("stderr tee broken: %q", errLog.String())
 	}
 }
 
@@ -539,11 +441,10 @@ func (b chmodBacking) Chmod(name string, mode stdfs.FileMode) error {
 	return os.Chmod(filepath.Join(b.root, filepath.FromSlash(strings.TrimPrefix(name, "/"))), mode)
 }
 
-// TestHostBuiltinEchoViaStubDir P1+P2 回归：无内存层的 host 形态引擎（OS
-// backing + 规则表门）上，shell 内置名 echo 经 BuiltinCommandDir 指向真实
-// stub 目录后可解析执行（修复前默认 /bin 在 host 上不存在 → /bin/echo
-// ENOENT）；且布局初始化写出的 stub 带执行位（0644 stub 会被 PATH/type -P
-// 解析跳过）。
+// TestHostBuiltinEchoViaStubDir 无内存层的 host 形态引擎（OS backing + 规则表
+// 门）上，shell 内置名 echo 经 BuiltinCommandDir 指向真实 stub 目录后可解析
+// 执行（修复前默认 /bin 在 host 上不存在 → /bin/echo ENOENT）；且布局初始化
+// 写出的 stub 带执行位（0644 stub 会被 PATH/type -P 解析跳过）。
 func TestHostBuiltinEchoViaStubDir(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -582,5 +483,53 @@ func TestHostBuiltinEchoViaStubDir(t *testing.T) {
 	}
 	if info.Mode()&0o111 == 0 {
 		t.Fatalf("stub echo mode = %v, want executable", info.Mode())
+	}
+}
+
+// 确保 io 引用保留（blockHandle 签名）。
+var _ = io.Discard
+
+// TestShellQuoteRoundtrip 用 aic ui/assets/libs/shell_quote.js 的输出形状
+// （POSIX 单引号语义：'...' 内无转义；单引号用 '"'"' 闭合替换；良名直通）
+// 作为测试向量，断言 vsh 解析后参数原样还原、没有额外指令被执行——
+// 与 JS 侧 shell_quote.test.js 的输出形状断言互为两端（hosts-vsh-redesign
+// §5「在 vsh 中验证参数原样还原且无额外执行」）。
+func TestShellQuoteRoundtrip(t *testing.T) {
+	t.Parallel()
+	e := newTestEngine(t)
+	vectors := []struct{ raw, quoted string }{
+		{"abc", "abc"},         // 良名直通
+		{"", "''"},             // 空串
+		{"a b", "'a b'"},       // 空白
+		{"it's", `'it'"'"'s'`}, // 单引号闭合替换
+		{`a\b`, `'a\b'`},       // 反斜杠字面量
+		{"a$b", "'a$b'"},       // 变量符不展开
+		{"a`b", "'a`b'"},       // 反引号不替换
+		{"a\nb", "'a\nb'"},     // 换行
+		{"*", "'*'"},           // 通配符不展开
+		{"?", "'?'"},
+		{"[a-z]", "'[a-z]'"},
+		{"a;b", "'a;b'"}, // 分号不断句
+		{"$(touch /u/u1/pwned)", "'$(touch /u/u1/pwned)'"},                   // 命令替换不执行
+		{"x'; touch /u/u1/pwned2; '", `'x'"'"'; touch /u/u1/pwned2; '"'"''`}, // 引号逃逸闭合
+		{"中文 值", "'中文 值'"},                                                   // Unicode
+	}
+	for _, v := range vectors {
+		res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "sq", Script: "echo " + v.quoted})
+		if err != nil {
+			t.Fatalf("quoted %q: %v", v.quoted, err)
+		}
+		got := strings.TrimSuffix(res.Stdout, "\n")
+		if res.ExitCode != 0 || got != v.raw {
+			t.Fatalf("quoted %q: exit=%d stdout=%q want %q (stderr %q)", v.quoted, res.ExitCode, got, v.raw, res.Stderr)
+		}
+	}
+	// 危险向量不得产生副作用
+	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "sq", Script: "ls /u/u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Stdout, "pwned") {
+		t.Fatalf("quoted vectors executed side effects: %q", res.Stdout)
 	}
 }

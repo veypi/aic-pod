@@ -1,27 +1,31 @@
 package host
 
-// engine_vsh.go 是 host 端 vsh 引擎装配（design §4.2 + todo 3.1.3）：
-// script 经 dispatch execCmd 的 script 分支进入，pod 侧引擎执行。
+// engine_vsh.go 是 host 端 vsh 引擎装配（hosts-vsh-redesign §2）：
+// exec 动作的 script 经 dispatch 进入，pod 侧引擎执行。
 //
 // 策略同源（一套策略源、两种执行机制）：
 //   - 进程内（内建命令/重定向/管道）→ fs_host 适配器 + fsauth.Snapshot(sid)
 //     的 vbox 表门（first-wins 行序：temp→cfg→builtin deny→便利根）；
-//   - 原生子进程 → native 白名单包装器 → exec_procs OS 沙箱（per-call 按当次
-//     策略生成，fail-closed）；
-//   - 网络 → NetClient 对接 netauth.SnapshotVbox（按 ctx 会话键取快照，
-//     M3c per-session 修复；host 不做私网阻断——LAN 访问是合法场景，
-//     AllowPrivate=true）。
+//   - 原生子进程 → native 兜底合成（OpenLookup）+ 执行期规则检查 →
+//     exec_procs OS 沙箱（per-call 按当次策略生成，fail-closed）；
+//   - 网络 → NetClient 对接 netauth.SnapshotVbox（按 ctx 会话键取快照；
+//     host 不做私网阻断——LAN 访问是合法场景，AllowPrivate=true）。
 //
-// 记录在案的设计偏差（详见 §4.2/§4.3）：
+// 可信上下文：grant_approved/nosandbox/归属全部经引擎注入的可信 ctx 传递，
+// 不从脚本可修改的 argv/env 读取；grant 修改入口由引擎内 grant 命令检查
+// GrantApprovedFromContext（pod 唯一审批边界）。
+//
+// 记录在案的设计偏差：
 //  1. stub 目录用进程级 {session_root}/.vsh-host/bin 而非 {sid}/bin——引擎
 //     布局初始化（stub 写入、HOME MkdirAll）吃 Runtime 级 BaseEnv（NewSession
-//     时无 sid 上下文），per-sid 目录需 fork 补丁，违背零补丁红线；D14
-//     registry 优先下同名文件无法 shadow 平台命令，安全性等价。
-//  2. exec_procs 的授权复核（revoke 杀运行中任务）在引擎任务表下不保留——
-//     bg 由引擎 TaskTable 统一承接（30min 墙钟到期 124）。
+//     时无 sid 上下文），per-sid 目录需 fork 补丁，违背零补丁红线；registry
+//     优先下同名文件无法 shadow 平台命令，安全性等价。
+//  2. exec_procs 的授权复核（revoke 杀运行中任务）不保留——bg 由引擎任务表
+//     统一承接（30min 墙钟到期 124）。
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	stdfs "io/fs"
@@ -35,11 +39,13 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/aic-pod/libs/execwait"
 	"github.com/veypi/aic-pod/libs/fsauth"
+	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/proto"
 	vshglue "github.com/veypi/aic-pod/libs/vsh"
+	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 	"github.com/veypi/vbox"
-	"github.com/veypi/vsh/commands"
 	gbfs "github.com/veypi/vsh/fs"
 )
 
@@ -51,17 +57,17 @@ type vshState struct {
 	err    error
 }
 
-// vshEngine 取或建 host 引擎（Runtime 单例 per pod 进程）。
-func (c *Client) vshEngine() (*vshglue.Engine, *vshglue.NativeRegistry, error) {
+// engine 取或建 host 引擎（Runtime 单例 per pod 进程）。
+func (c *Client) engine() (*vshglue.Engine, error) {
 	c.vsh.once.Do(func() {
 		c.vsh.engine, c.vsh.native, c.vsh.err = c.buildVSHEngine()
 	})
-	return c.vsh.engine, c.vsh.native, c.vsh.err
+	return c.vsh.engine, c.vsh.err
 }
 
 // hostCanonical 把 OS 原生路径转为引擎可见规范形（windows = /c/… 类 Linux
-// 形，2026-09-24 全局统一；posix 恒等）。引擎只看规范形——PATH 按 : 切分
-// 不吃盘符、绝对性判定只看 / 前缀，均不感知盘符。
+// 形，全局统一；posix 恒等）。引擎只看规范形——PATH 按 : 切分不吃盘符、
+// 绝对性判定只看 / 前缀，均不感知盘符。
 func hostCanonical(p string) string {
 	return proto.NormalizeHostPath(filepath.ToSlash(p))
 }
@@ -96,11 +102,10 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 		Manager: c.procs,
 		Policy:  c.nativePolicy,
 		// 引擎 cwd 是规范形（win = /c/…）——原生进程启动需 OS 路径。
-		Workdir: func(invCwd string) string { return proto.HostPathToOS(invCwd) },
+		Workdir:      func(invCwd string) string { return proto.HostPathToOS(invCwd) },
+		SessionAllow: c.sessionCmdGrant,
 	})
-	// 种子白名单 = cfg exec_allow（design §4.2；不含 shell/解释器由配置侧
-	// 约束——todo 3.6.2 核对）。exec_policy/exec_deny 同步进 native 门
-	// （open 姿态的解析兜底经 NativeFallback 进引擎）。
+	// 种子白名单 = cfg exec_allow（规则数据，不是注册动作）。
 	auth := cfg.AuthSnapshot()
 	native.Seed(auth.ExecAllow...)
 	native.SetPolicy(auth.ExecPolicy == cfg.PolicyOpen, auth.ExecDeny)
@@ -117,7 +122,7 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			return fsys, hostCanonical(c.options().WorkDir), nil
 		},
 		Network: vshglue.NewNetClient(vshglue.NetClientConfig{
-			AllowPrivate: true, // host LAN 合法（2.4.3：私网阻断仅 cloud）
+			AllowPrivate: true, // host LAN 合法（私网阻断仅 cloud）
 			Rules: func(ctx context.Context) vbox.NetRuleSet {
 				return c.netPol.SnapshotVbox(vshglue.SessionFromContext(ctx))
 			},
@@ -127,6 +132,23 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			GrantStatus: c.vshGrantStatus,
 			// ListHosts/SendUser：host 端无主机目录与通知通道（命令存在，
 			// 执行给可读报错——零值降级语义）。
+			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令。
+			Discoverable: func(name string) bool {
+				switch name {
+				case "commands", "bg", "grant", "browser", "cua":
+					return true
+				}
+				return false
+			},
+		},
+		// 虚拟指令执行规则门：browser/cua 按 cfg exec 域检查（exec_policy/
+		// exec_deny/exec_allow + 会话 grant）；内建与平台基础设施指令放行
+		//（它们是 shell 本身，旧模型同样不受 exec 域约束）。
+		CommandAllow: func(ctx context.Context, name string) bool {
+			if name == "browser" || name == "cua" {
+				return c.execAllowed(vshglue.SessionFromContext(ctx), name)
+			}
+			return true
 		},
 		// Runtime 级布局环境：stub 写入目标 = PATH 目录（须在规则表可写区，
 		// 进程级 stub 根位于会话区便利根之下）。引擎可见路径一律规范形。
@@ -138,15 +160,19 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 		// 内置名（echo/bg/help…）重写后的 stub 解析目录 = host stub bin：vsh
 		// 默认 /bin 只适用于有内存层的 cloud；host 无内存层必须显式指向。
 		BuiltinCommandDir: hostCanonical(stubBin),
-		// exec_policy: open 的未注册名兜底（白名单姿态下 OpenLookup 恒 false）。
+		// 原生不逐个注册：Registry 未命中经 OpenLookup 合成，执行期规则检查。
 		NativeFallback: native.OpenLookup,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	// native 白名单注册进引擎 Registry（白名单外命令 = 引擎 127）。
-	if err := native.RegisterInto(engine.Registry()); err != nil {
-		return nil, nil, fmt.Errorf("vsh host: register native: %w", err)
+	// browser/cua 注册为 vsh 指令（§2.2）：caller 由可信 ctx 构造（owner/
+	// session/grant_approved），诊断走 stderr、--json 契约走 stdout。
+	if err := engine.Registry().Register(c.browser.VshCommand(vshglue.CallerFromContext)); err != nil {
+		return nil, nil, fmt.Errorf("vsh host: register browser: %w", err)
+	}
+	if err := engine.Registry().Register(c.cua.VshCommand(vshglue.CallerFromContext)); err != nil {
+		return nil, nil, fmt.Errorf("vsh host: register cua: %w", err)
 	}
 	return engine, native, nil
 }
@@ -164,7 +190,7 @@ func repairStubExecBits(stubBin string) {
 }
 
 // vshGrantStatus 是 grant status 的执行体：四域姿态 + 规则表 + 会话级
-// 临时授权（只读——analyze 只收两参字面 grant，status 不触 4 级预检）。
+// 临时授权（只读，不要求 grant_approved）。
 func (c *Client) vshGrantStatus(ctx context.Context, sessionKey string) (string, error) {
 	a := cfg.AuthSnapshot()
 	var b strings.Builder
@@ -172,20 +198,11 @@ func (c *Client) vshGrantStatus(ctx context.Context, sessionKey string) (string,
 	fmt.Fprintf(&b, "exec_policy: %s", a.ExecPolicy)
 	fmt.Fprintf(&b, "\nexec_deny (%d): %s", len(a.ExecDeny), strings.Join(a.ExecDeny, " "))
 	fmt.Fprintf(&b, "\nexec_allow (%d): %s", len(a.ExecAllow), strings.Join(a.ExecAllow, " "))
-	if c.vsh.native != nil {
-		seeded := map[string]bool{}
-		for _, n := range a.ExecAllow {
-			seeded[n] = true
-		}
-		session := []string{}
-		for _, n := range c.vsh.native.Names() {
-			if !seeded[n] {
-				session = append(session, n)
-			}
-		}
-		sort.Strings(session)
-		fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
-	}
+	c.execGrantMu.RLock()
+	session := append([]string(nil), c.execGrants[sessionKey]...)
+	c.execGrantMu.RUnlock()
+	sort.Strings(session)
+	fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
 	// fs 域
 	fmt.Fprintf(&b, "\n\nfs_policy: %s", a.FsPolicy)
 	rows := c.policy.Rules()
@@ -215,11 +232,11 @@ func (c *Client) vshGrantStatus(ctx context.Context, sessionKey string) (string,
 	return b.String(), nil
 }
 
-// vshGrant 是引擎内 grant 命令的执行体（审批已在服务端完成——脚本含字面
-// grant → 恒 4 级；此处只执行授权动作）。复用 grant.go 的成熟实现：
-// fs/net/ssh 域 temp 授权（temp 行插表头、首命中压一切——DenyHit 拒批已按
-// 2.7.4 删除）或 --permanent 落盘；cmd 域扩充 native 白名单并即时注册
-// （--permanent 追加 exec_allow 落盘）。
+// vshGrant 是引擎内 grant 命令的执行体（grant_approved 检查已在引擎内
+// grant 命令完成——pod 唯一审批边界；此处只执行授权动作）：
+// fs/net/ssh 域 temp 授权（temp 行插表头、首命中压一切）或 --permanent
+// 落盘；cmd 域会话级记入 execGrants（native IsAllowed 经 SessionAllow
+// 即时生效），--permanent 追加 exec_allow 落盘。
 func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
 	sid := sessionKey
 	switch domain {
@@ -236,7 +253,6 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		}
 		return resp.Content, nil
 	case "ssh":
-		// ssh 域授权入 sshPol（执行面 = 免沙箱内置通道，随 ssh 工具重建另接）。
 		resp := c.grantTarget(sid, "", "ssh", target, permanent)
 		if resp.Error != "" {
 			return "", fmt.Errorf("%s", resp.Error)
@@ -247,29 +263,36 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		if name == "" || strings.ContainsAny(name, "/\\ \t") {
 			return "", fmt.Errorf("grant cmd: invalid command name %q", target)
 		}
-		eng, native, err := c.vshEngine()
-		if err != nil {
-			return "", err
-		}
-		native.Allow(name)
-		if err := native.Register(eng.Registry(), name); err != nil {
-			return "", err
-		}
 		if permanent {
 			if err := c.persistGrant("exec", name); err != nil {
 				return "", fmt.Errorf("grant cmd: persist: %w", err)
 			}
 			return fmt.Sprintf("granted cmd: %s（scope=permanent，已追加 exec_allow 落盘；注意：授予解释器 = 授予该进程一切能力）", name), nil
 		}
-		return fmt.Sprintf("granted cmd: %s（注意：授予解释器 = 授予该进程一切能力）", name), nil
+		c.execGrantMu.Lock()
+		c.execGrants[sid] = append(c.execGrants[sid], name)
+		c.execGrantMu.Unlock()
+		return fmt.Sprintf("granted cmd: %s（scope=session，重启失效；注意：授予解释器 = 授予该进程一切能力）", name), nil
 	default:
 		return "", fmt.Errorf("grant: host 支持 fs/net/ssh/cmd 域")
 	}
 }
 
-// fsSandboxRules 把 fs 域有序规则表映射为沙箱行序快照（M3 行序映射输入）：
-// 与工具层判定同源（builtin + cfg 拼接序）；darwin 按表序输出，
-// 其余平台消费 deny/writeAllow 字段不受影响。
+// sessionCmdGrant 是 native IsAllowed 的会话级规则 hook（grant cmd 会话授权）。
+func (c *Client) sessionCmdGrant(sid, name string) bool {
+	c.execGrantMu.RLock()
+	defer c.execGrantMu.RUnlock()
+	for _, n := range c.execGrants[sid] {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// fsSandboxRules 把 fs 域有序规则表映射为沙箱行序快照：与工具层判定同源
+// （builtin + cfg 拼接序）；darwin 按表序输出，其余平台消费 deny/writeAllow
+// 字段不受影响。
 func fsSandboxRules(p *fsauth.Policy) []exec_procs.SandboxRule {
 	rows := p.Rules()
 	out := make([]exec_procs.SandboxRule, 0, len(rows))
@@ -279,13 +302,12 @@ func fsSandboxRules(p *fsauth.Policy) []exec_procs.SandboxRule {
 	return out
 }
 
-// nativePolicy 是 native 包装器的当次策略快照（sid/level 经 inv.Env 透传）。
-func (c *Client) nativePolicy(inv *commands.Invocation) vshglue.NativePolicy {
-	sid := inv.Env["AIC_VSH_SESSION"]
-	lvl, _ := strconv.Atoi(inv.Env["AIC_VSH_LEVEL"])
+// nativePolicy 是 native 包装器的当次策略快照：会话与免沙箱全部经可信
+// ctx 取（引擎注入），不读脚本可修改的 env。
+func (c *Client) nativePolicy(ctx context.Context, cwd string) vshglue.NativePolicy {
+	sid := vshglue.SessionFromContext(ctx)
 	deny, allow := c.netPol.Snapshot(sid)
 	return vshglue.NativePolicy{
-		Level:        lvl,
 		WriteRoots:   c.policy.WriteRootsFor(sid),
 		DenyPaths:    c.policy.DenyPatterns(),
 		SandboxRules: fsSandboxRules(c.policy),
@@ -293,42 +315,29 @@ func (c *Client) nativePolicy(inv *commands.Invocation) vshglue.NativePolicy {
 		NetOpen:      c.netPol.OpenMode(),
 		NetDeny:      deny,
 		NetAllow:     allow,
-		NoSandbox:    inv.Env["AIC_VSH_NOSANDBOX"] == "1",
+		NoSandbox:    vshglue.NoSandboxFromContext(ctx),
 	}
 }
 
-// --- dispatch execCmd 的 script 分支（todo 3.1.3） ---
+// --- exec 动作的统一外层（§2.4 前台等待/超时登记 + §2.5 统一日志） ---
 
-// execScriptParams 是新 exec 工具的下发载荷（{script, workdir?, timeout?, stdin?, nosandbox?}）。
-type execScriptParams struct {
-	Script    string `json:"script"`
-	Workdir   string `json:"workdir,omitempty"`
-	Timeout   int    `json:"timeout,omitempty"` // 等待上限（秒）；任务本身有 30min 独立墙钟
-	Stdin     string `json:"stdin,omitempty"`
-	NoSandbox bool   `json:"nosandbox,omitempty"`
-}
-
-// execScript 执行 script：analyze 预检（grant 恒 4 级纵深）→ 引擎执行 →
-// 超时转 bg（任务表独立墙钟，不取消 ctx）。输出契约：Content = stdout 前
-// 1000 行；attrs exit_code/background/output（.exec/{short}.log 全量 tee；
-// id 仅在 background=true 时作为后台句柄携带）。
-func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequest, p execScriptParams) *proto.ToolResponse {
-	if strings.TrimSpace(p.Script) == "" {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: script is required"}
+// execScript 执行 script：execwait 编排（后台墙钟运行 + 前台等待；NATS 超时
+// Adopt 转后台，RTC 超时返回 deadline_exceeded 不转 bg）。输出契约：NATS
+// （AI 消费）content=stdout 前 1000 行预览（截断置 truncated）；RTC 直连
+// 全量 content+attrs（不截断、无 truncated 标记）。attrs 恒含
+// action/output/error_output，完成时含 exit_code（stderr 预览按需），转
+// 后台含 background/id。日志 = .exec/{short}.stdout.log / .stderr.log 双流
+// 全量；FS 写审计追加进 stderr 日志（不污染 stdout 契约）；日志创建失败
+// 是明确错误（不静默降级）。
+func (c *Client) execScript(ctx context.Context, caller tool.Caller, reqID string, p *wire.ExecPayload) (*wire.ExecResult, error) {
+	if p == nil || strings.TrimSpace(p.Script) == "" {
+		return nil, wire.Fail("invalid_argument", "exec: script is required")
 	}
-	engine, _, err := c.vshEngine()
+	engine, err := c.engine()
 	if err != nil {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: engine: " + err.Error()}
+		return nil, wire.Fail("internal", "exec: engine: "+err.Error())
 	}
-	// analyze 预检（语法错直接返回；grant 恒 4 级——服务端已审批，此处纵深）。
-	analysis := vshglue.Analyze(p.Script, nil)
-	if analysis.SyntaxError != "" {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
-			Error: "exec: syntax error: " + analysis.SyntaxError}
-	}
-	if len(analysis.GrantRequests) > 0 && req.GrantedLevel < 4 {
-		return reject(req.MsgID, "exec: script contains grant — requires approval (level 4)")
-	}
+	sid := caller.Origin
 
 	workdir := p.Workdir
 	if workdir == "" {
@@ -337,15 +346,20 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 		workdir = proto.NormalizeHostPath(workdir)
 	}
 	if err := c.ensureSessionWorkDir(sid); err != nil {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: err.Error()}
+		return nil, wire.Fail("internal", err.Error())
 	}
-	logPath := c.execLogPath(sid, req.MsgID)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: prepare log: " + err.Error()}
+	logOut, logErr := c.execLogPaths(sid, reqID)
+	if err := os.MkdirAll(filepath.Dir(logOut), 0o700); err != nil {
+		return nil, wire.Fail("internal", "exec: prepare log: "+err.Error())
 	}
-	logFile, err := os.Create(logPath)
+	outFile, err := os.Create(logOut)
 	if err != nil {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: open log: " + err.Error()}
+		return nil, wire.Fail("internal", "exec: open log: "+err.Error())
+	}
+	errFile, err := os.Create(logErr)
+	if err != nil {
+		_ = outFile.Close()
+		return nil, wire.Fail("internal", "exec: open log: "+err.Error())
 	}
 
 	env := map[string]string{
@@ -355,95 +369,171 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 	if home, herr := os.UserHomeDir(); herr == nil {
 		env["HOME"] = hostCanonical(home)
 	}
-	if p.NoSandbox {
-		env["AIC_VSH_NOSANDBOX"] = "1"
-	}
 	var stdin io.Reader
 	if p.Stdin != "" {
 		stdin = strings.NewReader(p.Stdin)
 	}
 
-	var res *vshglue.ExecResult
-	var runErr error
-	task, err := engine.Tasks.Start(p.Script, logPath, "host", func(runCtx context.Context, taskLog io.Writer) (int, error) {
-		res, runErr = engine.Exec(runCtx, vshglue.ExecRequest{
-			SessionKey:   sid,
-			Owner:        "host",
-			Script:       p.Script,
-			WorkDir:      workdir,
-			Env:          env,
-			GrantedLevel: req.GrantedLevel,
-			Stdin:        stdin,
-			Timeout:      vshglue.BackgroundWallClock,
-			LongRunning:  true,
-			// 同时喂任务表捕获缓冲（bg output 可见，同 cloud 侧修复）。
-			Log: io.MultiWriter(logFile, taskLog),
-		})
-		if runErr != nil {
-			return 1, runErr
-		}
-		return res.ExitCode, nil
-	}, nil)
-	if err != nil {
-		_ = logFile.Close()
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: " + err.Error()}
-	}
+	// 取消登记表：cancel(request_id) 与转后台后的 bg kill 共用此句柄。
+	// 归属统一从 caller.Subject 派生（与 cancelExec 的归属检查同源——
+	// NATS 信封 Caller 与 RTC 票据 Subject 都是已认证用户身份；不能用
+	// 设备属主 c.uid，否则跨用户归属判定与任务表脱节）。
+	h := vshglue.NewExecHandle(nil)
+	c.trackExec(reqID, caller.Subject, sid, caller.ConnectionID, h)
 
-	wait := time.Duration(p.Timeout) * time.Second
-	if wait <= 0 || wait > vshglue.MaxForegroundTimeout {
-		wait = vshglue.MaxForegroundTimeout
+	wait := time.Duration(p.WaitMS) * time.Millisecond
+	outcome := execwait.Execute(ctx, engine, vshglue.ExecRequest{
+		SessionKey:    sid,
+		Owner:         caller.Subject,
+		Script:        p.Script,
+		WorkDir:       workdir,
+		Env:           env,
+		GrantApproved: caller.GrantApproved,
+		NoSandbox:     p.NoSandbox,
+		Stdin:         stdin,
+		Stdout:        outFile,
+		Stderr:        errFile,
+		Handle:        h,
+	}, wait, vshglue.TaskMeta{
+		Owner: caller.Subject, Session: sid, RequestID: reqID,
+		LogOut: logOut, LogErr: logErr,
+		// 转后台（bg）只服务 NATS/AI 通道；RTC 直连等待超时返回
+		// ErrWaitElapsed——执行继续、不产生 bg 记录。
+	}, !caller.AllowStreams)
+
+	attrs := map[string]string{"action": "exec", "output": logOut, "error_output": logErr}
+	if errors.Is(outcome.Err, execwait.ErrWaitElapsed) {
+		// RTC 直连等待超时：执行继续（保留取消登记——cancel(request_id)
+		// 与 DisconnectTools 仍可终止）；日志在实际结束时关闭。
+		go func() {
+			<-h.Done()
+			auditWrites(errFile, h)
+			_ = outFile.Close()
+			_ = errFile.Close()
+		}()
+		return &wire.ExecResult{
+			Content: fmt.Sprintf("execution still running; output: %s（cancel(request_id) 可终止）", logOut),
+			Attrs:   attrs,
+		}, wire.Fail("deadline_exceeded", "exec: wait elapsed; execution continues (cancel to stop)")
 	}
-	done, werr := engine.Tasks.Wait(ctx, task.ID, wait)
-	if werr != nil {
-		_ = logFile.Close()
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: "exec: " + werr.Error()}
-	}
-	attrs := map[string]string{"action": "exec", "output": logPath}
-	if done.Status == "running" {
-		// 超时转 bg：任务继续（独立墙钟），本次返回执行句柄。
+	if outcome.Background {
+		// 超时转 bg：任务继续（独立墙钟）；日志文件在执行结束时关闭。
+		// 后台执行的取消走任务表 Kill（RequestID 关联）——从取消登记表
+		// 摘除，DisconnectTools 只影响前台执行（断线/停止等待不是取消）。
+		c.untrackExec(reqID)
 		attrs["background"] = "true"
-		attrs["id"] = task.ID
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
-			Content: fmt.Sprintf("execution backgrounded (id=%s); output: %s", task.ID, logPath),
-			Attrs:   attrs}
+		attrs["id"] = outcome.Task.ID
+		go func() {
+			<-h.Done()
+			auditWrites(errFile, h)
+			_ = outFile.Close()
+			_ = errFile.Close()
+		}()
+		return &wire.ExecResult{
+			Content: fmt.Sprintf("execution backgrounded (id=%s); output: %s", outcome.Task.ID, logOut),
+			Attrs:   attrs,
+		}, nil
 	}
-	// FS 写审计随 .exec 日志落行（todo 3.1.5）。
-	if res != nil && len(res.Writes) > 0 {
-		fmt.Fprintf(logFile, "\n# vsh fs writes (%d):\n", len(res.Writes))
-		for _, w := range res.Writes {
-			fmt.Fprintf(logFile, "#   %s\n", w)
+	// 容量不足取消（转后台登记失败，§2.4）：h.Cancel 是异步的，执行
+	// goroutine 仍在收尾写日志——与转后台路径一致，日志由实际执行结束
+	// 时关闭；错误响应仍携带本次执行已创建的日志地址（Reply 保留
+	// Result）。错误码用资源类 overloaded（与连接/页面/排队上限同码）。
+	if errors.Is(outcome.Err, execwait.ErrCapacity) {
+		go func() {
+			<-h.Done()
+			auditWrites(errFile, h)
+			_ = outFile.Close()
+			_ = errFile.Close()
+		}()
+		err := wire.Fail("overloaded", "exec: "+outcome.Err.Error())
+		if outcome.Result == nil {
+			return &wire.ExecResult{Attrs: attrs}, err
 		}
+		return execResultResponse(outcome.Result, attrs, caller.AllowStreams), err
 	}
-	_ = logFile.Close()
-	if runErr != nil {
-		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError,
-			Error: "exec: " + runErr.Error(), Attrs: attrs}
-	}
-	content := ""
-	exitCode := 1
-	if res != nil {
-		exitCode = res.ExitCode
-		content = firstLines(res.Stdout, 1000)
-		if res.Stderr != "" {
-			attrs["stderr"] = firstLines(res.Stderr, 100)
+	// 调用方 ctx 结束（传输断连/前台预算到期，§2.6）：断线不是取消——
+	// 停止等待但执行继续（取消登记保留），日志在实际执行结束时关闭。
+	if errors.Is(outcome.Err, context.Canceled) || errors.Is(outcome.Err, context.DeadlineExceeded) {
+		go func() {
+			<-h.Done()
+			auditWrites(errFile, h)
+			_ = outFile.Close()
+			_ = errFile.Close()
+		}()
+		if outcome.Result == nil {
+			return &wire.ExecResult{Attrs: attrs}, outcome.Err
 		}
-		if res.StdoutTruncated || res.StderrTruncated {
-			attrs["truncated"] = "true"
-		}
+		return execResultResponse(outcome.Result, attrs, caller.AllowStreams), outcome.Err
 	}
-	attrs["exit_code"] = strconv.Itoa(exitCode)
-	return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateCompleted,
-		Content: content, Attrs: attrs}
+	// 前台完成（执行错误）：写审计并关闭日志。
+	auditWrites(errFile, h)
+	_ = outFile.Close()
+	_ = errFile.Close()
+	if outcome.Err != nil {
+		if outcome.Result == nil {
+			return &wire.ExecResult{Attrs: attrs}, wire.Fail("internal", "exec: "+outcome.Err.Error())
+		}
+		// 执行完成但引擎层报错：结果与错误一并带出（Reply 保留 Result）。
+		res := execResultResponse(outcome.Result, attrs, caller.AllowStreams)
+		return res, wire.Fail("internal", "exec: "+outcome.Err.Error())
+	}
+	res := outcome.Result
+	if res == nil {
+		return nil, wire.Fail("internal", "exec: no result")
+	}
+	return execResultResponse(res, attrs, caller.AllowStreams), nil
 }
 
-// firstLines 截取前 n 行。
-func firstLines(s string, n int) string {
+// execResultResponse 构造完成响应（§3.1 统一输出形状）：attrs 恒含
+// action/output/error_output/exit_code。输出策略按通道分：
+//   - NATS（AI 消费）：有界预览——content=stdout 前 1000 行、attrs.stderr
+//     前 100 行；任一截断（行/引擎采集）置 truncated，全量经
+//     attrs.output/error_output 日志读取。
+//   - RTC 直连（viewer 等非 AI 消费）：全量 content+attrs——不截断、
+//     不转后台、没有 truncated 标记；更多数据（完整日志）经 fs 调用读取。
+func execResultResponse(res *vshglue.ExecResult, attrs map[string]string, rtcFull bool) *wire.ExecResult {
+	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
+	if rtcFull {
+		if res.Stderr != "" {
+			attrs["stderr"] = res.Stderr
+		}
+		return &wire.ExecResult{Content: res.Stdout, Attrs: attrs}
+	}
+	truncated := res.StdoutTruncated || res.StderrTruncated
+	content, cut := headLines(res.Stdout, 1000)
+	truncated = truncated || cut
+	if res.Stderr != "" {
+		errHead, errCut := headLines(res.Stderr, 100)
+		attrs["stderr"] = errHead
+		truncated = truncated || errCut
+	}
+	if truncated {
+		attrs["truncated"] = "true"
+	}
+	return &wire.ExecResult{Content: content, Attrs: attrs}
+}
+
+// auditWrites 把 FS 写审计追加进 stderr 日志（诊断信息——不污染 stdout
+// 日志的 --json/管道契约；与执行输出同档持久）。
+func auditWrites(errLog *os.File, h *vshglue.ExecHandle) {
+	res, _ := h.Result()
+	if res == nil || len(res.Writes) == 0 {
+		return
+	}
+	fmt.Fprintf(errLog, "\n# vsh fs writes (%d):\n", len(res.Writes))
+	for _, w := range res.Writes {
+		fmt.Fprintf(errLog, "#   %s\n", w)
+	}
+}
+
+// headLines 截取前 n 行；发生截取时返回 truncated=true。
+func headLines(s string, n int) (string, bool) {
 	if n <= 0 || s == "" {
-		return s
+		return s, false
 	}
 	lines := strings.SplitAfter(s, "\n")
 	if len(lines) <= n {
-		return s
+		return s, false
 	}
-	return strings.Join(lines[:n], "")
+	return strings.Join(lines[:n], ""), true
 }

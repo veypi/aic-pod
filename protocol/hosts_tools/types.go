@@ -1,4 +1,10 @@
 // Package hosts_tools defines the transport-independent tool contract.
+//
+// hosts_tools/2（hosts-vsh-redesign §4.1）：请求只携带完整脚本或数据面调用，
+// 不再注册业务命令。action 只有三种：
+//   - exec：执行完整 vsh 脚本（ExecPayload）；
+//   - fs：数据面文件调用（FSInvocation，直达 FS 服务）；
+//   - cancel：按 request_id 取消一次执行（与 bg kill 共用取消句柄）。
 package hosts_tools
 
 import (
@@ -12,78 +18,58 @@ import (
 	"regexp"
 )
 
-const Protocol = "hosts_tools/1"
+const Protocol = "hosts_tools/2"
 const MaxMessageBytes = 1 << 20
 
-type Mode string
-
+// 请求动作（每个 action 只接受对应载荷）。
 const (
-	Call   Mode = "call"
-	Stream Mode = "stream"
+	ActionExec   = "exec"
+	ActionFS     = "fs"
+	ActionCancel = "cancel"
 )
 
-type AccessRule struct {
-	Field  string `json:"field"`
-	Equals string `json:"equals"`
-	Level  int    `json:"level"`
-}
-type Method struct {
-	Background  bool            `json:"background,omitempty"`
-	AccessRules []AccessRule    `json:"access_rules,omitempty"`
-	Name        string          `json:"name"`
-	Mode        Mode            `json:"mode"`
-	Description string          `json:"description,omitempty"`
-	Input       json.RawMessage `json:"input,omitempty"`
-	Output      json.RawMessage `json:"output,omitempty"`
-	Access      int             `json:"access"`
-	CLI         string          `json:"cli,omitempty"`
-	Positionals []string        `json:"positionals,omitempty"`
-}
-type Command struct {
-	Desc          string   `json:"desc,omitempty"`
-	Help          string   `json:"help,omitempty"`
-	RequiredLevel int      `json:"level"`
-	RawArgv       bool     `json:"raw_argv,omitempty"`
-	Name          string   `json:"name"`
-	Methods       []Method `json:"methods"`
-}
-type Catalog struct {
-	FS   []Method `json:"fs"`
-	Exec struct {
-		Epoch    string    `json:"epoch,omitempty"`
-		Commands []Command `json:"commands"`
-	} `json:"exec"`
-}
-
-// CatalogQuery requests one complete capability declaration; omitted means a lightweight index.
-type CatalogQuery struct {
-	Domain  string `json:"domain"`
-	Command string `json:"command,omitempty"`
-}
-
-type Invocation struct {
-	Domain  string          `json:"domain"`
-	Command string          `json:"command,omitempty"`
-	Method  string          `json:"method"`
-	Args    json.RawMessage `json:"args"`
-}
-
-// Request has no business session, operation or resource identity.
+// Request 是一条传输无关的工具请求。
 type Request struct {
-	Catalog   *CatalogQuery     `json:"catalog,omitempty"`
-	Protocol  string            `json:"protocol"`
-	ID        string            `json:"request_id"`
-	Action    string            `json:"action"`
-	Call      *Invocation       `json:"call,omitempty"`
-	Argv      []string          `json:"argv,omitempty"`
-	Execution *ExecutionOptions `json:"execution,omitempty"`
-	TimeoutMS int64             `json:"timeout_ms,omitempty"`
-	CancelID  string            `json:"cancel_id,omitempty"`
-	Ticket    string            `json:"ticket,omitempty"`
+	Protocol string `json:"protocol"`
+	ID       string `json:"request_id"`
+	Action   string `json:"action"`
+	// Exec 是 action=exec 的载荷：完整脚本与执行选项。
+	Exec *ExecPayload `json:"exec,omitempty"`
+	// FS 是 action=fs 的载荷：数据面方法调用。
+	FS *FSInvocation `json:"fs,omitempty"`
+	// CancelID 是 action=cancel 的目标 request_id。
+	CancelID string `json:"cancel_id,omitempty"`
+	// TimeoutMS 是本次请求的传输预算（含排队与回包余量，§2.6）。
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
 }
-type ExecutionOptions struct {
-	Epoch string `json:"epoch"`
-	ID    string `json:"id"`
+
+// ExecPayload 执行请求：只传完整脚本。协议不区分脚本里用了哪些指令。
+type ExecPayload struct {
+	Script  string `json:"script"`
+	Workdir string `json:"workdir,omitempty"`
+	Stdin   string `json:"stdin,omitempty"`
+	// NoSandbox 免沙箱执行（物理 host；发送前审批——批准 nosandbox 不批准 grant）。
+	NoSandbox bool `json:"nosandbox,omitempty"`
+	// WaitMS 前台等待上限（毫秒）；到期未完成则登记后台并返回 background/id。
+	WaitMS int64 `json:"wait_ms,omitempty"`
+}
+
+// FSInvocation 是 FS 数据面调用：{method, args} 直达 FS 服务。
+type FSInvocation struct {
+	Method string          `json:"method"`
+	Args   json.RawMessage `json:"args"`
+}
+
+// ExecResult 是 exec 的响应结果：整段脚本的输出预览和 attrs，
+// 不是逐指令的业务对象。attrs 约定（字符串值）：
+//   - output / error_output：stdout / stderr 日志地址（日志创建后恒有）
+//   - exit_code：完成时存在
+//   - truncated：任一预览超限
+//   - stderr：stderr 预览
+//   - background=true + id：仅等待超时转后台时存在
+type ExecResult struct {
+	Content string            `json:"content"`
+	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
 type Response struct {
@@ -119,10 +105,12 @@ func AsFault(err error) *Fault {
 	}
 	return Fail("internal", err.Error())
 }
+
+// Reply 构造响应。err != nil 时保留调用方传入的 Result——错误与部分
+// 结果并存（如等待超时/容量取消的 exec 响应仍携带日志地址；§2.4/§2.5）。
 func Reply(protocol, id string, v any, err error) Response {
 	r := Response{Protocol: protocol, ID: id, Result: v}
 	if err != nil {
-		r.Result = nil
 		r.Error = AsFault(err)
 	}
 	return r
@@ -155,37 +143,38 @@ func Decode(raw []byte, v any) error {
 	}
 	return nil
 }
+
+// Validate 校验请求身份与 action/载荷互斥（§4.1：每个 action 只接受对应载荷）。
 func (r Request) Validate() error {
 	if !ValidID(r.ID) || r.TimeoutMS < 0 || r.TimeoutMS > 1800000 {
 		return Fail("invalid_argument", "Invalid request identity or timeout")
 	}
-	if r.Catalog != nil && (r.Action != "catalog" || (r.Catalog.Domain != "fs" && r.Catalog.Domain != "exec") || (r.Catalog.Domain == "exec" && !ValidName(r.Catalog.Command)) || (r.Catalog.Domain == "fs" && r.Catalog.Command != "")) {
-		return Fail("invalid_argument", "Invalid catalog selector")
+	if r.Exec != nil && r.Action != ActionExec {
+		return Fail("invalid_argument", "exec payload requires action=exec")
 	}
-	if r.Execution != nil {
-		if r.Action != "call" || !ValidID(r.Execution.ID) || !ValidID(r.Execution.Epoch) || (r.Call != nil && r.Call.Domain != "exec") {
-			return Fail("invalid_argument", "Invalid exec execution options")
-		}
+	if r.FS != nil && r.Action != ActionFS {
+		return Fail("invalid_argument", "fs payload requires action=fs")
 	}
 	switch r.Action {
-	case "catalog":
-	case "call":
-		if (r.Call == nil) == (len(r.Argv) == 0) {
-			return Fail("invalid_argument", "Provide exactly one of call or argv")
+	case ActionExec:
+		if r.Exec == nil || r.Exec.Script == "" || len(r.Exec.Script) > MaxMessageBytes/2 {
+			return Fail("invalid_argument", "exec requires a bounded script")
 		}
-		if r.Call != nil {
-			if (r.Call.Domain != "fs" && r.Call.Domain != "exec") || (r.Call.Domain == "exec" && !ValidName(r.Call.Command)) || (r.Call.Domain == "fs" && r.Call.Command != "") || !ValidName(r.Call.Method) {
-				return Fail("invalid_argument", "Invalid tool or method")
-			}
-			var a map[string]any
-			if err := Decode(r.Call.Args, &a); err != nil {
-				return err
-			}
-			if a == nil {
-				return Fail("invalid_argument", "args must be an object")
-			}
+		if r.Exec.WaitMS < 0 || len(r.Exec.Workdir) > 4096 || len(r.Exec.Stdin) > MaxMessageBytes/2 {
+			return Fail("invalid_argument", "Invalid exec options")
 		}
-	case "call.cancel":
+	case ActionFS:
+		if r.FS == nil || !ValidName(r.FS.Method) {
+			return Fail("invalid_argument", "Invalid fs method")
+		}
+		var a map[string]any
+		if err := Decode(r.FS.Args, &a); err != nil {
+			return err
+		}
+		if a == nil {
+			return Fail("invalid_argument", "args must be an object")
+		}
+	case ActionCancel:
 		if !ValidID(r.CancelID) {
 			return Fail("invalid_argument", "Invalid cancellation identity")
 		}
@@ -193,27 +182,4 @@ func (r Request) Validate() error {
 		return Fail("unsupported", "Unknown transport action")
 	}
 	return nil
-}
-
-// RequiredLevel allows argument-dependent grants to be declared once by a tool.
-func (m Method) RequiredLevel(args json.RawMessage) int {
-	level := m.Access
-	var values map[string]json.RawMessage
-	if json.Unmarshal(args, &values) != nil {
-		return level
-	}
-	for _, rule := range m.AccessRules {
-		var value string
-		if json.Unmarshal(values[rule.Field], &value) == nil && value == rule.Equals && rule.Level > level {
-			level = rule.Level
-		}
-	}
-	return level
-}
-
-func (in Invocation) Target() string {
-	if in.Domain == "fs" {
-		return "fs"
-	}
-	return in.Command
 }

@@ -2,26 +2,50 @@ package hosts_nats
 
 import (
 	"encoding/json"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 	"testing"
 	"time"
+
+	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
+func execReq() wire.Request {
+	return wire.Request{Protocol: Protocol, ID: "req", Action: wire.ActionExec,
+		Exec: &wire.ExecPayload{Script: "browser page.list --json | jq '.'"}}
+}
+
+// hosts_nats/2：签名覆盖完整请求（含 grant_approved 标记与脚本正文）——
+// 篡改任一字段验签必失败（hosts-vsh-redesign §4.2）。
 func TestSignatureBindsEveryExecutionField(t *testing.T) {
 	subject, _ := Subject("u1", "h1")
-	r := Request{HostID: "h1", Subject: subject, Caller: "u1", GrantedLevel: 2, Nonce: "nonce", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: wire.Request{Protocol: Protocol, ID: "req", Action: "call", Call: &wire.Invocation{Domain: "exec", Command: "browser", Method: "page.list", Args: json.RawMessage(`{}`)}}}
+	r := Request{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "nonce", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: execReq()}
 	Sign("secret", &r)
 	if err := Verify("secret", "h1", subject, r, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range []func(*Request){func(r *Request) { r.Scope = "fs" }, func(r *Request) { r.AuthorizationUntil += 1 }, func(r *Request) { r.Request.Execution = &wire.ExecutionOptions{Epoch: "epoch", ID: "exec"} }, func(r *Request) { r.Caller = "u2" }, func(r *Request) { r.Origin = "another" }, func(r *Request) { r.GrantedLevel = 9 }, func(r *Request) { r.Request.TimeoutMS = 5000 }, func(r *Request) { r.Subject += ".other" }, func(r *Request) { r.Request.Call.Args = json.RawMessage(`{"page_id":"another"}`) }} {
+	for _, change := range []func(*Request){
+		func(r *Request) { r.Scope = "fs" },
+		func(r *Request) { r.AuthorizationUntil += 1 },
+		func(r *Request) { r.Caller = "u2" },
+		func(r *Request) { r.Origin = "another" },
+		func(r *Request) { r.GrantApproved = true }, // 篡改审批标记必须验签失败
+		func(r *Request) { r.Request.TimeoutMS = 5000 },
+		func(r *Request) { r.Subject += ".other" },
+		func(r *Request) { r.Request.Exec.Script = "rm -rf /" },
+		func(r *Request) { r.Request.Exec.NoSandbox = true },
+	} {
 		copy := r
-		call := *r.Request.Call
-		copy.Request.Call = &call
+		payload := *r.Request.Exec
+		copy.Request.Exec = &payload
 		change(&copy)
 		if Verify("secret", "h1", subject, copy, time.Now()) == nil {
 			t.Fatal("tampering accepted")
 		}
+	}
+	// grant_approved 合法置位（服务端审批后签发）可验签通过
+	r.GrantApproved = true
+	Sign("secret", &r)
+	if err := Verify("secret", "h1", subject, r, time.Now()); err != nil {
+		t.Fatal("signed grant_approved request rejected:", err)
 	}
 }
 
@@ -31,7 +55,7 @@ func TestVerifyClockSlackToleratesCalibrationError(t *testing.T) {
 	subject, _ := Subject("u1", "h1")
 	base := time.Now()
 	mk := func(deadline, authorization time.Time) Request {
-		r := Request{HostID: "h1", Subject: subject, Caller: "u1", GrantedLevel: 2, Nonce: "nonce", Deadline: deadline.UnixMilli(), AuthorizationUntil: authorization.UnixMilli(), Request: wire.Request{Protocol: Protocol, ID: "req", Action: "call", Call: &wire.Invocation{Domain: "exec", Command: "browser", Method: "page.list", Args: json.RawMessage(`{}`)}}}
+		r := Request{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "nonce", Deadline: deadline.UnixMilli(), AuthorizationUntil: authorization.UnixMilli(), Request: execReq()}
 		Sign("secret", &r)
 		return r
 	}
@@ -54,5 +78,54 @@ func TestVerifyClockSlackToleratesCalibrationError(t *testing.T) {
 	r = mk(base.Add(20*time.Minute), base.Add(40*time.Minute))
 	if err := Verify("secret", "h1", subject, r, base); err == nil {
 		t.Fatal("oversized validity windows accepted")
+	}
+}
+
+// Caller 必须与签名 subject 目的地中的 uid 一致：执行归属统一从
+// caller.Subject 派生，信封 Caller 不能与服务端路由归属脱节（重新签名
+// 也必须拒绝）。
+func TestVerifyCallerMustMatchSubjectUID(t *testing.T) {
+	subject, _ := Subject("u1", "h1")
+	r := Request{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "nonce", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: execReq()}
+	Sign("secret", &r)
+	if err := Verify("secret", "h1", subject, r, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// 同一 subject、另一 Caller——即使信封自洽签名也拒绝。
+	r.Caller = "u2"
+	Sign("secret", &r)
+	if err := Verify("secret", "h1", subject, r, time.Now()); err == nil {
+		t.Fatal("caller mismatched with subject uid accepted")
+	}
+}
+
+// fs 载荷与 cancel 动作的校验（hosts_tools/2：每 action 只接受对应载荷）。
+func TestRequestValidateV2(t *testing.T) {
+	subject, _ := Subject("u1", "h1")
+	mk := func(req wire.Request) Request {
+		r := Request{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "nonce", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: req}
+		Sign("secret", &r)
+		return r
+	}
+	verify := func(r Request) error { return Verify("secret", "h1", subject, r, time.Now()) }
+
+	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r1", Action: wire.ActionFS,
+		FS: &wire.FSInvocation{Method: "text.read", Args: json.RawMessage(`{"path":"/a"}`)}})); err != nil {
+		t.Fatal("fs request rejected:", err)
+	}
+	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r2", Action: wire.ActionCancel, CancelID: "r1"})); err != nil {
+		t.Fatal("cancel request rejected:", err)
+	}
+	// 载荷错配
+	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r3", Action: wire.ActionFS,
+		Exec: &wire.ExecPayload{Script: "ls"}, FS: &wire.FSInvocation{Method: "read", Args: json.RawMessage(`{}`)}})); err == nil {
+		t.Fatal("mismatched payload accepted")
+	}
+	// 旧动作已删除
+	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r4", Action: "call"})); err == nil {
+		t.Fatal("legacy call action accepted")
+	}
+	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r5", Action: "catalog"})); err == nil {
+		t.Fatal("legacy catalog action accepted")
 	}
 }

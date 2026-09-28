@@ -269,7 +269,7 @@ func literalValues(pos []arg) []string {
 }
 
 // lastPositional 取末位 positional 为写目标——仅当末位词本身为字面时才取
-//（F3：末位词动态 = 真写目标不可知，放弃而不是误取倒数第二个字面词）。
+// （F3：末位词动态 = 真写目标不可知，放弃而不是误取倒数第二个字面词）。
 // 已知局限：cp/mv -t <dir> 形态下 positional 全是源（-t 值才是写目标），
 // 本函数会把末位源误报为写目标——预检保守方向（宁可误拦不可漏报），记录在案。
 func lastPositional(args []arg) []string {

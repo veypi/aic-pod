@@ -1,11 +1,11 @@
-// Package host 是 AIC host agent 运行时（docs/instruction_sets_v2.md §6.2）：
-// NATS 连接与认证、能力上报、心跳、fs/exec 方法分发、执行管理器装配、
-// granted_level 纵深检查。
+// Package host 是 AIC host agent 运行时（hosts-vsh-redesign）：
+// NATS 连接与认证、能力上报、心跳、exec/fs/cancel 分发、执行管理器装配。
 //
-// 物理 host 命令空间（vsh 引擎化）：exec 唯一 wire 命令（script 契约）——
-// 内建 90 + jq + 平台命令（commands/bg/grant/list_hosts/send_user）由引擎
-// Registry 收口，原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd
-// 扩充）；白名单外一律 127，不存在「未知命令透传」。
+// 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
+// 内建 90 + jq + 平台命令（commands/bg/grant）与 browser/cua 由引擎 Registry
+// 收口，原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd 扩充）；
+// 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
+// 且全在发送前；pod 不重新分类审批，只在执行点看 rules。
 package host
 
 import (
@@ -21,11 +21,12 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/browser"
+	"github.com/veypi/aic-pod/libs/cua"
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/fsauth"
+	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
@@ -55,8 +56,11 @@ type Options struct {
 // Client 是 host agent 客户端。
 type Client struct {
 	sessionRoot string
-	tools       *tool.Dispatcher
 	browser     *browser.Service
+	cua         *cua.Service
+
+	execMu      sync.Mutex
+	execHandles map[string]*execHandleEntry // cancel(request_id) 登记表（前台执行）
 
 	execGrantMu     sync.RWMutex
 	execGrants      map[string][]string
@@ -83,7 +87,7 @@ type Client struct {
 	files           *hostfs.FS
 	bytes           *hostfs.Bytes
 	initErr         error
-	rtcSvc          *rtc.Service // hosts_rtc/1 直连服务
+	rtcSvc          *rtc.Service // hosts_rtc/2 直连服务
 	logf            func(string, ...any)
 }
 
@@ -125,13 +129,15 @@ func New(opts Options) *Client {
 	policy := fsauth.New()
 	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{
-		opts:   opts,
-		replay: &replayCache{store: map[string]time.Time{}},
-		procs:  procs,
-		policy: policy,
-		netPol: netauth.New(netauth.NetKeys, "localhost:*"),
-		sshPol: netauth.New(netauth.SshKeys),
-		logf:   logf,
+		opts:        opts,
+		replay:      &replayCache{store: map[string]time.Time{}},
+		procs:       procs,
+		policy:      policy,
+		netPol:      netauth.New(netauth.NetKeys, "localhost:*"),
+		sshPol:      netauth.New(netauth.SshKeys),
+		execGrants:  map[string][]string{},
+		execHandles: map[string]*execHandleEntry{},
+		logf:        logf,
 	}
 
 	if parts := strings.SplitN(opts.Key, ".", 4); len(parts) == 4 {
@@ -280,11 +286,12 @@ func (c *Client) Close() error {
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = c.procs.Close(shutdown)
 	cancelRuns()
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = c.tools.Close(ctx)
-	}()
+	if c.browser != nil {
+		_ = c.browser.Close()
+	}
+	if c.cua != nil {
+		_ = c.cua.Close()
+	}
 	if c.files != nil {
 		_ = c.files.Close()
 	}
@@ -439,25 +446,12 @@ func (c *Client) handleRTCSignal(data []byte) {
 
 // ---- caps v2 上报（§6.3） ----
 
-// buildCaps 构造物理 host 的 caps v2（§6.3）：
-// FS 与 exec 元数据均从实际注册声明生成。
-// exec 命令面（vsh 引擎化）：注册 wire 命令（exec/cua/browser）+ native
-// 白名单名（广告用——AI 经 host_list 了解该 host 的原生命令面；内建 90
-// 命令各端一致不逐项广告，完整表以脚本内 `commands` 为准）。
+// buildCaps 构造物理 host 的 caps（hosts_tools/2）：命令目录（ExecCaps）已删
+// 除——指令集由三协议与 vsh `commands` 脚本内查询为准，caps 只声明身份、
+// 传输与 fs 动作集。
 func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
-	decls := c.tools.Commands(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)})
-	seen := map[string]bool{}
-	for _, d := range decls {
-		seen[d.Name] = true
-	}
-	if _, native, err := c.vshEngine(); err == nil {
-		for _, name := range native.Names() {
-			if !seen[name] {
-				decls = append(decls, proto.CommandDecl{Name: name, Desc: "native command (vsh whitelist)", RequiredLevel: 2})
-			}
-		}
-	}
+	actions := append([]string(nil), fsx.FSActions...)
 	return &proto.Caps{
 		HostID:        c.hostID,
 		CredentialVer: c.credVer,
@@ -466,10 +460,8 @@ func (c *Client) buildCaps() *proto.Caps {
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
 		Mgmt:          c.buildMgmt(),
-
 		ToolProtocols: []string{toolwire.Protocol, natswire.Protocol, rtcwire.Protocol},
-		FS:            c.filesystemCaps(),                                      // 内建 FS 方法与 AI 文本动作
-		Exec:          proto.ExecCaps{Epoch: c.procs.Epoch(), Commands: decls}, // 统一命令声明表
+		FS:            proto.FSCaps{Actions: &actions},
 	}
 }
 
@@ -512,8 +504,7 @@ func (c *Client) publishCaps(nc *nats.Conn) {
 	}
 	data, _ := json.Marshal(c.buildCaps())
 	nc.Publish(subj, data)
-	n := len(c.tools.Commands(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)}))
-	c.logf("caps published to %s (%d commands)", subj, n)
+	c.logf("caps published to %s", subj)
 }
 
 func (c *Client) connection() *nats.Conn {
@@ -591,17 +582,6 @@ func isAuthError(err error) bool {
 	// 统一小写后匹配，避免致命认证分支永不命中。
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "authentication") || strings.Contains(s, "authorization")
-}
-
-func (c *Client) filesystemCaps() proto.FSCaps {
-	catalog := c.tools.Catalog(context.Background(), tool.Caller{Subject: "catalog", ConnectionID: "catalog", Level: 9, ExpiresAt: time.Now().Add(time.Minute)})
-	actions := []string{}
-	for _, m := range catalog.FS {
-		if strings.HasPrefix(m.Name, "text.") {
-			actions = append(actions, strings.TrimPrefix(m.Name, "text."))
-		}
-	}
-	return proto.FSCaps{Actions: &actions, Methods: catalog.FS}
 }
 
 func (c *Client) options() Options { c.optsMu.RLock(); defer c.optsMu.RUnlock(); return c.opts }

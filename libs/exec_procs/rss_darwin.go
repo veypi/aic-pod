@@ -49,9 +49,9 @@ func groupRSSKB(pgid int) (uint64, error) {
 	return total, nil
 }
 
-// monitorGroupRSS 轮询进程组 RSS，超限按 killEntry 语义终止
-// （SIGTERM → 5s SIGKILL，与 bg_kill 一致）。进程结束（e.done）即退出。
-func monitorGroupRSS(e *Entry, limit uint64) {
+// monitorGroupRSS 轮询进程组 RSS，超限按 killProc 语义终止
+// （SIGTERM → 5s SIGKILL）。进程结束（h.done）即退出。
+func monitorGroupRSS(h *procHandle, limit uint64) {
 	limitKB := limit / 1024
 	if limitKB == 0 {
 		return
@@ -60,18 +60,18 @@ func monitorGroupRSS(e *Entry, limit uint64) {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-e.done:
+		case <-h.done:
 			return
 		case <-ticker.C:
-			if e.PID() <= 0 {
+			if h.PID() <= 0 {
 				return
 			}
-			kb, err := groupRSSKB(e.PID())
+			kb, err := groupRSSKB(h.PID())
 			if err != nil {
 				continue
 			}
 			if kb > limitKB {
-				killEntry(e)
+				killProc(h)
 				return
 			}
 		}

@@ -2,13 +2,11 @@ package proto
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
-// caps v2 固定向量（§6.3）：fs.actions 三形态（缺省/null = 全集；[] = 不支持）
-// 语义区分依赖 *[]string，Do not "simplify" to []string。
-// exec.commands 为统一命令声明表：未声明的命令一律拒绝（无三形态语义）。
+// exec.commands 统一命令声明表已随 hosts_tools/2 删除（发现走脚本内
+// `commands` + `<cmd> --help`，不再随 caps 逐项声明）。
 
 func TestCapsFSActionsForms(t *testing.T) {
 	// 字段缺省
@@ -40,37 +38,6 @@ func TestCapsFSActionsForms(t *testing.T) {
 	mustUnmarshal(t, `{"host_id":"host_a","fs":{"actions":["read"]}}`, &c4)
 	if !c4.FS.Supports("read") || c4.FS.Supports("write") {
 		t.Errorf("subset actions wrong: %v", *c4.FS.Actions)
-	}
-}
-
-func TestCapsCommandDecl(t *testing.T) {
-	var c Caps
-	mustUnmarshal(t, `{"host_id":"host_a","exec":{"epoch":"runtime_epoch","commands":[
- {"name":"browser","desc":"control a web browser","help":"browser <method>","level":1,"methods":[{"name":"page.wait","mode":"call","access":1,"background":true,"input":{"type":"object"}}]},
- {"name":"sh","raw_argv":true,"level":3,"methods":[{"name":"run","mode":"call","access":3,"background":true,"input":{"type":"object"}}]}
- ]}}`, &c)
-	if c.Exec.Epoch != "runtime_epoch" || len(c.Exec.Commands) != 2 {
-		t.Fatal(c.Exec)
-	}
-	browser := c.Exec.Commands[0]
-	if browser.RequiredLevel != 1 || browser.Help == "" || len(browser.Methods) != 1 || !browser.Methods[0].Background {
-		t.Fatal(browser)
-	}
-	shell := c.Exec.Commands[1]
-	if !shell.RawArgv || shell.RequiredLevel != 3 || shell.Methods[0].Name != "run" {
-		t.Fatal(shell)
-	}
-	raw, err := json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var roundtrip Caps
-	mustUnmarshal(t, string(raw), &roundtrip)
-	if string(roundtrip.Exec.Commands[0].Methods[0].Input) != `{"type":"object"}` || roundtrip.Exec.Epoch != c.Exec.Epoch {
-		t.Fatal("method schema or execution epoch lost")
-	}
-	if strings.Contains(string(raw), `"tools":`) {
-		t.Fatal("parallel tool capability published")
 	}
 }
 

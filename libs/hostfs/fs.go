@@ -25,7 +25,6 @@ import (
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	hosts "github.com/veypi/aic-pod/protocol/fs"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 type Root struct {
@@ -145,48 +144,15 @@ type removeArgs struct {
 	MissingOK bool     `json:"missing_ok,omitempty"`
 }
 
-func objectSchema(properties map[string]any, required ...string) json.RawMessage {
-	raw, _ := json.Marshal(map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false})
-	return raw
-}
-func (f *FS) Methods() []tool.Method {
-	path := map[string]any{"type": "object", "required": []string{"root_id", "segments"}, "properties": map[string]any{"root_id": map[string]any{"type": "string"}, "segments": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "additionalProperties": false}
-	text := map[string]any{"type": "string"}
-	boolean := map[string]any{"type": "boolean"}
-	methods := map[string]fsMethod{
-		"roots":  {InputSchema: objectSchema(map[string]any{}), Effect: "read"},
-		"home":   {InputSchema: objectSchema(map[string]any{}), Effect: "read"},
-		"stat":   {InputSchema: objectSchema(map[string]any{"path": path, "if_version": text, "follow_symlinks": map[string]any{"const": false}}, "path"), Effect: "read"},
-		"read":   {InputSchema: objectSchema(map[string]any{"path": path, "if_version": text, "consistency": map[string]any{"enum": []string{"verified"}}, "follow_symlinks": map[string]any{"const": false}}, "path"), Effect: "read"},
-		"list":   {InputSchema: objectSchema(map[string]any{"path": path, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": text, "hidden": boolean, "sort": map[string]any{"enum": []string{"name"}}}, "path"), Effect: "read"},
-		"write":  {InputSchema: objectSchema(map[string]any{"path": path, "source": map[string]any{"type": "object"}, "condition": map[string]any{"type": "object"}, "create_parents": map[string]any{"const": false}}, "path", "source", "condition"), Effect: "write"},
-		"mkdir":  {InputSchema: objectSchema(map[string]any{"path": path, "parents": boolean, "exist_ok": boolean}, "path"), Effect: "write"},
-		"remove": {InputSchema: objectSchema(map[string]any{"path": path, "if_version": text, "recursive": boolean, "missing_ok": boolean}, "path", "if_version"), Effect: "write"},
+// Handle 是 FS 数据面直调入口（hosts_tools/2 §4.1：fs 载荷 {method, args}
+// 直达现有 FS 服务；不再有方法声明/schema 目录层——方法集为协议固定集，
+// 参数校验在 validate/Authorize 内）。
+func (f *FS) Handle(ctx context.Context, caller tool.Caller, method string, args json.RawMessage) (any, error) {
+	call := Call{Caller: caller, Owner: Owner(caller), Command: "fs", Method: method, Args: args}
+	if v, ok, err := f.handleBytes(ctx, call); ok {
+		return v, err
 	}
-	methods["find"] = fsMethod{InputSchema: objectSchema(map[string]any{"path": path, "glob": text, "depth": map[string]any{"type": "integer", "minimum": 0, "maximum": 64}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}}, "path"), Effect: "read"}
-	methods["move"] = fsMethod{InputSchema: objectSchema(map[string]any{"src": path, "dst": path, "if_version": text, "condition": map[string]any{"type": "object"}}, "src", "dst", "if_version", "condition"), Effect: "write"}
-	methods["copy"] = methods["move"]
-	if !safeReadSupported() {
-		delete(methods, "copy")
-		delete(methods, "read")
-	}
-	if !atomicReplaceSupported() {
-		delete(methods, "write")
-		delete(methods, "move")
-		delete(methods, "copy")
-	}
-	out := []tool.Method{}
-	for name, desc := range methods {
-		level := 1
-		if desc.Effect == "write" {
-			level = 2
-		}
-		out = append(out, tool.Method{Descriptor: wire.Method{Name: name, Mode: wire.Call, Access: level, Input: desc.InputSchema}, Run: func(ctx context.Context, caller tool.Caller, args json.RawMessage) (any, error) {
-			return f.Run(ctx, Call{Caller: caller, Owner: Owner(caller), Command: "fs", Method: name, Args: args})
-		}})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Descriptor.Name < out[j].Descriptor.Name })
-	return append(out, f.byteMethods()...)
+	return f.Run(ctx, call)
 }
 func (f *FS) validate(method string, raw json.RawMessage) error {
 	var path fsp.Path

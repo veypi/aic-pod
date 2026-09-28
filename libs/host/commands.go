@@ -2,18 +2,14 @@ package host
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 	"github.com/veypi/vbox"
@@ -45,19 +41,10 @@ func (c *Client) fsGate(sid string) func(op, abs string, write bool) error {
 			vop = vbox.OpWrite
 		}
 		if d := c.policy.Snapshot(sid).Match(abs, vop); !d.Allow {
-			return fmt.Errorf("%s: %s 被规则表拒绝（越界硬拒绝；如需写入请用 exec 执行 `grant fs %s`，会话级、4 级审批）", op, abs, abs)
+			return fmt.Errorf("%s: %s 被规则表拒绝（越界硬拒绝；如需写入请用 exec 执行 `grant fs %s`）", op, abs, abs)
 		}
 		return nil
 	}
-}
-
-// fsTextAccess 是 text.{action} 的基线等级：write/edit=2，read/ls/rg=1。
-func fsTextAccess(action string) int {
-	switch action {
-	case "write", "edit":
-		return 2
-	}
-	return 1
 }
 
 func (c *Client) initFilesystem() error {
@@ -103,31 +90,7 @@ func (c *Client) initFilesystem() error {
 	}
 	c.files = files
 	c.bytes = store
-	methods := files.Methods()
-	// Text-oriented AI operations use this filesystem's same version-aware VFS.
-	// 五 action（v4.1 瘦身，todo 3.2.2）：fsx 薄层 + vbox 规则表门；cp/mv/rm
-	// 由引擎内建承接（exec script）。
-	for _, action := range fsx.FSActions {
-		methods = append(methods, tool.Method{Descriptor: wire.Method{Name: "text." + action, Mode: wire.Call, Access: fsTextAccess(action), Input: json.RawMessage(`{"type":"object"}`)}, Run: func(ctx context.Context, caller tool.Caller, args json.RawMessage) (any, error) {
-			var params map[string]any
-			if err := wire.Decode(args, &params); err != nil {
-				return nil, err
-			}
-			params["action"] = action
-			raw, _ := json.Marshal(params)
-			env := &fsx.Env{
-				FS:          files.View(ctx, caller),
-				Workdir:     filepath.ToSlash(c.options().WorkDir),
-				ImageData:   true, // host 端图片经 image_data 返回（§2.2）
-				VirtualRoot: runtime.GOOS == "windows",
-				Gate:        c.fsGate(caller.Origin),
-			}
-			result, err := fsx.RunFS(ctx, env, raw)
-			if result != nil {
-				c.attachFileURL(result.Attrs)
-			}
-			return result, err
-		}})
-	}
-	return c.tools.RegisterFS(methods...)
+	// text.{action}（fsx 薄层 + vbox 规则表门）由 tools.go handleFS 直接分发——
+	// FS 数据面直调（§4.4），不再经方法目录注册。
+	return nil
 }

@@ -12,20 +12,22 @@ import (
 	"time"
 )
 
-const Protocol = "hosts_nats/1"
+const Protocol = "hosts_nats/2"
 
 type Request struct {
-	HostID             string        `json:"host_id"`
-	Subject            string        `json:"subject"`
-	Caller             string        `json:"caller"`
-	Origin             string        `json:"origin,omitempty"`
-	Scope              string        `json:"scope,omitempty"`
-	AuthorizationUntil int64         `json:"authorization_until_ms"`
-	GrantedLevel       int           `json:"granted_level"`
-	Nonce              string        `json:"nonce"`
-	Deadline           int64         `json:"deadline_ms"`
-	Request            tools.Request `json:"request"`
-	Signature          string        `json:"signature"`
+	HostID             string `json:"host_id"`
+	Subject            string `json:"subject"`
+	Caller             string `json:"caller"`
+	Origin             string `json:"origin,omitempty"`
+	Scope              string `json:"scope,omitempty"`
+	AuthorizationUntil int64  `json:"authorization_until_ms"`
+	// GrantApproved 是服务端审批结果事实（默认 false）：本次脚本可通过 grant
+	// 修改授权。随签名信封传递，模型不能自行设置，篡改即验签失败。
+	GrantApproved bool          `json:"grant_approved,omitempty"`
+	Nonce         string        `json:"nonce"`
+	Deadline      int64         `json:"deadline_ms"`
+	Request       tools.Request `json:"request"`
+	Signature     string        `json:"signature"`
 }
 
 func Subject(uid, host string) (string, error) {
@@ -56,8 +58,14 @@ const (
 
 func Sign(key string, r *Request) { r.Signature = signature(key, *r) }
 func Verify(key, host, subject string, r Request, now time.Time) error {
-	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.Request.Protocol != Protocol || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.GrantedLevel < 1 || r.GrantedLevel > 9 || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
+	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.Request.Protocol != Protocol || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
 		return tools.Fail("unauthorized", "Invalid request destination, identity or validity window")
+	}
+	// Caller 必须与签名 subject 目的地中的 uid 一致：执行归属统一从
+	// caller.Subject 派生（exec/任务表/取消登记），信封里的 Caller 不能
+	// 与服务端路由的归属 uid 脱节。
+	if dest, err := Subject(r.Caller, host); err != nil || r.Subject != dest {
+		return tools.Fail("unauthorized", "Caller does not match request destination")
 	}
 	if !hmac.Equal([]byte(signature(key, r)), []byte(r.Signature)) {
 		return tools.Fail("unauthorized", "Invalid request signature")

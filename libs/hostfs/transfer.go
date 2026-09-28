@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	"io"
 	"os"
@@ -42,41 +41,64 @@ type SealArgs struct {
 	SHA256 string          `json:"sha256,omitempty"`
 }
 
-func (f *FS) byteMethods() []tool.Method {
-	spec := func(name string, level int) tool.Spec { return tool.Spec{Name: name, Access: level} }
-	return []tool.Method{
-		tool.Bind(spec("source.describe", 1), func(ctx context.Context, c tool.Caller, a SourceArgs) (ByteSource, error) {
-			return f.cfg.Bytes.Describe(Owner(c), a.Ref)
-		}),
-		tool.Bind(spec("source.release", 1), func(ctx context.Context, c tool.Caller, a SourceArgs) (map[string]bool, error) {
-			err := f.cfg.Bytes.Release(Owner(c), a.Ref)
-			return map[string]bool{"released": err == nil}, err
-		}),
-		tool.Bind(spec("source.read", 1), func(ctx context.Context, c tool.Caller, a ReadRangeArgs) (map[string]any, error) {
-			if a.Length < 0 || a.Length > RangeBytes {
-				return nil, fsp.Fail("invalid_argument", "Range exceeds transfer limit")
-			}
-			var out bytes.Buffer
-			err := f.cfg.Bytes.Copy(ctx, Owner(c), a.Ref, a.Offset, &a.Length, &out)
-			return map[string]any{"data": out.Bytes(), "offset": a.Offset}, err
-		}),
-		tool.Bind(spec("upload.open", 2), func(ctx context.Context, c tool.Caller, a UploadArgs) (ByteSource, error) {
-			f.mu.Lock()
-			limit := f.cfg.MaxProxyUploadBytes
-			f.mu.Unlock()
-			if c.Scope == "fs" && limit > 0 && a.Size > limit {
-				return ByteSource{}, fsp.Fail("overloaded", "Proxy upload quota")
-			}
-			return f.cfg.Bytes.beginUpload(Owner(c), a)
-		}),
-		tool.Bind(spec("upload.write", 2), func(ctx context.Context, c tool.Caller, a WriteRangeArgs) (map[string]int64, error) {
-			offset, err := f.cfg.Bytes.writeRange(ctx, Owner(c), a)
-			return map[string]int64{"offset": offset}, err
-		}),
-		tool.Bind(spec("upload.seal", 2), func(ctx context.Context, c tool.Caller, a SealArgs) (ByteSource, error) {
-			return f.cfg.Bytes.sealUpload(ctx, Owner(c), a)
-		}),
+// handleBytes 处理字节源/上传方法（数据面直调，hosts_tools/2 不再有
+// 方法声明层）。ok=false 表示非本组方法（交回 FS.Run）。
+func (f *FS) handleBytes(ctx context.Context, call Call) (value any, ok bool, err error) {
+	switch call.Method {
+	case "source.describe":
+		var a SourceArgs
+		if err := fsp.Decode(call.Args, &a); err != nil {
+			return nil, true, err
+		}
+		v, err := f.cfg.Bytes.Describe(call.Owner, a.Ref)
+		return v, true, err
+	case "source.release":
+		var a SourceArgs
+		if err := fsp.Decode(call.Args, &a); err != nil {
+			return nil, true, err
+		}
+		err := f.cfg.Bytes.Release(call.Owner, a.Ref)
+		return map[string]bool{"released": err == nil}, true, err
+	case "source.read":
+		var a ReadRangeArgs
+		if err := fsp.Decode(call.Args, &a); err != nil {
+			return nil, true, err
+		}
+		if a.Length < 0 || a.Length > RangeBytes {
+			return nil, true, fsp.Fail("invalid_argument", "Range exceeds transfer limit")
+		}
+		var out bytes.Buffer
+		err := f.cfg.Bytes.Copy(ctx, call.Owner, a.Ref, a.Offset, &a.Length, &out)
+		return map[string]any{"data": out.Bytes(), "offset": a.Offset}, true, err
+	case "upload.open":
+		var a UploadArgs
+		if err := fsp.Decode(call.Args, &a); err != nil {
+			return nil, true, err
+		}
+		f.mu.Lock()
+		limit := f.cfg.MaxProxyUploadBytes
+		f.mu.Unlock()
+		if call.Caller.Scope == "fs" && limit > 0 && a.Size > limit {
+			return nil, true, fsp.Fail("overloaded", "Proxy upload quota")
+		}
+		v, err := f.cfg.Bytes.beginUpload(call.Owner, a)
+		return v, true, err
+	case "upload.write":
+		var a WriteRangeArgs
+		if err := fsp.Decode(call.Args, &a); err != nil {
+			return nil, true, err
+		}
+		offset, err := f.cfg.Bytes.writeRange(ctx, call.Owner, a)
+		return map[string]int64{"offset": offset}, true, err
+	case "upload.seal":
+		var a SealArgs
+		if err := fsp.Decode(call.Args, &a); err != nil {
+			return nil, true, err
+		}
+		v, err := f.cfg.Bytes.sealUpload(ctx, call.Owner, a)
+		return v, true, err
 	}
+	return nil, false, nil
 }
 func (b *Bytes) beginUpload(owner string, a UploadArgs) (ByteSource, error) {
 	if a.Size < 0 || a.Size > b.sourceLimit() {

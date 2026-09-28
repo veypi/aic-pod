@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,36 +27,36 @@ func TestChromeLive(t *testing.T) {
 	defer service.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	caller := tool.Caller{Subject: "owner", ConnectionID: "rtc:one", Level: 9, ExpiresAt: time.Now().Add(time.Minute)}
-	d := tool.New(tool.Config{})
-	if err := d.RegisterCommand(service.Tool()); err != nil {
+	caller := tool.Caller{Subject: "owner", ConnectionID: "rtc:one", ExpiresAt: time.Now().Add(time.Minute)}
+	page, err := service.Create(ctx, caller, CreateArgs{URL: fixture.URL})
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close(ctx)
-	invoke := func(method string, args any) any {
+	must := func(err error) {
 		t.Helper()
-		raw, _ := json.Marshal(args)
-		r := d.Handle(ctx, caller, wire.Request{Protocol: "test", ID: wire.NewID("r_"), Action: "call", Call: &wire.Invocation{Domain: "exec", Command: "browser", Method: method, Args: raw}})
-		if r.Error != nil {
-			t.Fatalf("%s: %v", method, r.Error)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return r.Result
 	}
-	page := invoke("page.create", CreateArgs{URL: fixture.URL}).(PageInfo)
-	invoke("page.wait", WaitArgs{PageID: page.ID, Load: true})
-	obs := invoke("page.observe", ObserveArgs{PageID: page.ID}).(Observation)
+	_, err = service.Wait(ctx, caller, WaitArgs{PageID: page.ID, Load: true})
+	must(err)
+	obs, err := service.Observe(ctx, caller, ObserveArgs{PageID: page.ID})
+	must(err)
 	if len(obs.Elements) == 0 {
 		t.Fatal("empty AX tree")
 	}
-	invoke("page.fill", ActionArgs{PageID: page.ID, Locator: Locator{Label: "Email"}, Text: "hello@example.com"})
-	invoke("page.click", ActionArgs{PageID: page.ID, Locator: Locator{Role: "button", Name: "Save"}})
-	invoke("page.wait", WaitArgs{PageID: page.ID, Text: "hello@example.com"})
+	_, err = service.action("fill")(ctx, caller, ActionArgs{PageID: page.ID, Locator: Locator{Label: "Email"}, Text: "hello@example.com"})
+	must(err)
+	_, err = service.action("click")(ctx, caller, ActionArgs{PageID: page.ID, Locator: Locator{Role: "button", Name: "Save"}})
+	must(err)
+	_, err = service.Wait(ctx, caller, WaitArgs{PageID: page.ID, Text: "hello@example.com"})
+	must(err)
 	if _, err := service.Observe(ctx, tool.Caller{Subject: "intruder"}, ObserveArgs{PageID: page.ID}); err == nil {
 		t.Fatal("cross-caller page access")
 	}
 	caller.ConnectionID = "nats:owner" // Same service and page survive transport changes.
-	if list := invoke("page.list", Empty{}).([]PageInfo); len(list) != 1 || list[0].ID != page.ID {
-		t.Fatal(list)
+	if list, err := service.List(ctx, caller, Empty{}); err != nil || len(list) != 1 || list[0].ID != page.ID {
+		t.Fatal(list, err)
 	}
 	frame, err := service.Frames(ctx, caller, PageArgs{PageID: page.ID})
 	if err != nil {
@@ -97,7 +96,8 @@ func TestChromeLive(t *testing.T) {
 		t.Fatal("automation bypassed active manual input")
 	}
 	input.Close()
-	invoke("page.click", ActionArgs{PageID: page.ID, Locator: Locator{Role: "button", Name: "Download"}})
+	_, err = service.action("click")(ctx, caller, ActionArgs{PageID: page.ID, Locator: Locator{Role: "button", Name: "Download"}})
+	must(err)
 	var downloads []download
 	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); {
 		downloads, _ = service.DownloadList(ctx, caller, PageArgs{PageID: page.ID})
@@ -116,7 +116,9 @@ func TestChromeLive(t *testing.T) {
 		t.Fatalf("download: %+v %v", completed, err)
 	}
 	dest := filepath.Join(root, "export.txt")
-	invoke("download.export", DownloadArgs{ID: completed.ID, Path: dest})
+	if _, err := service.DownloadExport(ctx, caller, DownloadArgs{ID: completed.ID, Path: dest}); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(dest)
 	if err != nil || string(data) != "download fixture" {
 		t.Fatalf("export: %q %v", data, err)
@@ -125,8 +127,10 @@ func TestChromeLive(t *testing.T) {
 	if err = os.WriteFile(file, []byte("upload"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	invoke("page.upload", UploadArgs{PageID: page.ID, Locator: Locator{CSS: "#upload"}, File: file})
-	invoke("page.click", ActionArgs{PageID: page.ID, Locator: Locator{Role: "button", Name: "Popup"}})
+	_, err = service.Upload(ctx, caller, UploadArgs{PageID: page.ID, Locator: Locator{CSS: "#upload"}, File: file})
+	must(err)
+	_, err = service.action("click")(ctx, caller, ActionArgs{PageID: page.ID, Locator: Locator{Role: "button", Name: "Popup"}})
+	must(err)
 	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); {
 		list, _ := service.List(ctx, caller, Empty{})
 		if len(list) == 2 {
@@ -161,13 +165,17 @@ func TestChromeLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := obs.Elements[0].Ref
-	invoke("page.navigate", NavigateArgs{PageID: page.ID, URL: fixture.URL + "/next"})
-	invoke("page.wait", WaitArgs{PageID: page.ID, Load: true})
+	_, err = service.Navigate(ctx, caller, NavigateArgs{PageID: page.ID, URL: fixture.URL + "/next"})
+	must(err)
+	_, err = service.Wait(ctx, caller, WaitArgs{PageID: page.ID, Load: true})
+	must(err)
 	_, err = current.resolve(ctx, caller, Locator{Ref: old})
 	if err == nil || !strings.Contains(err.Error(), "stale_ref") {
 		t.Fatalf("navigation retained ref: %v", err)
 	}
 	for _, p := range list {
-		invoke("page.close", PageArgs{PageID: p.ID})
+		if _, err := service.ClosePage(ctx, caller, PageArgs{PageID: p.ID}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

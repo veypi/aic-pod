@@ -10,7 +10,7 @@ import (
 
 // grantTarget 域路由与 temp 授权（不触盘——permanent 落盘路径见
 // TestPersistGrantAppendsRuleRow）。argv 解析在 glue 平台命令层
-//（aic-pod/libs/vsh/cmds.go），本包只承接已解析的域+目标。
+// （aic-pod/libs/vsh/cmds.go），本包只承接已解析的域+目标。
 // M3c：DenyHit 拒批已废（temp 行插表头可覆盖 deny——「用户点就点了」）。
 func TestRunGrantTarget(t *testing.T) {
 	saved := cfg.Global
@@ -54,19 +54,26 @@ func TestRunGrantTarget(t *testing.T) {
 	}
 }
 
-func TestExecGrantIsLocal(t *testing.T) {
+func TestExecAllowedGatesBrowserAndCUA(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
 	defer func() { cfg.Global = saved }()
 	cfg.Global.ExecPolicy = cfg.PolicyDeny
-	cfg.Global.ExecDeny = []string{"bash"}
 	c, _ := testClient(t)
-	if c.execAllowed("s1", "json") {
-		t.Fatal("ungranted command allowed")
+	// 虚拟指令（browser/cua）按 exec 域规则门控；未授权拒绝。
+	if c.execAllowed("s1", "browser") {
+		t.Fatal("ungranted browser allowed")
 	}
-	// exec wire 命令恒可用（script 契约的唯一入口；内容由规则表与 native 白名单门控）。
-	if !c.execAllowed("s1", "exec") {
-		t.Fatal("local exec unavailable")
+	// 会话级 grant cmd 授权即时生效（规则数据，不是注册动作）。
+	c.execGrants["s1"] = []string{"browser"}
+	if !c.execAllowed("s1", "browser") {
+		t.Fatal("session grant not effective")
+	}
+	if c.execAllowed("s2", "browser") {
+		t.Fatal("session grant leaked across sessions")
+	}
+	if c.execAllowed("s1", "cua") {
+		t.Fatal("grant leaked across commands")
 	}
 }
 

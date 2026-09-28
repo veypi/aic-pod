@@ -156,7 +156,7 @@ func UserAllowPattern(uid string) (string, error) {
 }
 
 // FrontendDenyPattern 是前端 JWT 的 sub deny：u.{uid}.h.host_*.>
-// 连接级物理 host 工具流量（含文件内容、granted_level）不对浏览器端可观测——
+// 连接级物理 host 工具流量（含文件内容、审批事实）不对浏览器端可观测——
 // 浏览器是注入风险最高的端，签名防伪造不防旁观；host_ 前缀精确匹配物理
 // host（连接级 subject，§6.1 v3），page 主题（h.page）不受影响。
 func FrontendDenyPattern(uid string) (string, error) {

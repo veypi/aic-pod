@@ -32,8 +32,8 @@ type DeniedError struct{ Reason string }
 
 func (e *DeniedError) Error() string { return e.Reason }
 
-// ApprovalError 权限不足但可审批（state=waiting）：
-// 审批通过后以 granted_level=9 重发，执行端只做数字比较，无 fingerprint。
+// ApprovalError 权限不足但可审批：服务端审批链保型上抛（转人工审批）。
+// hosts_nats/2 起 pod 不再返回 waiting——审批全部在发送前完成。
 type ApprovalError struct {
 	Reason  string
 	Preview string
@@ -41,8 +41,8 @@ type ApprovalError struct {
 
 func (e *ApprovalError) Error() string { return e.Reason }
 
-// StateOf 将错误映射为协议层状态（§6.2）：DeniedError → rejected，
-// ApprovalError → waiting，其余一律执行错误 error。
+// StateOf 将错误映射为协议层状态：DeniedError → rejected，
+// ApprovalError → waiting（审批中转到服务端处理），其余一律执行错误 error。
 func StateOf(err error) State {
 	var de *DeniedError
 	if errors.As(err, &de) {

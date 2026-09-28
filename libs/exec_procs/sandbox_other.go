@@ -9,5 +9,5 @@ func probeBackend() sandboxBackend {
 
 // planConfined（其他平台）：fail-closed——confined 模式拒绝执行。
 func planConfined(spec confineSpec) (launchPlan, error) {
-	return launchPlan{}, sandboxUnavailable(spec.level)
+	return launchPlan{}, sandboxUnavailable()
 }

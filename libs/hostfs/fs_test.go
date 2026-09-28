@@ -43,7 +43,7 @@ func setup(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.caller = tool.Caller{Subject: "owner", ConnectionID: "test", Level: 9, ExpiresAt: time.Now().Add(time.Hour)}
+	f.caller = tool.Caller{Subject: "owner", ConnectionID: "test", ExpiresAt: time.Now().Add(time.Hour)}
 	f.owner = Owner(f.caller)
 	t.Cleanup(func() {
 		f.fs.Close()

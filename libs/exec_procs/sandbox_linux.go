@@ -33,10 +33,10 @@ func probeBackend() sandboxBackend {
 // deny 模式先实例化为覆盖目标（形态不可实例化 → 拒绝执行）。
 func planConfined(spec confineSpec) (launchPlan, error) {
 	if selectBackend() == backendUnavailable {
-		return launchPlan{}, sandboxUnavailable(spec.level)
+		return launchPlan{}, sandboxUnavailable()
 	}
 	var protected []string
-	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
+	if spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {
 			p := filepath.Join(spec.workdir, name)
 			if st, err := os.Stat(p); err == nil && st.IsDir() {

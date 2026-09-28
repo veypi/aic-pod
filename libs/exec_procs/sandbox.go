@@ -114,7 +114,6 @@ type SandboxRule struct {
 // confineSpec 是一次沙箱包装的完整输入（三域授权模型快照 + 等级/工作区/argv）。
 // 快照语义：每次 Start 读当次值（set_config/grant 动态生效），已启动进程不回溯。
 type confineSpec struct {
-	level      int                  // 授予等级（仅选择沙箱 profile）：1=read-only；2/3/4/9=workspace-write
 	workdir    string               // 进程 cwd，不授予目录权限
 	extra      []string             // 追加可写根（nil = 仅基础白名单）
 	argv       []string             // 被包装命令
@@ -130,15 +129,13 @@ type confineSpec struct {
 
 // Confine 将 argv 包装为沙箱执行形态（返回替换 argv；windows 的实际
 // confined 路径走 planConfined 的令牌注入，本函数仅供非 windows 调用与
-// 统一测试）。extraWrite 为追加可写根（nil = 仅基础白名单）。
-// level 为本次调用的授予等级（仅选择沙箱 profile）：1 = read-only；
-// 2/3/4/9 = workspace-write；0 = 未设置/异常值，按 read-only 处理（fail-closed）。
-// 审批通过（9）不豁免沙箱——免沙箱不经本函数表达（StartOptions.NoSandbox）。
+// 统一测试）。沙箱 profile 由 rules 派生（hosts-vsh-redesign：数字等级
+// 已删除）；免沙箱不经本函数表达（StartOptions.NoSandbox）。
 // 无可用后端返回错误（fail-closed），绝不返回未包装 argv。
 // deny/net 快照恒零值：现调用方仅测试；生产路径必须走 Start（StartOptions
 // 授权快照字段），否则 deny 隔离与网络管控静默缺失。
-func Confine(level int, workdir string, argv []string) ([]string, error) {
-	plan, err := planConfined(confineSpec{level: level, workdir: workdir, argv: argv, netOpen: true})
+func Confine(workdir string, argv []string) ([]string, error) {
+	plan, err := planConfined(confineSpec{workdir: workdir, argv: argv, netOpen: true})
 	if err != nil {
 		return nil, err
 	}
@@ -157,10 +154,10 @@ func selectBackend() sandboxBackend {
 
 // sandboxUnavailable 构造 fail-closed 错误（命令未执行）。
 // 云端批准不会豁免执行端必须落实的本地策略。
-func sandboxUnavailable(level int) error {
+func sandboxUnavailable() error {
 	return fmt.Errorf(
-		"sandbox: level %d requires confinement but no sandbox backend is usable on this host "+
-			"(install bubblewrap on Linux); the command was not run", level)
+		"sandbox: confinement required but no sandbox backend is usable on this host " +
+			"(install bubblewrap on Linux); the command was not run")
 }
 
 // ---- linux: bubblewrap（跨平台编译的纯 argv 构建，测试直接引用）----
@@ -211,7 +208,7 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string,
 	// deny 覆盖挂载在末尾追加，恒优先。
 	args := []string{"bwrap"}
 	flag := "--ro-bind"
-	if spec.fsOpen && spec.level >= proto.LevelWrite {
+	if spec.fsOpen {
 		flag = "--bind"
 	}
 	args = append(args, flag, "/", "/")
@@ -223,17 +220,16 @@ func bwrapArgs(spec confineSpec, cacheDirs []string, protectedReadonly []string,
 		args = append(args, "--unshare-net")
 	}
 	args = append(args, rlimitArgs()...)
-	if spec.level >= proto.LevelWrite {
-		args = append(args, "--tmpfs", "/tmp")
-		for _, d := range append(append([]string{}, cacheDirs...), literalWriteRoots(spec.writeAllow)...) {
-			if d != "" {
-				args = append(args, "--bind", d, d)
-			}
+	// 沙箱 profile 由 rules 派生（数字等级已删除）：临时区/缓存/可写根一律放行。
+	args = append(args, "--tmpfs", "/tmp")
+	for _, d := range append(append([]string{}, cacheDirs...), literalWriteRoots(spec.writeAllow)...) {
+		if d != "" {
+			args = append(args, "--bind", d, d)
 		}
-		for _, p := range protectedReadonly {
-			if p != "" {
-				args = append(args, "--ro-bind", p, p)
-			}
+	}
+	for _, p := range protectedReadonly {
+		if p != "" {
+			args = append(args, "--ro-bind", p, p)
 		}
 	}
 	// deny 隔离覆盖（§5.10）：后挂载优先（bwrap 后绑定覆盖前绑定），
@@ -576,17 +572,15 @@ func seatbeltArgs(spec confineSpec) []string {
 		"(deny file-write*)",
 		`(allow file-write* (literal "/dev/null"))`,
 	}
-	if spec.level >= proto.LevelWrite {
-		if spec.fsOpen {
-			// fs_policy=open：写全放（表内 deny 行在后输出，继续生效）。
-			forms = append(forms, "(allow file-write*)")
-		} else {
-			for _, root := range spec.extra {
-				forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
-			}
-			for _, pat := range spec.writeAllow {
-				forms = append(forms, "(allow file-write* (regex "+sbplString(globToSBPLRegex(pat))+"))")
-			}
+	if spec.fsOpen {
+		// fs_policy=open：写全放（表内 deny 行在后输出，继续生效）。
+		forms = append(forms, "(allow file-write*)")
+	} else {
+		for _, root := range spec.extra {
+			forms = append(forms, "(allow file-write* (subpath "+sbplString(root)+"))")
+		}
+		for _, pat := range spec.writeAllow {
+			forms = append(forms, "(allow file-write* (regex "+sbplString(globToSBPLRegex(pat))+"))")
 		}
 	}
 	forms = append(forms, seatbeltNetForms(spec)...)
@@ -594,10 +588,9 @@ func seatbeltArgs(spec confineSpec) []string {
 		// M3 行序映射：按规则表序逐行输出（SBPL 后规则胜）。AF_UNIX connect
 		// 不走 file-* 判定（实测 2026-09-05）——deny/allow 行都带
 		// network-outbound (remote unix) 形态，socket 覆盖与文件路径同口径
-		//（2026-09-23 探针复核）。写放行受等级门控（read-only 等级不放写）；
-		// 读与 unix 连通不受等级门控。
+		//（2026-09-23 探针复核）。写放行只看规则行（数字等级门控已删除）。
 		for _, r := range spec.rules {
-			allowWrite := r.Effect == "rw" && spec.level >= proto.LevelWrite
+			allowWrite := r.Effect == "rw"
 			for _, pat := range r.Patterns {
 				if pat == "" {
 					continue
@@ -634,7 +627,7 @@ func seatbeltArgs(spec confineSpec) []string {
 			forms = append(forms, "(deny network-outbound (remote unix (regex "+re+")))")
 		}
 	}
-	if spec.level >= proto.LevelWrite && spec.workdir != "" && !isGitArgv(spec.argv) {
+	if spec.workdir != "" && !isGitArgv(spec.argv) {
 		for _, name := range protectedMetadataNames {
 			p := filepath.Join(spec.workdir, name)
 			forms = append(forms, "(deny file-write* (subpath "+sbplString(canonicalRoot(p))+"))")
@@ -869,7 +862,7 @@ func validateProcessPolicy(spec confineSpec, platform string) error {
 	if platform == "windows" {
 		// 受限令牌 + ACL 模型：写白名单（fs_policy=deny）与 deny ACE 均可落地；
 		// 写全放（fs_policy=open 写级）与网络规则无法表达 → 拒绝执行。
-		if spec.fsOpen && spec.level >= proto.LevelWrite {
+		if spec.fsOpen {
 			return fail("this Windows backend cannot enforce fs_policy=open writable-everything")
 		}
 		if !spec.netOpen || len(spec.netDeny) > 0 {

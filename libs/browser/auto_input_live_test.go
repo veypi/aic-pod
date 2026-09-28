@@ -27,7 +27,7 @@ window.keys=[];addEventListener('keydown',e=>keys.push('down:'+e.key));addEventL
 	defer s.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c := tool.Caller{Subject: "owner", ConnectionID: "rtc:input", Level: 3, ExpiresAt: time.Now().Add(time.Minute)}
+	c := tool.Caller{Subject: "owner", ConnectionID: "rtc:input", ExpiresAt: time.Now().Add(time.Minute)}
 	info, err := s.Create(ctx, c, CreateArgs{URL: fixture.URL})
 	if err != nil {
 		t.Fatal(err)

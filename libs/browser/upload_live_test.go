@@ -38,7 +38,7 @@ func TestChromeUploadAndLocatorWaitLive(t *testing.T) {
 	defer s.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
-	c := tool.Caller{Subject: "review-owner", Level: 9, ConnectionID: "review", ExpiresAt: time.Now().Add(time.Minute)}
+	c := tool.Caller{Subject: "review-owner", ConnectionID: "review", ExpiresAt: time.Now().Add(time.Minute)}
 	page, err := s.Create(ctx, c, CreateArgs{URL: fixture.URL})
 	if err != nil {
 		t.Fatal(err)

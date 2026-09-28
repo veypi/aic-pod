@@ -21,23 +21,3 @@ func InWriteRoots(name string, roots []string) bool {
 	}
 	return false
 }
-
-// WriteGrade 返回路径集合的写分级：任一路径位于全部根外 → LevelDanger(3)；
-// 其余（含空路径集）→ LevelWrite(2)。空名单 = 分级关闭，恒 2（与
-// GatedFS.WriteRoots 未配置语义一致——两侧调用方恒传非空名单，此处把空名单
-// 语义钉死为「不分级」，消灭历史上 writeRequired 恒 2 / CloudWriteGrade 全 3
-// 的相反语义）。
-func WriteGrade(paths []string, roots []string) int {
-	if len(roots) == 0 {
-		return LevelWrite
-	}
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		if !InWriteRoots(p, roots) {
-			return LevelDanger
-		}
-	}
-	return LevelWrite
-}

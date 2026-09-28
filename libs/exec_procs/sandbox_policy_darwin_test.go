@@ -35,7 +35,7 @@ func TestHostPolicyNativeEnforcement(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: rw, extra: []string{rw}, rules: []SandboxRule{{Effect: "deny", Patterns: []string{deny}}}, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{workdir: rw, extra: []string{rw}, rules: []SandboxRule{{Effect: "deny", Patterns: []string{deny}}}, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,7 +112,7 @@ func TestHostPolicyReadOpenDenyScope(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{workdir: work, extra: []string{work}, rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestHostPolicyLiteralSpellings(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{workdir: work, extra: pol.WriteRootsFor(""), rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -205,7 +205,7 @@ func TestHostPolicyXcodeShimTools(t *testing.T) {
 	run := func(script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: pol.WriteRootsFor(""), rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{workdir: work, extra: pol.WriteRootsFor(""), rules: policyRules(pol), netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +299,7 @@ func TestHostPolicyRuleOverride(t *testing.T) {
 	run := func(rules []SandboxRule, script string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		plan, err := planConfined(confineSpec{level: 9, workdir: work, extra: []string{work}, rules: rules, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
+		plan, err := planConfined(confineSpec{workdir: work, extra: []string{work}, rules: rules, netOpen: true, argv: []string{"/bin/sh", "-c", script}})
 		if err != nil {
 			t.Fatal(err)
 		}

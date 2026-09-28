@@ -165,7 +165,7 @@ func inputFixture(t *testing.T) *inputStream {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &page{gate: make(chan struct{}, 1), info: PageInfo{Document: "doc", Width: 800, Height: 600}}
-	i := &inputStream{p: p, ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{}), plannedKeys: map[string]bool{}, caller: tool.Caller{Subject: "owner", ConnectionID: "rtc", Level: 3, ExpiresAt: time.Now().Add(time.Minute)}}
+	i := &inputStream{p: p, ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{}), plannedKeys: map[string]bool{}, caller: tool.Caller{Subject: "owner", ConnectionID: "rtc", ExpiresAt: time.Now().Add(time.Minute)}}
 	i.l = &lease{connection: i.caller.ConnectionID, input: i, keys: map[string]bool{}}
 	t.Cleanup(func() { i.Close() })
 	return i

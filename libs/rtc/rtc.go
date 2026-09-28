@@ -1,4 +1,4 @@
-// Package rtc transports hosts_rtc/1 over authenticated, reliable WebRTC channels.
+// Package rtc transports hosts_rtc/2 over authenticated, reliable WebRTC channels.
 // It has no filesystem or UI command dispatch: all business calls enter Backend.
 package rtc
 

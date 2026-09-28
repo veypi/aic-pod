@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // spawnOrSkip 启动管道进程；沙箱后端不可用时跳过（嵌套 seatbelt 环境——
@@ -31,8 +29,7 @@ func spawnOrSkip(t *testing.T, m *Manager, ctx context.Context, opts StartOption
 func TestSpawnEcho(t *testing.T) {
 	m := NewManager(time.Minute)
 	sp := spawnOrSkip(t, m, context.Background(), StartOptions{FsOpen: true, NetOpen: true,
-		Exec:  []string{"sh", "-c", "printf hello"},
-		Level: proto.LevelRead,
+		Exec: []string{"sh", "-c", "printf hello"},
 	})
 	body, err := io.ReadAll(sp.Body())
 	if err != nil {
@@ -50,8 +47,7 @@ func TestSpawnEcho(t *testing.T) {
 func TestSpawnExitError(t *testing.T) {
 	m := NewManager(time.Minute)
 	sp := spawnOrSkip(t, m, context.Background(), StartOptions{FsOpen: true, NetOpen: true,
-		Exec:  []string{"sh", "-c", "echo out; echo boom-err >&2; exit 3"},
-		Level: proto.LevelRead,
+		Exec: []string{"sh", "-c", "echo out; echo boom-err >&2; exit 3"},
 	})
 	_, err := io.ReadAll(sp.Body())
 	if err == nil || !strings.Contains(err.Error(), "boom-err") {
@@ -70,7 +66,7 @@ func TestSpawnExitError(t *testing.T) {
 func TestSpawnBodyEOFAfterSniffTerminatesCopy(t *testing.T) {
 	m := NewManager(time.Minute)
 	sp, err := m.Spawn(context.Background(), StartOptions{NoSandbox: true,
-		Exec: []string{"sh", "-c", "printf hi"}, Level: proto.LevelRead})
+		Exec: []string{"sh", "-c", "printf hi"}})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -101,8 +97,7 @@ func TestSpawnBodyEOFAfterSniffTerminatesCopy(t *testing.T) {
 func TestSpawnAbort(t *testing.T) {
 	m := NewManager(time.Minute)
 	sp := spawnOrSkip(t, m, context.Background(), StartOptions{FsOpen: true, NetOpen: true,
-		Exec:  []string{"sh", "-c", "yes"},
-		Level: proto.LevelRead,
+		Exec: []string{"sh", "-c", "yes"},
 	})
 	buf := make([]byte, 64)
 	if _, err := sp.Body().Read(buf); err != nil {
@@ -120,8 +115,7 @@ func TestSpawnCtxCancel(t *testing.T) {
 	m := NewManager(time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	sp := spawnOrSkip(t, m, ctx, StartOptions{FsOpen: true, NetOpen: true,
-		Exec:  []string{"sh", "-c", "sleep 30"},
-		Level: proto.LevelRead,
+		Exec: []string{"sh", "-c", "sleep 30"},
 	})
 	cancel()
 	done := make(chan struct{})

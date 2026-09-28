@@ -86,13 +86,17 @@ func (p *peer) toolChannel(dc *webrtc.DataChannel) {
 	}()
 }
 func (p *peer) openToolChannel(c tool.Caller, r rtcwire.Request) (any, error) {
-	probe := r.Request
-	probe.Action = "call"
-	if err := probe.Validate(); err != nil {
+	// endpoint 是指令名形（page.frames/page.input 含点号）——用 ValidName 校验；
+	// ValidID 无点号会把两个真实端点全部拒之门外。
+	if r.Stream == nil || !wire.ValidName(r.Stream.Endpoint) {
+		return nil, wire.Fail("invalid_argument", "Expected stream endpoint and opening args")
+	}
+	raw, err := json.Marshal(r.Stream.Args)
+	if err != nil {
 		return nil, err
 	}
-	if r.Call == nil || len(r.Argv) != 0 || r.TimeoutMS != 0 {
-		return nil, wire.Fail("invalid_argument", "Expected tool, method and opening args")
+	if len(raw) > wire.MaxMessageBytes/2 {
+		return nil, wire.Fail("invalid_argument", "Stream opening args too large")
 	}
 	p.mu.Lock()
 	s := p.toolStreams[r.Channel]
@@ -107,7 +111,7 @@ func (p *peer) openToolChannel(c tool.Caller, r rtcwire.Request) (any, error) {
 	}
 	s.bound = true
 	s.mu.Unlock()
-	source, err := p.s.cfg.Tools.OpenToolStream(s.ctx, c, *r.Call)
+	source, err := p.s.cfg.Tools.OpenToolStream(s.ctx, c, r.Stream.Endpoint, raw)
 	if err != nil {
 		s.close(err)
 		return nil, err

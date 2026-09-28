@@ -35,7 +35,7 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 		return launchPlan{}, err
 	}
 	if selectBackend() == backendUnavailable {
-		return launchPlan{}, sandboxUnavailable(spec.level)
+		return launchPlan{}, sandboxUnavailable()
 	}
 	return launchPlan{argv: confineRlimits(seatbeltArgs(spec))}, nil
 }

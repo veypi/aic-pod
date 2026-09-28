@@ -64,51 +64,6 @@ func NewNonce() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// ---- 工具请求签名（§6.2） ----
-
-// toolReqSigPayload 是工具请求签名的 canonical 输入。
-// 双端必须位级一致：JSON 字段序即签名输入序，禁止各自另写。
-type toolReqSigPayload struct {
-	Version      int    `json:"version"`
-	HostID       string `json:"host_id"`
-	MsgID        string `json:"msg_id"`
-	SessionID    string `json:"session_id"`
-	Tool         string `json:"tool"`
-	DataSHA256   string `json:"data_sha256"`
-	GrantedLevel int    `json:"granted_level"`
-	Nonce        string `json:"nonce"`
-	Deadline     string `json:"deadline"`
-}
-
-// CanonicalToolReqSigInput 构造签名 canonical 输入：
-// 覆盖 host_id/msg_id/session_id/tool/data_hash/granted_level/nonce/deadline（§6.2）。
-func CanonicalToolReqSigInput(hostID string, req *ToolRequest) string {
-	sum := sha256.Sum256(req.Data)
-	b, _ := json.Marshal(toolReqSigPayload{
-		Version:      2,
-		HostID:       hostID,
-		MsgID:        req.MsgID,
-		SessionID:    req.SessionID,
-		Tool:         req.Tool,
-		DataSHA256:   fmt.Sprintf("%x", sum),
-		GrantedLevel: req.GrantedLevel,
-		Nonce:        req.Nonce,
-		Deadline:     req.Deadline,
-	})
-	return string(b)
-}
-
-// SignToolRequest 计算并填入 req.Sig（HMAC-SHA256，K_tool）。
-func SignToolRequest(req *ToolRequest, hostID, kTool string) {
-	req.Sig = base64.RawURLEncoding.EncodeToString(HMACSHA256(kTool, CanonicalToolReqSigInput(hostID, req)))
-}
-
-// VerifyToolRequest 校验请求签名（host 端验证规范第 1 步，§6.2）。
-func VerifyToolRequest(req *ToolRequest, hostID, kTool string) bool {
-	expected := base64.RawURLEncoding.EncodeToString(HMACSHA256(kTool, CanonicalToolReqSigInput(hostID, req)))
-	return hmac.Equal([]byte(req.Sig), []byte(expected))
-}
-
 // ---- 连接 token（host 端连接认证；server natsauth 用同一 canonical 输入验签） ----
 
 const connectTokenDomain = "aic-host-connect-v1"

@@ -1,7 +1,6 @@
 package proto
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -33,39 +32,6 @@ func TestDeriveKeysVector(t *testing.T) {
 	}
 	if _, _, _, err := DeriveKeys(vecSecret, ""); err == nil {
 		t.Error("empty hostID want error")
-	}
-}
-
-func TestToolRequestSigVector(t *testing.T) {
-	req := &ToolRequest{
-		MsgID:        "msg_001",
-		SessionID:    "s_abc",
-		Tool:         ToolExec,
-		Data:         []byte(`{"action":"ls","argv":["-la"]}`),
-		GrantedLevel: 3,
-		Nonce:        "AAAAAAAAAAAAAAAAAAAAAA",
-		Deadline:     "2026-01-02T03:04:05Z",
-	}
-	SignToolRequest(req, vecHostID, vecKTool)
-	if req.Sig != vecToolReqSig {
-		t.Errorf("sig = %q, want %q", req.Sig, vecToolReqSig)
-	}
-	if !VerifyToolRequest(req, vecHostID, vecKTool) {
-		t.Error("verify failed for freshly signed request")
-	}
-	// 篡改任一字段验签必失败
-	tampered := *req
-	tampered.GrantedLevel = 9
-	if VerifyToolRequest(&tampered, vecHostID, vecKTool) {
-		t.Error("verify passed with tampered granted_level")
-	}
-	tampered = *req
-	tampered.Data = []byte(`{"action":"rm","argv":["-r","/"]}`)
-	if VerifyToolRequest(&tampered, vecHostID, vecKTool) {
-		t.Error("verify passed with tampered data")
-	}
-	if VerifyToolRequest(req, "host_other", vecKTool) {
-		t.Error("verify passed with wrong host_id")
 	}
 }
 
@@ -101,45 +67,5 @@ func TestNonceUnique(t *testing.T) {
 	}
 }
 
-// TestToolRequestWireRoundTrip 锁定“签名字节 == 线上字节”性质（§6.2）：
-// data 走服务端真实路径（map → json.Marshal，紧凑 + HTML 转义）时，
-// 签名 → 信封序列化 → 反序列化 → 验签必须成立。覆盖 <>& 转义与非 ASCII。
-// 历史教训：RawMessage 非 canonical（含未转义 <>&/多余空白）时 appendCompact
-// 会改写线上字节，验签静默失败——Data 必须 json.Marshal 产出（见 envelope.go）。
-func TestToolRequestWireRoundTrip(t *testing.T) {
-	data := map[string]any{
-		"action": "browser",
-		"argv":   []string{"open", "https://example.com/?a=1&b=<测试>"},
-	}
-	rawData, err := json.Marshal(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := &ToolRequest{
-		MsgID:        "msg_wire",
-		SessionID:    "s_wire",
-		Tool:         ToolExec,
-		Data:         rawData,
-		GrantedLevel: 2,
-		Nonce:        "AAAAAAAAAAAAAAAAAAAAAA",
-		Deadline:     "2026-01-02T03:04:05Z",
-	}
-	SignToolRequest(req, vecHostID, vecKTool)
-
-	// 线上字节（json.Marshal 信封）→ host 端反序列化
-	wire, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var back ToolRequest
-	if err := json.Unmarshal(wire, &back); err != nil {
-		t.Fatal(err)
-	}
-	if !VerifyToolRequest(&back, vecHostID, vecKTool) {
-		t.Error("verify failed after wire round-trip (data contains <>&/非ASCII)")
-	}
-	// 线上字节的 data 段必须与签名输入逐字节一致（appendCompact 幂等）
-	if string(back.Data) != string(rawData) {
-		t.Errorf("wire data = %q, want canonical %q", back.Data, rawData)
-	}
-}
+// （hosts_nats/2：ToolRequest 逐字段签名机制已删除——hosts_nats 信封对完整
+// 请求做 HMAC，覆盖 grant_approved 标记；见 protocol/hosts_nats/types_test.go。）

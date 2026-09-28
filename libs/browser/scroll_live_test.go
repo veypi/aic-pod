@@ -33,7 +33,7 @@ inner.addEventListener('scroll',()=>positions.push(inner.scrollTop));
 	defer s.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	c := tool.Caller{Subject: "owner", ConnectionID: "rtc:scroll", Level: 9, ExpiresAt: time.Now().Add(time.Minute)}
+	c := tool.Caller{Subject: "owner", ConnectionID: "rtc:scroll", ExpiresAt: time.Now().Add(time.Minute)}
 	info, err := s.Create(ctx, c, CreateArgs{URL: fixture.URL})
 	if err != nil {
 		t.Fatal(err)

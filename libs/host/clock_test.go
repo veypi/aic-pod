@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
@@ -80,21 +79,12 @@ func TestToolsVerifyUsesCalibratedClock(t *testing.T) {
 	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), BrowserStateDir: t.TempDir()})
 	t.Cleanup(func() { _ = c.Close() })
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
-	d := tool.New(tool.Config{})
-	if err := d.RegisterCommand(tool.DefineCommand("counter", tool.Bind(tool.Spec{Name: "next", Access: 2}, func(ctx context.Context, caller tool.Caller, _ struct{}) (int, error) {
-		return 1, nil
-	}))); err != nil {
-		t.Fatal(err)
-	}
-	original := c.tools
-	c.tools = d
-	t.Cleanup(func() { _ = original.Close(context.Background()) })
 	defer setClockOffset(0)
 
 	route, _ := natswire.Subject(c.uid, c.hostID)
 	setClockOffset((2 * time.Hour).Milliseconds())
 	makeReq := func(deadlineMS, untilMS int64) []byte {
-		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, GrantedLevel: 2, Nonce: wire.NewID("n_"), Deadline: deadlineMS, AuthorizationUntil: untilMS, Request: wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: "call", Argv: []string{"counter", "next"}}}
+		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: deadlineMS, AuthorizationUntil: untilMS, Request: wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionFS, FS: &wire.FSInvocation{Method: "roots", Args: json.RawMessage(`{}`)}}}
 		natswire.Sign(c.kTool, &r)
 		b, _ := json.Marshal(r)
 		return b

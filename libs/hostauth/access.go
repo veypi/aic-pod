@@ -99,7 +99,7 @@ func (a *Access) Admit(ticket, pcID, remoteFingerprint string) (Admission, error
 	if err = a.consume(t); err != nil {
 		return Admission{}, err
 	}
-	caller := Caller{Subject: t.UserID, ConnectionID: id, Transport: "rtc", ExpiresAt: time.Unix(t.LeaseUntil, 0)}
+	caller := Caller{Subject: t.UserID, ConnectionID: id, Transport: "rtc", SessionID: t.SessionID, ExpiresAt: time.Unix(t.LeaseUntil, 0)}
 	a.connections[id] = &connection{caller: caller, pcID: pcID, fingerprint: t.Fingerprint}
 	return Admission{Caller: caller}, nil
 }
@@ -155,5 +155,8 @@ func (a *Access) Expired() []string {
 
 type Caller struct {
 	Subject, ConnectionID, Transport string
-	ExpiresAt                        time.Time
+	// SessionID 归属会话：由票据绑定（hosts-vsh-redesign §2.4——不能由
+	// 脚本或未经核验的请求字段冒认）；空 = 独立 manual 范围。
+	SessionID string
+	ExpiresAt time.Time
 }

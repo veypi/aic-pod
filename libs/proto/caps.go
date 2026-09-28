@@ -2,7 +2,6 @@ package proto
 
 import (
 	"fmt"
-	toolwire "github.com/veypi/aic-pod/protocol/hosts_tools"
 	"regexp"
 	"strconv"
 )
@@ -21,7 +20,6 @@ type Caps struct {
 	Hostname      string      `json:"hostname,omitempty"`
 	DeviceInfo    *DeviceInfo `json:"device_info,omitempty"`
 	FS            FSCaps      `json:"fs"`
-	Exec          ExecCaps    `json:"exec"`
 	// Mgmt 分别声明已启动的 RTC / proxy 及开放命令；不包含凭据。
 	Mgmt *MgmtCaps `json:"mgmt,omitempty"`
 }
@@ -61,9 +59,9 @@ type DeviceInfo struct {
 
 // FSCaps 声明 fs 能力。Actions 为指针以严格区分三形态（§6.3）：
 // nil（null/未声明）= 全部 8 个 action；空数组 = 不支持 fs。
+// hosts_tools/2 起 FS 方法表为协议固定集，不再随 caps 逐项声明。
 type FSCaps struct {
-	Methods []toolwire.Method `json:"methods,omitempty"`
-	Actions *[]string         `json:"actions"`
+	Actions *[]string `json:"actions"`
 }
 
 // EffectiveActions 返回有效 fs action 集（nil → 全集）。
@@ -83,22 +81,6 @@ func (c FSCaps) Supports(action string) bool {
 	}
 	return false
 }
-
-// ExecCaps 声明 exec 能力（§6.3）：统一命令声明表。
-// 未在表中声明的命令一律拒绝，不存在「未知命令透传」。
-type ExecCaps struct {
-	Epoch    string        `json:"epoch,omitempty"`
-	Commands []CommandDecl `json:"commands,omitempty"`
-}
-
-// CommandDecl 是命令声明（§6.3）。注册信息为 {name, desc, help, level}：
-//   - name：命令名；desc：简短描述（commands 输出给 AI，能力发现用）
-//   - help：完整帮助文档（procs 拦截 `-h` 时内部返回，不下发到执行端）
-//   - level：基础权限等级（仅供 procs 内部审批判断，不暴露给 AI；
-//     风险操作的动态提升由判断端内部表处理，如 git push/reset → Danger）
-//
-// stateful/backgroundable/实现形态（虚拟指令/本地命令）是内部实现细节，不进协议。
-type CommandDecl = toolwire.Command
 
 // ---- 客户端版本门禁（§6.3） ----
 

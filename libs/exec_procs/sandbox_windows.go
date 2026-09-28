@@ -398,7 +398,7 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 	}
 	validateD := mark()
 	if selectBackend() == backendUnavailable {
-		return launchPlan{}, sandboxUnavailable(spec.level)
+		return launchPlan{}, sandboxUnavailable()
 	}
 	var extraSids []*windows.SID
 	var tmpDir string
@@ -414,7 +414,8 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 	}
 	cleanup := func() {}
 
-	if spec.level >= proto.LevelWrite {
+	// 可写区授权（workspace-write profile 由 rules 派生，数字等级已删除）。
+	{
 		dirs := make([]string, 0, 4)
 		if spec.workdir != "" {
 			dirs = append(dirs, spec.workdir)
@@ -480,8 +481,8 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 	}
 
 	if logf != nil {
-		logf("sandbox(windows): plan validate=%s deny=%s ws-grant=%s tmp=%s token=%s job=%s total=%s level=%d",
-			validateD, denyD, grantD, tmpD, tokenD, jobD, time.Since(t0).Round(time.Millisecond), spec.level)
+		logf("sandbox(windows): plan validate=%s deny=%s ws-grant=%s tmp=%s token=%s job=%s total=%s",
+			validateD, denyD, grantD, tmpD, tokenD, jobD, time.Since(t0).Round(time.Millisecond))
 	}
 
 	env := []string{}

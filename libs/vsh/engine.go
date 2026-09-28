@@ -1,9 +1,18 @@
 // Package vsh 是 aic-pod 的 vsh 引擎集成层（glue，cloud/host 共用）。
 //
-// 职责（design v4.3 §4）：Engine 生命周期（Runtime 单例 + Session 池 +
-// limits/墙钟 + panic recover + 后台任务表 + 日志 tee）、FS 适配器
-// （fs_ufs.go / fs_host.go，唯一进程内路径权威）、NetClient（netclient.go）、
-// 静态分析（analyze.go）、平台命令（cmds.go）、原生命令包装器（native.go）。
+// 职责：Engine 生命周期（Runtime 单例 + per-exec 派生会话 + limits/墙钟 +
+// panic recover + 后台任务登记表）、FS 适配器（fs_ufs.go / fs_host.go，唯一
+// 进程内路径权威）、NetClient（netclient.go）、静态分析（analyze.go）、
+// 平台命令（cmds.go）、原生命令包装器（native.go）。
+//
+// hosts-vsh-redesign 要点：
+//   - 每次 exec 使用独立派生会话（共享 backing FS，独立内存层）——脚本执行
+//     不持有跨调用的会话锁，bg 查询/取消与组合脚本永不被另一执行阻塞
+//     （不靠单指令特判）。跨 exec 的 cwd/变量不持久（外层每次显式传 workdir）。
+//   - 可信身份与审批事实经 ctx 传递（Owner/SessionKey/GrantApproved/NoSandbox），
+//     不从脚本可修改的 env（AIC_VSH_*）取授权信息。
+//   - bg 任务唯一来源是 exec 前台等待超时（Adopt 登记已运行执行）；任务表
+//     不再启动执行、不保存输出缓冲。
 //
 // 引擎路径权威分工（v4.1 强制项）：引擎 Policy 的 SymlinkMode 必须显式覆盖为
 // 放行型（SymlinkFollow）——默认 SymlinkDeny 会在 AllowPath 先于 FS 适配器
@@ -17,7 +26,6 @@ import (
 	"io"
 	"maps"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,17 +49,16 @@ const (
 	MaxLoopIterations    = 10000
 	MaxGlobOperations    = 100000
 	MaxSubstitutionDepth = 50
-	// MaxForegroundTimeout 前台 timeout 上限（page 端 180s 由 exec 工具层 cap）。
-	MaxForegroundTimeout = 300 * time.Second
-	// BackgroundWallClock 后台任务墙钟：到期以 124 终止（设计 §6：10m → 30min）。
+	// MaxForegroundWait 前台等待上限（page 端 180s 由 exec 工具层 cap）。
+	MaxForegroundWait = 300 * time.Second
+	// BackgroundWallClock 执行墙钟：到期以 124 终止（30min）。
 	BackgroundWallClock = 30 * time.Minute
 
-	// MaxRunningTasksPerOwner 单 owner 同时运行任务上限（容量闸，2026-09-24
-	// 用户拍板）：单任务只有 30min 墙钟不限并发——bg fan-out（一次调用 seq 1..64
-	// bg run yes）/多会话并发可占满全部核。超额快速拒绝（排队本身是 DoS 放大器）。
+	// MaxRunningTasksPerOwner 单 owner 同时运行任务上限（容量闸）：单任务只有
+	// 30min 墙钟不限并发——fan-out/多会话并发可占满全部核。超额快速拒绝
+	//（排队本身是 DoS 放大器）。
 	MaxRunningTasksPerOwner = 4
-	// MaxRetainedFinishedTasks 完成任务表保留上限（超出逐出最旧）——每项带
-	// 8MiB 上限输出缓冲，不限量累积是长跑内存泄漏面（2026-09-24 实测观察）。
+	// MaxRetainedFinishedTasks 完成任务表保留上限（超出逐出最旧）。
 	MaxRetainedFinishedTasks = 64
 )
 
@@ -81,12 +88,17 @@ func engineLimits() vshpolicy.Limits {
 // 不经 Engine。
 type EngineConfig struct {
 	// NewSessionFS 构建每会话文件系统（cloud = UFS 直通 + 内存层 + jail；
-	// host = OS backing）。返回的 workDir 是该会话的默认工作目录。
+	// host = OS backing）。入参为基会话键（派生后缀已剥离）；返回的 workDir
+	// 是该会话的默认工作目录。
 	NewSessionFS func(sessionKey string) (fsys gbfs.FileSystem, workDir string, err error)
 	// Network 注入 NetClient（cloud 唯一网络权威）；nil = 不注册 curl。
 	Network vshnet.Client
 	// Platform 平台命令依赖（cmds.go）；零值可用（各命令降级为可读报错）。
 	Platform PlatformDeps
+	// CommandAllow 虚拟指令的执行规则门（host 接线 cfg exec 域）：
+	// 命中已注册指令时调用，返回 false 即权限拒绝（不继续 fallback）。
+	// nil = 全部放行（cloud；page 无原生能力另由端侧收口）。
+	CommandAllow func(ctx context.Context, name string) bool
 	// BaseEnv 每次 exec 注入的基础环境（HOME/PATH 钉死由调用方给；
 	// 不跨 exec 持久，ExecRequest.Env 覆盖同名键）。
 	BaseEnv map[string]string
@@ -98,42 +110,47 @@ type EngineConfig struct {
 	// （空 = vsh 默认 /bin，仅内存层文件系统可用）。host 端无内存层，必须
 	// 指向真实 stub 目录（= LayoutEnv PATH 目录）。
 	BuiltinCommandDir string
-	// NativeFallback 命令 Registry 未命中时的兜底（host exec_policy: open
-	// 的原生 fallback——返回 false 继续走 PATH/hash 解析，最终 127）。
+	// NativeFallback 命令 Registry 未命中时的兜底（host 原生适配器：
+	// 按 PATH 查找并执行，执行期受命令规则与进程沙箱约束）。
 	// nil = 未命中即 127。
 	NativeFallback func(name string) (commands.Command, bool)
 	// Logf 可选日志。
 	Logf func(format string, args ...any)
 }
 
-// Engine 是 vsh Runtime 单例 + 会话池 + 后台任务表。
+// Engine 是 vsh Runtime 单例 + 后台任务登记表。
 type Engine struct {
 	cfg   EngineConfig
 	rt    *vshcore.Runtime
 	reg   *commands.Registry
 	Tasks *TaskTable
-
-	mu   sync.Mutex
-	sess map[string]*engineSession
-}
-
-type engineSession struct {
-	sess    *vshcore.Session
-	workDir string
 }
 
 // sessionFSKey 把每会话 FS 经 ctx 传给 Runtime 的 fs.Factory（Runtime 单例，
 // Factory.New(ctx) 在 NewSession 时调用——以此把会话身份带进工厂）。
 type sessionFSKey struct{}
 
-// netSessionKey 把会话键经 ctx 传给 NetClient（M3c：规则表 per-session 快照，
+// netSessionKey 把会话键经 ctx 传给 NetClient（规则表 per-session 快照，
 // cloud 多用户进程不可用进程级并集——跨用户泄漏授权）。
 type netSessionKey struct{}
 
-// ownerKey 把任务容量闸归属经 ctx 透传（bg run 派生任务继承同一 owner）。
+// ownerKey 把任务归属（用户身份）经 ctx 透传。
 type ownerKey struct{}
 
-// OwnerFromContext 取 Exec 注入的容量闸归属（无注入 = 空串匿名共池）。
+// grantApprovedKey 携带服务端确认过的 grant 审批事实（可信上下文；
+// 不进入 argv/env——脚本不可修改）。
+type grantApprovedKey struct{}
+
+// noSandboxKey 携带本次执行的免沙箱选项（可信上下文）。
+type noSandboxKey struct{}
+
+// waitBudgetKey 携带前台等待截止（bg wait 的共享预算源）。
+type waitBudgetKey struct{}
+
+// execHandleKey 携带本次执行的句柄（bg wait 禁止等待自身用）。
+type execHandleKey struct{}
+
+// OwnerFromContext 取 Exec 注入的任务归属（无注入 = 空串匿名共池）。
 func OwnerFromContext(ctx context.Context) string {
 	o, _ := ctx.Value(ownerKey{}).(string)
 	return o
@@ -146,12 +163,45 @@ func SessionFromContext(ctx context.Context) string {
 	return sid
 }
 
+// GrantApprovedFromContext 取本次执行的 grant 审批事实（默认 false）。
+func GrantApprovedFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(grantApprovedKey{}).(bool)
+	return v
+}
+
+// NoSandboxFromContext 取本次执行的免沙箱选项（默认 false）。
+func NoSandboxFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(noSandboxKey{}).(bool)
+	return v
+}
+
+// WaitBudgetRemaining 取剩余前台等待预算（bg wait 用）：
+// 返回 min(剩余预算减 1 秒) 与 ok；无预算（后台执行/未注入）或预算耗尽
+// 时 ok=false——此时 wait 只查询不阻塞。
+func WaitBudgetRemaining(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := ctx.Value(waitBudgetKey{}).(time.Time)
+	if !ok {
+		return 0, false
+	}
+	remain := time.Until(deadline) - time.Second
+	if remain <= 0 {
+		return 0, false
+	}
+	return remain, true
+}
+
+// HandleFromContext 取本次执行的句柄（bg wait 禁止等待自身用）。
+func HandleFromContext(ctx context.Context) *ExecHandle {
+	h, _ := ctx.Value(execHandleKey{}).(*ExecHandle)
+	return h
+}
+
 // layoutInitEnv 是 Runtime 级 BaseEnv：仅服务于 NewSession 的布局初始化
 // （initializeSandboxLayout 用 r.cfg.BaseEnv 做 MkdirAll(HOME)/Chmod(/tmp)/写
 // PATH stub）。HOME 钉进内存层（/tmp 前缀）——真实 HOME（cloud=/u/{uid}）
 // 由平台每次 exec 经 ExecRequest.Env 注入（executionEnv 覆盖 BaseEnv），
 // Runtime 单例因此可跨用户/会话共享（布局初始化不触碰 jail 内真实路径）。
-// host 端无内存层：该 HOME 需落在规则表可写处（M3a host 接线时按会话根调整）。
+// host 端无内存层：该 HOME 需落在规则表可写处。
 var layoutInitEnv = map[string]string{
 	"HOME": "/tmp/.vsh-layout-home",
 	"PATH": "/usr/bin:/bin",
@@ -168,10 +218,9 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	if err := jq.Register(reg); err != nil {
 		return nil, fmt.Errorf("vsh glue: register jq: %w", err)
 	}
-	e := &Engine{cfg: cfg, reg: reg, Tasks: NewTaskTable(), sess: map[string]*engineSession{}}
-	// bg run 需要回到 Engine.Exec（cmds.go 不反向引用引擎，由此注入）。
+	e := &Engine{cfg: cfg, reg: reg, Tasks: NewTaskTable()}
+	// bg 指令需要任务登记表（cmds.go 不反向引用引擎，由此注入）。
 	cfg.Platform.Tasks = e.Tasks
-	cfg.Platform.RunBG = e.runBG
 	if err := RegisterPlatformCommands(reg, cfg.Platform); err != nil {
 		return nil, fmt.Errorf("vsh glue: register platform commands: %w", err)
 	}
@@ -192,15 +241,15 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	if layoutEnv == nil {
 		layoutEnv = layoutInitEnv
 	}
-	// exec_policy: open 的解析兜底：Registry 未命中时交 NativeFallback
-	// （host 原生门）；base 命中恒优先（D14 registry 优先不动摇）。
+	// 解析兜底：Registry 未命中时交 NativeFallback（host 原生适配器）；
+	// base 命中恒优先（registry 优先不动摇）。命中指令先过执行规则门
+	//（CommandAllow），被拒返回权限错误命令——不能 fallback 绕过拒绝。
 	var regIf commands.CommandRegistry = reg
-	if cfg.NativeFallback != nil {
-		regIf = fallbackRegistry{base: reg, fallback: cfg.NativeFallback}
+	if cfg.NativeFallback != nil || cfg.CommandAllow != nil {
+		regIf = fallbackRegistry{base: reg, fallback: cfg.NativeFallback, allow: cfg.CommandAllow}
 	}
 	opts := []vshcore.Option{
 		vshcore.WithRegistry(regIf),
-		vshcore.WithPolicy(pol),
 		vshcore.WithPolicy(pol),
 		vshcore.WithBaseEnv(layoutEnv),
 		vshcore.WithFileSystem(vshcore.CustomFileSystem(factory, "/")),
@@ -220,18 +269,39 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	return e, nil
 }
 
-// fallbackRegistry Registry 包装：base 未命中时交兜底（exec_policy: open
-// 的原生命令合成）；Names 只列 base（stub 钉板/命令发现不含动态原生名）。
+// fallbackRegistry Registry 包装：base 未命中时交兜底（宿主原生适配）；
+// 命中（含兜底合成）先过 CommandAllow 执行规则门——拒绝返回权限错误命令，
+// 不继续 fallback。Names 只列 base（stub 钉板/命令发现不含动态原生名）。
 type fallbackRegistry struct {
 	base     *commands.Registry
 	fallback func(string) (commands.Command, bool)
+	allow    func(ctx context.Context, name string) bool
+}
+
+// gated 把命中命令包上执行规则门（每次调用取当次规则——grant/cfg 动态生效）。
+func (r fallbackRegistry) gated(name string, c commands.Command) commands.Command {
+	if r.allow == nil {
+		return c
+	}
+	allow := r.allow
+	return commands.DefineCommand(name, func(ctx context.Context, inv *commands.Invocation) error {
+		if !allow(ctx, name) {
+			return commands.Exitf(inv, 126, "%s: command denied by exec rules（grant cmd %s 申请）", name, name)
+		}
+		return c.Run(ctx, inv)
+	})
 }
 
 func (r fallbackRegistry) Lookup(name string) (commands.Command, bool) {
 	if c, ok := r.base.Lookup(name); ok {
-		return c, true
+		return r.gated(name, c), true
 	}
-	return r.fallback(name)
+	if r.fallback != nil {
+		if c, ok := r.fallback(name); ok {
+			return r.gated(name, c), true
+		}
+	}
+	return nil, false
 }
 
 func (r fallbackRegistry) Register(cmd commands.Command) error { return r.base.Register(cmd) }
@@ -242,31 +312,41 @@ func (r fallbackRegistry) RegisterLazy(name string, loader commands.LazyCommandL
 
 func (r fallbackRegistry) Names() []string { return r.base.Names() }
 
-// Registry 暴露组合 Registry（host 端 native 白名单在此追加注册）。
+// Registry 暴露组合 Registry（browser/cua 等端侧指令在此追加注册）。
 func (e *Engine) Registry() *commands.Registry { return e.reg }
 
 // ExecRequest 一次脚本执行。
 type ExecRequest struct {
-	SessionKey string // 会话键（cloud=sid；host=sid）
-	// Owner 任务容量闸归属（cloud="u:"+uid；host="host"；空=匿名共池）——
-	// 经 ctx 透传，bg run 派生任务继承同一 owner。
-	Owner   string
-	Script  string            // 脚本正文
-	WorkDir string            // 空 = 会话默认工作目录
+	SessionKey string // 会话键（cloud/host = sid）
+	// Owner 任务归属的用户身份（cloud="u:"+uid 或 uid；host=host owner uid；
+	// 空=匿名共池）。bg 归属 = (Owner, SessionKey)。
+	Owner  string
+	Script string // 脚本正文
+	// WorkDir 空 = 会话默认工作目录（每次 exec 显式给——派生会话不持久 cwd）。
+	WorkDir string
 	Env     map[string]string // 覆盖 BaseEnv
-	// GrantedLevel 当次授予等级（host native 子进程沙箱 profile 选择用；
-	// 经 env AIC_VSH_LEVEL 透传给 native 包装器）。
-	GrantedLevel int
-	Stdin        io.Reader
-	Timeout      time.Duration // ≤0 = MaxForegroundTimeout；上限见 LongRunning
-	// LongRunning 后台语义：Timeout 上限放宽到 BackgroundWallClock（bg 任务
-	// 的执行体走 Exec 但需要 30min 墙钟而非前台 300s 钳制）。
-	LongRunning bool
-	// Log 非空时 stdout/stderr 全量 tee 进该 writer（.exec/{msg_id}.log 约定）。
-	Log io.Writer
+	// GrantApproved 可信审批事实：服务端已批准「本次脚本可通过 grant 修改
+	// 授权」。默认 false；同次执行的 eval/source、管道和超时转后台继承，
+	// 后续独立 exec 不继承。
+	GrantApproved bool
+	// NoSandbox 本次执行的显式免沙箱选项（发送前审批；不派生 grant 权利）。
+	NoSandbox bool
+	Stdin     io.Reader
+	// Timeout 运行期限（≤0 或超上限 = BackgroundWallClock）。
+	Timeout time.Duration
+	// WaitBudget 调用方前台等待预算（bg wait 共享）；0 = 无（后台执行）。
+	WaitBudget time.Duration
+	// Stdout/Stderr 可选 stdio 接线（bash 语义）：非空时引擎输出全量透传
+	// 进对应 writer（引擎只写——不创建、不命名、不关闭；日志文件由调用方
+	// 持有）。返回值（下方 ExecResult 采集串）不受接线影响。
+	Stdout io.Writer
+	Stderr io.Writer
+	// Handle 本次执行的外层句柄（bg wait 禁止等待自身）；空 = 无。
+	Handle *ExecHandle
 }
 
-// ExecResult 执行结果（Content = stdout 前 1000 行的截断展示由 exec 工具层做）。
+// ExecResult 执行结果：stdout/stderr 采集串 + exit_code，仅此而已。
+// 预览截断、attrs、日志文件都是调用方（exec 接入层）的职责，不在引擎。
 type ExecResult struct {
 	ExitCode        int
 	Stdout          string
@@ -274,53 +354,52 @@ type ExecResult struct {
 	StdoutTruncated bool
 	StderrTruncated bool
 	Duration        time.Duration
-	// Writes 是本次执行的进程内文件写路径审计（trace file.mutation，§5.1）。
+	// Writes 是本次执行的进程内文件写路径审计（trace file.mutation）。
 	Writes []string
 }
 
-// Exec 执行脚本（panic 隔离：引擎 panic 不带崩 pod 进程，验收 7）。
+// Exec 执行脚本（panic 隔离：引擎 panic 不带崩 pod 进程）。
+// 每次 exec 使用独立派生会话：不持有跨调用会话锁——另一执行（含
+// `bg list | grep running` 组合脚本）永不被本执行阻塞。
 func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			res, err = nil, fmt.Errorf("vsh engine panic: %v", r)
 		}
 	}()
-	// 管理面快路径：纯 bg 管理命令（list/wait/kill/output）路由派生会话，
-	// 不占用基会话执行锁（vshcore Session.Exec 全程持 s.mu）——2026-09-24 实测
-	// 漏洞：前台长任务超时转 bg 后仍持基会话锁，救场的 bg kill 排在锁后到不了
-	// 执行层，整个会话活锁至 30min 墙钟。Tasks 表引擎级共享，派生会话功能不变。
-	sessionKey := req.SessionKey
-	if isPureBGMgmtScript(req.Script) {
-		sessionKey = fmt.Sprintf("%s#mgmt-%d", baseSessionKey(req.SessionKey), time.Now().UnixNano())
-		defer e.DropSession(sessionKey)
-	}
-	sess, err := e.session(ctx, sessionKey)
+	// 每次 exec 经 NewSessionFS(baseKey) + NewSession 建独立会话：与其他
+	// 执行同 backing（UFS/宿主盘状态共享）、独立内存层与工作目录，互不
+	// 持锁互等（另一执行/组合脚本永不被本执行阻塞）。
+	baseKey := baseSessionKey(req.SessionKey)
+	fsys, sessWorkDir, err := e.cfg.NewSessionFS(baseKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("vsh glue: session fs: %w", err)
 	}
-	// 会话键注入 ctx：NetClient 规则表按 sid 取快照（M3c per-session 修复——
-	// cloud 多用户进程不能用进程级并集；bg 路径经 runBG→Exec 同样注入）。
-	ctx = context.WithValue(ctx, netSessionKey{}, req.SessionKey)
+	sess, err := e.rt.NewSession(context.WithValue(ctx, sessionFSKey{}, fsys))
+	if err != nil {
+		return nil, fmt.Errorf("vsh glue: new session: %w", err)
+	}
+	// 可信身份与审批事实注入 ctx（不从脚本可修改的 env 取授权信息）。
+	ctx = context.WithValue(ctx, netSessionKey{}, baseKey)
 	ctx = context.WithValue(ctx, ownerKey{}, req.Owner)
-	timeout := req.Timeout
-	maxTimeout := MaxForegroundTimeout
-	if req.LongRunning {
-		maxTimeout = BackgroundWallClock
+	ctx = context.WithValue(ctx, grantApprovedKey{}, req.GrantApproved)
+	ctx = context.WithValue(ctx, noSandboxKey{}, req.NoSandbox)
+	if req.WaitBudget > 0 {
+		ctx = context.WithValue(ctx, waitBudgetKey{}, time.Now().Add(req.WaitBudget))
 	}
-	if timeout <= 0 || timeout > maxTimeout {
-		timeout = maxTimeout
+	if req.Handle != nil {
+		ctx = context.WithValue(ctx, execHandleKey{}, req.Handle)
+	}
+	timeout := req.Timeout
+	if timeout <= 0 || timeout > BackgroundWallClock {
+		timeout = BackgroundWallClock
 	}
 	env := map[string]string{}
 	maps.Copy(env, e.cfg.BaseEnv)
 	maps.Copy(env, req.Env)
-	// 会话键/授予等级经 env 透传给平台命令与 native 包装器。
-	env["AIC_VSH_SESSION"] = req.SessionKey
-	if lvl := req.GrantedLevel; lvl > 0 {
-		env["AIC_VSH_LEVEL"] = strconv.Itoa(lvl)
-	}
 	workDir := req.WorkDir
 	if workDir == "" {
-		workDir = sess.workDir
+		workDir = sessWorkDir
 	}
 	ereq := &vshcore.ExecutionRequest{
 		Script:  req.Script,
@@ -329,11 +408,13 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 		Stdin:   req.Stdin,
 		Timeout: timeout,
 	}
-	if req.Log != nil {
-		ereq.Stdout = req.Log
-		ereq.Stderr = req.Log
+	if req.Stdout != nil {
+		ereq.Stdout = req.Stdout
 	}
-	result, err := sess.sess.Exec(ctx, ereq)
+	if req.Stderr != nil {
+		ereq.Stderr = req.Stderr
+	}
+	result, err := sess.Exec(ctx, ereq)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +426,7 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 		StderrTruncated: result.StderrTruncated,
 		Duration:        result.Duration,
 	}
-	// FS 写审计（§5.1：网络有审计，进程内文件写补写路径记录）。
+	// FS 写审计（进程内文件写路径记录）。
 	for _, ev := range result.Events {
 		if ev.Kind == trace.EventFileMutation && ev.File != nil {
 			res.Writes = append(res.Writes, ev.File.Path)
@@ -354,35 +435,8 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 	return res, nil
 }
 
-// session 取或建会话（同 key 多次 Exec 共享沙箱文件系统状态）。
-func (e *Engine) session(ctx context.Context, key string) (*engineSession, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if s, ok := e.sess[key]; ok {
-		return s, nil
-	}
-	fsys, workDir, err := e.cfg.NewSessionFS(baseSessionKey(key))
-	if err != nil {
-		return nil, fmt.Errorf("vsh glue: session fs: %w", err)
-	}
-	s, err := e.rt.NewSession(context.WithValue(ctx, sessionFSKey{}, fsys))
-	if err != nil {
-		return nil, fmt.Errorf("vsh glue: new session: %w", err)
-	}
-	es := &engineSession{sess: s, workDir: workDir}
-	e.sess[key] = es
-	return es, nil
-}
-
-// DropSession 会话结束清理（会话目录回收时调用；幂等）。
-func (e *Engine) DropSession(key string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.sess, key)
-}
-
-// baseSessionKey 派生会话（"sid#bg-..."）归一到基键——NewSessionFS 只见基键
-// （backing/规则表按基键路由；派生会话独立内存层）。
+// baseSessionKey 派生会话（"sid#exec-..."）归一到基键——NewSessionFS 只见
+// 基键（backing/规则表按基键路由；派生会话独立内存层）。
 func baseSessionKey(key string) string {
 	if i := strings.IndexByte(key, '#'); i > 0 {
 		return key[:i]
@@ -390,63 +444,144 @@ func baseSessionKey(key string) string {
 	return key
 }
 
-// runBG 是 bg run 的执行体（墙钟由 TaskTable.Start 统一施加，到期 124）。
-// bg 在派生会话执行（key 加 "#bg-" 后缀）：与前台同 backing（UFS/宿主盘状态
-// 共享）、独立内存层与工作目录（per-exec 内存层语义），且不与前台 Session.Exec
-// 串行化互等（同会话 bg 会死锁——前台 wait 等后台、后台排队等前台）。
-func (e *Engine) runBG(ctx context.Context, sessionKey, script, workdir, logPath string, log io.Writer) (int, error) {
-	bgKey := fmt.Sprintf("%s#bg-%d", sessionKey, time.Now().UnixNano())
-	defer e.DropSession(bgKey)
-	res, err := e.Exec(ctx, ExecRequest{
-		SessionKey:  bgKey,
-		Owner:       OwnerFromContext(ctx), // 派生任务继承同一容量闸归属
-		Script:      script,
-		WorkDir:     workdir,
-		Timeout:     BackgroundWallClock,
-		LongRunning: true,
-		Log:         log,
-	})
-	if err != nil {
-		return 1, err
-	}
-	if ctx.Err() == context.DeadlineExceeded {
-		return 124, nil
-	}
-	return res.ExitCode, nil
+// --- exec 接入层编排已移出（libs/execwait）：vsh 引擎只负责执行 script 并
+// 返回 stdout/stderr/exit_code；前台等待、超时转后台、日志与响应 shaping
+// 都是调用方职责（§2.4/§2.5，2026-09-28 用户裁定重分层）。 ---
+
+// TaskMeta 是转后台登记的元信息（日志路径 + 请求关联）。
+type TaskMeta struct {
+	// Owner/Session 归属：list/wait/kill/cancel 按 (user, session) 检查。
+	Owner, Session string
+	// RequestID 请求关联（cancel 按 request_id 找到同一执行）。
+	RequestID string
+	// LogOut/LogErr stdout/stderr 日志地址（对应端可读取路径）。
+	LogOut, LogErr string
 }
 
-// --- 后台任务表（bg list/wait/kill 闭环，验收 6） ---
+// --- 后台任务登记表（bg list/wait/kill；唯一来源 = exec 等待超时 Adopt） ---
 
 // Task 是后台任务的快照。
 type Task struct {
 	ID         string
 	Command    string
-	LogPath    string
 	Status     string // running / done / timeout / killed / error
 	ExitCode   int
 	StartedAt  time.Time
 	FinishedAt time.Time
 	Err        string
+	// Owner/Session 归属（user_id, session_id）；RequestID 请求关联（cancel）。
+	Owner, Session string
+	RequestID      string
+	// LogOut/LogErr 是 stdout/stderr 日志地址（bg list/wait 报告用；
+	// 输出读取经 FS/cat，任务表不另存输出缓冲）。
+	LogOut, LogErr string
+}
+
+// ExecHandle 是一次执行的外层句柄：前台等待、转后台登记与取消共用。
+type ExecHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	mu     sync.Mutex
+	res    *ExecResult
+	err    error
+	taskID string
+}
+
+func NewExecHandle(cancel context.CancelFunc) *ExecHandle {
+	return &ExecHandle{cancel: cancel, done: make(chan struct{})}
+}
+
+// Done 完成通知（执行结束关闭）。
+func (h *ExecHandle) Done() <-chan struct{} { return h.done }
+
+// DoneFlag 非阻塞完成查询。
+func (h *ExecHandle) DoneFlag() bool {
+	select {
+	case <-h.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// Finish 写入最终结果并关闭完成通知（只生效一次）。
+func (h *ExecHandle) Finish(res *ExecResult, err error) {
+	h.mu.Lock()
+	select {
+	case <-h.done:
+		h.mu.Unlock()
+		return
+	default:
+	}
+	h.res, h.err = res, err
+	close(h.done)
+	h.mu.Unlock()
+}
+
+// Result 取最终结果（未完成返回 nil, nil）。
+func (h *ExecHandle) Result() (*ExecResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.res, h.err
+}
+
+// Cancel 终止本次执行（脚本及受管子进程）。与 BindCancel 并发安全：
+// cancel(request_id)/DisconnectTools 可能与 execwait 编排层绑定墙钟
+// cancel 并发，必须经锁读取（否则会读到半构造的 cancel 或漏取）。
+func (h *ExecHandle) Cancel() {
+	h.mu.Lock()
+	cancel := h.cancel
+	h.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// BindCancel 绑定取消函数（接入层编排 execwait 注入墙钟 ctx 的 cancel——
+// 外层预建句柄后由编排层接管执行期限）。
+func (h *ExecHandle) BindCancel(cancel context.CancelFunc) {
+	h.mu.Lock()
+	h.cancel = cancel
+	h.mu.Unlock()
+}
+
+// TaskID 转后台后分配的任务 ID（未登记为空）。
+func (h *ExecHandle) TaskID() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.taskID
+}
+
+// adopt 登记任务 ID；已完成或未运行返回 false（调用方裁决竞争）。
+func (h *ExecHandle) adopt(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	select {
+	case <-h.done:
+		return false
+	default:
+	}
+	if h.taskID != "" {
+		return false
+	}
+	h.taskID = id
+	return true
 }
 
 type taskEntry struct {
 	mu       sync.Mutex
 	task     Task
-	cancel   context.CancelFunc
-	done     chan struct{}
-	output   *boundedBuffer
+	handle   *ExecHandle
 	finished bool
 	seq      int
-	owner    string
-	// released 容量计数是否已释放（t.mu 守卫）——Kill 同步释放（kill 即补位，
-	// 救场路径不等 goroutine 收尾）与 goroutine 收尾释放只发生一次。
+	// released 容量计数是否已释放（mu 守卫）——只在 finalizeLocked 实际
+	// 终结时释放一次（Kill 不再同步释放：容量反映真实在跑数量）。
 	released bool
 }
 
-// TaskTable 后台任务表（引擎统一承接 bg，exec_procs 退役后此处是唯一来源）。
-// 容量闸（2026-09-24 用户拍板）：全局 max(2, NumCPU/2) + per-owner 4 同时运行
-// 上限，超额快速拒绝——单任务 30min 墙钟只限时长，不限并发时 bg fan-out/多会话
-// 并发 yes 可占满全部核（排队拒绝采用：排队本身是 DoS 放大器）。
+// TaskTable 后台任务登记表（exec 超时转后台的唯一来源；不启动执行、不存
+// 输出缓冲）。容量闸：全局 max(2, NumCPU/2) + per-owner 4 同时运行上限，
+// 超额快速拒绝。沿用完成记录的有界清理，不做持久任务恢复。
 type TaskTable struct {
 	mu             sync.Mutex
 	tasks          map[string]*taskEntry
@@ -473,74 +608,81 @@ func NewTaskTableWithCaps(maxGlobal, maxPerOwner int) *TaskTable {
 	}
 }
 
-// Start 登记并启动后台任务：run 在带 BackgroundWallClock 的 ctx 中执行，
-// 输出落 output 缓冲（bounded）并可 tee 到 logW；墙钟到期 → Status=timeout、
-// ExitCode=124。owner 为容量闸归属（空=匿名共池）；超额拒绝并返回错误。
-func (t *TaskTable) Start(command, logPath, owner string, run func(ctx context.Context, log io.Writer) (int, error), logW io.Writer) (Task, error) {
+// Adopt 把一次仍在运行的执行登记为后台任务：分配 ID、容量计数；完成监视
+// 从 handle 终结状态回填（不重启、不重放、不更换日志）。已完成或已登记的
+// 句柄返回错误（exec 外层据此回退为完成结果——竞争只产生一个结果）。
+func (t *TaskTable) Adopt(h *ExecHandle, command string, meta TaskMeta) (Task, error) {
 	t.mu.Lock()
+	// 容量检查前先惰性结算：已完成任务同步释放名额——否则满载时连
+	// bg list/kill 都无法执行（任何新 exec 都被拒），形成死锁。
+	t.evictFinishedLocked()
 	if t.running >= t.maxGlobal {
 		n := t.running
 		t.mu.Unlock()
 		return Task{}, fmt.Errorf("task table full（全局运行上限 %d，当前 %d）——先 bg list 查看、bg kill 释放或稍后重试", t.maxGlobal, n)
 	}
-	if t.runningByOwner[owner] >= t.maxPerOwner {
-		n := t.runningByOwner[owner]
+	if t.runningByOwner[meta.Owner] >= t.maxPerOwner {
+		n := t.runningByOwner[meta.Owner]
 		t.mu.Unlock()
 		return Task{}, fmt.Errorf("task table full（单归属运行上限 %d，当前 %d）——先 bg list 查看、bg kill 释放或稍后重试", t.maxPerOwner, n)
 	}
 	t.seq++
 	id := fmt.Sprintf("bg-%d", t.seq)
-	entry := &taskEntry{done: make(chan struct{}), output: newBoundedBuffer(MaxStdoutBytes), seq: t.seq, owner: owner}
-	entry.task = Task{ID: id, Command: command, LogPath: logPath, Status: "running", StartedAt: time.Now()}
-	// ctx/cancel 同步建立（goroutine 启动前）——Kill 紧随 Start 时 cancel 必已
-	// 就位（竞态：cancel 在 goroutine 内赋值时，Start 后微秒级 Kill 会读 nil
-	// 跳过 cancel，任务杀不死跑满 30min——TestTaskTableCapacity 实测揪出）。
-	ctx, cancel := context.WithTimeout(context.Background(), BackgroundWallClock)
-	entry.cancel = cancel
+	// 句柄登记（原子裁决完成/超时竞争，t.mu 持有期间调用——h.mu 与 t.mu
+	// 无反向锁序）：失败 = 已完成/已登记，回退为完成结果由调用方处理。
+	if !h.adopt(id) {
+		t.mu.Unlock()
+		return Task{}, fmt.Errorf("execution already finished")
+	}
+	entry := &taskEntry{handle: h, seq: t.seq}
+	entry.task = Task{ID: id, Command: command, Status: "running", StartedAt: time.Now(),
+		Owner: meta.Owner, Session: meta.Session, RequestID: meta.RequestID,
+		LogOut: meta.LogOut, LogErr: meta.LogErr}
 	t.tasks[id] = entry
 	t.running++
-	t.runningByOwner[owner]++
+	t.runningByOwner[meta.Owner]++
 	t.evictFinishedLocked()
 	t.mu.Unlock()
-
-	go func() {
-		// 后台墙钟（§6：30min，到期 124）——任务表统一施加，执行体不再自带。
-		defer cancel()
-		var w io.Writer = entry.output
-		if logW != nil {
-			w = io.MultiWriter(entry.output, logW)
-		}
-		code, err := run(ctx, w)
-		entry.mu.Lock()
-		entry.task.FinishedAt = time.Now()
-		entry.task.ExitCode = code
-		switch {
-		case ctx.Err() == context.DeadlineExceeded:
-			entry.task.Status = "timeout"
-			entry.task.ExitCode = 124
-		case ctx.Err() == context.Canceled && entry.task.Status == "killed":
-			// Kill 已置位
-		case err != nil:
-			entry.task.Status = "error"
-			entry.task.Err = err.Error()
-		default:
-			entry.task.Status = "done"
-		}
-		entry.finished = true
-		entry.mu.Unlock()
-		// 容量计数必须先于 close(done) 释放——Wait 解除阻塞即代表容量已恢复
-		// （TestTaskTableCapacity 竞态：defer 在 close 后跑，释放晚一拍）。
-		// Kill 可能已同步释放（released 置位）——只释放一次。
-		t.mu.Lock()
-		if !entry.released {
-			entry.released = true
-			t.running--
-			t.runningByOwner[owner]--
-		}
-		t.mu.Unlock()
-		close(entry.done)
-	}()
+	// 终态惰性回填：读路径（List/Get/Wait/Kill/evict）经 finalizeLocked 从
+	// 句柄结果结算——Wait 解除阻塞即终态可见，容量同步恢复（无 watcher
+	// goroutine 的异步窗口）。
 	return entry.snapshot(), nil
+}
+
+// finalizeLocked 从执行句柄结算终态（幂等；t.mu 已持有，锁序
+// t.mu→entry.mu→handle.mu）。容量计数在实际终结时同步释放，只发生一次。
+func (t *TaskTable) finalizeLocked(e *taskEntry) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.finished || !e.handle.DoneFlag() {
+		return
+	}
+	res, err := e.handle.Result()
+	e.task.FinishedAt = time.Now()
+	switch {
+	case e.task.Status == "killed":
+		// Kill 已置位——130 不被执行结果覆盖（kill 时进程可能仍正常退出 0）。
+	case err != nil:
+		if res != nil {
+			e.task.ExitCode = res.ExitCode
+		}
+		e.task.Status = "error"
+		e.task.Err = err.Error()
+	case res != nil && res.ExitCode == 124:
+		e.task.ExitCode = 124
+		e.task.Status = "timeout"
+	default:
+		if res != nil {
+			e.task.ExitCode = res.ExitCode
+		}
+		e.task.Status = "done"
+	}
+	e.finished = true
+	if !e.released {
+		e.released = true
+		t.running--
+		t.runningByOwner[e.task.Owner]--
+	}
 }
 
 // evictFinishedLocked 逐出最旧的已完成任务至保留上限（t.mu 已持有；
@@ -550,6 +692,7 @@ func (t *TaskTable) evictFinishedLocked() {
 		var oldest *taskEntry
 		finished := 0
 		for _, e := range t.tasks {
+			t.finalizeLocked(e)
 			e.mu.Lock()
 			fin := e.finished
 			e.mu.Unlock()
@@ -568,127 +711,125 @@ func (t *TaskTable) evictFinishedLocked() {
 	}
 }
 
-// List 按启动序返回任务快照。
-func (t *TaskTable) List() []Task {
+// owned 归属检查：(owner, session) 二元组一致才可见/可管（跨会话默认隔离；
+// 无会话的手动调用属独立 manual 范围——session 空只匹配空）。
+func owned(e *taskEntry, owner, session string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.task.Owner == owner && e.task.Session == session
+}
+
+// snapshot 先惰性结算终态再取值（t.mu 由调用方持有）。
+func (t *TaskTable) snapshot(e *taskEntry) Task {
+	t.finalizeLocked(e)
+	return e.snapshot()
+}
+
+// List 按登记序返回该归属的任务快照。
+func (t *TaskTable) List(owner, session string) []Task {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make([]Task, 0, len(t.tasks))
 	for _, e := range t.tasks {
-		out = append(out, e.snapshot())
+		if owned(e, owner, session) {
+			out = append(out, t.snapshot(e))
+		}
 	}
 	return out
 }
 
-// Get 取单个任务快照。
-func (t *TaskTable) Get(id string) (Task, bool) {
+// Get 取单个任务快照（归属不匹配等同不存在）。
+func (t *TaskTable) Get(id, owner, session string) (Task, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.tasks[id]
-	if !ok {
+	if !ok || !owned(e, owner, session) {
 		return Task{}, false
 	}
-	return e.snapshot(), true
+	return t.snapshot(e), true
 }
 
-// Wait 等待任务结束（d≤0 不等待，立即返回当前快照）。
-func (t *TaskTable) Wait(ctx context.Context, id string, d time.Duration) (Task, error) {
+// FindByRequest 按 request_id 找任务（cancel 与 bg kill 共用取消句柄）。
+func (t *TaskTable) FindByRequest(requestID, owner, session string) (Task, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, e := range t.tasks {
+		t.finalizeLocked(e)
+		e.mu.Lock()
+		if e.task.RequestID == requestID && e.task.Owner == owner && e.task.Session == session {
+			e.mu.Unlock()
+			return e.snapshot(), true
+		}
+		e.mu.Unlock()
+	}
+	return Task{}, false
+}
+
+// Wait 等待任务结束（d≤0 不等待，立即返回当前快照；归属不匹配等同不存在）。
+func (t *TaskTable) Wait(ctx context.Context, id string, d time.Duration, owner, session string) (Task, error) {
 	t.mu.Lock()
 	e, ok := t.tasks[id]
-	t.mu.Unlock()
-	if !ok {
+	if !ok || !owned(e, owner, session) {
+		t.mu.Unlock()
 		return Task{}, fmt.Errorf("bg: no such task %q", id)
 	}
+	t.finalizeLocked(e) // 已终结直接出终态，不进等待
+	t.mu.Unlock()
 	if d > 0 {
-		var deadline <-chan time.Time
 		timer := time.NewTimer(d)
 		defer timer.Stop()
-		deadline = timer.C
 		select {
-		case <-e.done:
+		case <-e.handle.Done():
 		case <-ctx.Done():
-			return e.snapshot(), ctx.Err()
-		case <-deadline:
-			return e.snapshot(), nil
+			return t.snapshot(e), ctx.Err()
+		case <-timer.C:
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			return t.snapshot(e), nil
 		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.snapshot(e), nil // 句柄终结：读取即结算终态
 	}
-	return e.snapshot(), nil
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.snapshot(e), nil
 }
 
-// Kill 终止任务（置 killed 并 cancel；wall clock 由 Start 的 ctx 携带）。
-// 容量同步释放——kill 紧接着 bg run 的救场路径不撞异步释放窗口。
-func (t *TaskTable) Kill(id string) error {
+// Kill 请求终止任务：置 killed/130 并取消同一执行句柄（归属不匹配等同
+// 不存在）。终态（finished/FinishedAt）与容量释放不在此结算——执行实际
+// 结束时由 finalizeLocked 回填（§2.6：实际结束后才报终态；bg wait 等待
+// 句柄 Done，天然等到真正结束）。killed 状态即时可见 = kill 请求已受理。
+func (t *TaskTable) Kill(id, owner, session string) error {
 	t.mu.Lock()
 	e, ok := t.tasks[id]
-	t.mu.Unlock()
-	if !ok {
+	if !ok || !owned(e, owner, session) {
+		t.mu.Unlock()
 		return fmt.Errorf("bg: no such task %q", id)
 	}
+	t.finalizeLocked(e) // 已终结按终态报错
 	e.mu.Lock()
 	if e.finished {
 		status := e.task.Status
 		e.mu.Unlock()
+		t.mu.Unlock()
 		return fmt.Errorf("bg: task %q already finished (%s)", id, status)
 	}
 	e.task.Status = "killed"
 	e.task.ExitCode = 130
-	cancel := e.cancel
+	handle := e.handle
 	e.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	t.mu.Lock()
-	if !e.released {
-		e.released = true
-		t.running--
-		t.runningByOwner[e.owner]--
+	if handle != nil {
+		handle.Cancel()
 	}
 	t.mu.Unlock()
 	return nil
-}
-
-// Output 返回任务迄今的捕获输出（bounded）。
-func (t *TaskTable) Output(id string) (string, error) {
-	t.mu.Lock()
-	e, ok := t.tasks[id]
-	t.mu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("bg: no such task %q", id)
-	}
-	return e.output.String(), nil
 }
 
 func (e *taskEntry) snapshot() Task {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.task
-}
-
-// boundedBuffer 上限截断的并发安全缓冲（后台输出兜底，防内存膨胀）。
-type boundedBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-	max int
-}
-
-func newBoundedBuffer(max int) *boundedBuffer { return &boundedBuffer{max: max} }
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if remain := b.max - len(b.buf); remain > 0 {
-		if len(p) > remain {
-			b.buf = append(b.buf, p[:remain]...)
-		} else {
-			b.buf = append(b.buf, p...)
-		}
-	}
-	return len(p), nil
-}
-
-func (b *boundedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return string(b.buf)
 }
 
 // 确保 vbox 引用在包内成立（FSRuleSet/NetRuleSet 源由适配器文件消费）。

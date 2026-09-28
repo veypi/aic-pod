@@ -24,28 +24,3 @@ func TestInWriteRoots(t *testing.T) {
 		}
 	}
 }
-
-// WriteGrade 分级：全部命中 → 2；任一路径在全部根外 → 3；
-// 空名单恒 2（分级关闭）；空路径集 2；空串路径跳过。
-func TestWriteGrade(t *testing.T) {
-	roots := []string{"/u/alice/sessions/s1"}
-	if g := WriteGrade([]string{"/u/alice/sessions/s1/a", "/u/alice/sessions/s1/b"}, roots); g != LevelWrite {
-		t.Errorf("all inside roots: grade = %d, want %d", g, LevelWrite)
-	}
-	if g := WriteGrade([]string{"/u/alice/sessions/s1/a", "/u/alice/other"}, roots); g != LevelDanger {
-		t.Errorf("one outside roots: grade = %d, want %d", g, LevelDanger)
-	}
-	if g := WriteGrade([]string{"/u/alice/other"}, roots); g != LevelDanger {
-		t.Errorf("outside roots: grade = %d, want %d", g, LevelDanger)
-	}
-	// 空名单 = 分级关闭（单源钉死语义，两侧一致）
-	if g := WriteGrade([]string{"/anywhere"}, nil); g != LevelWrite {
-		t.Errorf("empty roots: grade = %d, want %d", g, LevelWrite)
-	}
-	if g := WriteGrade(nil, roots); g != LevelWrite {
-		t.Errorf("empty paths: grade = %d, want %d", g, LevelWrite)
-	}
-	if g := WriteGrade([]string{""}, roots); g != LevelWrite {
-		t.Errorf("blank path skipped: grade = %d, want %d", g, LevelWrite)
-	}
-}

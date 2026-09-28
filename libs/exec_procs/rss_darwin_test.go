@@ -3,15 +3,13 @@
 package exec_procs
 
 import (
+	"bytes"
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // groupRSSKB 对**本进程实际进程组**返回非零 RSS（组内必有进程，物理内存
@@ -45,27 +43,24 @@ func TestRssLimitBytes(t *testing.T) {
 	}
 }
 
-// 集成：正常进程（分配 ~200MB，远低于上限）经沙箱 Start 不被 RSS 监控
+// 集成：正常进程（分配 ~200MB，远低于上限）经沙箱 RunProcess 不被 RSS 监控
 // 误杀，exit 0 且输出正确。嵌套沙箱环境（无后端 fail-closed）skip。
 func TestMonitorDoesNotKillNormalProcess(t *testing.T) {
 	m := NewManager(time.Minute)
-	res, err := m.Start(context.Background(), StartOptions{FsOpen: true, NetOpen: true,
-		ID:      "t-rss-ok",
-		Command: "python alloc 200MB",
-		LogPath: filepath.Join(t.TempDir(), "out.log"),
-		Level:   proto.LevelRead,
-		Exec:    []string{"python3", "-c", "import time; x=bytearray(200*1024*1024); time.sleep(0.2); print(len(x))"},
-	})
+	var out bytes.Buffer
+	code, err := m.RunProcess(context.Background(), StartOptions{FsOpen: true, NetOpen: true,
+		Exec: []string{"python3", "-c", "import time; x=bytearray(200*1024*1024); time.sleep(0.2); print(len(x))"},
+	}, nil, &out, &out)
 	if err != nil {
 		if strings.Contains(err.Error(), "no sandbox backend") {
 			t.Skipf("nested sandbox unavailable: %v", err)
 		}
-		t.Fatalf("start: %v", err)
+		t.Fatalf("run: %v", err)
 	}
-	if res.ExitCode != 0 {
-		t.Fatalf("exit = %d, want 0 (should not be killed): %s", res.ExitCode, res.Content)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (should not be killed): %s", code, out.String())
 	}
-	if !strings.Contains(res.Content, "209715200") {
-		t.Fatalf("output missing alloc size: %q", res.Content)
+	if !strings.Contains(out.String(), "209715200") {
+		t.Fatalf("output missing alloc size: %q", out.String())
 	}
 }

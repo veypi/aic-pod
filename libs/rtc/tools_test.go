@@ -18,26 +18,40 @@ import (
 	"time"
 )
 
-type rtcTools struct{ d *tool.Dispatcher }
+// rtcTools 是测试用 ToolBackend（hosts_tools/2：普通请求 + 私有 stream 端点）。
+type rtcTools struct {
+	calls  int
+	source *duplexFixture
+}
 
-func (b rtcTools) HandleTool(ctx context.Context, c tool.Caller, r wire.Request) wire.Response {
-	return b.d.Handle(ctx, c, r)
+func (b *rtcTools) HandleTool(ctx context.Context, c tool.Caller, r wire.Request) wire.Response {
+	if err := r.Validate(); err != nil {
+		return wire.Reply(r.Protocol, r.ID, nil, err)
+	}
+	switch r.Action {
+	case wire.ActionExec:
+		b.calls++
+		return wire.Reply(r.Protocol, r.ID, b.calls, nil)
+	default:
+		return wire.Reply(r.Protocol, r.ID, nil, wire.Fail("unsupported", "test backend: exec only"))
+	}
 }
-func (b rtcTools) OpenToolStream(ctx context.Context, c tool.Caller, in wire.Invocation) (tool.Stream, error) {
-	return b.d.OpenStream(ctx, c, in)
+func (b *rtcTools) OpenToolStream(ctx context.Context, c tool.Caller, endpoint string, args json.RawMessage) (tool.Stream, error) {
+	if endpoint != "duplex" {
+		return nil, wire.Fail("unsupported", "Unknown stream endpoint")
+	}
+	return b.source, nil
 }
-func (b rtcTools) DisconnectTools(c tool.Caller) { b.d.Disconnect(c) }
+func (b *rtcTools) DisconnectTools(c tool.Caller) {}
 func TestRTCToolsWithoutBusinessSession(t *testing.T) {
- key,_:=hosts.DirectKey("secret","host_1")
- auth,err:=hostauth.NewAccess(hostauth.AccessConfig{HostID:"host_1",UserID:"owner",CredentialVersion:1,Key:key});if err!=nil{t.Fatal(err)}
- defer auth.RevokeAll()
-	d := tool.New(tool.Config{})
-	defer d.Close(context.Background())
-	calls := 0
-	source := &duplexFixture{out: make(chan []byte, 16), gate: make(chan struct{}), closed: make(chan struct{})}
-	if err = d.RegisterCommand(tool.DefineCommand("counter", tool.Bind(tool.Spec{Name: "next", Access: 1}, func(ctx context.Context, c tool.Caller, _ struct{}) (int, error) { calls++; return calls, nil }), tool.BindStream(tool.Spec{Name: "duplex", Access: 1}, func(context.Context, tool.Caller, struct{}) (tool.Stream, error) { return source, nil }))); err != nil {
+	key, _ := hosts.DirectKey("secret", "host_1")
+	auth, err := hostauth.NewAccess(hostauth.AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key})
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer auth.RevokeAll()
+	source := &duplexFixture{out: make(chan []byte, 16), gate: make(chan struct{}), closed: make(chan struct{})}
+	backend := &rtcTools{source: source}
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +73,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	var signalMu sync.Mutex
 	var candidates []webrtc.ICECandidateInit
 	remote := false
-	service, err := rtc.New(rtc.Config{HostID: "host_1", Authorization: auth, Tools: rtcTools{d}, Send: func(sig *proto.RtcSignal) {
+	service, err := rtc.New(rtc.Config{HostID: "host_1", Authorization: auth, Tools: backend, Send: func(sig *proto.RtcSignal) {
 		signalMu.Lock()
 		defer signalMu.Unlock()
 		if sig.Kind == proto.RtcAnswer {
@@ -106,11 +120,19 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("channel timeout")
 	}
+	var helloTicket string
+	var streamOpen *rtcwire.StreamOpen
 	request := func(r wire.Request, channels ...string) wire.Response {
 		t.Helper()
 		r.Protocol = rtcwire.Protocol
 		r.ID = wire.NewID("r_")
 		envelope := rtcwire.Request{Request: r}
+		if r.Action == "hello" {
+			envelope.Ticket = helloTicket
+		}
+		if r.Action == "stream.open" {
+			envelope.Stream = streamOpen
+		}
 		if len(channels) > 0 {
 			envelope.Channel = channels[0]
 		}
@@ -129,7 +151,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			return wire.Response{}
 		}
 	}
-	if r := request(wire.Request{Action: "catalog"}); r.Error == nil {
+	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error == nil {
 		t.Fatal("unauthenticated tools admitted")
 	}
 	key, _ = hosts.DirectKey("secret", "host_1")
@@ -137,18 +159,31 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := request(wire.Request{Action: "hello", Ticket: ticket}); r.Error != nil {
+	helloTicket = ticket
+	if r := request(wire.Request{Action: "hello"}); r.Error != nil {
 		t.Fatal(r.Error)
 	}
-	if r := request(wire.Request{Action: "call", Argv: []string{"counter", "next"}}); r.Error != nil || r.Result != float64(1) {
+	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error != nil || r.Result != float64(1) {
 		t.Fatalf("%+v", r)
 	}
 	if r := request(wire.Request{Action: "session.open"}); r.Error == nil {
 		t.Fatal("legacy business session accepted")
 	}
-	if r := request(wire.Request{Action: "call", Argv: []string{"counter", "next"}}); r.Error != nil || r.Result != float64(2) {
+	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error != nil || r.Result != float64(2) {
 		t.Fatalf("%+v", r)
 	}
+	// 端点校验：真实端点含点号（page.frames/page.input）必须过 ValidName
+	// 校验（此处无对应 channel → not_found，证明未被 invalid_argument 拒）；
+	// 非法字符才 invalid_argument。
+	streamOpen = &rtcwire.StreamOpen{Endpoint: "page.frames", Args: json.RawMessage(`{}`)}
+	if r := request(wire.Request{Action: "stream.open"}, "hosts-stream/ch_none"); r.Error == nil || r.Error.Code == "invalid_argument" {
+		t.Fatalf("dotted endpoint must pass validation (expect not_found): %+v", r.Error)
+	}
+	streamOpen = &rtcwire.StreamOpen{Endpoint: "bad endpoint!!", Args: json.RawMessage(`{}`)}
+	if r := request(wire.Request{Action: "stream.open"}, "hosts-stream/ch_none"); r.Error == nil || r.Error.Code != "invalid_argument" {
+		t.Fatalf("invalid endpoint must be invalid_argument: %+v", r.Error)
+	}
+	streamOpen = nil
 	// Channel setup is the only request. Neither duplex payloads nor local
 	// consumers exchange per-message RPCs, even while tool input is blocked.
 	label := rtcwire.StreamPrefix + "duplex"
@@ -170,8 +205,18 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream channel did not open")
 	}
-	if r := request(wire.Request{Action: "stream.open", Call: &wire.Invocation{Domain: "exec", Command: "counter", Method: "duplex", Args: json.RawMessage(`{}`)}}, label); r.Error != nil {
-		t.Fatal(r.Error)
+	streamOpen = &rtcwire.StreamOpen{Endpoint: "duplex", Args: json.RawMessage(`{}`)}
+	// 服务端 OnDataChannel 注册与客户端 OnOpen 存在竞态——not_found 时短重试。
+	var openResp wire.Response
+	for end := time.Now().Add(3 * time.Second); ; {
+		openResp = request(wire.Request{Action: "stream.open"}, label)
+		if openResp.Error == nil {
+			break
+		}
+		if openResp.Error.Code != "not_found" || time.Now().After(end) {
+			t.Fatal(openResp.Error)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if r := request(wire.Request{Action: "stream.send"}); r.Error == nil {
 		t.Fatal("RPC stream send retained")
@@ -242,4 +287,12 @@ func (s *duplexFixture) Recv(ctx context.Context) ([]byte, error) {
 }
 func (s *duplexFixture) Close() error { s.once.Do(func() { close(s.closed) }); return nil }
 
-func decode[T any](t *testing.T,v any)T{t.Helper();raw,_:=json.Marshal(v);var out T;if err:=json.Unmarshal(raw,&out);err!=nil{t.Fatal(err)};return out}
+func decode[T any](t *testing.T, v any) T {
+	t.Helper()
+	raw, _ := json.Marshal(v)
+	var out T
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}

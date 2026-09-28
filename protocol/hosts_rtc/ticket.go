@@ -30,10 +30,13 @@ type Ticket struct {
 	PCID              string `json:"pc_id"`
 	Fingerprint       string `json:"fingerprint"`
 	ConnectionID      string `json:"connection_id,omitempty"`
-	ID                string `json:"jti"`
-	IssuedAt          int64  `json:"issued_at"`
-	ExpiresAt         int64  `json:"expires_at"`
-	LeaseUntil        int64  `json:"lease_until"`
+	// SessionID 绑定 RTC 请求归属会话（hosts-vsh-redesign §2.4：RTC 的
+	// session_id 必须由票据绑定，不能由脚本或未经核验的请求字段冒认）。
+	SessionID  string `json:"session_id,omitempty"`
+	ID         string `json:"jti"`
+	IssuedAt   int64  `json:"issued_at"`
+	ExpiresAt  int64  `json:"expires_at"`
+	LeaseUntil int64  `json:"lease_until"`
 }
 
 func DirectKey(secret, hostID string) ([]byte, error) {
@@ -126,6 +129,9 @@ func (t Ticket) validate(now time.Time) error {
 	}
 	if t.ConnectionID != "" && !wire.ValidID(t.ConnectionID) {
 		return wire.Fail("invalid_argument", "Invalid connection identity")
+	}
+	if t.SessionID != "" && !wire.ValidID(t.SessionID) {
+		return wire.Fail("invalid_argument", "Invalid session identity")
 	}
 	fp, err := NormalizeFingerprint(t.Fingerprint)
 	if err != nil || !bytes.Equal([]byte(fp), []byte(t.Fingerprint)) {

@@ -14,8 +14,10 @@ import (
 
 // NativePolicy 是原生命令一次执行所需的策略快照（每次调用取当次值——
 // grant/cfg 动态生效）。字段对齐 exec_procs.StartOptions。
+// hosts-vsh-redesign：数字等级已删除——沙箱 profile 一律由 rules 派生
+// （WriteRoots/DenyPaths/SandboxRules/…），免沙箱只来自可信 ctx 的
+// NoSandbox（不再读脚本可修改的 env）。
 type NativePolicy struct {
-	Level        int      // 当次授予等级（沙箱 profile 选择；0=read-only 兜底）
 	WriteRoots   []string // 追加可写根（cfg fs_allow + grant fs）
 	DenyPaths    []string // 预展开 deny 模式
 	WritePaths   []string // 可写 glob
@@ -24,35 +26,36 @@ type NativePolicy struct {
 	NetOpen      bool
 	NetDeny      []netauth.Entry
 	NetAllow     []netauth.Entry
-	// NoSandbox 免沙箱标记（显式 nosandbox 经 Critical(4) 审批下发）。
+	// NoSandbox 免沙箱标记（显式 nosandbox，发送前审批下发）。
 	NoSandbox bool
 }
 
 // NativeDeps 原生命令包装器依赖。
 type NativeDeps struct {
 	Manager *exec_procs.Manager
-	// Policy 当次策略快照源（按调用取——sid/level 经 inv.Env 透传：
-	// AIC_VSH_SESSION / AIC_VSH_LEVEL，由引擎调用方注入）。
-	Policy func(inv *commands.Invocation) NativePolicy
+	// Policy 当次策略快照源（按调用取——会话/免沙箱经可信 ctx 透传：
+	// SessionFromContext / NoSandboxFromContext，由引擎注入）。
+	Policy func(ctx context.Context, cwd string) NativePolicy
 	// LookPath name → 真实二进制路径；nil = exec.LookPath。
 	LookPath func(name string) (string, error)
 	// Workdir 进程 cwd（空 = inv.Cwd 直通）。inv.Cwd 是引擎规范形（win =
 	// /c/…）——host 装配侧必须经 proto.HostPathToOS 转原生态再启动进程。
 	// 返回空串 = 继承 pod cwd。
 	Workdir func(invCwd string) string
-	// LogPath 输出落盘路径（可选；空 = 不落盘）。
-	LogPath func() string
+	// SessionAllow 会话级命令规则（grant cmd 会话授权；host 接线
+	// Client.execGrants）。nil = 无会话授权。
+	SessionAllow func(session, name string) bool
 }
 
-// NativeRegistry 是 host 原生命令白名单注册器（design §4.2：种子 =
-// caps/exec_allow 声明，运行时 grant cmd 扩充；exec_policy: open 时
-// 未注册名经 OpenLookup 兜底即时合成——原生边界统一收进 exec_procs
-// OS 沙箱）。
+// NativeRegistry 是 host 原生命令的规则门与适配器（hosts-vsh-redesign §2.1：
+// 原生程序不逐个注册——Registry 未命中时由 OpenLookup 兜底合成，执行期按
+// 命令规则检查（deny 优先 → open 姿态 → exec_allow 白名单 → 会话 grant），
+// 实际进程由 exec_procs OS 沙箱约束）。
 type NativeRegistry struct {
 	deps    NativeDeps
 	mu      sync.RWMutex
 	allowed map[string]string // name → binary 路径（空 = 惰性 LookPath）
-	open    bool              // exec_policy: open——未注册名也放行（deny 优先）
+	open    bool              // exec_policy: open——规则全放（deny 优先）
 	deny    map[string]bool   // exec_deny（含 "*" 全禁）
 }
 
@@ -63,7 +66,7 @@ func NewNativeRegistry(deps NativeDeps) *NativeRegistry {
 	return &NativeRegistry{deps: deps, allowed: map[string]string{}}
 }
 
-// Seed 批量登记白名单（caps/exec_allow 种子）。
+// Seed 批量登记规则白名单（cfg exec_allow 种子——规则数据，不是注册动作）。
 func (n *NativeRegistry) Seed(names ...string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -75,9 +78,8 @@ func (n *NativeRegistry) Seed(names ...string) {
 	}
 }
 
-// SetPolicy 同步 exec 域策略（exec_policy + exec_deny；cfg 加载/Reconcile
-// 调用）。open=true 时未注册名经 OpenLookup 兜底放行——OS 沙箱仍是唯一
-// 执行边界；deny 对全部原生命令（含已注册）执行期即时生效。
+// SetPolicy 同步 exec 域规则（exec_policy + exec_deny；cfg 加载/Reconcile
+// 调用）。deny 对全部原生命令执行期即时生效。
 func (n *NativeRegistry) SetPolicy(open bool, deny []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -91,114 +93,62 @@ func (n *NativeRegistry) SetPolicy(open bool, deny []string) {
 	}
 }
 
-// Allow 运行时扩充（grant cmd 审批通过后调用）。
-func (n *NativeRegistry) Allow(name string) { n.Seed(name) }
-
 // IsAllowed 报告命令是否放行：deny 优先（"*" 全禁）；open 姿态全放；
-// 否则看白名单。
-func (n *NativeRegistry) IsAllowed(name string) bool {
+// 否则看白名单或会话 grant（session 为空时不查会话授权）。
+func (n *NativeRegistry) IsAllowed(session, name string) bool {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
-	if n.deny["*"] || n.deny[name] {
+	deny := n.deny
+	open := n.open
+	_, whitelisted := n.allowed[name]
+	n.mu.RUnlock()
+	if deny["*"] || deny[name] {
 		return false
 	}
-	if n.open {
+	if open || whitelisted {
 		return true
 	}
-	_, ok := n.allowed[name]
-	return ok
+	if session != "" && n.deps.SessionAllow != nil {
+		return n.deps.SessionAllow(session, name)
+	}
+	return false
 }
 
-// OpenLookup exec_policy: open 的引擎解析兜底：Registry 未命中且策略放行
-// 时即时合成本地命令（执行体与注册命令同一包装器——exec_procs 沙箱兜底）。
-// 白名单姿态下未注册名返回 false（继续走 PATH/hash 解析，最终 127）。
+// OpenLookup 引擎解析兜底：Registry 未命中时合成原生命令——任意良名都合成
+// （规则检查在执行期，IsAllowed 拒绝时返回权限错误而非 127；二进制不存在
+// 才 127）。这不是免检查通道：原生 fallback 受命令规则与进程沙箱约束。
 func (n *NativeRegistry) OpenLookup(name string) (commands.Command, bool) {
 	if name == "" || strings.ContainsAny(name, "/\\ \t") {
-		return nil, false
-	}
-	if !n.IsAllowed(name) {
 		return nil, false
 	}
 	return n.command(name), true
 }
 
-// Names 返回白名单快照（排序交由调用方）。
-func (n *NativeRegistry) Names() []string {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	out := make([]string, 0, len(n.allowed))
-	for name := range n.allowed {
-		out = append(out, name)
-	}
-	return out
-}
-
-// RegisterInto 把白名单内全部命令注册进引擎 Registry。每个命令 =
-// 包装器：stdio 接引擎管道，子进程由 exec_procs 的 OS 沙箱兜底
-// （Seatbelt/bwrap/受限令牌，per-call 按当次策略生成，fail-closed）。
-func (n *NativeRegistry) RegisterInto(reg *commands.Registry) error {
-	for _, name := range n.Names() {
-		if err := reg.Register(n.command(name)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Register 注册单个命令（grant cmd 后即时生效）。
-func (n *NativeRegistry) Register(reg *commands.Registry, name string) error {
-	if !n.IsAllowed(name) {
-		return fmt.Errorf("vsh glue: native command %q not in whitelist", name)
-	}
-	return reg.Register(n.command(name))
-}
-
-// command 构造单命令包装器。
+// command 构造单命令包装器：stdio 接引擎管道，子进程由 exec_procs 的 OS
+// 沙箱兜底（Seatbelt/bwrap/受限令牌，per-call 按当次规则生成，fail-closed）。
 func (n *NativeRegistry) command(name string) commands.Command {
 	return commands.DefineCommand(name, func(ctx context.Context, inv *commands.Invocation) error {
-		if !n.IsAllowed(name) {
-			// 白名单在运行期被移除的兜底（正常路径：未注册即 127，到不了这里）。
-			return commands.Exitf(inv, 127, "%s: command not granted（grant cmd %s 申请）", name, name)
-		}
-		n.mu.RLock()
-		bin, registered := n.allowed[name]
-		n.mu.RUnlock()
-		if !registered || bin == "" {
-			var err error
-			bin, err = n.deps.LookPath(name)
-			if err != nil {
-				return commands.Exitf(inv, 127, "%s: binary not found: %s", name, err)
-			}
-			if registered {
-				// 仅白名单内命令回写 LookPath 缓存；open fallback 合成的命令
-				// 不回写——Names() 只代表真实授权（grant status 的会话清单
-				// 不被缓存污染）。
-				n.mu.Lock()
-				n.allowed[name] = bin
-				n.mu.Unlock()
-			}
+		session := SessionFromContext(ctx)
+		if !n.IsAllowed(session, name) {
+			return commands.Exitf(inv, 126, "permission_denied: %s: command denied by exec rules（grant cmd %s 申请）", name, name)
 		}
 		if n.deps.Manager == nil {
 			return commands.Exitf(inv, 1, "%s: native process manager unavailable", name)
 		}
+		bin, err := n.deps.LookPath(name)
+		if err != nil {
+			return commands.Exitf(inv, 127, "%s: binary not found: %s", name, err)
+		}
 		var pol NativePolicy
 		if n.deps.Policy != nil {
-			pol = n.deps.Policy(inv)
+			pol = n.deps.Policy(ctx, inv.Cwd)
 		}
 		workdir := inv.Cwd
 		if n.deps.Workdir != nil {
 			workdir = n.deps.Workdir(inv.Cwd)
 		}
-		var logPath string
-		if n.deps.LogPath != nil {
-			logPath = n.deps.LogPath()
-		}
 		code, err := n.deps.Manager.RunProcess(ctx, exec_procs.StartOptions{
-			Command:      name + " " + strings.Join(inv.Args, " "),
-			LogPath:      logPath,
 			Workdir:      workdir,
 			Exec:         append([]string{bin}, inv.Args...),
-			Level:        pol.Level,
 			NoSandbox:    pol.NoSandbox,
 			WriteRoots:   pol.WriteRoots,
 			DenyPaths:    pol.DenyPaths,
@@ -208,7 +158,7 @@ func (n *NativeRegistry) command(name string) commands.Command {
 			NetOpen:      pol.NetOpen,
 			NetDeny:      pol.NetDeny,
 			NetAllow:     pol.NetAllow,
-		}, inv.Stdout)
+		}, inv.Stdin, inv.Stdout, inv.Stderr)
 		if err != nil {
 			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", name, err)
 		}
@@ -218,6 +168,9 @@ func (n *NativeRegistry) command(name string) commands.Command {
 		return nil
 	})
 }
+
+// 确保 fmt 引用保留（错误文案格式化）。
+var _ = fmt.Sprintf
 
 func exitCodeOr(code, fallback int) int {
 	if code != 0 {

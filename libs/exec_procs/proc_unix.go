@@ -30,25 +30,22 @@ func assignJob(pid int, job uintptr) error { return nil }
 // closeJob 无句柄可关（非 windows 平台恒 no-op）。
 func closeJob(job uintptr) {}
 
-// killEntry 终止后台条目：子进程先对整个进程组发 SIGTERM，5s 未退出补
-// SIGKILL（§5.8）；托管任务（pid=0）无进程，仅 cancel 中止任务体。
-func killEntry(e *Entry) {
-	if e.PID() > 0 {
+// killProc 终止一次运行：子进程先对整个进程组发 SIGTERM，5s 未退出补
+// SIGKILL。尚未 spawn（pid=0）时无进程可杀——调用方 ctx 取消由
+// CommandContext 承担。
+func killProc(h *procHandle) {
+	if h.PID() > 0 {
 		// 进程组杀死（Setpgid 使 pgid == pid）
-		_ = syscall.Kill(-e.PID(), syscall.SIGTERM)
+		_ = syscall.Kill(-h.PID(), syscall.SIGTERM)
 		go func() {
 			timer := time.NewTimer(5 * time.Second)
 			<-timer.C
 			select {
-			case <-e.done:
+			case <-h.done:
 			default:
-				_ = syscall.Kill(-e.PID(), syscall.SIGKILL)
+				_ = syscall.Kill(-h.PID(), syscall.SIGKILL)
 			}
 		}()
-	}
-	// cancel 兜底（CommandContext 会 Kill 进程；任务体 ctx 中止）
-	if e.cancel != nil {
-		e.cancel()
 	}
 }
 

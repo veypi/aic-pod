@@ -3,45 +3,35 @@ package exec_procs
 import (
 	"context"
 	"fmt"
-	"github.com/veypi/aic-pod/libs/fsauth"
-	"github.com/veypi/aic-pod/libs/netauth"
 	"io"
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/veypi/aic-pod/libs/fsauth"
+	"github.com/veypi/aic-pod/libs/netauth"
 )
 
 type StartOptions struct {
-	ID      string   // 后台条目 ID（{host}:{sid}:{op_id} 或 msgID）
-	Command string   // 展示名（bg_list）
-	LogPath string   // 输出落盘路径（父目录自动创建）
 	Workdir string   // 进程 cwd（空 = 继承），不授予目录权限
 	Exec    []string // argv：Exec[0] = 程序名
-	// Level 是本次调用的授予等级（§2.4/§5.10 沙箱 profile 选择）：
-	// 1 = read-only 沙箱；2/3/4/9 = workspace-write 沙箱；
-	// 0 = 未设置/异常值，按 read-only 兜底（fail-closed——
-	// host 外部调用的 level 0 已被 dispatch 拒绝，
-	// 到这里的 0 只会是调用方 bug，宁可过紧也不可裸跑）。
-	// 注意：LevelApproved(9) 只是「审批通过」的等级语义，不免沙箱——
-	// 免沙箱唯一通道是 NoSandbox。
-	Level int
-	// NoSandbox 是免沙箱执行标记（§5.10），合法来源：
+	// NoSandbox 是免沙箱执行标记（hosts-vsh-redesign §3.3），合法来源：
 	//   - 内部管控调用方（ssh/scp、browser，由执行环境自身管控）；
-	//   - 外部请求显式携带 nosandbox 且经人工审批（required Critical(4)
-	//     ⇒ 必审批；审批本身不免沙箱，仅放行该标记）；
+	//   - 外部请求显式携带 nosandbox（发送前审批；审批本身不免沙箱，
+	//     仅放行该标记）；
 	//   - 全局 no_sandbox 配置（Manager.NoSandbox）。
 	NoSandbox bool
-	// WriteRoots 是追加可写根（统一授权模型 fs 域）：workspace-write
-	//（level>=2）沙箱 bind 白名单成员，与 fsauth 基础白名单（工作区/临时区/
-	// 会话区/公共区/缓存）并集。来源 = Policy.WriteRootsFor(sid)（cfg
-	// fs_allow + grant fs 临时授权）——fs 与 exec 共用同一份名单。
-	// 每次 Start 读当次值（配置动态生效）；nil = 仅基础白名单。
+	// WriteRoots 是追加可写根（统一授权模型 fs 域）：沙箱 bind 白名单成员，
+	// 与 fsauth 基础白名单（工作区/临时区/会话区/公共区/缓存）并集。
+	// 来源 = Policy.WriteRootsFor(sid)（cfg fs_allow + grant fs 临时授权）
+	// ——fs 与 exec 共用同一份名单。每次运行读当次值（配置动态生效）；
+	// nil = 仅基础白名单。
 	WriteRoots []string
 	// DenyPaths 是预展开的拒绝模式（deny 隔离，读写双拒）：deny 表（fsauth
 	// defaultDenyPaths + cfg fs_deny）经本字段进入沙箱 profile——fs 工具与
 	// exec 进程共用同一份名单。darwin 为 regex 规则；linux 为覆盖挂载
 	//（目录 tmpfs / 文件与 socket 以 /dev/null 覆盖；形态不可实例化时
-	// 启动前拒绝执行）。来源 = Policy.DenyPatterns()（快照，每次 Start 读当次值）。
+	// 启动前拒绝执行）。来源 = Policy.DenyPatterns()（快照，每次运行读当次值）。
 	// nil = 无拒绝（仅测试/无策略场景；生产调用方恒传）。
 	DenyPaths []string
 	// SandboxRules 是 fs 域有序规则表快照（M3 行序映射）：darwin 消费——按
@@ -66,19 +56,20 @@ type StartOptions struct {
 	NetAllow []netauth.Entry
 }
 
-// RunProcess runs exactly one child inside its caller's execution and writer.
-func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.Writer) (int, error) {
+// RunProcess runs exactly one child process under the caller's context.
+// stdio 全接通：stdin 供管道/载荷输入，stdout/stderr 分流写入各自 writer
+// （双流日志契约——stderr 不混入 stdout；nil 表示丢弃对应流）。
+// 运行期限与取消全部由 ctx 承担（exec 外层墙钟/取消句柄）。
+func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(opts.Exec) == 0 {
 		return 0, fmt.Errorf("exec: program required")
 	}
 	if _, err := exec.LookPath(opts.Exec[0]); err != nil {
 		return 0, fmt.Errorf("exec: unknown action %q", opts.Exec[0])
 	}
-	// 沙箱包装（§5.10）：未显式免沙箱（NoSandbox）且全局未禁用（m.NoSandbox）
-	// 的进程调用一律进沙箱——审批通过（9）也不例外；免沙箱来源 = 显式
-	// nosandbox 请求（经 Critical(4) 审批下发 9）、内部管控调用方（ssh/scp）
-	// 或全局 no_sandbox 配置，不再叠加 fs/net 策略校验（2026-09-16 修复）；
-	// 无可用后端时 fail-closed 返回错误（命令不执行，绝不静默裸跑）。
+	// 沙箱包装（§3.3）：未显式免沙箱（NoSandbox）且全局未禁用（m.NoSandbox）
+	// 的进程调用一律进沙箱；无可用后端时 fail-closed 返回错误
+	//（命令不执行，绝不静默裸跑）。
 	execArgv := opts.Exec
 	var plan launchPlan
 	logf := m.logFunc()
@@ -86,7 +77,7 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 	if confined {
 		var err error
 		plan, err = planConfined(confineSpec{
-			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
+			workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
 			deny: opts.DenyPaths, rules: opts.SandboxRules, fsOpen: opts.FsOpen,
 			writeAllow: opts.WritePaths,
 			netOpen:    opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
@@ -110,10 +101,19 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 		}
 		cmd.Env = fsauth.ScrubEnv(cmd.Env)
 	}
-	// Windows 上经逐行转码（GBK→UTF-8）后落盘，其余平台原样直写
-	out := newOutputWriter(output)
+	// Windows 上经逐行转码（GBK→UTF-8）后落盘，其余平台原样直写；
+	// stdout/stderr 分流（诊断不污染 stdout 的 --json 契约与管道数据）。
+	cmd.Stdin = stdin
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	out := newOutputWriter(stdout)
+	errOut := newOutputWriter(stderr)
 	cmd.Stdout = out
-	cmd.Stderr = out
+	cmd.Stderr = errOut
 	SetSysProcAttr(cmd)
 	cmd.Cancel = func() error { killProcessTree(cmd.Process.Pid); return nil }
 	cmd.WaitDelay = 5 * time.Second
@@ -126,6 +126,13 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 			return 0, fmt.Errorf("exec: apply token: %v", err)
 		}
 	}
+
+	h := &procHandle{done: make(chan struct{})}
+	defer close(h.done)
+	if err := m.track(h); err != nil {
+		return 0, err
+	}
+	defer m.untrack(h)
 
 	spawnStart := time.Now()
 	if err := cmd.Start(); err != nil {
@@ -152,20 +159,21 @@ func (m *Manager) RunProcess(ctx context.Context, opts StartOptions, output io.W
 		}
 	}
 	if confined && logf != nil {
-		logf("exec: spawn=%s level=%d", time.Since(spawnStart).Round(time.Millisecond), opts.Level)
+		logf("exec: spawn=%s", time.Since(spawnStart).Round(time.Millisecond))
 	}
 
 	if plan.cleanup != nil {
 		defer plan.cleanup()
 	}
-	if e, _ := ctx.Value(entryKey{}).(*Entry); e != nil {
-		e.pid.Store(int64(cmd.Process.Pid))
-		if limit := rssLimitBytes(); limit > 0 {
-			go monitorGroupRSS(e, limit)
-		}
+	h.pid.Store(int64(cmd.Process.Pid))
+	if limit := rssLimitBytes(); limit > 0 {
+		go monitorGroupRSS(h, limit)
 	}
 	err := cmd.Wait()
 	if closer, ok := out.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+	if closer, ok := errOut.(interface{ Close() error }); ok {
 		_ = closer.Close()
 	}
 	code := 0

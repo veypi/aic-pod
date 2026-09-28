@@ -3,17 +3,21 @@ package rtc
 import (
 	"context"
 	"encoding/json"
+	"time"
+
 	"github.com/pion/webrtc/v4"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
-	"time"
 )
 
+// ToolBackend 是 RTC 直连的业务入口（hosts_rtc/2）：
+// 普通请求与 NATS 同载荷同分发；stream.open 走私有端点表（page.frames/
+// page.input 直接连接业务服务，不注册为 vsh 指令、不进 commands/caps）。
 type ToolBackend interface {
 	HandleTool(context.Context, tool.Caller, wire.Request) wire.Response
 	DisconnectTools(tool.Caller)
-	OpenToolStream(context.Context, tool.Caller, wire.Invocation) (tool.Stream, error)
+	OpenToolStream(ctx context.Context, c tool.Caller, endpoint string, args json.RawMessage) (tool.Stream, error)
 }
 
 func (p *peer) toolCaller() (tool.Caller, error) {
@@ -30,7 +34,7 @@ func (p *peer) toolCaller() (tool.Caller, error) {
 			return time.Time{}
 		}
 		return current.ExpiresAt
-	}, Subject: c.Subject, ConnectionID: c.ConnectionID, Level: 9, ExpiresAt: c.ExpiresAt, Check: func(ctx context.Context) error {
+	}, Subject: c.Subject, ConnectionID: c.ConnectionID, Origin: c.SessionID, ExpiresAt: c.ExpiresAt, Check: func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -56,11 +60,11 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 		var req rtcwire.Request
 		err := wire.Decode(msg.Data, &req)
 		if !msg.IsString || len(msg.Data) > wire.MaxMessageBytes || err != nil || req.Protocol != rtcwire.Protocol || !wire.ValidID(req.ID) {
-			_ = p.sendTool(dc, wire.Reply(rtcwire.Protocol, req.ID, nil, wire.Fail("invalid_argument", "Expected hosts_rtc/1 request")))
+			_ = p.sendTool(dc, wire.Reply(rtcwire.Protocol, req.ID, nil, wire.Fail("invalid_argument", "Expected hosts_rtc/2 request")))
 			return
 		}
 		// Call cancellation must remain reachable when requests are waiting.
-		if req.Action == "call.cancel" {
+		if req.Action == wire.ActionCancel {
 			p.toolRequest(dc, req)
 			return
 		}
@@ -122,6 +126,9 @@ func (p *peer) toolRequest(dc *webrtc.DataChannel, r rtcwire.Request) {
 			value, err := p.openToolChannel(caller, r)
 			response = wire.Reply(rtcwire.Protocol, r.ID, value, err)
 		} else {
+			// owner 前端的确认元信息只作用于本次请求（默认不批准；
+			// 不因连接已认证而一概设为 true——§3.1 RTC 入口）。
+			caller.GrantApproved = r.GrantApproved
 			response = p.s.cfg.Tools.HandleTool(p.ctx, caller, r.Request)
 		}
 	}

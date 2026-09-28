@@ -30,7 +30,7 @@ func (m *Manager) Spawn(ctx context.Context, opts StartOptions) (*Spawned, error
 	if confined {
 		var err error
 		plan, err = planConfined(confineSpec{
-			level: opts.Level, workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
+			workdir: opts.Workdir, extra: opts.WriteRoots, argv: opts.Exec,
 			deny: opts.DenyPaths, fsOpen: opts.FsOpen,
 			writeAllow: opts.WritePaths,
 			netOpen:    opts.NetOpen, netDeny: opts.NetDeny, netAllow: opts.NetAllow,
