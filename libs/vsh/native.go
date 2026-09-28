@@ -161,17 +161,22 @@ func (n *NativeRegistry) command(name string) commands.Command {
 			return commands.Exitf(inv, 127, "%s: command not granted（grant cmd %s 申请）", name, name)
 		}
 		n.mu.RLock()
-		bin := n.allowed[name]
+		bin, registered := n.allowed[name]
 		n.mu.RUnlock()
-		if bin == "" {
+		if !registered || bin == "" {
 			var err error
 			bin, err = n.deps.LookPath(name)
 			if err != nil {
 				return commands.Exitf(inv, 127, "%s: binary not found: %s", name, err)
 			}
-			n.mu.Lock()
-			n.allowed[name] = bin
-			n.mu.Unlock()
+			if registered {
+				// 仅白名单内命令回写 LookPath 缓存；open fallback 合成的命令
+				// 不回写——Names() 只代表真实授权（grant status 的会话清单
+				// 不被缓存污染）。
+				n.mu.Lock()
+				n.allowed[name] = bin
+				n.mu.Unlock()
+			}
 		}
 		if n.deps.Manager == nil {
 			return commands.Exitf(inv, 1, "%s: native process manager unavailable", name)
