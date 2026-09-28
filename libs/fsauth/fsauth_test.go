@@ -678,6 +678,27 @@ func TestDecideCachesWithoutStat(t *testing.T) {
 	}
 }
 
+// canonical 形路径禁止 filepath.Join 回填反斜杠（win \c\… 毒形态回归：
+// 该行进 WriteRootsFor 后 win 沙箱 grantDirWrite 必失败）。会话根行任何
+// 平台都不得含反斜杠（缓存/临时根的原生态字面行不在此列——只断言行内
+// 含 sid 的会话根）。
+func TestSessionRootRowsNoBackslash(t *testing.T) {
+	p := New()
+	if strings.Contains(p.sessionDir, `\`) {
+		t.Fatalf("sessionDir = %q", p.sessionDir)
+	}
+	for _, r := range p.decideRootsLocked("s1") {
+		if strings.Contains(r, "s1") && strings.Contains(r, `\`) {
+			t.Fatalf("decideRoots session row = %q", r)
+		}
+	}
+	for _, r := range p.bindRootsLocked("s1") {
+		if strings.Contains(r, "s1") && strings.Contains(r, `\`) {
+			t.Fatalf("bindRoots session row = %q", r)
+		}
+	}
+}
+
 // canonical 盘符输入归一（2026-09-24 /c/ 规范形）：windows 上裸盘符按盘根
 // 展开为 /c；posix 上 "C:" 是普通相对路径名，不特殊处理。
 func TestCanonicalBareDrive(t *testing.T) {

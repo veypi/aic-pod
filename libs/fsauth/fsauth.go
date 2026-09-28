@@ -87,8 +87,11 @@ func New() *Policy {
 	p := &Policy{grants: map[string][]string{}}
 	if dir, err := cfg.PublicDir(); err == nil {
 		p.publicDir = canonical(dir)
-		p.sessionDir = filepath.Join(p.publicDir, "sessions")
-		_ = os.MkdirAll(p.sessionDir, 0o700)
+		// sessionDir 为 canonical 形（win = /c/ 规范形）：禁止 filepath.Join
+		// （win 上 Join 回填反斜杠，产出 \c\… 毒形态——进 WriteRootsFor 后
+		// win 沙箱 grantDirWrite 必失败，原生命令全灭）。
+		p.sessionDir = p.publicDir + "/sessions"
+		_ = os.MkdirAll(proto.HostPathToOS(p.sessionDir), 0o700)
 	}
 	p.mu.Lock()
 	p.rebuildLocked()
@@ -333,7 +336,7 @@ func (p *Policy) decideRootsLocked(sid string) []string {
 	roots = append(roots, p.baseRoots...)
 	roots = append(roots, p.decideCaches...)
 	if sid != "" && p.sessionDir != "" {
-		roots = append(roots, filepath.Join(p.sessionDir, sid))
+		roots = append(roots, p.sessionDir+"/"+sid) // canonical 形，禁止 filepath.Join（见 New）
 	}
 	roots = append(roots, p.grants[sid]...)
 	return roots
@@ -347,7 +350,7 @@ func (p *Policy) bindRootsLocked(sid string) []string {
 	roots = append(roots, p.baseRoots...)
 	roots = append(roots, CacheRoots()...)
 	if sid != "" && p.sessionDir != "" {
-		roots = append(roots, filepath.Join(p.sessionDir, sid))
+		roots = append(roots, p.sessionDir+"/"+sid) // canonical 形，禁止 filepath.Join（见 New）
 	}
 	roots = append(roots, p.grants[sid]...)
 	for _, r := range p.rules {
