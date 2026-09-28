@@ -140,6 +140,13 @@ func New(opts Options) *Client {
 		_, _, c.kTool, _ = proto.DeriveKeys(parts[2], parts[0])
 		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
 	}
+	// 会话区根 = {PublicDir}/sessions：与 fsauth 会话便利根、vshStubRoot 兜底
+	// 同路径（生产此前从不赋值 → sessionWorkDir 退 Temp 兜底，「会话区」分裂
+	// 为两个概念；win 沙箱对 fsauth 会话根行 grantDirWrite 因目录从未存在而
+	// fail-closed）。ensureSessionWorkDir 自此创建真实目录，两侧归一。
+	if dir, err := cfg.PublicDir(); err == nil {
+		c.sessionRoot = filepath.Join(dir, "sessions")
+	}
 	c.initTools()
 	return c
 }
