@@ -11,7 +11,6 @@ package fsauth
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -413,7 +412,7 @@ func compileFSRule(raw, src string) (fsRule, bool) {
 		}
 	} else {
 		r.pats = append(r.pats, joinPattern(cp, "**"))
-		if lit := filepath.ToSlash(e); lit != cp {
+		if lit := hostFormFromOS(e); lit != cp {
 			r.pats = append(r.pats, lit, joinPattern(lit, "**"))
 		}
 		if r.eff == effRW {
@@ -427,38 +426,38 @@ func compileFSRule(raw, src string) (fsRule, bool) {
 // Canonical 导出 canonical（包外少量场景用：grant fs 落盘幂等比较等）。
 func Canonical(p string) string { return canonical(p) }
 
-// bareDriveRe 匹配裸盘符形态（"C:"）。
-var bareDriveRe = regexp.MustCompile(`^[A-Za-z]:$`)
+// hostFormToOS canonical 系列入口归一（= proto.HostPathToOS）：windows 接受
+// 任意盘符形态转原生态；posix 恒等（"C:" 是合法相对文件名，不做盘符归一）。
+func hostFormToOS(p string) string { return proto.HostPathToOS(p) }
 
-// isBareDrive 报告 p 是否为 windows 裸盘符（非 windows 恒 false——posix 上
-// "C:" 是普通相对路径名，不做特殊处理）。
-func isBareDrive(p string) bool {
-	return runtime.GOOS == "windows" && bareDriveRe.MatchString(p)
+// hostFormFromOS canonical 系列出口归一：windows 原生态 → /c/ 规范形；
+// posix 仅斜杠归一（旧行为）。
+func hostFormFromOS(p string) string {
+	if runtime.GOOS != "windows" {
+		return filepath.ToSlash(p)
+	}
+	return proto.NormalizeHostPath(filepath.ToSlash(p))
 }
 
 // canonical 展开符号链接到真实文件系统身份：EvalSymlinks 逐级向父目录回退
 // （目标不存在时展开最近存在祖先，剩余路径原样拼接——写新文件场景）。
-// 反斜杠归一为 /（匹配器统一斜杠语义）。
+// 输出为 /c/ 规范形（2026-09-24 全局统一；非 windows 恒为 posix 形）。
+// 入口接受任意形态（C:\…、C:/…、/c/…）——先归一再转原生供 filepath 使用。
 // 递归到文件系统根基（/ 或 C:\）时直接返回原路径：根基无可展开项，且
-// TrimSuffix 根基分隔符得空串/盘符，继续递归会退化成相对路径（"./x" 或
-// 盘符相对形态），使绝对路径判定脱离绝对口径。
-// windows 裸盘符（"C:"）先补为盘根（"C:\"）再展开：EvalSymlinks 对裸盘符
-// 是盘符当前目录语义，权限判定必须按盘根口径（与 ProtectRoots 的 "C:" 可比）。
+// TrimSuffix 根基分隔符得空串/盘符，继续递归会退化成相对路径。
 func canonical(p string) string {
-	if isBareDrive(p) {
-		p += `\`
-	}
+	p = hostFormToOS(p)
 	p = filepath.Clean(p)
 	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return filepath.ToSlash(r)
+		return hostFormFromOS(r)
 	}
 	dir, base := filepath.Split(p)
 	if dir == "" {
-		return filepath.ToSlash(p)
+		return hostFormFromOS(p)
 	}
 	parent := strings.TrimSuffix(dir, string(filepath.Separator))
 	if parent == filepath.VolumeName(dir) {
-		return filepath.ToSlash(p)
+		return hostFormFromOS(p)
 	}
 	return canonical(parent) + "/" + base
 }
@@ -468,18 +467,16 @@ func CanonicalNoFollow(p string) string { return canonicalNoFollow(p) }
 
 // canonicalNoFollow 展开父目录符号链接、保留末段字面形（unlink/rename 语义：
 // 系统调用作用于链接本身，判定必须同口径）。父链复用 canonical（含最近存在
-// 祖先回退）；末段为根/退化形态时退回跟随版。
+// 祖先回退）；末段为根/退化形态时退回跟随版。输出同为 /c/ 规范形。
 func canonicalNoFollow(p string) string {
-	if isBareDrive(p) {
-		p += `\`
-	}
+	p = hostFormToOS(p)
 	p = filepath.Clean(p)
 	parent := filepath.Dir(p)
 	base := filepath.Base(p)
 	if base == "." || base == string(filepath.Separator) || parent == p {
 		return canonical(p)
 	}
-	return filepath.ToSlash(filepath.Join(canonical(parent), base))
+	return hostFormFromOS(filepath.Join(canonical(parent), base))
 }
 
 func dedupClean(roots []string) []string {

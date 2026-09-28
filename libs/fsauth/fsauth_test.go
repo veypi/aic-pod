@@ -678,22 +678,24 @@ func TestDecideCachesWithoutStat(t *testing.T) {
 	}
 }
 
-// canonical 裸盘符：windows 按盘根展开（EvalSymlinks 裸盘符是盘符当前目录语义，
-// 权限判定必须盘根口径）；posix 上 "C:" 是普通相对路径名，不特殊处理。
+// canonical 盘符输入归一（2026-09-24 /c/ 规范形）：windows 上裸盘符按盘根
+// 展开为 /c；posix 上 "C:" 是普通相对路径名，不特殊处理。
 func TestCanonicalBareDrive(t *testing.T) {
 	got := Canonical("C:")
 	if runtime.GOOS == "windows" {
-		if got != "C:/" {
-			t.Errorf("Canonical(C:) = %q, want C:/", got)
+		if got != "/c" {
+			t.Errorf("Canonical(C:) = %q, want /c", got)
 		}
 	} else if got != "C:" {
 		t.Errorf("Canonical(C:) = %q, want C:", got)
 	}
-	if isBareDrive("C:") != (runtime.GOOS == "windows") {
-		t.Errorf("isBareDrive(C:) should be windows-only")
-	}
-	if isBareDrive("C:/") || isBareDrive("C:x") {
-		t.Errorf("isBareDrive should only match bare drive")
+	if runtime.GOOS == "windows" {
+		if got := Canonical(`C:\Users`); got != "/c/Users" {
+			t.Errorf("Canonical(C:\\Users) = %q, want /c/Users", got)
+		}
+		if got := Canonical("/c/Users"); got != "/c/Users" {
+			t.Errorf("Canonical(/c/Users) = %q, want /c/Users", got)
+		}
 	}
 }
 

@@ -36,7 +36,8 @@ type NativeDeps struct {
 	Policy func(inv *commands.Invocation) NativePolicy
 	// LookPath name → 真实二进制路径；nil = exec.LookPath。
 	LookPath func(name string) (string, error)
-	// Workdir 进程 cwd（空 = inv.Cwd 直通；host 端会话 cwd 即真实路径）。
+	// Workdir 进程 cwd（空 = inv.Cwd 直通）。inv.Cwd 是引擎规范形（win =
+	// /c/…）——host 装配侧必须经 proto.HostPathToOS 转原生态再启动进程。
 	// 返回空串 = 继承 pod cwd。
 	Workdir func(invCwd string) string
 	// LogPath 输出落盘路径（可选；空 = 不落盘）。

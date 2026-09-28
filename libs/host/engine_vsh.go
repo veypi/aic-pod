@@ -57,7 +57,15 @@ func (c *Client) vshEngine() (*vshglue.Engine, *vshglue.NativeRegistry, error) {
 	return c.vsh.engine, c.vsh.native, c.vsh.err
 }
 
-// vshStubRoot 进程级 stub/布局根（偏差 1，见文件头）。
+// hostCanonical 把 OS 原生路径转为引擎可见规范形（windows = /c/… 类 Linux
+// 形，2026-09-24 全局统一；posix 恒等）。引擎只看规范形——PATH 按 : 切分
+// 不吃盘符、绝对性判定只看 / 前缀，均不感知盘符。
+func hostCanonical(p string) string {
+	return proto.NormalizeHostPath(filepath.ToSlash(p))
+}
+
+// vshStubRoot 进程级 stub/布局根（偏差 1，见文件头）。原生态（os.MkdirAll
+// 直接用）；进引擎前经 hostCanonical 转换。
 func (c *Client) vshStubRoot() string {
 	base := c.sessionRoot
 	if base == "" {
@@ -84,6 +92,8 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 	native := vshglue.NewNativeRegistry(vshglue.NativeDeps{
 		Manager: c.procs,
 		Policy:  c.nativePolicy,
+		// 引擎 cwd 是规范形（win = /c/…）——原生进程启动需 OS 路径。
+		Workdir: func(invCwd string) string { return proto.HostPathToOS(invCwd) },
 	})
 	// 种子白名单 = cfg exec_allow（design §4.2；不含 shell/解释器由配置侧
 	// 约束——todo 3.6.2 核对）。
@@ -98,11 +108,13 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			if err != nil {
 				return nil, "", err
 			}
-			return fsys, c.options().WorkDir, nil
+			return fsys, hostCanonical(c.options().WorkDir), nil
 		},
 		Network: vshglue.NewNetClient(vshglue.NetClientConfig{
 			AllowPrivate: true, // host LAN 合法（2.4.3：私网阻断仅 cloud）
-			Rules:        func(ctx context.Context) vbox.NetRuleSet { return c.netPol.SnapshotVbox(vshglue.SessionFromContext(ctx)) },
+			Rules: func(ctx context.Context) vbox.NetRuleSet {
+				return c.netPol.SnapshotVbox(vshglue.SessionFromContext(ctx))
+			},
 		}),
 		Platform: vshglue.PlatformDeps{
 			Grant: c.vshGrant,
@@ -110,10 +122,10 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			// 执行给可读报错——零值降级语义）。
 		},
 		// Runtime 级布局环境：stub 写入目标 = PATH 目录（须在规则表可写区，
-		// 进程级 stub 根位于会话区便利根之下）。
+		// 进程级 stub 根位于会话区便利根之下）。引擎可见路径一律规范形。
 		LayoutEnv: map[string]string{
-			"HOME": layoutHome,
-			"PATH": stubBin,
+			"HOME": hostCanonical(layoutHome),
+			"PATH": hostCanonical(stubBin),
 			"USER": "agent",
 		},
 	})
@@ -237,7 +249,9 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 
 	workdir := p.Workdir
 	if workdir == "" {
-		workdir = c.options().WorkDir
+		workdir = hostCanonical(c.options().WorkDir)
+	} else {
+		workdir = proto.NormalizeHostPath(workdir)
 	}
 	if err := c.ensureSessionWorkDir(sid); err != nil {
 		return &proto.ToolResponse{MsgID: req.MsgID, State: proto.StateError, Error: err.Error()}
@@ -252,11 +266,11 @@ func (c *Client) execScript(ctx context.Context, sid string, req *proto.ToolRequ
 	}
 
 	env := map[string]string{
-		"PATH":   filepath.Join(c.vshStubRoot(), "bin"),
-		"TMPDIR": os.TempDir(),
+		"PATH":   hostCanonical(filepath.Join(c.vshStubRoot(), "bin")),
+		"TMPDIR": hostCanonical(os.TempDir()),
 	}
 	if home, herr := os.UserHomeDir(); herr == nil {
-		env["HOME"] = home
+		env["HOME"] = hostCanonical(home)
 	}
 	if p.NoSandbox {
 		env["AIC_VSH_NOSANDBOX"] = "1"

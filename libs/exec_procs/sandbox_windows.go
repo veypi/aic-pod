@@ -385,6 +385,13 @@ func planConfined(spec confineSpec) (launchPlan, error) {
 		last = now
 		return d.Round(time.Millisecond)
 	}
+	// 路径形态边界（2026-09-24 /c/ 规范形全局统一）：策略层路径（deny/extra/
+	// workdir 可能带 /c/ 规范形）一律转原生态——本文件后续全按 OS 路径消费。
+	spec.deny = pathsToOS(spec.deny)
+	spec.extra = pathsToOS(spec.extra)
+	if spec.workdir != "" {
+		spec.workdir = pathToOS(spec.workdir)
+	}
 	logf := spec.logf
 	if err := validateProcessPolicy(spec, "windows"); err != nil {
 		return launchPlan{}, err
@@ -1079,4 +1086,16 @@ func aclReachable(dacl *windows.ACL, sids []*windows.SID) bool {
 		off += int(ace.AceSize)
 	}
 	return false
+}
+
+// pathToOS 把 /c/ 规范形（及旧输入形）转 windows 原生态（=
+// proto.HostPathToOS）。策略层 → ACL/令牌边界的单一转换点。
+func pathToOS(p string) string { return proto.HostPathToOS(p) }
+
+func pathsToOS(in []string) []string {
+	out := make([]string, len(in))
+	for i, p := range in {
+		out[i] = pathToOS(p)
+	}
+	return out
 }

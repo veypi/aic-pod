@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -16,18 +15,20 @@ import (
 
 // OSVFS 是 OS 本地文件系统的 ufs.FS 适配（物理 host 执行环境）。
 //
-// 路径模型（2026-09-15 盘符方案）：
-//   - 输入为 vcore 规范形：斜杠分隔绝对路径；Windows 盘符形 C:/…（裸 C: =
-//     盘符根，严格语义——C:foo 盘符相对形态由 proto.ResolvePath 归为相对
-//     路径，不会以盘符身份到达本层）；
-//   - Windows 下 "/" 是虚拟挂载根：ReadDir 返回盘符挂载列表（C:、D:…），
-//     Stat 返回合成目录信息；其余操作作用于 "/" 报错（rm/mv 另由
-//     ProtectRoots 硬保护拦截）。"当前盘根" 语义不复存在；
+// 路径模型（2026-09-24 全局统一 /c/ 类 Linux 规范形，废除 C:/ 盘符形）：
+//   - 输入为公共规范形：斜杠分隔绝对路径；Windows 盘符 = 首段单字母
+//     （/c/…，/c = 盘符根）。C:/…、C:\… 等输入形由 proto.NormalizeHostPath
+//     容错归一；
+//   - Windows 下 "/" 是虚拟挂载根：ReadDir 返回盘符挂载列表（c、d…），
+//     Stat 返回合成目录信息；其余操作作用于 "/" 报错；
+//   - Windows 下 /tmp 是虚拟别名（cygwin 式语义）：映射到 os.TempDir()，
+//     与规则表侧 canonical（proto.HostPathToOS）同口径——vsh 引擎布局
+//     初始化与脚本的 /tmp 写在 win 上有真实落点；
 //   - Windows 下非盘符绝对路径（/x）一律拒绝——虚拟根下只有盘符挂载。
 type OSVFS struct{}
 
 // errVirtualRoot 是 "/" 虚拟挂载根上执行非列举类操作的统一错误。
-var errVirtualRoot = errors.New(`fs: "/" is a virtual drive-list root on this host (ls it to enumerate drives; file operations require a drive path like C:/…)`)
+var errVirtualRoot = errors.New(`fs: "/" is a virtual drive-list root on this host (ls it to enumerate drives; file operations require a drive path like /c/…)`)
 
 // isVirtualRoot 报告 name 是否为 windows 虚拟挂载根。
 func isVirtualRoot(name string) bool { return runtime.GOOS == "windows" && name == "/" }
@@ -35,37 +36,40 @@ func isVirtualRoot(name string) bool { return runtime.GOOS == "windows" && name 
 // toOS 把规范形路径映射为 OS 路径（非 Windows 为恒等映射；Windows 见 winToOS）。
 func toOS(p string) (string, error) {
 	if runtime.GOOS == "windows" {
+		p = proto.NormalizeHostPath(p)
+		// /tmp 虚拟别名优先于盘根判定（winToOS 对非盘符绝对路径报错）。
+		if q, ok := proto.WinTmpToOS(p, os.TempDir()); ok {
+			return q, nil
+		}
 		return winToOS(p)
 	}
 	return p, nil
 }
 
-// winDriveRe 匹配盘符规范形（斜杠已归一）：C:（裸盘符 = 盘符根）或 C:/…。
-var winDriveRe = regexp.MustCompile(`^[A-Za-z]:($|/)`)
-
 // winToOS 把规范形路径映射为 Windows OS 路径（纯函数，跨平台可测）：
-//   - 归一与规则匹配层共用 proto.NormalizeDrivePath（本层兜底 ls/rg 递归拼接等
-//     绕过主入口的产物；多斜杠前缀 //C:、盘符形内双分隔符 C://x 同样消除）；
-//   - C: → C:\（盘根严格语义）；C:/x → C:\x；
+//   - 归一与规则匹配层共用 proto.NormalizeHostPath（本层兜底 ls/rg 递归拼接等
+//     绕过主入口的产物；多斜杠前缀 //c、旧输入形 C:/… 同样归一）；
+//   - /c → C:\（盘根）；/c/x → C:\x；
 //   - "/" → errVirtualRoot（Stat/ReadDir 特判，其余操作拒绝）；
 //   - 其余 /…（非盘符绝对路径）→ 错误：虚拟根下只有盘符挂载。
 func winToOS(p string) (string, error) {
-	p = proto.NormalizeDrivePath(p)
+	p = proto.NormalizeHostPath(p)
 	if p == "/" {
 		return "", errVirtualRoot
 	}
-	if winDriveRe.MatchString(p) {
-		drive := p[:1] + ":" // 盘符字母已在归一阶段大写
+	drive, rest, ok := proto.SplitDriveRoot(p)
+	if ok {
+		d := strings.ToUpper(string(drive)) + ":"
 		// 分隔符转换不能用 filepath.FromSlash（非 windows 上是恒等映射，
 		// 纯函数跨平台可测性会丢失）
-		rest := strings.ReplaceAll(strings.TrimPrefix(p[2:], "/"), "/", `\`)
+		rest = strings.ReplaceAll(rest, "/", `\`)
 		if rest == "" {
-			return drive + `\`, nil
+			return d + `\`, nil
 		}
-		return drive + `\` + rest, nil
+		return d + `\` + rest, nil
 	}
 	if strings.HasPrefix(p, "/") {
-		return "", fmt.Errorf("fs: windows path requires a drive letter (C:/…); got %q", p)
+		return "", fmt.Errorf("fs: windows path requires a drive root (/c/…); got %q", p)
 	}
 	return "", fmt.Errorf("fs: relative path %q reached the OS boundary", p)
 }
@@ -84,18 +88,19 @@ func (v virtualDir) Sys() any                   { return nil }
 func (v virtualDir) Type() fs.FileMode          { return fs.ModeDir }
 func (v virtualDir) Info() (fs.FileInfo, error) { return v, nil }
 
-// driveEntries 把盘符列表格式化为虚拟根 ReadDir 条目（纯函数，跨平台可测）。
+// driveEntries 把盘符列表格式化为虚拟根 ReadDir 条目（纯函数，跨平台可测）：
+// 条目名为规范形首段（"c"、"d"…——子路径拼接得 /c、/d 规范形）。
 func driveEntries(drives []string) []fs.DirEntry {
 	out := make([]fs.DirEntry, len(drives))
 	for i, d := range drives {
-		out[i] = virtualDir(d)
+		out[i] = virtualDir(strings.ToLower(strings.TrimSuffix(d, ":")))
 	}
 	return out
 }
 
 // windowsDrives 探测存在的盘符：C–Z 逐个 stat("X:/")（裸 X: 是盘符当前目录
-// 语义，不能用于探测）。返回盘符根规范形列表（"C:"、"D:"…，与 path.Clean 结果
-// 一致）。filesystemRoots 与虚拟根 ReadDir 共用此探测（单一实现）。
+// 语义，不能用于探测）。返回盘符根原生态列表（"C:"、"D:"…——mount
+// （deviceFileRoots）与探测共用；虚拟根 ReadDir 经 driveEntries 转规范形名）。
 func windowsDrives() []string {
 	var drives []string
 	for _, d := range "CDEFGHIJKLMNOPQRSTUVWXYZ" {
@@ -236,9 +241,8 @@ func (osAbsFS) Stat(name string) (fs.FileInfo, error) {
 	return os.Stat(p)
 }
 
-// filesystemRoots 返回 rm/mv 根目录硬保护列表（§5.4：物理 host 文件系统根）。
-// windows：盘符根（C:、D:…，规范形与 path.Clean 结果一致）+ 虚拟挂载根
-// "/"——/ 变为虚拟根后 rm / 与 mv / 必须拒绝。
+// filesystemRoots 返回设备文件系统 mount 根列表（deviceFileRoots 专用，
+// 原生态路径）。windows：盘符根（C:、D:…）+ 虚拟挂载根 "/"。
 func filesystemRoots() []string {
 	if runtime.GOOS == "windows" {
 		return append(windowsDrives(), "/")

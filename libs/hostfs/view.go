@@ -36,12 +36,17 @@ type fileView struct {
 
 func (v *fileView) location(name string) (fsp.Path, error) {
 	if runtime.GOOS == "windows" {
-		name = proto.NormalizeDrivePath(name)
-		if len(name) < 2 || name[1] != ':' {
-			return fsp.Path{}, fsp.Fail("invalid_argument", "Windows file operations require a drive path")
-		}
-		if len(name) == 2 {
-			name += "/"
+		name = proto.NormalizeHostPath(name)
+		if q, ok := proto.WinTmpToOS(name, os.TempDir()); ok {
+			// /tmp 虚拟别名（cygwin 式映射 os.TempDir()，与 Decide 侧
+			// proto.HostPathToOS 同口径）。
+			name = q
+		} else {
+			drive, rest, ok := proto.SplitDriveRoot(name)
+			if !ok {
+				return fsp.Path{}, fsp.Fail("invalid_argument", "Windows file operations require a drive path (/c/…)")
+			}
+			name = strings.ToUpper(string(drive)) + `:\` + strings.ReplaceAll(rest, "/", `\`)
 		}
 	}
 	abs, err := filepath.Abs(filepath.FromSlash(name))
@@ -177,7 +182,8 @@ func (v *fileView) ReadDir(name string) ([]fs.DirEntry, error) {
 		out := []fs.DirEntry{}
 		for _, root := range v.f.roots {
 			if _, _, err := v.f.check(v.ctx, v.call, fsp.Path{RootID: root.ID}, false); err == nil {
-				out = append(out, virtualDir(filepath.VolumeName(root.Path)))
+				// 条目名为规范形首段（"c"——子路径拼接得 /c 规范形）。
+				out = append(out, virtualDir(strings.ToLower(strings.TrimSuffix(filepath.VolumeName(root.Path), ":"))))
 			}
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })

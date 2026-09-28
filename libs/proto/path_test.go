@@ -37,38 +37,39 @@ func TestResolvePathVectors(t *testing.T) {
 		// workdir 约束
 		{"rel", "", nil, "", true},
 		{"rel", "not/abs", nil, "", true},
-		// Windows 盘符视为绝对，反斜杠归一为斜杠、盘符字母大写（vcore 规范形）；
-		// path.Clean 剥盘符尾斜杠："C:/" → "C:"（盘符根规范形）
-		{`C:\foo\bar`, "/wd", nil, `C:/foo/bar`, false},
-		{`C:\foo\..\x`, "/wd", nil, `C:/x`, false},
-		{`C:\`, "/wd", nil, `C:`, false},
-		{"C:/", "/wd", nil, "C:", false},
-		{"C:/slash/form", "/wd", nil, "C:/slash/form", false},
+		// Windows 盘符输入归一为 /c/… 类 Linux 规范形（2026-09-24 全局统一，
+		// 废除 C:/ 规范形）：反斜杠归一为斜杠、盘符字母小写作首段；
+		// 裸盘符 = 盘符根（/c）
+		{`C:\foo\bar`, "/wd", nil, `/c/foo/bar`, false},
+		{`C:\foo\..\x`, "/wd", nil, `/c/x`, false},
+		{`C:\`, "/wd", nil, `/c`, false},
+		{"C:/", "/wd", nil, "/c", false},
+		{"C:/slash/form", "/wd", nil, "/c/slash/form", false},
 		// 裸盘符 = 盘符根；盘符相对形态 C:foo 保持相对路径语义
-		{"C:", "/wd", nil, "C:", false},
+		{"C:", "/wd", nil, "/c", false},
 		{"C:foo", "/wd", nil, "/wd/C:foo", false},
-		// 盘符字母大写归一（根保护等值比较依赖单一规范形）
-		{"c:/x", "/wd", nil, "C:/x", false},
-		{"c:", "/wd", nil, "C:", false},
-		{`c:\x`, "/wd", nil, `C:/x`, false},
-		// 前导斜杠+盘符形归一（host 端输入容错收口：前端树路径 /C:/…）
-		{"/C:", "/wd", nil, "C:", false},
-		{"/C:/x", "/wd", nil, "C:/x", false},
-		{`/C:\x`, "/wd", nil, `C:/x`, false},
-		{"/c:/x", "/wd", nil, "C:/x", false},
-		// 多斜杠前缀先 path.Clean 折叠再判盘符形——归一结果中 //C:、/C: 形态不存在
+		// 盘符字母小写归一（根保护等值比较依赖单一规范形）
+		{"c:/x", "/wd", nil, "/c/x", false},
+		{"c:", "/wd", nil, "/c", false},
+		{`c:\x`, "/wd", nil, `/c/x`, false},
+		// 前导斜杠+盘符形归一（host 端输入容错收口）
+		{"/C:", "/wd", nil, "/c", false},
+		{"/C:/x", "/wd", nil, "/c/x", false},
+		{`/C:\x`, "/wd", nil, `/c/x`, false},
+		{"/c:/x", "/wd", nil, "/c/x", false},
+		// 多斜杠前缀先 path.Clean 折叠再判盘符形——归一结果中 //c、/C: 形态不存在
 		//（根保护等值比较依赖单一规范形；修复前 //C: → "/C:" 绕过 rm/mv 根保护）
-		{"//C:", "/wd", nil, "C:", false},
-		{"//C:/x", "/wd", nil, "C:/x", false},
-		{"///C:/x", "/wd", nil, "C:/x", false},
-		{"//c:", "/wd", nil, "C:", false},
-		{"C://x", "/wd", nil, "C:/x", false},
-		{"/C://x", "/wd", nil, "C:/x", false},
+		{"//C:", "/wd", nil, "/c", false},
+		{"//C:/x", "/wd", nil, "/c/x", false},
+		{"///C:/x", "/wd", nil, "/c/x", false},
+		{"//c:", "/wd", nil, "/c", false},
+		{"C://x", "/wd", nil, "/c/x", false},
+		{"/C://x", "/wd", nil, "/c/x", false},
 		// /C:foo 不是盘符形（C:foo 为盘符相对），保持 POSIX 绝对路径
 		{"/C:foo", "/wd", nil, "/C:foo", false},
-		// workdir 盘符反斜杠形同样归一
-		{"rel.txt", `C:\wd`, nil, "C:/wd/rel.txt", false},
-		{"rel.txt", "c:", nil, "C:/rel.txt", false},
+		// workdir 盘符形同样归一
+		{"rel.txt", `C:\wd`, nil, "/c/wd/rel.txt", false},
+		{"rel.txt", "c:", nil, "/c/rel.txt", false},
 		{"", "/wd", nil, "", true},
 	}
 	for _, c := range cases {
@@ -82,6 +83,35 @@ func TestResolvePathVectors(t *testing.T) {
 		if err != nil || got != c.want {
 			t.Errorf("ResolvePath(%q, %q) = %q, %v; want %q", c.path, c.workdir, got, err, c.want)
 		}
+	}
+}
+
+// WinTmpToOS 固定向量（纯函数，跨平台可测）：/tmp 虚拟别名 → windows 临时
+// 目录原生路径；非 /tmp 前缀一律 ok=false（/tmpfoo 不是别名）。
+func TestWinTmpToOS(t *testing.T) {
+	tmp := `C:\Users\x\AppData\Local\Temp`
+	cases := []struct {
+		in, want string
+		ok       bool
+	}{
+		{"/tmp", tmp, true},
+		{"/tmp/", tmp, true},
+		{"/tmp/a", tmp + `\a`, true},
+		{"/tmp/a b/c.txt", tmp + `\a b\c.txt`, true},
+		{"/tmpfoo", "", false},
+		{"/c/tmp", "", false},
+		{"/", "", false},
+		{"tmp", "", false},
+	}
+	for _, c := range cases {
+		got, ok := WinTmpToOS(c.in, tmp)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("WinTmpToOS(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+	// 尾反斜杠注入防御（os.TempDir 一般不帶，注入侧容错）
+	if got, ok := WinTmpToOS("/tmp/a", tmp+`\`); !ok || got != tmp+`\a` {
+		t.Errorf("WinTmpToOS trailing-backslash = %q, %v", got, ok)
 	}
 }
 
