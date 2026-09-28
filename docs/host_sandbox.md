@@ -1,77 +1,75 @@
-# Host 执行策略与原生沙箱
+# Host 执行权限与原生沙箱
 
-状态：2026-09-22 当前实现。云端审批策略与本地执行策略分别决策；完整协议见 aic 的 `docs/permission.md`。本地策略不能被云端批准覆盖，不保留旧配置兼容逻辑。fs 模型：读默认开放（除 deny），fs_allow 只授写——已废除 `ro:` 只读授权。
+状态：2026-09-28 目标设计，尚未实施。本文替代旧等级检查流程；总契约见 [hosts-vsh-redesign.md](hosts-vsh-redesign.md)，当前代码仍需按实施清单迁移。
 
-## 配置
+## 1. 边界
 
-```yaml
-fs_policy: deny
-fs_deny: ["/work/private/**"]
-fs_allow: ["/work/project/**"]
-exec_policy: deny
-exec_deny: ["bash"]
-exec_allow: ["git", "json"]
-net_policy: deny
-net_deny: ["blocked.example:*"]
-net_allow: ["example.com:443"]
-ssh_policy: deny
-ssh_deny: []
-ssh_allow: ["dev.example:22"]
-```
+审批回答“用户是否允许本次脚本修改授权或免沙箱执行”，rules 回答“实际访问是否允许”，OS 沙箱约束原生子进程。三者不使用数字等级表达。
 
-统一判定顺序为 deny、覆盖本次访问的 allow、policy 默认值。deny 恒优先且为读写双拒（审批与临时 grant 不可绕过）；fs 读方向默认开放（除 deny），fs_allow 只授予写：裸路径覆盖子树，通配条目精确匹配，支持段内 `*`、跨层 `**` 和 `?`；`fs_policy` 只描述写方向：deny=仅写白名单，open=写除 deny 外全放。exec 使用命令名精确匹配或 `*`，不把命令正文作为配置规则；exec/net 的 open 默认允许、deny 默认拒绝。
+只有修改授权的 grant 和显式 nosandbox 触发审批。一个 Tool.Message 只做一次整单审批，通过即允许本次脚本中的 grant 和请求显式指定的 nosandbox，不分别审批。Browser/CUA 不审批；命令规则、资源规则和各服务的对象归属检查继续生效。允许 GUI 能力不等于文件沙箱能够约束另一个应用的全部行为。
 
-net/ssh 以 `host:port` 精确匹配主机，端口可为数字或 `*`。IPv6 使用方括号。明确 deny 不能被更具体的 allow 覆盖。
+## 2. 请求与授权修改
 
-默认 fs/ssh policy 为 deny，exec/net 为 open。工作区、Session 区、临时区、工具缓存与公共区装配为默认可写资源（内置便利根）；默认凭证保护名单与 fs_deny 合并后统一优先（读写双拒）。读方向不再装配任何白名单（读默认开放），也不再需要系统运行库/系统 CA 读根。调用参数 workdir 只决定工作目录，不授予该目录权限。
+1. 验证 NATS 签名或 RTC 身份、目标、scope、会话绑定和有效期。
+2. 构造不可由脚本修改的执行上下文。NATS 的 grant_approved 由服务端在用户明确批准该条 Tool.Message 后置为 true，无论由 grant 还是 nosandbox 触发审批；默认 false，受既有签名保护，不另建 grant 审批状态。
+3. 执行脚本，按 exec 规则分发；虚拟指令优先，未命中才走受管的 PATH fallback。
+4. FS/net/ssh 实际访问按对应 rules 检查；原生程序启动时生成 OS 沙箱。
+5. 无论通过字面调用、变量、eval/source 还是嵌套脚本到达 grant，实际修改规则前都检查 grant_approved。没有批准就返回 permission_denied，不写规则、不暂停审批、不重放脚本。
 
-配置文件仅接受当前 snake_case 键。错误的授权 policy/列表不能回退为 open 或清空；业务格式错误保留原值，类型解析失败保留可见错误标记，整个文件损坏则将全部授权字段标为无效。设备工具通过 `cfg.CheckAuth` 拒绝调用，授权等级和临时 grant 均不能绕过；本地设置 API 继续可用。必须显式修正错误字段后才能保存，无关设置更新不会覆盖原文件，也不能清除环境变量/flag 中的错误授权。文件解析错误必须修复文件或通过设置 API 修复，不能依赖更高优先级参数掩盖。配置保存经 `ValidateAuth` 校验；本地设置 API 与永久 grant 使用同一配置更新锁，写盘成功后更新内存。
+grant status/help 不修改规则，不要求该标记。普通请求无需人工审批而获准执行时，grant_approved 仍为 false；由 nosandbox 触发的整单审批通过后同样置为 true。标记只在本次执行内继承，超时转后台不丢失，后续独立请求不继承；env、argv、stdin 都不能覆盖它。
 
-## 请求处理
+这是使用现有可信请求传递一个整单审批事实，不是新的审批票据，也不是 pod 再做一次审批分类。RTC 仅信任已认证 owner 前端对本次请求的一次整体确认，不分项确认，不从连接身份推导所有请求均已批准；AI 走服务端工具入口。
 
-1. 验证签名、deadline、nonce、Session 与工具参数。
-2. 检查可信 granted_level 与本地声明所需等级；不足直接返回权限错误。
-3. 检查 exec 命令策略及相应 fs/net/ssh 范围。
-4. 原生进程根据当次本地策略生成 OS 沙箱；虚拟指令在实际 IO 处检查。
+授权单位是完整脚本及执行选项，审批文案须明确整单通过后允许本次脚本中的 grant 和请求显式指定的 nosandbox。改变目标、脚本、cwd 或选项需重新确认；不引入逐操作审批状态或票据。未指定 nosandbox 时，审批通过也仍使用沙箱。
 
-任何本地权限失败都返回 rejected/error 给 AI，host 不返回 waiting 或提权请求。即使 provider 返回 waiting，host 响应出口也转换为拒绝。云端请求中的 granted_level=9 只表示审批完成，不能更改本地 allow/deny。
+核对旧实现时应注意：libs/host/execution.go 的 required 提升与 libs/host/engine_vsh.go 的预检依赖 Analyze，libs/vsh/cmds.go 的 grant 修改分支没有等价的上下文检查；不能把旧 granted_level 描述为已完整挡住动态 grant。
 
-## grant 与生命周期
+## 3. rules 与 grant
 
-```text
-grant fs /work/extra --temp
-grant exec python3 --temp
-grant net example.com:443 --permanent
-grant ssh dev.example:22 --temp
-```
+沿用现有 exec/fs/net/ssh 配置及匹配器，不为协议切换改名或重排规则。具体配置键以 cfg 的现有 Auth 定义为准；本设计不再复制过期的“所有 deny 永远优先”或“只允许已注册二进制”模型。
 
-grant 自身 required=4，先经正常云端审批再修改 host 的对应 allow。省略范围时默认为本 Session 临时授权，永久授权写入本地配置。deny 内目标不能申请；exec grant 必须指定本机已注册命令。commands/grant 默认可用于发现和申请，明确 exec_deny 仍可关闭它们。
+当前 FS 快照采用 first-match：会话 grant → 设备配置/永久规则 → 内建 deny → 便利根 → 默认值，设备配置组按其既有逻辑反转一次。显式 grant 因此可以改变此前 deny 的结果；普通请求的审批本身不改变任何规则。net/ssh 和 exec 继续按各自现有规则求值，不强行套用 FS 的行序。
 
-临时授权按 Session 隔离，保存在设备进程内存，随进程退出或重启清空；Session clear/delete 不影响临时授权（2026-09-21 定）。永久授权写入设备本地配置，不受 Session 清理影响。运行中的进程继续使用启动时快照；新启动重新读取策略。
-
-浏览器扩展 host 使用相同的 fs/exec 字符串规则，OPFS 根与命令默认全开；支持 fs/exec 临时 grant、通过扩展本地 settings 保存永久 grant。SDK 宿主没有配置保存入口时，永久 grant 报错而不假称成功。扩展没有原生 net/ssh 沙箱能力。
-
-## OS 沙箱
-
-- macOS Seatbelt：默认放行（读开放）；写方向先整体关闭再按写白名单放行范围；随后按 fs 规则表序逐行输出（M3 行序映射，2026-09-23）——deny 行转 file-read*/file-write* 双拒 + unix socket 出站拒绝，后置 ro/rw 行转 allow（读 + unix socket 连通，写放行受等级门控；SBPL 后规则胜），cfg / permanent grant 的覆盖在内核真实生效。网络规则仅对 loopback 可以精确执行；不能表达的域名/IP 条目在启动前拒绝。
-- Linux bubblewrap：整机只读绑定为读视图（fs_policy=open 且写级时改整机读写绑定），写白名单逐个可写绑定；deny 以覆盖挂载落地（目录 tmpfs 黑洞，文件/socket 以 /dev/null 覆盖；后挂载优先），形态不可实例化的 deny 模式（递归超预算、无字面前缀的全 glob）与无法实例化的可写 glob 在启动前拒绝执行。
-- Windows：受限令牌 + ACL 写授权（工作区/缓存/追加根 standing ACE，私有临时目录 per-call）+ 持久 deny ACE（稳定 SID 加入 restricting list，对 deny 目标 ensure 完全拒绝 ACE 并继承到子对象；ACE 不随进程撤销，到期由状态文件 `deny_acl_state.json` 对账：新目标补打/旧目标撤销/重算时校验——codex windows-sandbox-rs 同模型）；对受限令牌本就不可达的对象跳过（语义等价），可达对象加不上 ACE 则拒绝执行。fs_policy=open 写级与网络规则无法用令牌模型表达，携带时在启动前拒绝。
-
-Windows 文件服务单独由 hostfs 实现，与上述原生进程沙箱限制无关：支持文件读写、编辑、搜索、复制、移动和 curl 输出文件，遵守统一 fs 授权。读取拒绝 reparse point，提交和移动以固定父目录句柄执行，保留版本条件与原子禁止覆盖。
-
-nosandbox 免沙箱执行不再叠加本地 fs/net 策略条件：请求级 nosandbox 经 dispatch 强制 Critical(4) 人工审批（granted 9 随签名下发）后直接执行；ssh/scp 内部管控调用与全局 no_sandbox 配置同属免沙箱来源。无法建立沙箱时仍拒绝运行（沙箱路径 fail-closed），不提供静默裸跑兜底。
-
-资源限额、进程组终止、后台任务与输出处理保持原有实现。Windows 盘符虚拟根仍通过统一路径模块解析。
-
-## 验证
+fs 未命中规则时读默认开放，写按 fs_policy；deny/ro/rw、符号链接、rename/unlink 与条件写入由现有匹配器和文件服务处理。workdir 只决定路径解析，不授予访问权。云端用户根等领域硬边界不能通过 grant 绕过。
 
 ```sh
-GOCACHE=/tmp/aic-permission-go-cache go test ./... -skip '^TestCuaLive'
-# host 包在平台自身沙箱内跑时有系统调用受限的环境性失败（EPERM），以 nosandbox 复核：
-#   go test ./libs/host（nosandbox）
-AIC_SANDBOX_PROBE=1 GOCACHE=/tmp/aic-permission-go-cache go test ./libs/exec_procs -run '^TestHostPolicy' -count=1 -v   # 需 nosandbox（嵌套 sandbox-exec 在沙箱内被拒）
-go test ./protocol/ui ./libs/hostfs
-node --test ui（aic 仓库，前端）
+grant status
+grant fs /work/extra
+grant cmd git
+grant net example.com:443 --permanent
+grant ssh dev.example:22
 ```
 
-macOS 本轮真实探测覆盖：白名单外路径可读（读开放）、白名单内可写、白名单外写被拒、deny 读写双拒与字面拼写（/tmp/$TMPDIR）、Xcode shim 工具链可用。Linux/Windows 完成交叉编译（windows 另跑 vet），没有真机执行验证。
+grant 默认修改当前会话规则，--permanent 经校验、原子保存后才生效。grant cmd 只修改命令规则，不注册原生二进制。保留现有会话授权清理及永久配置生命周期，不在本轮另造存储层。
+
+无效权限配置拒绝受影响的执行，不回退为 open，不靠 grant_approved 绕过配置错误。本机设置仍可修复配置。
+
+## 4. 原生沙箱
+
+原生程序默认按本次 rules 派生沙箱，不再用 granted_level 选择只读/可写 profile。进程内 FS/网络适配与原生沙箱应表达相同资源约束；平台无法落实必要隔离时必须拒绝，不能静默裸跑或忽略不支持的网络规则。
+
+- macOS 继续使用 Seatbelt 后端，将有序资源约束转换成系统沙箱规则。
+- Linux 继续使用 bubblewrap 后端，处理只读/可写挂载、拒绝范围及网络隔离。
+- Windows 继续使用受限令牌和 ACL 后端；无法表达的文件或网络约束明确失败。
+
+此处描述目标保证，不表示三个平台已经通过新规则的实测。Windows 文件服务自身的句柄检查、版本条件和原子提交继续由 hostfs 负责，不用原生进程沙箱替代。
+
+nosandbox 是请求级显式选项，由发送端批准后进入可信执行上下文；只有物理 host 支持。它使本次原生进程脱离进程级隔离，不承诺该进程继续服从 fs/net 拒绝表；进程内服务和身份检查仍有效。Browser/CUA 的固定驱动调用不是脚本可伪造的免沙箱标记。
+
+原生进程使用启动时快照，新授权供后续启动读取；不宣称规则变化能够实时修改已有进程的 OS 沙箱。配置、资源限制与进程组取消继续由既有实现承担，改变撤销语义需单独明示。
+
+## 5. 生命周期与日志
+
+普通 exec 不建 bg 任务，前台等待结束仍在运行时才登记原执行。bg 只负责 list/wait/kill；管理命令仍是可组合的普通脚本指令。任务和日志按 user_id + session_id 隔离，同会话 NATS/RTC 不另分权限域。
+
+exec 外层将 stdout/stderr 分别写文件，始终返回已创建文件的路径，只截断响应预览。cancel 与 bg kill 取消实际脚本及受管进程；等待结束、网络断线不等于取消。具体预算、bg wait 和输出契约以主设计第 2 节为准。
+
+## 6. 实施验收
+
+- 无 grant_approved 的动态 grant 返回权限错误且不写规则；grant/nosandbox 同时出现只审批一次，由任一触发的整单批准都设置 grant_approved，未指定 nosandbox 则仍使用沙箱。
+- 模型参数和脚本环境不能伪造授权；修改签名信封的标记导致验签失败；新 exec 不继承旧标记。
+- 相同资源在 vsh、FS RPC 和原生进程中符合相同可实现规则，fallback 不绕过拒绝。
+- stdout JSON 与 stderr 诊断分离，截断不丢日志；取消、超时转后台和文件关闭不存在重复执行或句柄丢失。
+- macOS/Linux/Windows 分别在真实目标平台验证沙箱；仅编译通过不代表隔离成立。
+
+以上为待实施的验收项，本轮没有运行沙箱或权限变更实验。

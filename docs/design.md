@@ -1,264 +1,80 @@
 # AIC Pod 设计文档
 
-设备能力以 [三协议实现说明](hosts-tools.md) 和 [统一结构图](hosts-protocols-proposal.md) 为准。下文其他模块说明保留；旧设备传输入口已移除。
+状态：2026-09-28 目标架构，评审修订中、尚未实施。详细契约以 [vsh、权限与宿主协议设计](hosts-vsh-redesign.md) 为准；[hosts-tools.md](hosts-tools.md) 描述旧实现，不能据此继续添加等级、方法表或 argv 调用接口。
 
 ## 概述
 
-AIC Pod 是 AIC 平台客户端程序仓库。客户端以独立进程形式运行在各类终端设备上，通过 NATS over WebSocket 连入 AIC 服务端，将设备上的执行能力（命令执行、文件操作、浏览器控制、原生 GUI 自动化、ssh/scp 转发等）注册为 LLM 可调用的工具。本机能力受三域授权（fs/net/ssh）与进程沙箱两道闸控制（详见 [host_sandbox.md](host_sandbox.md)）。
+AIC Pod 是运行在用户设备上的能力代理。CLI 和 Desktop 共用 Go 后端，通过 NATS 接收服务端已获准发送的请求；已认证用户也可通过 RTC 直接操作。pod 验证身份、执行请求并检查本地资源规则，不运行人工审批流程。
 
-每个客户端是**能力代理**——它不决策做什么，只忠实地在本地执行服务端发来的指令并返回结果，同时通过验签确保指令来源可信。
+命令执行只有完整脚本这一种输入。vsh 是面向 Agent 的 shell，bg、grant、browser、cua 和其他指令一样参与管道、重定向与控制流。FS 保持结构化数据接口，实时帧与输入留在 RTC 私有流端点。
 
-## 目录结构
+## 模块职责
 
-```
-aic-pod/
-├── go.mod                # module github.com/veypi/aic-pod
-├── Makefile              # 构建/发版（build/cli-all/desktop-all/docker-build/release）
-├── Dockerfile            # 容器镜像（ENTRYPOINT ["aic","run"]）
-│
-├── init.go               # 根包 pod：host 会话装配（Start/Stop），本地不监听任何端口
-├── cfg/                  # 配置中心：Options + Global（含 Version/DeviceType）、config.yaml 0600 原子写
-├── settings/             # 本机设置面：View/Update/Apply（`aic config get|set` 的读/写模型）
-├── libs/                 # 客户端核心：协议 + host 运行时 + 指令引擎 + 子进程托管
-│   ├── proto/            # 协议层：subject 拓扑、请求/响应信封、HMAC 签名（HKDF 三密钥派生）、
-│   │                     #   caps v2、客户端版本门禁、nonce 防重放（固定向量测试锁定）
-│   ├── host/             # host agent 运行时：NATS 连接/重连/认证失败处理、caps 发布、心跳、
-│   │                     #   请求分发（验签→deadline→防重放→纵深检查）、统一命令声明表、
-│   │                     #   fs/exec/bg_* 路由、壳 provider 注册、cua 桥接（cua.go/cua_run.go）、
-│   │                     #   配置模型（cli/desktop 共享 config.yaml）、Runner（会话生命周期）
-│   ├── vcore/            # 虚拟指令引擎：命令声明表与分级表（meta/levels 同包维护）、
-│   │                     #   curl/json/bg_*/commands + git/browser/cua/ssh/scp 元数据与分级、
-│   │                     #   fs 8 action 实现、OS VFS 适配、argv 双层解析
-│   ├── fsauth/           # 文件授权：fs 域判定（policy/deny/allow、内置根、会话临时 grant、env 清洗）
-│   ├── netauth/          # 网络授权：net 域出站闸（deny/allow、localhost 内建、沙箱网络规则）
-│   ├── rtc/              # WebRTC 直连应答（2026-09-10）：单 UDP mux + mDNS 解析 + DataChannel
-│   │                     #   鉴权帧 + fs 帧协议 + readbin/writebin 二进制字节出入口（预览/下载/二进制写入，见 design.md「协议」节）
-│   └── exec_procs/       # 子进程统一托管：沙箱包装（seatbelt/bwrap/受限令牌）+ 日志落盘 +
-│                         #   请求超时自动后台化 + bg_list/bg_wait/bg_kill + 进程组终止
-│
-├── cli/                  # 命令行入口：aic（vigo/flags 解析；子命令 config/bind/unbind/wake）
-├── desktop/              # Electron 壳（纯远程）：窗口直接加载平台页 + session.setPreloads 注入
-│                         #   remote-preload（host 白名单 → window.aicDesktop：本地设置 IPC/窗口控制）
-│                         #   + settings-preload（设置窗自身）+ spawn `aic config/bind` 子命令读写 config.yaml
-│                         #   browser-path.cjs 仅注入 Chrome 默认路径；Go libs/browser 独立执行
-│                         #   内置 cua-driver 发行物（cua.json + scripts/sync-cua.mjs → resources/cua）
-├── protocol/ui/          # ui/1 命令 schema、Go 解析/结果、跨语言验收向量
-├── docs/                 # design.md（本文）、host_sandbox.md（沙箱与三域授权）、ui-protocol.md
-└── dist/                 # 构建产出（make 生成）
-```
+| 模块 | 职责 |
+|---|---|
+| cli / desktop | 客户端入口；Desktop 提供 Electron 窗口、本地设置和 Go 后端生命周期 |
+| cfg / settings | 配置解析、校验、原子保存和设备绑定；不参与脚本审批判断 |
+| libs/proto、libs/hostauth | 连接身份、签名、有效期、请求关联及可信执行上下文 |
+| protocol/hosts_tools | 脚本、FS、取消请求及响应的数据结构，不注册业务指令 |
+| protocol/hosts_nats、protocol/hosts_rtc | NATS 签名信封与 RTC 认证连接；共用脚本分发 |
+| libs/host | 宿主装配、请求路由；exec 外层统一前台等待、后台登记和分流日志 |
+| libs/vsh | vsh 集成，注册平台指令；保留虚拟指令优先与宿主 PATH fallback |
+| libs/exec_procs | 原生子进程、OS 沙箱及进程组取消，不自建第二套输出契约 |
+| libs/fsauth、libs/netauth 等 | 现有资源规则、会话 grant 和沙箱约束派生 |
+| libs/hostfs | 文件、版本、字节源、上传与条件提交 |
+| libs/browser、libs/cua | 页面与桌面领域状态；作为普通 vsh 指令调用这些服务 |
+| libs/rtc、protocol/ui | RTC 连接与 UI 领域数据，不承担命令审批分级 |
 
-### 设计原则
+继续使用现有包，不为这次改造增加权限服务、任务服务或第二个 Registry。旧 hosts_tool 声明体系在迁移时删除，不再维护 Method/Translate/AccessRules/RequiredLevel 或 DeviceCommand 投影。
 
-- **一个子目录一种客户端**：目录名即客户端身份，不做交叉依赖
-- **交互协议同源**：Go 和 JS 读取 `protocol/ui/schema.json`；desktop/browser 直接驱动 CDP，原生 cua 由 Go 适配 cua-driver
-- **入口最小化**：客户端目录仅包含入口代码（main.go 等），核心逻辑全部在 libs/api
-- **外部可扩展**：任何人引用 Go libs 即可编写自定义客户端，无需修改本仓库
+## 客户端与配置
 
-## 客户端类型
+- CLI 面向 Windows、macOS、Linux，可用于个人设备、服务器和容器。
+- Desktop 使用 Electron 远程页面与同一 Go 后端；本地设置通过受控 IPC 调用配置命令，不另建本地工具 HTTP 服务。Browser 由 Go 服务管理专用浏览器，CUA 由 Go 服务适配本机驱动。
+- embedded/mobile 仍属未来适配，本提案不宣称已经实现。
 
-### cli — 命令行 host agent
+CLI 与 Desktop 沿用当前配置文件及解析链：显式 flag → 环境变量 → 配置文件 → 默认值。保留 host/key/work_dir/exec_timeout/rtc 等现有配置，不为新协议重写配置系统。无效权限配置拒绝执行，不静默改成开放；持久修改经校验和原子写入。
 
-| 维度 | 说明 |
-|------|------|
-| **语言** | Go |
-| **目标平台** | Windows / macOS / Linux |
-| **权限模型** | 高（沙箱 + 三域授权门控；shell 为 level 3 逃生舱） |
-| **能力** | exec（统一命令声明表：核心虚拟指令 + 启动探测的 shell/git/ssh/scp）、fs（8 action）、ssh/scp |
-| **典型场景** | 开发服务器、个人 PC、CI Runner、Docker 容器 |
-| **体积** | ~10 MB 单二进制 |
-| **参数** | `-host`（平台地址，NATS 端点由此推断）+ `-key`；配置链 flag > env（HOST/KEY/WORK_DIR/EXEC_TIMEOUT）> config.yaml > 默认 |
+执行身份和审批事实不能从脚本环境变量读取。配置层环境变量与 vsh 脚本 Env 是不同边界，不能混为一谈。
 
-### desktop — Electron 纯远程壳 + Go 后端子进程
+## 命令与发现
 
-| 维度 | 说明 |
-|------|------|
-| **语言** | Node（主进程）+ Go（后端二进制） |
-| **目标平台** | Windows / macOS / Linux |
-| **形态** | 启动：loading → spawn 后端 → 探测 {host}/root.html → 主窗口加载平台页（Chromium）；session.setPreloads 注入 remote-preload（白名单 = 配置 host + 默认域名与旧域名 ivec.ai），平台页经 window.aicDesktop 调本地设置（主进程 spawn `aic config|bind` 子命令，无端口/无 code，IPC handler 校验 senderFrame host） |
-| **能力** | 与 cli 相同（exec/fs/ssh/scp，沙箱 + 三域授权）；另有 `hosts_tools/1` 的 `browser`（独立 Chrome）与 `cua`（cua-driver MCP 桥接，原生 GUI 自动化，内置发行物随包分发） |
-| **本地页面** | 仅 /settings 配置页（独立系统边框配置窗口：托盘「本地配置」直开，平台不可达首配时自动打开）；设置保存后探测并跳 {host}/hosts |
-| **桌宠** | 透明小窗加载 {host}/pet（平台页，双击恢复 + IPC 拖动） |
-| **典型场景** | 个人 PC 桌面端，页面直连平台、本机能力经 host 注册 |
+虚拟指令直接注册到 vsh；未命中时交宿主适配器按 PATH 查找原生程序，不逐个注册机器上的二进制。命令规则拒绝后不得继续 fallback。page 没有原生执行能力。
 
-### embedded / mobile — 未来规划（未实现）
+host/cloud 的 commands 只展示核心自定义能力；page 展示全部已注册指令。未出现在发现结果中不等于不可执行。用脚本执行 commands 和 `<command> --help` 获取帮助，不设独立 catalog 或单指令调用协议。
 
-| 形态 | 说明 |
-|------|------|
-| **embedded** | Go（可能 tinygo）：受限白名单命令 + 限定目录，目标树莓派/IoT/边缘节点（< 5MB） |
-| **mobile** | Dart/Flutter：iOS/Android，系统沙箱 + 用户授权（拍照/定位/通知/传感器） |
+扩展业务只需实现普通 vsh 指令与服务，不再添加宿主方法表、等级表或 argv 翻译规则。viewer 所需的 --json 输出由命令自身维护稳定 schema 和契约测试，仍是 stdout 文本。
 
-## 安全模型
+## 权限与审批
 
-两道闸（判定唯一权威见 [host_sandbox.md](host_sandbox.md)，实现见 `libs/fsauth`、`libs/netauth`、`libs/exec_procs`）：
+工具 enabled 和目标准入在 aic；exec/fs/net/ssh 的实际访问由执行端 rules 判断。普通请求获准发送不会改写 rules，也不会自动关闭沙箱。
 
-- **三域授权**（fs / net / ssh × policy / deny / allow），统一判定式：
-  `deny 读写双拒且恒优先（不可被 allow/grant/审批绕过）；
-  policy=open → 未命中 deny 一律放；policy=deny → 写仅 allow 放行`。
-  fs 域读默认开（除 deny），写受 fs_policy + 内置可写根 + `fs_allow` + 临时 grant 控制；已废除 `ro:` 只读授权（读本就开放）；
-  net 域管沙箱内子进程出站（内建 localhost:*）；ssh 域是 ssh/scp 一级工具的目标闸。
-  `set_config` 与 `grant <域> <目标> [--permanent]` 动态生效（已启动进程不回溯）。
-- **进程沙箱**：exec 调用默认进沙箱（darwin seatbelt / linux bubblewrap / windows
-  受限令牌 + ACL + 持久 deny ACE），按授予等级选 profile（1=read-only，2/3/4/9=workspace-write），
-  叠加 env 敏感变量清洗、资源限制与网络闸；后端无法表达的策略在启动前拒绝，无可用后端 **fail-closed**。
-  免沙箱唯一通道 = 请求级 `nosandbox` + 单独人工审批（Critical(4)）——审批通过（9）
-  本身不豁免沙箱。
+只有 grant 授权修改和显式 nosandbox 触发审批，Browser/CUA 包括前台接管都不需要。一个 Tool.Message 沿用一个状态机，只做一次整单审批，通过即覆盖本次脚本的 grant 和请求显式指定的 nosandbox，不分项审批。发送端据整单批准结果在可信上下文置 grant_approved；现有签名覆盖该标记和完整请求。grant 的所有修改分支在实际写规则前检查它，缺失返回权限错误，不补审批。
 
-cua / browser / ssh / scp 属宿主体外或独立通道能力，不进 exec 沙箱，各自受目标闸与等级表控制。
+grant_approved 不是等级、独立审批状态、审批票据或会话开关。无论审批由 grant 还是 nosandbox 触发，整单通过都设置它；它只属于被批准的完整脚本执行，随同一次运行的后台转换保留，不传给下一次 exec。批准不直接修改 rules，也不隐式打开未指定的 nosandbox。
 
-## 指令模型（指令集 v2.6）
+资源判定和原生沙箱详见 [host_sandbox.md](host_sandbox.md)。删除旧的 granted_level 纵深比较并不意味着删除真实执行点的授权检查。
 
-协议与指令语义以 aic 仓库 `docs/instruction_sets_v2.md` 为权威，本仓库实现并维护同源表（meta/levels）。
+## 执行、后台与日志
 
-### 参数风格
+普通 exec 直接运行，不先创建 bg 记录。前台等待到期仍未结束时，才将原执行登记到 bg 表、返回 ID；不重启脚本，不重置运行期限。bg 只有 list/wait/kill，不再有 run/output。
 
-所有工具统一采用 **Linux 命令风格**：`action + argv`。
+bg wait 共用当前 exec 剩余前台预算，提前返回目标状态，不独立创建等待任务。任务归属为 user_id + session_id；同一会话的 AI/NATS 与用户/RTC 互见互管，跨会话隔离。RTC 会话由认证票据绑定。
 
-```json
-{ "action": "read", "argv": ["/etc/hosts", "--offset", "10", "--limit", "50"] }
-```
+每次 exec 由外层分别保存完整 stdout、stderr；attrs.output 和 attrs.error_output 指向两个文件。content 和 attrs.stderr 分别返回有限预览；截断由 exec 外层处理，不改变日志或管道数据。转后台继续使用原文件，读历史输出使用普通 FS。
 
-**argv 解析规则：**
+传输超时至少比前台等待多 5 秒；丢失回复不自动重跑。cancel 按 request_id、bg kill 按任务 ID 取消同一个实际执行及其受管子进程。断线或等待结束不等于取消，取消不回滚副作用。
 
-- 非 `--` 开头的为位置参数
-- `--key value` 为键值对（下一个非 `--` 开头的为 value）
-- `--key` 单独出现为 bool 标记
-- 顺序自由，`--flags` 可出现在位置参数前后
-- 未声明 flag 一律拒绝（受限反馈），单横线 flag 支持组合展开（-la）
+## 协议与前端
 
-### 统一命令声明表（§5.1）
+保留 hosts_tools / hosts_nats / hosts_rtc 分工，升主版本整体切换，不设兼容层。NATS 信封继续校验身份、目标、scope、签名、nonce 和有效期；新增的 grant_approved 由既有签名保护，不增加第二次握手。
 
-所有 exec 命令统一声明 `{name, desc, help, level}`，未声明命令一律拒绝（不存在「未知命令透传」）：
+FS 仍使用领域 method/args；RTC 的 page.frames/page.input 是私有流，不进入 vsh 或 caps。移出目录不代表免除身份、页面归属和资源检查。
 
-- **恒声明**：核心虚拟指令（`curl`/`json` + `commands`/`bg_list`/`bg_wait`/`bg_kill`，vcore 元数据同源）
-- **fs 指令集**（独立工具，8 action）：`read`/`write`/`edit`/`ls`/`rg`/`cp`/`mv`/`rm`
-- **启动探测**（exec.LookPath）：shell（bash/zsh/sh/fish/powershell/pwsh/cmd）→ level 3 逃生舱；git → level 1（本地凭证天然可用）；ssh/scp → 独立目标闸（ssh 域 Policy）；cua（cua-driver 二进制）→ 本机 GUI 自动化（§5.10）
-- **工具注册**：browser/cua 经 hosts_tool 一次声明，由 hosts_rtc/1 与 hosts_nats/1 调用，详见 [当前实现](hosts-tools.md)
-- 分级与动态提升（git push/checkout/reset、browser 子命令、cua `--delivery foreground`/`activate`、rm -r 非空目录 → Danger）见 `libs/vcore/levels.go`
+前端只提交普通脚本。动态值统一经共享 shellQuote 处理；viewer 使用稳定 --json 输出，等待整段脚本成功后仅解析 stdout，截断时读取 stdout 文件，不从混合文本中过滤诊断。
 
-### fs — 文件操作
+## 迁移与状态
 
-| 字段 | 值 |
-|------|-----|
-| `name` | `fs` |
-| `required_level` | read=1 (Read)，write/edit=2 (Write) |
+详细顺序与验收见 [重设计文档第 5 节](hosts-vsh-redesign.md#5-只做必要改动)。实施必须同步修改 aic 工具描述、Agent 指令说明和前端帮助，不能在运行功能未切换时提前宣称 bg run/output 或旧等级已经删除。
 
-| action | argv | 说明 |
-|--------|------|------|
-| `read` | `<path> [--offset N] [--limit N]` | 读取文件（host 端可返回 image_data，§2.2 图片投递收敛） |
-| `write` | `<path> --content <string>` | 写入文件（覆盖） |
-| `edit` | `<path> --old <string> --new <string> [--replace-all]` | 替换内容 |
-| `ls` | `<path> [--depth N]` | 列目录（递归树） |
-| `rg` | `<pattern> <path> [--glob G] [--context N] [--limit N]` | 内容搜索 |
-| `cp` / `mv` | `<src> <dst>` | 复制 / 移动（目录递归） |
-| `rm` | `<path> [--recursive]` | 删除（删非空目录提级 Danger(3)） |
-
-物理 host 的路径为本地绝对路径；cloud/page 走 UFS/PageFS（见 instruction_sets_v2.md §2.1.1）。
-
-### 自定义命令
-
-自定义命令注册进统一命令声明表，遵循同样的 `action + argv` 风格：
-
-1. **action 命名**：用动词或短名词，一个工具可以有多个 action
-2. **位置参数在前**：核心对象（路径、文件名等）不放 flag 里
-3. **可选参数用 flag**：用 `--key value` 或 `--bool-flag` 风格
-4. **保持正交**：不同 action 的 flag 含义一致。例如 `--offset` / `--limit` 在所有读取型 action 中语义相同
-
-注册声明示例（Go）：
-
-```go
-c.RegisterCommand(proto.CommandDecl{
-    Name: "camera", Desc: "Capture photos and video. Actions: capture, stream, info.",
-    Help: "camera capture [--width 1920]...\n  ...", RequiredLevel: proto.LevelRead,
-})
-```
-
-## SDK 设计
-
-### Go 核心库（`libs/`）与本地 API（`api/`）
-
-| 子包 | 职责 |
-|------|------|
-| `libs/proto` | 协议层唯一权威：subject 构造/解析（连接级）、ToolRequest/ToolResponse 信封、HKDF 三密钥派生、连接 token 与请求签名（canonical 输入 + HMAC-SHA256）、caps v2、版本门禁、nonce 防重放。固定向量测试锁定双端一致。 |
-| `libs/host` | host agent 运行时：NATS 连接（TokenHandler 动态签发连接 token）/重连（republish caps）/认证失败处理、caps v2 发布、20s 心跳、请求分发（验签→deadline→nonce 去重→granted_level 纵深检查）、统一命令声明表构建、fs/exec/browser/bg_* 路由、配置模型（Config/解析链/原子持久化）、Runner（host 会话生命周期，cli/desktop 共用）。 |
-| `libs/vcore` | 虚拟指令引擎：命令声明表与分级表同包维护（meta.go/levels.go）、curl/json 等虚拟指令与 fs 8 action 实现、git/browser/cua/ssh/scp 元数据与动态分级、OS VFS 适配接口（OSVFS/memvfs）、argv 双层解析、图片尺寸/压缩。 |
-| `libs/fsauth` | 文件授权：fs 域判定（policy/deny/allow 匹配、内置根、会话级临时 grant、沙箱 deny 模式展开、env 敏感变量清洗）。 |
-| `libs/rtc` | RTC 直连应答（2026-09-10）：pion/webrtc 集成——单 UDP mux、mDNS QueryOnly、信令处理（offer/answer/trickle）、DataChannel 鉴权帧、fs 帧协议服务（chunk 流式 + backpressure）+ readbin/writebin 二进制字节出入口（vcore.ReadBin/WriteBin，预览/下载与二进制写入用）。 |
-| `libs/netauth` | 网络授权：net 域出站判定（deny 恒优先于 allow、localhost 内建、具体度排序、沙箱网络规则生成）。 |
-| `libs/exec_procs` | 子进程统一托管 + 沙箱：seatbelt/bubblewrap/受限令牌包装（按等级选 profile、env 清洗、资源限制、网络闸，无可用后端 fail-closed）、stdout+stderr 合并落盘、请求 deadline 超时自动后台化（进程继续运行）、输出前 1000 行截断 + truncated + path、bg_list/bg_wait/bg_kill、进程组 SIGTERM→5s SIGKILL。 |
-| `settings` | 本机设置面（2026-09-22 由本地管理 API 改为进程内调用）：View/Update/Apply 读写 config.yaml（`aic config get|set`、`aic bind|unbind` 子命令，JSON/凭证走 stdin/stdout）；host 会话生命周期自持（libs/host Runner，Start 时自动连接已绑定设备）；get_status/get_log 由 desktop 主进程直接读进程状态与日志文件。 |
-| `cfg` | 配置中心：Options 结构体（flag/env/文件/default 四级解析）+ Global 全局有效配置 + Load/LoadFile/Save（config.yaml 0600 原子写）+ LogPath/LogWriter（aic.log console 格式滚动写入，cli console+文件双写、desktop 仅文件）。 |
-
-**客户端只需做的：**
-
-```go
-cfg, _ := host.Load()                       // 配置文件 + env 覆盖
-opts, _ := cfg.Options("cli", "v1.2.3", nil)
-c, _ := host.Connect(opts)                  // 连接并阻塞
-```
-
-### TypeScript SDK / Dart SDK — 未来
-
-desktop 的 UI 自动化位于 `desktop/browser/`；跨语言命令协议位于 `protocol/ui/`。Chrome 扩展已移除，AIC page 的文件能力继续由平台前端独立维护。
-
-## 配置体系
-
-CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yaml`（0600，原子写）。
-
-- 解析由 vigo/flags 承担（`AutoRegister` 自动注册 flag + env，只需配置结构体）：
-  **显式 flag > 环境变量 > 配置文件（LoadConfig 填充默认值）> 结构体默认**
-- flag：`-host` / `-key` / `-work_dir` / `-exec_timeout` / `-home_path`（json tag 即 flag 名）
-- env：`HOST` / `KEY` / `WORK_DIR` / `EXEC_TIMEOUT` / `HOME_PATH`（字段名大写，无前缀）
-- 配置键：`host`（平台地址，默认 https://ivec-ai.com）、`key`（绑定凭证，必填）、`work_dir`（exec 缺省工作区）、`exec_timeout`（后台超时，默认 30m）、`home_path`（desktop 默认打开地址，host 后路径，默认 `/`，必须 `/` 开头；清空恢复 `/`）、`rtc`（RTC 直连应答开关，默认 true；关闭则 caps 不上报 mgmt、不应答 rtc.in 信令）
-- 三域授权键（vigo/flags 自动注册 flag/env，env 名 = json tag 大写）：
-  `fs_policy`/`fs_deny`/`fs_allow`、`net_policy`/`net_deny`/`net_allow`、`ssh_policy`/`ssh_deny`/`ssh_allow`；
-  隐藏项 `no_sandbox`（全局跳过 exec 沙箱，仅配置文件/flag/env 可改，设置面不暴露）
-- 发版版本位：只改 `cfg/config.go` 的 `Version`（带 `v` 前缀）；
-  `desktop/package.json` 由 `make desktop-version` 从 git describe 自动同步
-- NATS 端点完全由 host 推断（ResolveNATSURL）：https→wss / http→ws，路径前缀保留并拼接 /api/nc
-- 本机设置面：不监听任何端口（2026-09-22 去本地管理 API）；设置 = `UserConfigDir/aic/config.yaml`，
-  CLI 用 `aic config get|set` / `aic bind|unbind` 读写，desktop 设置窗经 Electron IPC spawn 同一套子命令；
-  保存后重启后端子进程生效。
-
-## 协议
-
-所有客户端遵循同一套 AIC Env 协议（指令集 v2.6）。协议唯一权威：
-
-- `libs/proto`（subject/信封/签名，含固定向量测试）
-- aic 仓库 `docs/instruction_sets_v2.md` §6（host 协议规范：连接认证、caps v2、工具请求验签/防重放/纵深检查、错误模型）
-
-核心要点：
-
-- NATS over WebSocket（`/api/nc`），连接 token 认证（HMAC-SHA256，K_connect）
-- HKDF 派生 K_connect / K_server / K_tool 三把用途隔离密钥
-- 连接级 subject：`u.{uid}.h.{host_id}.{cred_ver}.caps|presence`（生命周期）、`u.{uid}.h.{host}.{tool}.req.{sid}`（工具请求，§6.1 v4——sid 段定向，信封 SessionID 一致；run_tool 无会话直发用 manual 占位）
-- 即时发布 CAPS → 定时心跳（20s）→ 单订阅 inbox（`u.{uid}.h.host_{host_id}.>`）→ 验签执行 → req-reply 回复
-
-**设备调用**：前端 hosts_rtc/1 与服务器 hosts_nats/1 共用 hosts_tools/1 声明和分发，内建 FS 与 exec.commands 是唯一能力模型。RTC 票据绑定 DTLS，控制使用 hosts-tools，原始 stream 使用 hosts-stream/*。文件代理转换为签名的 fs-only NATS call。业务状态分别由 FS、exec、Browser、CUA 管理。
-
-## 外部扩展
-
-外部成员编写自定义客户端只需：
-
-1. 引入 Go 库（`github.com/veypi/aic-pod/libs/host` + `libs/proto`）
-2. 注册自定义命令（`RegisterCommand`，走统一命令声明表）
-3. 编写客户端入口（连接参数、设备信息）
-
-```go
-// my-cron/main.go
-c := host.New(host.Options{Credential: "..."})
-c.RegisterCommand(proto.CommandDecl{Name: "cron", Desc: "..."})
-c.Connect()
-```
-
-无需 fork 或修改本仓库。
-
-## 路线图
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| **Phase 1** | `libs/` + `api` + `cli`/`desktop` — host agent 运行时、统一命令声明表、配置体系 | 完成 |
-| **Phase 2** | 安全模型 — 三域授权（fs/net/ssh）+ exec 进程沙箱（seatbelt/bwrap/受限令牌） | 完成 |
-| **Phase 3** | `browser` / `cua` — ui/1 统一协议；desktop CDP 与原生窗口适配 | 已切换；扩展退场 |
-| **Phase 4** | `cua` — 本机 GUI 自动化（cua-driver MCP 桥接，内置发行物随包分发） | 完成 |
-| **Phase 5** | `embedded` — 适配 tinygo、命令白名单、限定目录 | 规划（未开始） |
-| **Phase 6** | `mobile` — Dart/Flutter App | 规划（未开始） |
+本轮只修订设计。旧代码中的静态 grant 检测不能替代修改入口检查；真实平台的沙箱覆盖、取消和日志行为仍须在实施后验证。不存在以交叉编译代替安全验收的结论。
