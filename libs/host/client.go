@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +87,16 @@ type Client struct {
 	logf            func(string, ...any)
 }
 
+// defaultWorkDir 缺省工作区 = ~/aic（2026-09-28 拍板；历史缺省为系统临时
+// 目录——临时目录语义随机器清理漂移，不适合作为默认工作区）。UserHomeDir
+// 失败时退系统临时目录。
+func defaultWorkDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, "aic")
+	}
+	return os.TempDir()
+}
+
 // New 创建客户端（不连接）。
 func New(opts Options) *Client {
 	if opts.DeviceType == "" {
@@ -95,7 +106,7 @@ func New(opts Options) *Client {
 		opts.DeviceName, _ = os.Hostname()
 	}
 	if opts.WorkDir == "" {
-		opts.WorkDir = os.TempDir()
+		opts.WorkDir = defaultWorkDir()
 	}
 	// WorkDir 的反斜杠规范形归一由 proto.ResolvePath 在路径运算层统一处理
 	//（Windows 下 os.TempDir() 为反斜杠形，workdir 分支同样归一）。
@@ -297,6 +308,9 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	// 凭证与身份字段保持现有会话不变
 	opts.Key = c.options().Key
 	opts.DeviceName = c.options().DeviceName
+	if opts.WorkDir == "" {
+		opts.WorkDir = defaultWorkDir()
+	}
 	oldURL := ResolveNATSURL(c.options().Host)
 	restartRTC := c.options().WorkDir != opts.WorkDir || c.options().RTC != opts.RTC || c.options().Transfers != opts.Transfers
 	if restartRTC {

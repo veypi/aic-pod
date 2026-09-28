@@ -48,7 +48,7 @@ var DeviceType = "cli"
 type Options struct {
 	Host        string `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
 	Key         string `json:"key" yaml:"key" desc:"binding credential key (from platform device page)"`
-	WorkDir     string `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: system temp dir)"`
+	WorkDir     string `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
 	ExecTimeout string `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
