@@ -102,6 +102,28 @@ func TestCmdGrantFlow(t *testing.T) {
 	}
 }
 
+func TestCmdGrantStatus(t *testing.T) {
+	t.Parallel()
+	reg := commands.NewRegistry()
+	deps := PlatformDeps{
+		Tasks: NewTaskTable(),
+		GrantStatus: func(ctx context.Context, sessionKey string) (string, error) {
+			return "fs_policy: deny\nfs_rules (0):", nil
+		},
+	}
+	_ = RegisterPlatformCommands(reg, deps)
+	out, _, err := runCmd(t, reg, "grant", "status")
+	if err != nil || !strings.Contains(out, "fs_policy") {
+		t.Fatalf("status: %q %v", out, err)
+	}
+	// 未接状态查询的端：可读报错。
+	reg2 := commands.NewRegistry()
+	_ = RegisterPlatformCommands(reg2, PlatformDeps{Tasks: NewTaskTable()})
+	if _, _, err := runCmd(t, reg2, "grant", "status"); err == nil {
+		t.Fatal("status without GrantStatus must fail")
+	}
+}
+
 func TestCmdBGClosedLoop(t *testing.T) {
 	t.Parallel()
 	tasks := NewTaskTable()

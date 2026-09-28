@@ -26,6 +26,9 @@ type PlatformDeps struct {
 	// 拒绝/失败返回 error。审批在工具层完成（脚本含字面 grant → 恒 4 级，
 	// analyze GrantRequests），此处只执行授权动作本身。
 	Grant func(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error)
+	// GrantStatus 返回各域授权姿态与规则表（grant status——只读，不升档
+	// 不审批）。nil = 降级报错。
+	GrantStatus func(ctx context.Context, sessionKey string) (string, error)
 	// ListHosts 返回预格式化的主机表文本（表格形态由平台定——cloud 给
 	// Markdown 表；host 端通常 nil 降级）。sessionKey=调用会话。
 	ListHosts func(ctx context.Context, sessionKey string) (string, error)
@@ -183,6 +186,7 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 }
 
 const grantHelp = `usage:
+  grant status                          查看各域授权姿态与规则表（只读）
   grant fs <路径> [--permanent]        申请文件访问（默认会话级临时授权；--permanent 落盘永久生效）
   grant net <host:port> [--permanent]  申请网络目标访问
   grant ssh <host:port> [--permanent]  申请 SSH 目标访问（host）
@@ -191,6 +195,18 @@ const grantHelp = `usage:
 func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) error {
 	if len(inv.Args) == 0 || helpRequested(inv.Args) {
 		fmt.Fprintln(inv.Stdout, grantHelp)
+		return nil
+	}
+	// status 只读查询（analyze 只收两参字面 grant，本分支不触 4 级预检）。
+	if inv.Args[0] == "status" {
+		if d.GrantStatus == nil {
+			return commands.Exitf(inv, 1, "grant: 此端未接状态查询")
+		}
+		text, err := d.GrantStatus(ctx, inv.Env["AIC_VSH_SESSION"])
+		if err != nil {
+			return commands.Exitf(inv, 1, "grant status: %s", err)
+		}
+		fmt.Fprintln(inv.Stdout, text)
 		return nil
 	}
 	// --permanent 任意位置生效（grant fs /x --permanent / grant --permanent fs /x）。

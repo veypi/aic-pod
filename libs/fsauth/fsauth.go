@@ -374,6 +374,13 @@ func (p *Policy) WritePatternsFor(sid string) []string {
 	return dedupClean(out)
 }
 
+// SessionGrants 返回 sid 的临时授权快照（grant status 回显用）。
+func (p *Policy) SessionGrants(sid string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]string{}, p.grants[sid]...)
+}
+
 func (p *Policy) DropSession(sid string) { p.mu.Lock(); defer p.mu.Unlock(); delete(p.grants, sid) }
 
 // joinPattern 拼接「根 + 子模式」（根为 "/" 时不产生 "//"——matchPattern 按 / 分段，

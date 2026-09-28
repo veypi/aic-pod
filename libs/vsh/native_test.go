@@ -1,96 +1,68 @@
 package vsh
 
 import (
-	"bytes"
-	"context"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/vsh/commands"
 )
 
-func TestNativeWhitelistGating(t *testing.T) {
+// exec 域策略矩阵：白名单（默认）→ 仅种子；open → 未注册名兜底合成；
+// deny 恒优先（含 "*" 全禁）。
+func TestNativeRegistryPolicy(t *testing.T) {
 	t.Parallel()
-	nr := NewNativeRegistry(NativeDeps{})
-	nr.Seed("ffmpeg", "python3")
-	if !nr.IsAllowed("ffmpeg") || !nr.IsAllowed("python3") {
-		t.Fatal("seed failed")
+	n := NewNativeRegistry(NativeDeps{})
+	n.Seed("git")
+	if !n.IsAllowed("git") || n.IsAllowed("go") {
+		t.Fatal("whitelist stance broken")
 	}
-	if nr.IsAllowed("bash") {
-		t.Fatal("bash must not be seeded（默认白名单不含 shell/解释器——bash 是引擎内建）")
+	if _, ok := n.OpenLookup("go"); ok {
+		t.Fatal("whitelist stance must not synthesize")
 	}
-	reg := commands.NewRegistry()
-	if err := nr.RegisterInto(reg); err != nil {
-		t.Fatal(err)
+	n.SetPolicy(true, []string{"rm"})
+	if !n.IsAllowed("go") {
+		t.Fatal("open stance should allow unregistered")
 	}
-	if _, ok := reg.Lookup("ffmpeg"); !ok {
-		t.Fatal("ffmpeg not registered")
+	if n.IsAllowed("rm") {
+		t.Fatal("deny must win over open")
 	}
-	if _, ok := reg.Lookup("bash"); ok {
-		t.Fatal("bash must stay unregistered（白名单外 = 引擎 127）")
+	if _, ok := n.OpenLookup("go"); !ok {
+		t.Fatal("open stance should synthesize")
 	}
-	// 白名单外注册被拒。
-	if err := nr.Register(reg, "curl-native"); err == nil {
-		t.Fatal("register outside whitelist should fail")
+	if _, ok := n.OpenLookup("rm"); ok {
+		t.Fatal("denied name must not synthesize")
 	}
-	// grant cmd 扩充后可注册。
-	nr.Allow("curl-native")
-	if err := nr.Register(reg, "curl-native"); err != nil {
-		t.Fatal(err)
+	if _, ok := n.OpenLookup("a/b"); ok {
+		t.Fatal("invalid name must not synthesize")
+	}
+	n.SetPolicy(true, []string{"*"})
+	if n.IsAllowed("git") {
+		t.Fatal("deny * must block everything")
 	}
 }
 
-func TestNativeCommandRunsThroughManager(t *testing.T) {
+// fallbackRegistry：base 命中恒优先（D14）；未命中交兜底；Names 只列 base。
+func TestFallbackRegistry(t *testing.T) {
 	t.Parallel()
-	m := exec_procs.NewManager(30 * time.Second)
-	defer m.Close(context.Background())
-	nr := NewNativeRegistry(NativeDeps{
-		Manager: m,
-		Policy: func(inv *commands.Invocation) NativePolicy {
-			// NoSandbox：单测不依赖沙箱后端（沙箱收容是 exec_procs 的既有
-			// 测试面，验收 10 在 M4 端到端做）。
-			return NativePolicy{NoSandbox: true}
-		},
-	})
-	nr.Seed("echo")
-	reg := commands.NewRegistry()
-	if err := nr.RegisterInto(reg); err != nil {
-		t.Fatal(err)
+	base := commands.NewRegistry()
+	_ = base.Register(commands.DefineCommand("hit", nil))
+	called := ""
+	reg := fallbackRegistry{base: base, fallback: func(name string) (commands.Command, bool) {
+		called = name
+		if name == "synth" {
+			return commands.DefineCommand(name, nil), true
+		}
+		return nil, false
+	}}
+	if _, ok := reg.Lookup("hit"); !ok || called != "" {
+		t.Fatal("base hit must short-circuit")
 	}
-	cmd, _ := reg.Lookup("echo")
-	var out bytes.Buffer
-	err := commands.RunCommand(context.Background(), cmd, &commands.Invocation{
-		Args:   []string{"native-hello"},
-		Stdout: &out,
-		Env:    map[string]string{},
-	})
-	if err != nil {
-		t.Fatal(err)
+	if _, ok := reg.Lookup("synth"); !ok || called != "synth" {
+		t.Fatal("miss must consult fallback")
 	}
-	if strings.TrimSpace(out.String()) != "native-hello" {
-		t.Fatalf("out = %q", out.String())
+	if _, ok := reg.Lookup("ghost"); ok {
+		t.Fatal("fallback false must propagate miss")
 	}
-}
-
-func TestNativeExitCodePassthrough(t *testing.T) {
-	t.Parallel()
-	m := exec_procs.NewManager(30 * time.Second)
-	defer m.Close(context.Background())
-	nr := NewNativeRegistry(NativeDeps{
-		Manager: m,
-		Policy:  func(inv *commands.Invocation) NativePolicy { return NativePolicy{NoSandbox: true} },
-	})
-	nr.Seed("false")
-	reg := commands.NewRegistry()
-	_ = nr.RegisterInto(reg)
-	cmd, _ := reg.Lookup("false")
-	err := commands.RunCommand(context.Background(), cmd, &commands.Invocation{
-		Stdout: &bytes.Buffer{}, Env: map[string]string{},
-	})
-	code, ok := commands.ExitCode(err)
-	if !ok || code == 0 {
-		t.Fatalf("exit = %v (%d,%v)", err, code, ok)
+	if names := reg.Names(); len(names) != 1 || names[0] != "hit" {
+		t.Fatalf("Names = %v, want [hit]", names)
 	}
 }

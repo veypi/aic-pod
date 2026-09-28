@@ -27,6 +27,7 @@ import (
 	stdfs "io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,8 +99,11 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 		Workdir: func(invCwd string) string { return proto.HostPathToOS(invCwd) },
 	})
 	// 种子白名单 = cfg exec_allow（design §4.2；不含 shell/解释器由配置侧
-	// 约束——todo 3.6.2 核对）。
-	native.Seed(cfg.AuthSnapshot().ExecAllow...)
+	// 约束——todo 3.6.2 核对）。exec_policy/exec_deny 同步进 native 门
+	// （open 姿态的解析兜底经 NativeFallback 进引擎）。
+	auth := cfg.AuthSnapshot()
+	native.Seed(auth.ExecAllow...)
+	native.SetPolicy(auth.ExecPolicy == cfg.PolicyOpen, auth.ExecDeny)
 
 	engine, err := vshglue.NewEngine(vshglue.EngineConfig{
 		NewSessionFS: func(sid string) (gbfs.FileSystem, string, error) {
@@ -119,7 +123,8 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			},
 		}),
 		Platform: vshglue.PlatformDeps{
-			Grant: c.vshGrant,
+			Grant:       c.vshGrant,
+			GrantStatus: c.vshGrantStatus,
 			// ListHosts/SendUser：host 端无主机目录与通知通道（命令存在，
 			// 执行给可读报错——零值降级语义）。
 		},
@@ -133,6 +138,8 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 		// 内置名（echo/bg/help…）重写后的 stub 解析目录 = host stub bin：vsh
 		// 默认 /bin 只适用于有内存层的 cloud；host 无内存层必须显式指向。
 		BuiltinCommandDir: hostCanonical(stubBin),
+		// exec_policy: open 的未注册名兜底（白名单姿态下 OpenLookup 恒 false）。
+		NativeFallback: native.OpenLookup,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -154,6 +161,58 @@ func repairStubExecBits(stubBin string) {
 		}
 		return nil
 	})
+}
+
+// vshGrantStatus 是 grant status 的执行体：四域姿态 + 规则表 + 会话级
+// 临时授权（只读——analyze 只收两参字面 grant，status 不触 4 级预检）。
+func (c *Client) vshGrantStatus(ctx context.Context, sessionKey string) (string, error) {
+	a := cfg.AuthSnapshot()
+	var b strings.Builder
+	// exec 域（policy/deny/allow 三键 + 会话级 cmd 授权）
+	fmt.Fprintf(&b, "exec_policy: %s", a.ExecPolicy)
+	fmt.Fprintf(&b, "\nexec_deny (%d): %s", len(a.ExecDeny), strings.Join(a.ExecDeny, " "))
+	fmt.Fprintf(&b, "\nexec_allow (%d): %s", len(a.ExecAllow), strings.Join(a.ExecAllow, " "))
+	if c.vsh.native != nil {
+		seeded := map[string]bool{}
+		for _, n := range a.ExecAllow {
+			seeded[n] = true
+		}
+		session := []string{}
+		for _, n := range c.vsh.native.Names() {
+			if !seeded[n] {
+				session = append(session, n)
+			}
+		}
+		sort.Strings(session)
+		fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
+	}
+	// fs 域
+	fmt.Fprintf(&b, "\n\nfs_policy: %s", a.FsPolicy)
+	rows := c.policy.Rules()
+	fmt.Fprintf(&b, "\nfs_rules (%d，拼接序 = 匹配序，后命中者胜):", len(rows))
+	for i, r := range rows {
+		fmt.Fprintf(&b, "\n  %d. %s [%s]", i+1, r.Raw, r.Source)
+	}
+	fmt.Fprintf(&b, "\nsession fs grants (%d，表头首命中): %s",
+		len(c.policy.SessionGrants(sessionKey)), strings.Join(c.policy.SessionGrants(sessionKey), " "))
+	// net/ssh 域
+	for _, d := range []struct {
+		name  string
+		pol   string
+		rules []string
+		list  []string
+	}{
+		{"net", a.NetPolicy, a.NetRules, c.netPol.List(sessionKey)},
+		{"ssh", a.SshPolicy, a.SshRules, c.sshPol.List(sessionKey)},
+	} {
+		fmt.Fprintf(&b, "\n\n%s_policy: %s", d.name, d.pol)
+		fmt.Fprintf(&b, "\n%s_rules (%d):", d.name, len(d.rules))
+		for i, r := range d.rules {
+			fmt.Fprintf(&b, "\n  %d. %s", i+1, r)
+		}
+		fmt.Fprintf(&b, "\n%s allow list (%d，含内建与会话): %s", d.name, len(d.list), strings.Join(d.list, " "))
+	}
+	return b.String(), nil
 }
 
 // vshGrant 是引擎内 grant 命令的执行体（审批已在服务端完成——脚本含字面

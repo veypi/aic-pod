@@ -45,12 +45,15 @@ type NativeDeps struct {
 }
 
 // NativeRegistry 是 host 原生命令白名单注册器（design §4.2：种子 =
-// caps/exec_allow 声明，运行时 grant cmd 扩充；默认不含任何 shell/解释器）。
-// 白名单外命令不进 Registry——引擎解析命中不到即 127。
+// caps/exec_allow 声明，运行时 grant cmd 扩充；exec_policy: open 时
+// 未注册名经 OpenLookup 兜底即时合成——原生边界统一收进 exec_procs
+// OS 沙箱）。
 type NativeRegistry struct {
 	deps    NativeDeps
 	mu      sync.RWMutex
 	allowed map[string]string // name → binary 路径（空 = 惰性 LookPath）
+	open    bool              // exec_policy: open——未注册名也放行（deny 优先）
+	deny    map[string]bool   // exec_deny（含 "*" 全禁）
 }
 
 func NewNativeRegistry(deps NativeDeps) *NativeRegistry {
@@ -72,15 +75,51 @@ func (n *NativeRegistry) Seed(names ...string) {
 	}
 }
 
+// SetPolicy 同步 exec 域策略（exec_policy + exec_deny；cfg 加载/Reconcile
+// 调用）。open=true 时未注册名经 OpenLookup 兜底放行——OS 沙箱仍是唯一
+// 执行边界；deny 对全部原生命令（含已注册）执行期即时生效。
+func (n *NativeRegistry) SetPolicy(open bool, deny []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.open = open
+	n.deny = map[string]bool{}
+	for _, d := range deny {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			n.deny[d] = true
+		}
+	}
+}
+
 // Allow 运行时扩充（grant cmd 审批通过后调用）。
 func (n *NativeRegistry) Allow(name string) { n.Seed(name) }
 
-// IsAllowed 报告命令是否在白名单。
+// IsAllowed 报告命令是否放行：deny 优先（"*" 全禁）；open 姿态全放；
+// 否则看白名单。
 func (n *NativeRegistry) IsAllowed(name string) bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
+	if n.deny["*"] || n.deny[name] {
+		return false
+	}
+	if n.open {
+		return true
+	}
 	_, ok := n.allowed[name]
 	return ok
+}
+
+// OpenLookup exec_policy: open 的引擎解析兜底：Registry 未命中且策略放行
+// 时即时合成本地命令（执行体与注册命令同一包装器——exec_procs 沙箱兜底）。
+// 白名单姿态下未注册名返回 false（继续走 PATH/hash 解析，最终 127）。
+func (n *NativeRegistry) OpenLookup(name string) (commands.Command, bool) {
+	if name == "" || strings.ContainsAny(name, "/\\ \t") {
+		return nil, false
+	}
+	if !n.IsAllowed(name) {
+		return nil, false
+	}
+	return n.command(name), true
 }
 
 // Names 返回白名单快照（排序交由调用方）。

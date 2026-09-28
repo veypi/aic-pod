@@ -98,6 +98,10 @@ type EngineConfig struct {
 	// （空 = vsh 默认 /bin，仅内存层文件系统可用）。host 端无内存层，必须
 	// 指向真实 stub 目录（= LayoutEnv PATH 目录）。
 	BuiltinCommandDir string
+	// NativeFallback 命令 Registry 未命中时的兜底（host exec_policy: open
+	// 的原生 fallback——返回 false 继续走 PATH/hash 解析，最终 127）。
+	// nil = 未命中即 127。
+	NativeFallback func(name string) (commands.Command, bool)
 	// Logf 可选日志。
 	Logf func(format string, args ...any)
 }
@@ -188,8 +192,15 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	if layoutEnv == nil {
 		layoutEnv = layoutInitEnv
 	}
+	// exec_policy: open 的解析兜底：Registry 未命中时交 NativeFallback
+	// （host 原生门）；base 命中恒优先（D14 registry 优先不动摇）。
+	var regIf commands.CommandRegistry = reg
+	if cfg.NativeFallback != nil {
+		regIf = fallbackRegistry{base: reg, fallback: cfg.NativeFallback}
+	}
 	opts := []vshcore.Option{
-		vshcore.WithRegistry(reg),
+		vshcore.WithRegistry(regIf),
+		vshcore.WithPolicy(pol),
 		vshcore.WithPolicy(pol),
 		vshcore.WithBaseEnv(layoutEnv),
 		vshcore.WithFileSystem(vshcore.CustomFileSystem(factory, "/")),
@@ -208,6 +219,28 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	e.rt = rt
 	return e, nil
 }
+
+// fallbackRegistry Registry 包装：base 未命中时交兜底（exec_policy: open
+// 的原生命令合成）；Names 只列 base（stub 钉板/命令发现不含动态原生名）。
+type fallbackRegistry struct {
+	base     *commands.Registry
+	fallback func(string) (commands.Command, bool)
+}
+
+func (r fallbackRegistry) Lookup(name string) (commands.Command, bool) {
+	if c, ok := r.base.Lookup(name); ok {
+		return c, true
+	}
+	return r.fallback(name)
+}
+
+func (r fallbackRegistry) Register(cmd commands.Command) error { return r.base.Register(cmd) }
+
+func (r fallbackRegistry) RegisterLazy(name string, loader commands.LazyCommandLoader) error {
+	return r.base.RegisterLazy(name, loader)
+}
+
+func (r fallbackRegistry) Names() []string { return r.base.Names() }
 
 // Registry 暴露组合 Registry（host 端 native 白名单在此追加注册）。
 func (e *Engine) Registry() *commands.Registry { return e.reg }

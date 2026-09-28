@@ -182,6 +182,13 @@ func (c *Client) syncAuth() {
 	c.policy.Reconcile()
 	c.netPol.Reconcile()
 	c.sshPol.Reconcile()
+	// exec 域：引擎已建则同步 native 策略/种子（未建时由 buildVSHEngine 从
+	// 当次 cfg 快照初始化，不抢建）。
+	if c.vsh.native != nil {
+		a := cfg.AuthSnapshot()
+		c.vsh.native.SetPolicy(a.ExecPolicy == cfg.PolicyOpen, a.ExecDeny)
+		c.vsh.native.Seed(a.ExecAllow...)
+	}
 }
 
 // expandHomeDir 展开路径的 ~ 前缀（与 api 包 expandHome 同语义；grant fs
