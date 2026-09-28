@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // ---- 有序规则表（docs/permission_rules.md §1）：行首效果前缀 + 全域模式禁写 ----
@@ -66,7 +68,9 @@ func checkGlobalFS(effect, pattern string) error {
 		return fmt.Errorf("home directory root is not expressible as an allow rule (use fs_policy: open or narrower entries)")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if h := filepath.ToSlash(home); p == h || p == h+"/" || p == h+"/**" {
+		// 双形态归一后比较：win 家根 C:\… / C:/… / /c/… 任一书写都拦截。
+		h := proto.NormalizeHostPath(filepath.ToSlash(home))
+		if pn := proto.NormalizeHostPath(p); pn == h || pn == h+"/" || pn == h+"/**" {
 			return fmt.Errorf("home directory root is not expressible as an allow rule (use fs_policy: open or narrower entries)")
 		}
 	}
@@ -80,13 +84,17 @@ func isLiteralGlobal(p string) bool {
 	return p == "/" || p == "**" || p == "/**"
 }
 
-// driveRootRe 匹配整盘根三形态：C: / C:/ / C:/**（大小写不限；配置跨平台共享，统一禁写）。
-var driveRootRe = regexp.MustCompile(`(?i)^[a-z]:(/\*\*)?/?$`)
+// driveRootRe 匹配整盘根：旧输入形 C: / C:/ / C:/** 与 /c/ 规范形
+// /c / /c/ / /c/**（大小写不限；配置跨平台共享，统一禁写——与 vbox
+// fsrule.go 同源）。
+var driveRootRe = regexp.MustCompile(`(?i)^([a-z]:|/[a-z])(/\*\*)?/?$`)
 
 // ValidateFSGrantTarget 校验 grant fs 目标（具体绝对路径，非模式）——
 // temp/permanent grant 与规则行同护栏（§1）：全域/家根/盘根不可授。
+// 输入任意盘符书写先归一为 /c/ 规范形再判（win 上 C:\… 与 /c/… 同口径）。
 func ValidateFSGrantTarget(abs string) error {
 	p := filepath.ToSlash(strings.TrimSpace(abs))
+	p = proto.NormalizeHostPath(p)
 	if p == "" || strings.ContainsRune(p, 0) {
 		return fmt.Errorf("invalid grant target %q", abs)
 	}
@@ -94,7 +102,7 @@ func ValidateFSGrantTarget(abs string) error {
 		return fmt.Errorf("filesystem root cannot be granted (use fs_policy: open or narrower paths)")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		if p == filepath.ToSlash(home) {
+		if p == proto.NormalizeHostPath(filepath.ToSlash(home)) {
 			return fmt.Errorf("home directory root cannot be granted (use fs_policy: open or narrower paths)")
 		}
 	}

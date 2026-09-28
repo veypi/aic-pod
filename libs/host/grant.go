@@ -28,11 +28,17 @@ import (
 
 // grantFS 处理 fs 域：路径写白名单申请（原 grant_apply 语义）。
 func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolResponse {
-	abs, err := filepath.Abs(expandHomeDir(path))
+	// 路径解析走 proto 可解析层（与规则匹配/执行层同口径：/c/ 规范形、/tmp
+	// 虚拟别名、旧盘符形态容错归一；相对路径按 pod 进程 cwd 展开，同历史
+	// filepath.Abs 行为），出口转原生 OS 路径供护栏校验与授权落盘——win 上
+	// filepath.Abs("/c/…") 会错拼成 <当前盘>:\c\…（2026-09-28 验收报告）。
+	wd, _ := os.Getwd()
+	abs, err := proto.ResolvePath(expandHomeDir(path), wd, nil)
 	if err != nil {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
 			Error: fmt.Sprintf("exec grant fs: invalid path %q: %v", path, err)}
 	}
+	abs = proto.HostPathToOS(abs)
 	if err := policy.ValidateFSGrantTarget(abs); err != nil {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: "exec grant fs: " + err.Error()}
 	}
@@ -133,6 +139,9 @@ func (c *Client) persistGrant(domain, value string) error {
 		}
 		fileCfg.ExecAllow = append(fileCfg.ExecAllow, value)
 	case "fs":
+		// 落盘统一 canonical 形（win = /c/ 规范形；posix = 解析后 posix 形）——
+		// 配置跨平台可读，且与规则表编译产物同形。
+		value = fsauth.Canonical(value)
 		norm := func(s string) string {
 			_, pat, err := policy.ParseFSRule(s)
 			if err != nil {
