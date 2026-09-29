@@ -3,12 +3,16 @@ package vsh
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/netauth"
+	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -116,11 +120,34 @@ func (n *NativeRegistry) IsAllowed(session, name string) bool {
 // OpenLookup 引擎解析兜底：Registry 未命中时合成原生命令——任意良名都合成
 // （规则检查在执行期，IsAllowed 拒绝时返回权限错误而非 127；二进制不存在
 // 才 127）。这不是免检查通道：原生 fallback 受命令规则与进程沙箱约束。
+//
+// 含 "/" 的显式程序路径（引擎二进制分支）同样经此合成：仅当目标文件存在
+// 且可执行时命中（unix 要求执行位；windows 只看存在），执行走同一条规则 +
+// OS 沙箱通道，规则检查用 basename 口径。含空格/制表符或反斜杠的名字仍拒绝
+// （避免绕过 shell 引号语义）。
 func (n *NativeRegistry) OpenLookup(name string) (commands.Command, bool) {
-	if name == "" || strings.ContainsAny(name, "/\\ \t") {
+	if name == "" || strings.ContainsAny(name, "\\ \t") {
 		return nil, false
 	}
+	if strings.Contains(name, "/") {
+		if !explicitPathExecutable(name) {
+			return nil, false
+		}
+		return n.commandPath(name), true
+	}
 	return n.command(name), true
+}
+
+// explicitPathExecutable 报告显式程序路径（引擎规范形）是否可原生执行。
+func explicitPathExecutable(name string) bool {
+	info, err := os.Stat(proto.HostPathToOS(name))
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode()&0o111 != 0
 }
 
 // command 构造单命令包装器：stdio 接引擎管道，子进程由 exec_procs 的 OS
@@ -161,6 +188,54 @@ func (n *NativeRegistry) command(name string) commands.Command {
 		}, inv.Stdin, inv.Stdout, inv.Stderr)
 		if err != nil {
 			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", name, err)
+		}
+		if code != 0 {
+			return &commands.ExitError{Code: code}
+		}
+		return nil
+	})
+}
+
+// commandPath 构造显式程序路径（引擎规范形，含 "/"）的原生命令包装器。
+// 与 command 同一条通道：命令规则（basename 口径）、执行期策略快照、OS
+// 沙箱；bin 直取给定路径（不做 LookPath），文件须存在。
+func (n *NativeRegistry) commandPath(filePath string) commands.Command {
+	return commands.DefineCommand(filePath, func(ctx context.Context, inv *commands.Invocation) error {
+		session := SessionFromContext(ctx)
+		name := path.Base(filePath)
+		if !n.IsAllowed(session, name) {
+			return commands.Exitf(inv, 126, "permission_denied: %s: command denied by exec rules（grant cmd %s 申请）", filePath, name)
+		}
+		if n.deps.Manager == nil {
+			return commands.Exitf(inv, 1, "%s: native process manager unavailable", filePath)
+		}
+		bin := proto.HostPathToOS(filePath)
+		if info, err := os.Stat(bin); err != nil || info.IsDir() {
+			return commands.Exitf(inv, 127, "%s: No such file or directory", filePath)
+		}
+		var pol NativePolicy
+		if n.deps.Policy != nil {
+			pol = n.deps.Policy(ctx, inv.Cwd)
+		}
+		workdir := inv.Cwd
+		if n.deps.Workdir != nil {
+			workdir = n.deps.Workdir(inv.Cwd)
+		}
+		code, err := n.deps.Manager.RunProcess(ctx, exec_procs.StartOptions{
+			Workdir:      workdir,
+			Exec:         append([]string{bin}, inv.Args...),
+			NoSandbox:    pol.NoSandbox,
+			WriteRoots:   pol.WriteRoots,
+			DenyPaths:    pol.DenyPaths,
+			SandboxRules: pol.SandboxRules,
+			WritePaths:   pol.WritePaths,
+			FsOpen:       pol.FsOpen,
+			NetOpen:      pol.NetOpen,
+			NetDeny:      pol.NetDeny,
+			NetAllow:     pol.NetAllow,
+		}, inv.Stdin, inv.Stdout, inv.Stderr)
+		if err != nil {
+			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", filePath, err)
 		}
 		if code != 0 {
 			return &commands.ExitError{Code: code}

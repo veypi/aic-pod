@@ -2,6 +2,10 @@ package vsh
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -38,8 +42,10 @@ func TestNativeRegistryPolicy(t *testing.T) {
 	if _, ok := n.OpenLookup("go"); !ok {
 		t.Fatal("well-formed name should synthesize")
 	}
+	// 显式路径：不存在的文件不合成（存在且可执行才命中，见
+	// TestOpenLookupExplicitPath）
 	if _, ok := n.OpenLookup("a/b"); ok {
-		t.Fatal("invalid name must not synthesize")
+		t.Fatal("missing path must not synthesize")
 	}
 	n.SetPolicy(true, []string{"*"})
 	if n.IsAllowed("", "git") {
@@ -160,4 +166,60 @@ func TestFallbackRegistryCommandGate(t *testing.T) {
 	// 放行名单正常执行
 	cmd2, _ := reg.Lookup("other-ok")
 	_ = cmd2
+}
+
+// 显式程序路径（引擎二进制分支）：存在且可执行的路径合成；不存在/不可执行
+// 不合成；命名合法性规则不变（空白/反斜杠拒绝）；合成后与普通原生命令同
+// 通道真实执行（规则按 basename，策略快照/沙箱由 commandPath 同源应用）。
+func TestOpenLookupExplicitPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix explicit path semantics")
+	}
+	lsPath, err := exec.LookPath("ls")
+	if err != nil || !filepath.IsAbs(lsPath) {
+		t.Skipf("no absolute ls on PATH: %q %v", lsPath, err)
+	}
+	n := NewNativeRegistry(NativeDeps{})
+	if _, ok := n.OpenLookup(lsPath); !ok {
+		t.Fatalf("executable path %q should synthesize", lsPath)
+	}
+	if _, ok := n.OpenLookup("/nonexistent-ivec/nope"); ok {
+		t.Fatal("missing file must not synthesize")
+	}
+	plain := filepath.Join(t.TempDir(), "plain.txt")
+	if err := os.WriteFile(plain, []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := n.OpenLookup(plain); ok {
+		t.Fatalf("non-executable file %q must not synthesize", plain)
+	}
+	for _, bad := range []string{"a b", "a\tb", `a\b`} {
+		if _, ok := n.OpenLookup(bad); ok {
+			t.Fatalf("%q must not synthesize", bad)
+		}
+	}
+
+	// 执行通道：显式路径经 exec_procs 真实运行，参数原样透传
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "marker-ivec"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := exec_procs.NewManager(0)
+	m.SetNoSandbox(true)
+	run := NewNativeRegistry(NativeDeps{Manager: m})
+	run.SetPolicy(true, nil)
+	cmd, ok := run.OpenLookup(lsPath)
+	if !ok {
+		t.Fatalf("synthesize %q failed", lsPath)
+	}
+	var out, errBuf strings.Builder
+	if err := cmd.Run(context.Background(), &commands.Invocation{
+		Args: []string{dir}, Stdout: &out, Stderr: &errBuf,
+	}); err != nil {
+		t.Fatalf("run %s: %v (stderr %q)", lsPath, err, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "marker-ivec") {
+		t.Fatalf("explicit-path run output = %q (stderr %q)", out.String(), errBuf.String())
+	}
 }
