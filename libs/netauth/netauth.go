@@ -102,7 +102,8 @@ func (p *Policy) Grant(sid string, e Entry) {
 }
 
 // resolve 顺序求值规则表：按拼接序逐条匹配（port 取保守交集语义，任一侧为 *
-// 即视为命中），最后命中者胜；未命中 hit=false。
+// 即视为命中），最后命中者胜（legacy 视图；权威执行视图是 SnapshotVbox 的
+// first-wins 快照，经组内反转等价）；未命中 hit=false。
 func (p *Policy) resolve(e Entry) (allow, hit bool) {
 	for _, r := range p.rules {
 		if entryMatch(r.e, e) {

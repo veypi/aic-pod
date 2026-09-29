@@ -32,7 +32,7 @@ func cacheRootDirs() []string {
 
 // CacheRoots（darwin）= cacheRootDirs 存在性过滤版：exec 沙箱 bind 白名单用
 // （bind 源必须存在；每次实时探测，Start 频率低不缓存）。
-// 单一事实源：fsauth 白名单与 exec_procs 沙箱 write bind 读同一份——
-// exec_procs 经 CacheRoots() 引用，禁止另写。Decide 判定侧用 cacheRootDirs
+// 单一事实源：fsauth 白名单与 vbox 沙箱 write bind 读同一份——
+// vbox 经注入的 CacheRootsFn hook 引用，禁止另写。Decide 判定侧用 cacheRootDirs
 // （无过滤，见 fsauth.go rebuildBaseRootsLocked）。
 func CacheRoots() []string { return existingDirs(cacheRootDirs()...) }

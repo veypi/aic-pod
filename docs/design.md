@@ -19,7 +19,7 @@ AIC Pod 是运行在用户设备上的能力代理。CLI 和 Desktop 共用 Go �
 | protocol/hosts_nats、protocol/hosts_rtc | NATS 签名信封与 RTC 认证连接；共用脚本分发 |
 | libs/host | 宿主装配、请求路由；exec 外层统一前台等待、后台登记和分流日志 |
 | libs/vsh | vsh 集成，注册平台指令；保留虚拟指令优先与宿主 PATH fallback |
-| libs/exec_procs | 原生子进程、OS 沙箱及进程组取消，不自建第二套输出契约 |
+| vbox（外部依赖 ivec/vbox） | 原生子进程托管、OS 沙箱及进程组取消，不自建第二套输出契约 |
 | libs/fsauth、libs/netauth 等 | 现有资源规则、会话 grant 和沙箱约束派生 |
 | libs/hostfs | 文件、版本、字节源、上传与条件提交 |
 | libs/browser、libs/cua | 页面与桌面领域状态；作为普通 vsh 指令调用这些服务 |

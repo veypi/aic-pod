@@ -53,7 +53,7 @@ type NativeDeps struct {
 // NativeRegistry 是 host 原生命令的规则门与适配器（hosts-vsh-redesign §2.1：
 // 原生程序不逐个注册——Registry 未命中时由 OpenLookup 兜底合成，执行期按
 // 命令规则检查（deny 优先 → open 姿态 → exec_allow 白名单 → 会话 grant），
-// 实际进程由 exec_procs OS 沙箱约束）。
+// 实际进程由 vbox OS 沙箱约束）。
 type NativeRegistry struct {
 	deps    NativeDeps
 	mu      sync.RWMutex
@@ -149,7 +149,7 @@ func explicitPathExecutable(name string) bool {
 	return info.Mode()&0o111 != 0
 }
 
-// command 构造单命令包装器：stdio 接引擎管道，子进程由 exec_procs 的 OS
+// command 构造单命令包装器：stdio 接引擎管道，子进程由 vbox 的 OS
 // 沙箱兜底（Seatbelt/bwrap/受限令牌，per-call 按当次规则生成，fail-closed）。
 func (n *NativeRegistry) command(name string) commands.Command {
 	return commands.DefineCommand(name, func(ctx context.Context, inv *commands.Invocation) error {
@@ -246,7 +246,7 @@ func (n *NativeRegistry) commandPath(filePath string) commands.Command {
 // exitCodeOr 保持非零退出码，零值回退 fallback。
 
 // toVboxEntries netauth 目标快照转 vbox 形态（同构 {Host, Port}——
-// exec_procs 迁入 vbox 后沙箱输入统一为 vbox.Entry）。
+// 沙箱输入统一为 vbox.Entry）。
 func toVboxEntries(es []netauth.Entry) []vbox.Entry {
 	if len(es) == 0 {
 		return nil

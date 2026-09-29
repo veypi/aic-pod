@@ -100,7 +100,9 @@ func New() *Policy {
 }
 
 // rebuildLocked 全量重算派生状态：有序规则表（builtin deny 出厂初始表 +
-// cfg fs_rules——permanent grant 直接追加在表尾，后命中者胜）+ 根基底预计算。
+// cfg fs_rules——permanent grant 直接追加在表尾，文件序后写者优先；本表是
+// legacy 展示/解释视图，权威执行视图是 Snapshot 的 vbox first-wins 快照，
+// 两者经组内反转语义等价）+ 根基底预计算。
 // New/Reconcile 的统一出口；锁内调用。
 func (p *Policy) rebuildLocked() {
 	a := cfg.AuthSnapshot()
@@ -185,7 +187,8 @@ func (p *Policy) OpenMode() bool {
 	return p.openMode
 }
 
-// resolveLocked 顺序求值规则表：按拼接序逐条匹配，最后命中者胜；未命中返回 effNone。
+// resolveLocked 顺序求值规则表：按拼接序逐条匹配，最后命中者胜（legacy 视图
+// 语义；权威执行走 Snapshot 的 first-wins 快照，经组内反转等价）；未命中返回 effNone。
 func (p *Policy) resolveLocked(cpath string) fsEffect {
 	eff := effNone
 	for _, r := range p.rules {
@@ -271,7 +274,7 @@ func (p *Policy) LastDenyRow(path string) (int, string, bool) {
 }
 
 // WriteRootsFor 返回 sid 的沙箱 write bind 白名单（便利根 + rw 行裸模式根 +
-// 临时 grant，canonical + 去重）——exec_procs workspace-write 的可写根。
+// 临时 grant，canonical + 去重）——vbox 沙箱 write bind 的可写根（经 hooks 注入）。
 func (p *Policy) WriteRootsFor(sid string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -282,7 +285,8 @@ func (p *Policy) WriteRootsFor(sid string) []string {
 // sid 为空 = 无会话上下文（仅基础白名单）。
 func (p *Policy) View(sid string) *View { return &View{p: p, sid: sid} }
 
-// View 实现 vcore.PathPolicy（Decide 不含 sid 参数——sid 在视图绑定时固化）。
+// View 返回绑定 sid 的判定视图（vcore.PathPolicy 时代的遗留形状；当前生产
+// 路径走 Snapshot，View 仅测试使用）。
 type View struct {
 	p   *Policy
 	sid string

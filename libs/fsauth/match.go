@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// MatchPattern 导出 matchPattern（exec_procs 的 bwrap deny 例外覆盖判定用——
+// MatchPattern 导出 matchPattern（vbox 的 bwrap deny 例外覆盖判定用——
 // 例外模式对覆盖挂载目标是否整体覆盖必须与 fs 判定同口径，不得另写一套 glob）。
 func MatchPattern(pattern, cpath string) bool { return matchPattern(pattern, cpath) }
 

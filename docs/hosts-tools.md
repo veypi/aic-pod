@@ -11,7 +11,7 @@ AI 只有内建 `fs` 和 `exec` 两个工具。exec 是唯一执行动作：一�
 - `protocol/hosts_rtc`（hosts_rtc/2）是 owner 前端直连：票据绑定 DTLS 指纹与归属会话，grant_approved 是逐请求的确认元信息。
 - `libs/vsh` 是 vsh 引擎装配层：可信执行上下文（归属/grant_approved/nosandbox 经 context 注入，不从脚本可修改的 argv/env 读取）、统一外层 Execute（前台等待 + 超时登记后台）、平台命令（commands/bg/grant/list_hosts/send_user）。
 - `libs/hostauth` 负责 RTC 票据、DTLS 身份绑定和续期。
-- `libs/exec_procs` 托管原生进程：OS 沙箱 profile 一律由规则表派生（数字等级已删除），免沙箱只来自可信上下文的 nosandbox。
+- `vbox`（外部依赖 ivec/vbox）托管原生进程：OS 沙箱 profile 一律由规则表派生（数字等级已删除），免沙箱只来自可信上下文的 nosandbox。
 - `libs/hostfs` 拥有路径、版本、上传和字节源；AI 文本操作与前端二进制文件操作使用同一 FS 实现。
 - `libs/browser` / `libs/cua` 拥有 Chrome/窗口/快照，经 `VshCommand` 暴露为 vsh 指令；`page.frames`/`page.input` 是 RTC 私有 stream 端点，不注册为指令。
 - `ui/1` 保留为 cua 内部操作与结果词汇（target/snapshot/ref 等），不是独立的协议入口；对外统一经 hosts_tools/2 与 vsh 指令。

@@ -7,7 +7,7 @@ package host
 //   - 进程内（内建命令/重定向/管道）→ fs_host 适配器 + fsauth.Snapshot(sid)
 //     的 vbox 表门（first-wins 行序：temp→cfg→builtin deny→便利根）；
 //   - 原生子进程 → native 兜底合成（OpenLookup）+ 执行期规则检查 →
-//     exec_procs OS 沙箱（per-call 按当次策略生成，fail-closed）；
+//     vbox OS 沙箱（per-call 按当次策略生成，fail-closed）；
 //   - 网络 → NetClient 对接 netauth.SnapshotVbox（按 ctx 会话键取快照；
 //     host 不做私网阻断——LAN 访问是合法场景，AllowPrivate=true）。
 //
@@ -20,8 +20,8 @@ package host
 //     布局初始化（stub 写入、HOME MkdirAll）吃 Runtime 级 BaseEnv（NewSession
 //     时无 sid 上下文），per-sid 目录需 fork 补丁，违背零补丁红线；registry
 //     优先下同名文件无法 shadow 平台命令，安全性等价。
-//  2. exec_procs 的授权复核（revoke 杀运行中任务）不保留——bg 由引擎任务表
-//     统一承接（30min 墙钟到期 124）。
+//  2. 旧 exec_procs 的授权复核（revoke 杀运行中任务）未随 vbox 迁移保留——
+//     bg 由引擎任务表统一承接（30min 墙钟到期 124）。
 
 import (
 	"context"
@@ -204,7 +204,7 @@ func (c *Client) vshGrantStatus(ctx context.Context, sessionKey string) (string,
 	// fs 域
 	fmt.Fprintf(&b, "\n\nfs_policy: %s", a.FsPolicy)
 	rows := c.policy.Rules()
-	fmt.Fprintf(&b, "\nfs_rules (%d，拼接序 = 匹配序，后命中者胜):", len(rows))
+	fmt.Fprintf(&b, "\nfs_rules (%d，文件序，后写者优先):", len(rows))
 	for i, r := range rows {
 		fmt.Fprintf(&b, "\n  %d. %s [%s]", i+1, r.Raw, r.Source)
 	}
