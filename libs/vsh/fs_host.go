@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	stdfs "io/fs"
-	"strings"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/contrib/ufs"
@@ -23,7 +22,8 @@ type HostFSConfig struct {
 }
 
 // NewHostFS host：OS backing + vbox 规则表门，不引内存覆盖层（host 会话目录
-// 本就是 scratch，无 cloud 污染红线；stub 钉会话级真实目录，见 PinStubs）。
+// 本就是 scratch，无 cloud 污染红线；stub 钉进程级 .vsh-host/bin 真实目录，
+// 见 libs/host/engine_vsh.go 文件头偏差 1）。
 func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 	if cfg.Backing == nil {
 		return nil, fmt.Errorf("vsh glue: host backing required")
@@ -59,30 +59,4 @@ func (h hostLayoutFS) Chmod(ctx context.Context, name string, mode stdfs.FileMod
 		return nil
 	}
 	return h.FileSystem.Chmod(ctx, name, mode)
-}
-
-// StubDirFor 返回会话 stub 目录（PATH 钉 {session_root}/{sid}/bin，
-// fsauth 基础白名单内、天然可写，随会话清理）。
-func StubDirFor(sessionRoot, sid string) string {
-	return strings.TrimSuffix(sessionRoot, "/") + "/" + sid + "/bin"
-}
-
-// PinStubs 把 stub 写入会话级真实目录（每次 exec 前调用，幂等覆盖）。
-// stub 虽在写域内可写，D14 registry 优先：同名真实文件无法 shadow 平台命令。
-func PinStubs(backing ufs.FS, stubDir string, stubs map[string][]byte) error {
-	if len(stubs) == 0 {
-		return nil
-	}
-	if err := backing.MkdirAll(stubDir, 0o755); err != nil {
-		return fmt.Errorf("vsh glue: pin stubs mkdir: %w", err)
-	}
-	for name, data := range stubs {
-		if strings.Contains(name, "/") || name == "" || name == "." || name == ".." {
-			return fmt.Errorf("vsh glue: invalid stub name %q", name)
-		}
-		if err := backing.WriteFile(stubDir+"/"+name, data, 0o755); err != nil {
-			return fmt.Errorf("vsh glue: pin stub %s: %w", name, err)
-		}
-	}
-	return nil
 }
