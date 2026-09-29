@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -78,7 +78,7 @@ func TestNativeCommandRuleGate(t *testing.T) {
 // stdout/stderr 分流（诊断不污染 stdout）。
 func TestNativeCommandStdio(t *testing.T) {
 	t.Parallel()
-	m := exec_procs.NewManager(0)
+	m := vbox.NewManager(0)
 	m.SetNoSandbox(true) // 与沙箱无关：隔离环境差异
 	n := NewNativeRegistry(NativeDeps{Manager: m})
 	n.SetPolicy(true, nil)
@@ -200,12 +200,12 @@ func TestOpenLookupExplicitPath(t *testing.T) {
 		}
 	}
 
-	// 执行通道：显式路径经 exec_procs 真实运行，参数原样透传
+	// 执行通道：显式路径经 vbox 真实运行，参数原样透传
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "marker-ivec"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := exec_procs.NewManager(0)
+	m := vbox.NewManager(0)
 	m.SetNoSandbox(true)
 	run := NewNativeRegistry(NativeDeps{Manager: m})
 	run.SetPolicy(true, nil)

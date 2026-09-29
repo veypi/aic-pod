@@ -5,6 +5,13 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布（v0.9.0 候选）
+
+- **hosts-vsh-redesign 落地（阶段 1-7，破坏性）**：exec 只接收完整 vsh 脚本；browser/cua/bg/grant 为 vsh 指令；协议升 hosts_tools/2 + hosts_nats/2 + hosts_rtc/2（无旧协议兼容入口）；审批事实收敛为布尔 grant_approved（数字等级删除）；规则表三域有序表 + vbox first-wins matcher；execwait 统一外层（前台等待/超时转后台/双流日志）；vcore 与旧 wire 面物理删除。契约 docs/hosts-vsh-redesign.md + docs/hosts-tools.md。
+- **Windows 虚拟根语义（F7 解除）**：vbox canonical 全局统一 /c/ 规范形（废除 C:/ 盘符形）+ 引擎装配 hostCanonical——win exec 建会话被拒问题消除。2026-09-29 win 实测：建会话/写工作区/管道/重定向/jq/变量/127/规则门（/c/ 形报错 + grant 引导）/builtin deny/native curl.exe/bg/grant status 全通。
+- **vbox 阶段二（exec_procs 物理迁移）**：沙箱 OS 落地（sandbox_*.go：seatbelt/bwrap/受限令牌）与进程托管（Manager/RunProcess/Spawn）迁入 vbox 仓，libs/exec_procs 删除；darwin 沙箱输入从 legacy 表切换为 fsauth.Snapshot 的 vbox first-wins 快照——seatbelt 改**逆序**输出（SBPL 后规则胜等价映射；裸模式输出 subpath 形态），行序回归测试重写（vbox sandbox_policy_darwin_test）；DeniedError 归 vbox（proto 为别名，拒绝语义跨包同链识别）；沙箱可写根（公共区/缓存目录）改经 vbox hooks 注入。
+- 清理：死代码 StubDirFor/PinStubs 删除（进程级 .vsh-host/bin 是记录在案的设计偏差）。
+
 ## v0.8.4 — 2026-09-23
 
 - **find 跳过隐藏条目**：fs find 不再匹配点开头条目、也不再递归进入（此前 `.git` 等内容会出现在前端文件选择器的搜索结果里）——与 `list`（`hidden` 缺省 false）、`rg` 及 cloud/page 搜索的缺省口径一致；`copy/remove/move` 的递归不受影响（隐藏内容照常搬运/删除）。测试：`TestFindSkipsHiddenEntries`。

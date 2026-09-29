@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/contrib/ufs"
 	gbfs "github.com/veypi/vsh/fs"
@@ -604,7 +603,7 @@ func TestHostExplicitBinaryPath(t *testing.T) {
 	backing := chmodBacking{FS: local, root: root}
 	const stubDir = "/stub/bin"
 	env := map[string]string{"HOME": "/stub/home", "PATH": stubDir, "USER": "agent"}
-	m := exec_procs.NewManager(0)
+	m := vbox.NewManager(0)
 	m.SetNoSandbox(true)
 	native := NewNativeRegistry(NativeDeps{
 		Manager: m,

@@ -38,9 +38,7 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/execwait"
-	"github.com/veypi/aic-pod/libs/fsauth"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/proto"
 	vshglue "github.com/veypi/aic-pod/libs/vsh"
@@ -290,27 +288,17 @@ func (c *Client) sessionCmdGrant(sid, name string) bool {
 	return false
 }
 
-// fsSandboxRules 把 fs 域有序规则表映射为沙箱行序快照：与工具层判定同源
-// （builtin + cfg 拼接序）；darwin 按表序输出，其余平台消费 deny/writeAllow
-// 字段不受影响。
-func fsSandboxRules(p *fsauth.Policy) []exec_procs.SandboxRule {
-	rows := p.Rules()
-	out := make([]exec_procs.SandboxRule, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, exec_procs.SandboxRule{Effect: r.Effect, Patterns: r.Patterns})
-	}
-	return out
-}
-
 // nativePolicy 是 native 包装器的当次策略快照：会话与免沙箱全部经可信
-// ctx 取（引擎注入），不读脚本可修改的 env。
+// ctx 取（引擎注入），不读脚本可修改的 env。FSRules 与进程内 FS 门同源
+// （fsauth.Snapshot 的 vbox first-wins 表——darwin 沙箱经它逆序输出）。
 func (c *Client) nativePolicy(ctx context.Context, cwd string) vshglue.NativePolicy {
 	sid := vshglue.SessionFromContext(ctx)
 	deny, allow := c.netPol.Snapshot(sid)
+	fsSnap := c.policy.Snapshot(sid)
 	return vshglue.NativePolicy{
 		WriteRoots:   c.policy.WriteRootsFor(sid),
 		DenyPaths:    c.policy.DenyPatterns(),
-		SandboxRules: fsSandboxRules(c.policy),
+		FSRules:      &fsSnap,
 		FsOpen:       c.policy.OpenMode(),
 		NetOpen:      c.netPol.OpenMode(),
 		NetDeny:      deny,

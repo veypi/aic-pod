@@ -221,8 +221,9 @@ func (p *Policy) Rules() []RuleInfo {
 // DenyPatterns 返回全部 deny 行的编译模式快照——exec 沙箱拒绝规则
 // （§5.10 deny 隔离）与 fs 判定同源派生；cfg 变更经 Reconcile 重算后，
 // 本次调用的 Start 即取到新名单（沙箱每次 Start 构造 profile）。
-// 注意：darwin 已走 M3 行序映射（Rules 快照经 StartOptions.SandboxRules 进入
-// seatbelt profile，后规则胜，ro/rw 洞在内核真实生效）；linux/windows 仍按
+// 注意：darwin 已走 vbox 快照行序映射（Snapshot 经 StartOptions.FSRules 进入
+// seatbelt profile——first-wins 逆序输出映射 SBPL 后规则胜，ro/rw 洞在内核
+// 真实生效）；linux/windows 仍按
 // 本函数全量落隔离，不表达 deny 行之内的 ro/rw 洞（fail-closed，仅工具层
 // 放行，permission_rules.md §5）。
 func (p *Policy) DenyPatterns() []string {

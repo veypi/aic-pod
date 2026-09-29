@@ -3,6 +3,8 @@ package proto
 import (
 	"errors"
 	"fmt"
+
+	"github.com/veypi/vbox"
 )
 
 // 错误模型（§2.3）：执行错误 / 拒绝 / 需审批 三类，所有环境统一。
@@ -28,9 +30,9 @@ func (e *ExecError) Error() string {
 
 // DeniedError 策略明确拒绝（state=rejected）：路径越界、1host 非法、
 // LevelNone、caps 未启用。不可通过审批绕过。
-type DeniedError struct{ Reason string }
-
-func (e *DeniedError) Error() string { return e.Reason }
+// v0.9.0 起为 vbox.DeniedError 的别名（沙箱 OS 落地迁入 vbox——同一类型
+// 保证沙箱启动前拒绝与策略层拒绝经 errors.As 同链识别）。
+type DeniedError = vbox.DeniedError
 
 // ApprovalError 权限不足但可审批：服务端审批链保型上抛（转人工审批）。
 // hosts_nats/2 起 pod 不再返回 waiting——审批全部在发送前完成。

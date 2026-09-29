@@ -7,7 +7,7 @@
 //	cfg/       配置中心：Options + Global、Version/DeviceType 二进制身份、日志文件写入
 //	settings/  本机设置面（`aic config get|set` 的读/写模型，原 api 包逻辑）
 //	libs/      客户端核心：host（NATS 会话运行时）、proto（协议信封签名）、
-//	          vcore（虚拟指令）、exec_procs（进程托管）、utils（纯工具）
+//	          vcore（虚拟指令）、vsh/vbox（脚本 glue / 进程沙箱）、utils（纯工具）
 //	cli/       命令行版本（aic）：连接运行 / config / bind / unbind
 //	desktop/   Electron 壳（main.js + preload.js）：Chromium 窗口 + Go 后端子进程
 //

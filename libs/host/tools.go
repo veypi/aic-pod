@@ -131,7 +131,7 @@ func (c *Client) HandleTool(ctx context.Context, caller tool.Caller, r wire.Requ
 // 流检查：调用者身份（票据）+ browser 能力 rules（与 vsh 指令同一判定——
 // 认证不是资源授权；旧 Dispatcher 删除时丢失，此处补回）+ 页面归属与租期
 // 由 Browser 服务在打开时判定；连接失效由 RTC 通道关闭传播（连接撤销 →
-// 通道关闭 → 流关闭，不做运行中规则复核——与 exec_procs 偏差 2 一致）。
+// 通道关闭 → 流关闭，不做运行中规则复核——与 engine_vsh 文件头偏差 2 一致）。
 func (c *Client) OpenToolStream(ctx context.Context, caller tool.Caller, endpoint string, args json.RawMessage) (tool.Stream, error) {
 	if !caller.AllowStreams {
 		return nil, wire.Fail("unsupported", "Streams require an RTC channel")

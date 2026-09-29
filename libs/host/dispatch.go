@@ -44,7 +44,7 @@ func (c *Client) execLogPaths(sid, id string) (string, string) {
 }
 
 // ensureSessionWorkDir 确保会话工作区（含父级）就绪。嵌套执行路径
-// （exec_procs.Output(ctx) 非空，平台命令的常态）不经 StartCall 的
+// （引擎任务表已登记，平台命令的常态）不经 StartCall 的
 // LogPath 建目录动作，必须显式确保：windows 沙箱的可写根授予要求目录
 // 已存在（grant 时枚举），缺目录会让首个嵌套命令沙箱初始化失败。
 func (c *Client) ensureSessionWorkDir(sid string) error {

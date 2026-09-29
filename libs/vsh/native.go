@@ -2,7 +2,6 @@ package vsh
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -10,22 +9,22 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/veypi/aic-pod/libs/exec_procs"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
 
 // NativePolicy 是原生命令一次执行所需的策略快照（每次调用取当次值——
-// grant/cfg 动态生效）。字段对齐 exec_procs.StartOptions。
+// grant/cfg 动态生效）。字段对齐 vbox.StartOptions。
 // hosts-vsh-redesign：数字等级已删除——沙箱 profile 一律由 rules 派生
-// （WriteRoots/DenyPaths/SandboxRules/…），免沙箱只来自可信 ctx 的
+// （WriteRoots/DenyPaths/FSRules/…），免沙箱只来自可信 ctx 的
 // NoSandbox（不再读脚本可修改的 env）。
 type NativePolicy struct {
 	WriteRoots   []string // 追加可写根（cfg fs_allow + grant fs）
 	DenyPaths    []string // 预展开 deny 模式
 	WritePaths   []string // 可写 glob
-	SandboxRules []exec_procs.SandboxRule
+	FSRules      *vbox.FSRuleSet
 	FsOpen       bool
 	NetOpen      bool
 	NetDeny      []netauth.Entry
@@ -36,7 +35,7 @@ type NativePolicy struct {
 
 // NativeDeps 原生命令包装器依赖。
 type NativeDeps struct {
-	Manager *exec_procs.Manager
+	Manager *vbox.Manager
 	// Policy 当次策略快照源（按调用取——会话/免沙箱经可信 ctx 透传：
 	// SessionFromContext / NoSandboxFromContext，由引擎注入）。
 	Policy func(ctx context.Context, cwd string) NativePolicy
@@ -173,18 +172,18 @@ func (n *NativeRegistry) command(name string) commands.Command {
 		if n.deps.Workdir != nil {
 			workdir = n.deps.Workdir(inv.Cwd)
 		}
-		code, err := n.deps.Manager.RunProcess(ctx, exec_procs.StartOptions{
+		code, err := n.deps.Manager.RunProcess(ctx, vbox.StartOptions{
 			Workdir:      workdir,
 			Exec:         append([]string{bin}, inv.Args...),
 			NoSandbox:    pol.NoSandbox,
 			WriteRoots:   pol.WriteRoots,
 			DenyPaths:    pol.DenyPaths,
-			SandboxRules: pol.SandboxRules,
+			FSRules:      pol.FSRules,
 			WritePaths:   pol.WritePaths,
 			FsOpen:       pol.FsOpen,
 			NetOpen:      pol.NetOpen,
-			NetDeny:      pol.NetDeny,
-			NetAllow:     pol.NetAllow,
+			NetDeny:      toVboxEntries(pol.NetDeny),
+			NetAllow:     toVboxEntries(pol.NetAllow),
 		}, inv.Stdin, inv.Stdout, inv.Stderr)
 		if err != nil {
 			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", name, err)
@@ -221,18 +220,18 @@ func (n *NativeRegistry) commandPath(filePath string) commands.Command {
 		if n.deps.Workdir != nil {
 			workdir = n.deps.Workdir(inv.Cwd)
 		}
-		code, err := n.deps.Manager.RunProcess(ctx, exec_procs.StartOptions{
+		code, err := n.deps.Manager.RunProcess(ctx, vbox.StartOptions{
 			Workdir:      workdir,
 			Exec:         append([]string{bin}, inv.Args...),
 			NoSandbox:    pol.NoSandbox,
 			WriteRoots:   pol.WriteRoots,
 			DenyPaths:    pol.DenyPaths,
-			SandboxRules: pol.SandboxRules,
+			FSRules:      pol.FSRules,
 			WritePaths:   pol.WritePaths,
 			FsOpen:       pol.FsOpen,
 			NetOpen:      pol.NetOpen,
-			NetDeny:      pol.NetDeny,
-			NetAllow:     pol.NetAllow,
+			NetDeny:      toVboxEntries(pol.NetDeny),
+			NetAllow:     toVboxEntries(pol.NetAllow),
 		}, inv.Stdin, inv.Stdout, inv.Stderr)
 		if err != nil {
 			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", filePath, err)
@@ -244,8 +243,20 @@ func (n *NativeRegistry) commandPath(filePath string) commands.Command {
 	})
 }
 
-// 确保 fmt 引用保留（错误文案格式化）。
-var _ = fmt.Sprintf
+// exitCodeOr 保持非零退出码，零值回退 fallback。
+
+// toVboxEntries netauth 目标快照转 vbox 形态（同构 {Host, Port}——
+// exec_procs 迁入 vbox 后沙箱输入统一为 vbox.Entry）。
+func toVboxEntries(es []netauth.Entry) []vbox.Entry {
+	if len(es) == 0 {
+		return nil
+	}
+	out := make([]vbox.Entry, 0, len(es))
+	for _, e := range es {
+		out = append(out, vbox.Entry{Host: e.Host, Port: e.Port})
+	}
+	return out
+}
 
 func exitCodeOr(code, fallback int) int {
 	if code != 0 {

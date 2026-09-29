@@ -22,7 +22,7 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/browser"
 	"github.com/veypi/aic-pod/libs/cua"
-	"github.com/veypi/aic-pod/libs/exec_procs"
+	"github.com/veypi/vbox"
 	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
@@ -77,7 +77,7 @@ type Client struct {
 	uid             string
 	credVer         uint64
 	replay          *replayCache
-	procs           *exec_procs.Manager // exec 子进程统一托管（§5.8/§5.9）
+	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
 	policy          *fsauth.Policy      // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
 	vsh             vshState            // vsh 引擎装配态（script 执行，惰性构建）
 	netPol          *netauth.Policy     // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
@@ -123,9 +123,17 @@ func New(opts Options) *Client {
 			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		}
 	}
-	procs := exec_procs.NewManager(opts.ExecTimeout)
+	procs := vbox.NewManager(opts.ExecTimeout)
 	procs.SetNoSandbox(opts.NoSandbox)
 	procs.SetLogf(logf)
+	// vbox 沙箱可写根注入（vbox 不自持配置）：公共区 + 依赖缓存目录。
+	vbox.PublicRootsFn = func() []string {
+		if p, err := cfg.PublicDir(); err == nil {
+			return []string{p}
+		}
+		return nil
+	}
+	vbox.CacheRootsFn = fsauth.CacheRoots
 	policy := fsauth.New()
 	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{
@@ -306,7 +314,7 @@ func (c *Client) Close() error {
 }
 
 // Reconfigure 应用新运行配置（保存设置后调用）：
-// 保留 Client 与 exec_procs Manager（bg 任务原样保留），仅更新
+// 保留 Client 与 vbox Manager（bg 任务原样保留），仅更新
 // work_dir/exec_timeout 参数；NATS 地址（host）变化时重连。
 // 凭证/身份字段不变（换绑走 bind 流程重建）。
 func (c *Client) Reconfigure(o cfg.Options) error {
