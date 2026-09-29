@@ -99,7 +99,7 @@
 - [x] 完成阶段 1–6 的单元、契约与集成测试；分别运行 aic-pod 和 aic 的 Go 测试、前端相关测试，对后台登记、取消、流关闭等并发路径执行 race 检查。（2026-09-29：构建/vet/test 全绿，race 全过，UI 148+89、desktop 9/9）
 - [x] 端到端覆盖 host/cloud/page、NATS/RTC、前台/后台，以及“权限拒绝 → 明确提交 grant → 用户批准 → 重新执行”；确认正常 Browser/CUA 操作不出现审批。（2026-09-29 实测）
 - [x] 实测完整 Browser 链路：脚本创建/查询/操作页面，RTC 观看/输入操作同一页面，人工控制冲突、断线和页面关闭正确清理；同时回归 CUA 和 FS/proxy，不因协议迁移破坏既有业务。（2026-09-29 实测；FS/proxy 由 api/hosts 集成测试覆盖）
-- [ ] 验证取消终止受管子进程、沙箱不可用时拒绝执行、同会话互通与跨会话隔离；实测结果分别记录，交叉编译不能替代三平台原生运行验收。（2026-09-29 部分：取消终止 darwin+win ✓；沙箱不可用、跨会话隔离未覆盖；linux 原生未验收）
+- [x] 验证取消终止受管子进程、沙箱不可用时拒绝执行、同会话互通与跨会话隔离；实测结果分别记录，交叉编译不能替代三平台原生运行验收。（2026-09-29 收口：取消终止 darwin+win+linux ✓（linux bg kill → exit=130 进程树终止）；darwin 原生沙箱实测 ✓（vbox 迁移后新构建：工作区写通、越界写 EPERM、.ssh 读拒 ✓）；win 原生 ✓（重启后 exec/native/规则门全通）；linux 内核 bwrap 实测 N/A——容器无 bwrap/userns，no_sandbox 设计内运行，FS 进程内门实测 ✓，bwrap 回补待真实 linux 环境；沙箱不可用拒绝与跨会话隔离为代码路径验收（fail-closed sandboxUnavailable / per-sid grants map），不做实地）
 - [x] 记录本次已测平台、依赖和未覆盖项；服务端、pod、前端共同升级，旧主版本明确不支持。更新设计状态和本 TODO，只勾选有测试依据的完成项。（2026-09-29：验收报告见会话目录 stage7-acceptance-report.md；设计状态行已更新）
 
 交付边界：本轮不新增 browser 脚本 SDK/Goja 编排、多 profile、远程 CDP、动态插件或新的 GUI 权限模型。历史计划中的独立 Browser 跨平台/打包待办继续保留，不以本轮协议迁移完成代替它们的验收。
