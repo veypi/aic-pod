@@ -7,8 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // probeBackend（linux）：bwrap 功能性探测——真跑一次最小只读 profile，
