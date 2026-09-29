@@ -40,7 +40,7 @@ import (
 	"github.com/veypi/vsh/trace"
 )
 
-// limits 定稿（design §6，已拍板）。
+// limits 定稿（已拍板）。
 const (
 	MaxStdoutBytes       = 8 << 20 // 8 MiB
 	MaxStderrBytes       = 1 << 20 // 1 MiB

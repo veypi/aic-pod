@@ -1,7 +1,6 @@
 package fsauth
 
-// snapshot_vbox.go 是 fsauth 状态层 → vbox 纯 matcher 的桥（design §11.5
-// 阶段一：状态层留 pod，vbox 表在此发射）。vsh 引擎 host 端 FS 适配器消费
+// snapshot_vbox.go 是 fsauth 状态层 → vbox 纯 matcher 的桥（状态层留 pod，vbox 表在此发射）。vsh 引擎 host 端 FS 适配器消费
 // 本快照；语义为 v4 first-wins 新行序（temp → cfg/permanent → builtin deny →
 // 便利根），旧 decide 路径（last-wins + 便利根表外授写）的语义映射规则：
 //   - old: builtin deny 在前、cfg 在后，后命中者胜 → cfg 可覆盖 builtin deny；

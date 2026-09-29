@@ -11,7 +11,7 @@ import (
 	gbfs "github.com/veypi/vsh/fs"
 )
 
-// HostFSConfig host 会话文件系统参数（design §4.2）。
+// HostFSConfig host 会话文件系统参数。
 type HostFSConfig struct {
 	// Backing OS 文件系统适配（libs/host OSVFS 或其 view）。host 侧真实路径
 	// 含 symlink，规则表门 canonicalize-then-check 在 ufsAdapter 内完成
@@ -61,7 +61,7 @@ func (h hostLayoutFS) Chmod(ctx context.Context, name string, mode stdfs.FileMod
 	return h.FileSystem.Chmod(ctx, name, mode)
 }
 
-// StubDirFor 返回会话 stub 目录（design §4.2：PATH 钉 {session_root}/{sid}/bin，
+// StubDirFor 返回会话 stub 目录（PATH 钉 {session_root}/{sid}/bin，
 // fsauth 基础白名单内、天然可写，随会话清理）。
 func StubDirFor(sessionRoot, sid string) string {
 	return strings.TrimSuffix(sessionRoot, "/") + "/" + sid + "/bin"

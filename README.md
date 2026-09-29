@@ -133,21 +133,22 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-Desktop 提供 ui/1 交互工具：browser 控制 Electron 工作区标签页，cua 控制本机原生窗口。
-两者共用 `target / snapshot / click / fill / type / press / scroll / wait` 及结果格式。
-批量操作使用 `run --code <JavaScript>` 或 `run --file <path>`，两端注入相同 `ui` API；脚本在独立受限进程运行，每一步沿用原命令权限和错误语义。
-普通结果进入 content，图片经 image_data 投递；完整协议与能力边界见 [docs/ui-protocol.md](docs/ui-protocol.md)。
+browser 与 cua 是 vsh 指令（注册进引擎 Registry，与管道、重定向、控制流自由组合）：
+browser 控制 Go 托管的 Chrome 页面，cua 控制本机原生窗口。两者共用
+`observe / click / fill / type / press / scroll / wait` 等交互原语与统一结果格式
+（cua 内部操作与结果词汇沿用 ui/1）；`--json` 输出稳定结果，诊断走 stderr。
+完整协议与能力边界见 [docs/hosts-tools.md](docs/hosts-tools.md)。
 
 ```text
-browser open https://example.com
-browser snapshot
-browser click @s<snapshot>:e1
-cua target list
-cua target use <window-target-id>
-cua snapshot --image
+browser page.create https://example.com
+browser page.observe <page_id> --image
+browser page.click <page_id> --ref <snapshot-ref>
+cua window.list
+cua window.observe <window_id> --image
+cua window.click <window_id> --role button --name 确定
 ```
 
-Chrome 扩展已移除；desktop browser 直接使用 CDP，不依赖插件代码或同步脚本。
+Chrome 扩展已移除；browser 由 Go 直接驱动真实 Chrome（CDP），不依赖插件代码或同步脚本。
 
 ## 构建
 

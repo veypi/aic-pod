@@ -11,7 +11,7 @@ import (
 // 本分析仅作预检报错材料，拦截由运行期 FS 适配器规则表门兜底）。
 const maxAnalyzeScriptDepth = 3
 
-// Analysis 是脚本静态分析结果（design §4 analyze.go；两端共用）。
+// Analysis 是脚本静态分析结果（两端共用）。
 // 只收集字面量目标——含变量/glob 的动态目标跳过（运行期由 FS 适配器
 // 规则表门强制，验收 4 的 rm $X 拒绝在运行期发生）。
 type Analysis struct {

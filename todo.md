@@ -2,8 +2,6 @@
 
 更新：2026-09-29。依据 [hosts-vsh-redesign.md](docs/hosts-vsh-redesign.md) 制定。阶段 1-7 已实施；阶段 7 联调与真实平台验收已完成（darwin+win 在线实测，linux 未覆盖；遗留 2 处缺陷待修复，报告见会话目录 stage7-acceptance-report.md）。设计有冲突时以该文档为准；实现和对应验收都通过后才勾选。
 
-旧 Browser/三协议计划及当时进度保存在 [历史 TODO](docs/todo-browser-2026-09-21.md)，不再与本轮要求混用。
-
 ## 范围与顺序
 
 - 只改现有执行、授权和接入链路，不新增执行框架、通用工具 Registry、权限 DSL 或任务服务。
@@ -92,7 +90,7 @@
 - [x] 清除旧 caps 方法投影、catalog、DeviceCommand、原生逐个注册、Background 方法标记、bg run/output、重复任务表/输出缓冲及不可达兼容入口。
 - [x] 清除本轮协议和执行链路的 granted_level、Level=9 重发和环境变量授权依赖；更新相关配置/UI、签名和测试，不让数字等级以旁路形式继续影响执行。
 - [x] 实际切换时同步 `tools/exec/exec.go` 工具描述、Agent 指令注入、前端帮助和 aic 的 `docs/instruction_sets_v2.md`；示例只展示脚本、commands/--help、bg list/wait/kill 和新输出约定，不提前宣称功能上线。
-- [x] 校准 `docs/design.md`、`docs/host_sandbox.md`、`docs/hosts-tools.md`、`docs/hosts-protocols-proposal.md` 与前端 `ui/hosts/README.md`；旧规范明确归档或替换，不能留下两份同时生效的协议。保留 Browser 自身业务语义，移除与新执行模型冲突的描述。
+- [x] 校准 `docs/design.md`、`docs/host_sandbox.md`、`docs/hosts-tools.md` 与前端 `ui/hosts/README.md`；旧规范明确归档或替换，不能留下两份同时生效的协议。保留 Browser 自身业务语义，移除与新执行模型冲突的描述。
 
 验收：活动代码、工具说明和测试不再引用旧调用/等级/后台模型；历史文档允许保留旧词，但必须明确失效。各端没有兼容分支，没有第二个命令目录或工具注册框架。
 

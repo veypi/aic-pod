@@ -16,7 +16,7 @@ import (
 	vshnet "github.com/veypi/vsh/network"
 )
 
-// NetClient 默认值（design §4.3：重定向上限/超时/响应上限）。
+// NetClient 默认值（重定向上限/超时/响应上限）。
 const (
 	DefaultNetMaxRedirects     = 10
 	DefaultNetTimeout          = 10 * time.Minute

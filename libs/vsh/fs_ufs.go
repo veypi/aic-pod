@@ -87,7 +87,7 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	return a, nil
 }
 
-// CloudFSConfig cloud 会话文件系统参数（design §4.1）。
+// CloudFSConfig cloud 会话文件系统参数。
 type CloudFSConfig struct {
 	// UserRoot = /u/{uid}（HOME；jail 硬约束根）。
 	UserRoot string
