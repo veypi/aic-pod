@@ -93,7 +93,7 @@ func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Respon
 			c.emit(audit)
 			return nil, err
 		}
-		resp, err := c.round(ctx, req, current, body)
+		resp, cancel, err := c.round(ctx, req, current, body)
 		if err != nil {
 			audit.Reason = err.Error()
 			c.emit(audit)
@@ -104,6 +104,7 @@ func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Respon
 		if !isRedirectStatus(resp.StatusCode) || !req.FollowRedirects {
 			data, rerr := c.readBody(resp, current)
 			_ = resp.Body.Close()
+			cancel()
 			if rerr != nil {
 				audit.Reason = rerr.Error()
 				c.emit(audit)
@@ -121,6 +122,7 @@ func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Respon
 		}
 		loc := resp.Header.Get("Location")
 		_ = resp.Body.Close()
+		cancel()
 		if loc == "" || hop >= c.cfg.MaxRedirects {
 			audit.Reason = "too many redirects"
 			c.emit(audit)
@@ -144,13 +146,15 @@ func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Respon
 }
 
 // round 发单跳请求（禁用 net/http 自带重定向——重定向由 Do 逐跳复核）。
-func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL string, body []byte) (*http.Response, error) {
+// 返回的 cancel 必须在响应体读完并关闭后调用（ctx 一取消，http.Transport
+// 立即中断体读——此前 defer cancel() 在 Do 返回即触发，大于 transport 首包
+// 缓冲的响应（~16KB 以上）全部读体失败 context canceled，2026-09-30 实测）。
+func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL string, body []byte) (*http.Response, context.CancelFunc, error) {
 	timeout := req.Timeout
 	if timeout <= 0 {
 		timeout = c.cfg.Timeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	transport := &http.Transport{
 		// 私网阻断双保险：目标检查（checkTarget）之外，dial 时对实际连接
@@ -184,12 +188,18 @@ func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL strin
 	}
 	hreq, err := http.NewRequestWithContext(ctx, method, rawURL, rdr)
 	if err != nil {
-		return nil, err
+		cancel()
+		return nil, nil, err
 	}
 	for k, v := range req.Headers {
 		hreq.Header.Set(k, v)
 	}
-	return client.Do(hreq)
+	resp, err := client.Do(hreq)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return resp, cancel, nil
 }
 
 // checkTarget 规则表门 + 私网阻断（初始 URL 与每次重定向目标均过此门）。

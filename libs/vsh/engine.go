@@ -480,11 +480,15 @@ type Task struct {
 // ExecHandle 是一次执行的外层句柄：前台等待、转后台登记与取消共用。
 type ExecHandle struct {
 	cancel context.CancelFunc
-	done   chan struct{}
-	mu     sync.Mutex
-	res    *ExecResult
-	err    error
-	taskID string
+	// cancelRequested 记录「取消已请求但 cancel 尚未绑定」——Cancel 先于
+	// BindCancel 到达时不丢失（接入层预建句柄与编排层绑定之间存在竞态窗），
+	// BindCancel 绑定时补触发。
+	cancelRequested bool
+	done            chan struct{}
+	mu              sync.Mutex
+	res             *ExecResult
+	err             error
+	taskID          string
 }
 
 func NewExecHandle(cancel context.CancelFunc) *ExecHandle {
@@ -528,8 +532,10 @@ func (h *ExecHandle) Result() (*ExecResult, error) {
 // Cancel 终止本次执行（脚本及受管子进程）。与 BindCancel 并发安全：
 // cancel(request_id)/DisconnectTools 可能与 execwait 编排层绑定墙钟
 // cancel 并发，必须经锁读取（否则会读到半构造的 cancel 或漏取）。
+// cancel 尚未绑定时请求不丢失：记录标志，由 BindCancel 补触发。
 func (h *ExecHandle) Cancel() {
 	h.mu.Lock()
+	h.cancelRequested = true
 	cancel := h.cancel
 	h.mu.Unlock()
 	if cancel != nil {
@@ -538,11 +544,15 @@ func (h *ExecHandle) Cancel() {
 }
 
 // BindCancel 绑定取消函数（接入层编排 execwait 注入墙钟 ctx 的 cancel——
-// 外层预建句柄后由编排层接管执行期限）。
+// 外层预建句柄后由编排层接管执行期限）。绑定前已有取消请求的立即补触发。
 func (h *ExecHandle) BindCancel(cancel context.CancelFunc) {
 	h.mu.Lock()
 	h.cancel = cancel
+	pending := h.cancelRequested
 	h.mu.Unlock()
+	if pending {
+		cancel()
+	}
 }
 
 // TaskID 转后台后分配的任务 ID（未登记为空）。

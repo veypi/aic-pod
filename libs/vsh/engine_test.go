@@ -46,6 +46,36 @@ func blockHandle() (*ExecHandle, chan struct{}) {
 	return h, release
 }
 
+// Cancel 先于 BindCancel：取消请求不得丢失（接入层预建句柄与 execwait
+// 编排层绑定墙钟 cancel 之间存在竞态窗）——绑定时补触发。
+func TestExecHandleCancelBeforeBind(t *testing.T) {
+	t.Parallel()
+	h := NewExecHandle(nil)
+	h.Cancel() // cancel 未绑定：仅记标志
+	bound := false
+	h.BindCancel(func() { bound = true })
+	if !bound {
+		t.Fatal("BindCancel 应补触发先于它的 Cancel")
+	}
+	// 重复 Cancel 幂等（context.CancelFunc 语义：多次调用无副作用）。
+	h.Cancel()
+	if !bound {
+		t.Fatal("重复 Cancel 不应丢失绑定")
+	}
+}
+
+// BindCancel 先于 Cancel：正常路径即时触发。
+func TestExecHandleCancelAfterBind(t *testing.T) {
+	t.Parallel()
+	h := NewExecHandle(nil)
+	bound := 0
+	h.BindCancel(func() { bound++ })
+	h.Cancel()
+	if bound != 1 {
+		t.Fatalf("Cancel 应触发绑定的 cancel，实际 %d 次", bound)
+	}
+}
+
 // TestTaskTableCapacity 容量闸（全局 + per-owner 上限，超额快速拒绝——
 // fan-out/多会话并发可占满全部核的防线）。Adopt 模型：登记即占容量。
 func TestTaskTableCapacity(t *testing.T) {
