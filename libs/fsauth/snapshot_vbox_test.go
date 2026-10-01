@@ -122,3 +122,45 @@ func TestSnapshotOpenMode(t *testing.T) {
 		t.Fatalf("open mode should allow unmatched writes")
 	}
 }
+
+// TestSnapshotForNativeWorkspaceMetadata 工作区元数据保护（内置 ro 行）：
+// 存在才下发、git 豁免、cfg/temp 可覆盖、便利根不可压；普通 Snapshot 不下发。
+func TestSnapshotForNativeWorkspaceMetadata(t *testing.T) {
+	wd := t.TempDir()
+	p := newTestPolicy(t, wd)
+	mkdir(t, filepath.Join(wd, ".git"), filepath.Join(wd, ".aws"))
+	gitFile := filepath.Join(wd, ".git", "HEAD")
+	awsFile := filepath.Join(wd, ".aws", "credentials")
+
+	// 普通命令：.git / .aws 写拒、读放行（便利根在表尾，压不过保护行）。
+	if d := p.SnapshotForNative("s1", wd, "bash").Match(gitFile, vbox.OpWrite); d.Allow {
+		t.Fatalf("native snapshot must deny writes under .git: %+v", d)
+	}
+	if d := p.SnapshotForNative("s1", wd, "bash").Match(awsFile, vbox.OpWrite); d.Allow {
+		t.Fatalf(".aws must be protected: %+v", d)
+	}
+	if d := p.SnapshotForNative("s1", wd, "bash").Match(gitFile, vbox.OpRead); !d.Allow {
+		t.Fatalf(".git reads stay open: %+v", d)
+	}
+	// 进程内门快照（Snapshot）不下发保护（维持现状）。
+	if d := p.Snapshot("s1").Match(gitFile, vbox.OpWrite); !d.Allow {
+		t.Fatalf("plain snapshot must not carry protection: %+v", d)
+	}
+	// git 命令豁免；不存在保护目录不下发。
+	if d := p.SnapshotForNative("s1", wd, "git").Match(gitFile, vbox.OpWrite); !d.Allow {
+		t.Fatalf("git invocation must be exempt: %+v", d)
+	}
+	if d := p.SnapshotForNative("s1", wd, "bash").Match(filepath.Join(wd, ".codex", "x"), vbox.OpWrite); !d.Allow {
+		t.Fatalf("absent metadata dirs must stay writable: %+v", d)
+	}
+	// cfg rw 行（更靠表头）可显式覆盖。
+	setRules(t, p, "rw:"+filepath.Join(wd, ".git"))
+	if d := p.SnapshotForNative("s1", wd, "bash").Match(gitFile, vbox.OpWrite); !d.Allow {
+		t.Fatalf("explicit cfg rw row must override protection: %+v", d)
+	}
+	// temp grant（表头）同样覆盖。
+	p.Grant("s2", filepath.Join(wd, ".aws"))
+	if d := p.SnapshotForNative("s2", wd, "bash").Match(awsFile, vbox.OpWrite); !d.Allow {
+		t.Fatalf("temp grant must override protection: %+v", d)
+	}
+}

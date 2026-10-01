@@ -11,6 +11,7 @@
 - **Windows 虚拟根语义（F7 解除）**：vbox canonical 全局统一 /c/ 规范形（废除 C:/ 盘符形）+ 引擎装配 hostCanonical——win exec 建会话被拒问题消除。2026-09-29 win 实测：建会话/写工作区/管道/重定向/jq/变量/127/规则门（/c/ 形报错 + grant 引导）/builtin deny/native curl.exe/bg/grant status 全通。
 - **vbox 阶段二（exec_procs 物理迁移）**：沙箱 OS 落地（sandbox_*.go：seatbelt/bwrap/受限令牌）与进程托管（Manager/RunProcess/Spawn）迁入 vbox 仓，libs/exec_procs 删除；darwin 沙箱输入从 legacy 表切换为 fsauth.Snapshot 的 vbox first-wins 快照——seatbelt 改**逆序**输出（SBPL 后规则胜等价映射；裸模式输出 subpath 形态），行序回归测试重写（vbox sandbox_policy_darwin_test）；DeniedError 归 vbox（proto 为别名，拒绝语义跨包同链识别）；沙箱可写根（公共区/缓存目录）改经 vbox hooks 注入。
 - **linux/windows 内核行序映射（W3）**：实例化 deny 目标按 vbox 快照（first-wins）求值后落措施——linux bwrap 终局 ro/rw 洞按序 --ro-bind/--bind 回补（含嵌套洞字面前缀回补，cfg 覆盖 builtin deny 在内核真实生效）；windows 终局 rw 目标跳过 deny ACE（ro/deny 仍落，嵌套洞仅工具层生效）；Caps.OrderedFSRules linux 翻 true。
+- **工作区元数据保护收敛为内置 ro 行 + darwin/windows 修复（2026-10-01）**：vbox 沙箱层的 `.git` 写保护专路（`protectedMetadataNames` + git 参数豁免 + 平台特判）删除——保护改由 pod 在原生沙箱快照注入内置 ro 行（`fsauth.SnapshotForNative`：`<workDir>/.git`、`<workDir>/.aws` 存在才下发；本次命令 basename 为 git/git.exe 时豁免），插在 builtin deny 之后、便利根之前（cfg/temp 可覆盖、便利根不可压），进程内 Snapshot 不注入（保护面=原生沙箱子进程）。新增 `.aws` 保护（凭证助手可执行，理由同 codex 1d804e91b）。顺带修复两处既有缺陷：darwin Seatbelt ro 行只渲染读允许、可写根内 ro 洞的写被宽写放行盖掉（现 ro 行显式下沉写拒）；windows ro 行 ACE 从未落地（策略层 `/c/` 规范形路径无法用于 ACL 边界、被"对象不可读→跳过"吞掉；现经 `pathsToOS` 转换后实际生效）。测试：`fsauth.TestSnapshotForNativeWorkspaceMetadata`、vbox `TestWindowsSandboxRoRowProtectsWorkspaceMetadata`（win 实机）与 darwin 行序回归。
 - 清理：死代码 StubDirFor/PinStubs 删除（进程级 .vsh-host/bin 是记录在案的设计偏差）。
 
 ## v0.8.4 — 2026-09-23

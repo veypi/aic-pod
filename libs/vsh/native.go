@@ -36,9 +36,10 @@ type NativePolicy struct {
 // NativeDeps 原生命令包装器依赖。
 type NativeDeps struct {
 	Manager *vbox.Manager
-	// Policy 当次策略快照源（按调用取——会话/免沙箱经可信 ctx 透传：
+	// Policy 当次策略快照源（按调用取——workdir 为 OS 原生态、name 为命令名，
+	// 供工作区元数据保护行派生；会话/免沙箱经可信 ctx 透传：
 	// SessionFromContext / NoSandboxFromContext，由引擎注入）。
-	Policy func(ctx context.Context, cwd string) NativePolicy
+	Policy func(ctx context.Context, workdir, name string) NativePolicy
 	// LookPath name → 真实二进制路径；nil = exec.LookPath。
 	LookPath func(name string) (string, error)
 	// Workdir 进程 cwd（空 = inv.Cwd 直通）。inv.Cwd 是引擎规范形（win =
@@ -164,13 +165,13 @@ func (n *NativeRegistry) command(name string) commands.Command {
 		if err != nil {
 			return commands.Exitf(inv, 127, "%s: binary not found: %s", name, err)
 		}
-		var pol NativePolicy
-		if n.deps.Policy != nil {
-			pol = n.deps.Policy(ctx, inv.Cwd)
-		}
 		workdir := inv.Cwd
 		if n.deps.Workdir != nil {
 			workdir = n.deps.Workdir(inv.Cwd)
+		}
+		var pol NativePolicy
+		if n.deps.Policy != nil {
+			pol = n.deps.Policy(ctx, workdir, name)
 		}
 		code, err := n.deps.Manager.RunProcess(ctx, vbox.StartOptions{
 			Workdir:      workdir,
@@ -212,13 +213,13 @@ func (n *NativeRegistry) commandPath(filePath string) commands.Command {
 		if info, err := os.Stat(bin); err != nil || info.IsDir() {
 			return commands.Exitf(inv, 127, "%s: No such file or directory", filePath)
 		}
-		var pol NativePolicy
-		if n.deps.Policy != nil {
-			pol = n.deps.Policy(ctx, inv.Cwd)
-		}
 		workdir := inv.Cwd
 		if n.deps.Workdir != nil {
 			workdir = n.deps.Workdir(inv.Cwd)
+		}
+		var pol NativePolicy
+		if n.deps.Policy != nil {
+			pol = n.deps.Policy(ctx, workdir, name)
 		}
 		code, err := n.deps.Manager.RunProcess(ctx, vbox.StartOptions{
 			Workdir:      workdir,

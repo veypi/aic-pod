@@ -290,11 +290,12 @@ func (c *Client) sessionCmdGrant(sid, name string) bool {
 
 // nativePolicy 是 native 包装器的当次策略快照：会话与免沙箱全部经可信
 // ctx 取（引擎注入），不读脚本可修改的 env。FSRules 与进程内 FS 门同源
-// （fsauth.Snapshot 的 vbox first-wins 表——darwin 沙箱经它逆序输出）。
-func (c *Client) nativePolicy(ctx context.Context, cwd string) vshglue.NativePolicy {
+// （fsauth 的 vbox first-wins 表——darwin 沙箱经它逆序输出）；workdir/cmd
+// 供工作区元数据保护行（SnapshotForNative）派生。
+func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vshglue.NativePolicy {
 	sid := vshglue.SessionFromContext(ctx)
 	deny, allow := c.netPol.Snapshot(sid)
-	fsSnap := c.policy.Snapshot(sid)
+	fsSnap := c.policy.SnapshotForNative(sid, workdir, cmd)
 	return vshglue.NativePolicy{
 		WriteRoots:   c.policy.WriteRootsFor(sid),
 		DenyPaths:    c.policy.DenyPatterns(),
