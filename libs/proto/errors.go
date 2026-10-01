@@ -30,7 +30,7 @@ func (e *ExecError) Error() string {
 
 // DeniedError 策略明确拒绝（state=rejected）：路径越界、1host 非法、
 // LevelNone、caps 未启用。不可通过审批绕过。
-// v0.9.0 起为 vbox.DeniedError 的别名（沙箱 OS 落地迁入 vbox——同一类型
+// v0.8.5 起为 vbox.DeniedError 的别名（沙箱 OS 落地迁入 vbox——同一类型
 // 保证沙箱启动前拒绝与策略层拒绝经 errors.As 同链识别）。
 type DeniedError = vbox.DeniedError
 

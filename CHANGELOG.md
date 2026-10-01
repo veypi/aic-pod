@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布（v0.9.0 候选）
+## v0.8.5 — 2026-10-01
 
 - **hosts-vsh-redesign 落地（阶段 1-7，破坏性）**：exec 只接收完整 vsh 脚本；browser/cua/bg/grant 为 vsh 指令；协议升 hosts_tools/2 + hosts_nats/2 + hosts_rtc/2（无旧协议兼容入口）；审批事实收敛为布尔 grant_approved（数字等级删除）；规则表三域有序表 + vbox first-wins matcher；execwait 统一外层（前台等待/超时转后台/双流日志）；vcore 与旧 wire 面物理删除。契约 docs/hosts-vsh-redesign.md + docs/hosts-tools.md。
 - **Windows 虚拟根语义（F7 解除）**：vbox canonical 全局统一 /c/ 规范形（废除 C:/ 盘符形）+ 引擎装配 hostCanonical——win exec 建会话被拒问题消除。2026-09-29 win 实测：建会话/写工作区/管道/重定向/jq/变量/127/规则门（/c/ 形报错 + grant 引导）/builtin deny/native curl.exe/bg/grant status 全通。
