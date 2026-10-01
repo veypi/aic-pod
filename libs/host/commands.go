@@ -52,12 +52,12 @@ func (c *Client) initFilesystem() error {
 	if err != nil {
 		return err
 	}
-	roots, home, err := deviceFileRoots(c.options().WorkDir)
+	roots, home, osHome, err := deviceFileRoots(c.options().WorkDir)
 	if err != nil {
 		store.Close()
 		return err
 	}
-	files, err := hostfs.New(hostfs.Config{Roots: roots, Home: &home, Bytes: store, MaxProxyUploadBytes: c.options().Transfers.ProxyUploadBytes, Check: func(ctx context.Context, call hostfs.Call, path string, write bool) error {
+	files, err := hostfs.New(hostfs.Config{Roots: roots, Home: &home, OSHome: osHomePtr(osHome), Bytes: store, MaxProxyUploadBytes: c.options().Transfers.ProxyUploadBytes, Check: func(ctx context.Context, call hostfs.Call, path string, write bool) error {
 		if cfg.CheckAuth() != nil {
 			return wire.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
 		}

@@ -103,9 +103,14 @@ type EngineConfig struct {
 	// 不跨 exec 持久，ExecRequest.Env 覆盖同名键）。
 	BaseEnv map[string]string
 	// LayoutEnv 覆盖 Runtime 级布局初始化环境（默认 layoutInitEnv：HOME 钉
-	// 内存层 /tmp/.vsh-layout-home）。host 端无内存层，必须显式给可写布局
-	// HOME 与 PATH（PATH 目录 = stub 写入目标，须在规则表可写区）。
+	// 内存层 /tmp/.vsh-layout-home）。host 端无内存层，必须显式给布局 HOME
+	// 与 PATH（PATH 目录 = stub 写入目标；布局 IO 通道见 LayoutFS）。
 	LayoutEnv map[string]string
+	// LayoutFS 布局 IO（目录准备 + stub 写入）专用文件系统：非 nil 时透传
+	// vshcore.WithLayoutFS——布局是引擎自身机械状态，host 注入未过会话规则
+	// 门的 OS 文件系统（权限门管 exec/工具，不管引擎自身读写）。nil = 布局
+	// IO 走会话文件系统（cloud 内存层语义不变）。
+	LayoutFS gbfs.FileSystem
 	// BuiltinCommandDir 重写 shell 内置名（echo/bg/help…）的 stub 解析目录
 	// （空 = vsh 默认 /bin，仅内存层文件系统可用）。host 端无内存层，必须
 	// 指向真实 stub 目录（= LayoutEnv PATH 目录）。
@@ -260,6 +265,9 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	}
 	if cfg.BuiltinCommandDir != "" {
 		opts = append(opts, vshcore.WithBuiltinCommandDir(cfg.BuiltinCommandDir))
+	}
+	if cfg.LayoutFS != nil {
+		opts = append(opts, vshcore.WithLayoutFS(cfg.LayoutFS))
 	}
 	rt, err := vshcore.New(opts...)
 	if err != nil {

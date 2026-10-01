@@ -22,8 +22,9 @@ type HostFSConfig struct {
 }
 
 // NewHostFS host：OS backing + vbox 规则表门，不引内存覆盖层（host 会话目录
-// 本就是 scratch，无 cloud 污染红线；stub 钉进程级 .vsh-host/bin 真实目录，
-// 见 libs/host/engine_vsh.go 文件头偏差 1）。
+// 本就是 scratch，无 cloud 污染红线）。布局 IO（stub 钉 $HOME/.aic/vsh/bin
+// 真实目录）经 vshcore LayoutFS 专用通道——同样经本函数构造但 Rules 全放行
+// （pod 自身机械读写不过门，见 libs/host/engine_vsh.go 文件头决策 1）。
 func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 	if cfg.Backing == nil {
 		return nil, fmt.Errorf("vsh glue: host backing required")
@@ -32,7 +33,7 @@ func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 		Backing: cfg.Backing,
 		Rules:   cfg.Rules,
 		// 无 jail：host 的边界由规则表表达（读默认开放、写白名单制）。
-		// 无内存层：stub 落 {session_root}/{sid}/bin 真实目录。
+		// 无内存层：会话 FS 直读直写宿主盘（规则门拦截越界写）。
 	})
 	if err != nil {
 		return nil, err

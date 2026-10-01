@@ -19,9 +19,9 @@ const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const { Arch } = require("builder-util");
-const { assertBrowserBundle } = require("../browser-bundle.cjs");
 
 module.exports = async (context) => {
+  const { assertBrowserBundle } = await import("./sync-browser.mjs");
   const resources = context.electronPlatformName === "darwin"
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");

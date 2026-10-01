@@ -1,0 +1,205 @@
+package host
+
+// skillToolStream 桥接测试：真实 hello 包（service provider + echo stream）
+// 经 skillrun.OpenStream → tool.Stream 消息语义验证（v6 P3）。
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/veypi/vbox"
+	"github.com/veypi/vsh/commands"
+
+	tool "github.com/veypi/aic-pod/libs/hosts_tool"
+	"github.com/veypi/aic-pod/libs/skillrun"
+	vshglue "github.com/veypi/aic-pod/libs/vsh"
+)
+
+// newStreamTestRegistry 构造隔离 skillrun Registry（无沙箱；hello 包真实构建）。
+func newStreamTestRegistry(t *testing.T) *skillrun.Registry {
+	t.Helper()
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "hello")
+	binDir := filepath.Join(pkgDir, "cli", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "skill-packages", "hello", "cli", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "cli", "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(binDir, "hello-process")
+	if b, err := exec.Command("go", "build", "-o", out, filepath.Join("..", "..", "skill-packages", "hello", "provider", "process")).CombinedOutput(); err != nil {
+		t.Fatalf("build hello-process: %v\n%s", err, b)
+	}
+	outSvc := filepath.Join(binDir, "hello-service")
+	if b, err := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "skill-packages", "hello", "provider", "service")).CombinedOutput(); err != nil {
+		t.Fatalf("build hello-service: %v\n%s", err, b)
+	}
+	// macOS unix socket 104 字符上限：run 目录用短路径。
+	runDir, err := os.MkdirTemp("/tmp", "skr-host-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(runDir) })
+	reg := commands.NewRegistry()
+	m := vbox.NewManager(5 * time.Minute)
+	m.SetNoSandbox(true)
+	r, err := skillrun.New(skillrun.Deps{
+		SkillsDir: filepath.Join(root, "skills"),
+		RunDir:    runDir,
+		Manager:   m,
+		Workdir:   func(s string) string { return s },
+		Registry:  func() (*commands.Registry, error) { return reg, nil },
+		Tasks:     func() (*vshglue.TaskTable, error) { return vshglue.NewTaskTableWithCaps(8, 4), nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Install(pkgDir); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestSkillToolStreamEcho(t *testing.T) {
+	r := newStreamTestRegistry(t)
+	s, err := r.OpenStream(context.Background(), "hello", "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := newSkillToolStream(s)
+	defer st.Close()
+	ctx := context.Background()
+	// 消息边界保持：两条 Send = 两条 Recv（含二进制与 0 字节）
+	if err := st.Send(ctx, []byte("msg\x00one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Send(ctx, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	b1, err := st.Recv(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := st.Recv(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b1) != "msg\x00one" || string(b2) != "second" {
+		t.Fatalf("messages = %q, %q", b1, b2)
+	}
+}
+
+func TestSkillToolStreamCloseUnblocksRecv(t *testing.T) {
+	r := newStreamTestRegistry(t)
+	s, err := r.OpenStream(context.Background(), "hello", "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := newSkillToolStream(s)
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.Recv(context.Background())
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	st.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Recv after Close must return error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not unblock Recv")
+	}
+	// Close 幂等
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillToolStreamRecvCtxCancel(t *testing.T) {
+	r := newStreamTestRegistry(t)
+	s, err := r.OpenStream(context.Background(), "hello", "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := newSkillToolStream(s)
+	defer st.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := st.Recv(ctx); err == nil {
+		t.Fatal("Recv with no frames must honor ctx deadline")
+	}
+	// ctx 取消只放弃本次等待——流仍可续读
+	if err := st.Send(context.Background(), []byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.Recv(context.Background())
+	if err != nil || string(b) != "after" {
+		t.Fatalf("Recv after ctx cancel = %q, %v", b, err)
+	}
+}
+
+// buildBrowserPkg 装配 browser 源包（v6 P5：真实两个 provider 二进制）。
+func buildBrowserPkg(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "browser")
+	binDir := filepath.Join(pkgDir, "cli", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join("..", "..", "skill-packages", "browser")
+	manifest, err := os.ReadFile(filepath.Join(src, "cli", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "cli", "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{"browser": "process", "browser-service": "service"} {
+		out := filepath.Join(binDir, name)
+		if b, err := exec.Command("go", "build", "-o", out, filepath.Join(src, "provider", dir)).CombinedOutput(); err != nil {
+			t.Fatalf("build %s: %v\n%s", name, err, b)
+		}
+	}
+	return pkgDir
+}
+
+// TestOpenToolStreamFullNameEndpoint OpenToolStream 端点泛化解析（v6 P5）：
+// page.frames → browser 包全名流（端点名保留 v5 前端契约），stream.open 负载
+// 原样透传到 svc（不存在的页面 → svc not_found 错误经桥接回来）；未知端点
+// 显式失败。
+func TestOpenToolStreamFullNameEndpoint(t *testing.T) {
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true})
+	defer c.Close()
+	r := newStreamTestRegistry(t)
+	if _, err := r.Install(buildBrowserPkg(t)); err != nil {
+		t.Fatal(err)
+	}
+	c.skills = r
+	caller := tool.Caller{Subject: "owner", ConnectionID: "rtc:test", Origin: "sess", AllowStreams: true, ExpiresAt: time.Now().Add(time.Minute)}
+	ctx := context.Background()
+	st, err := c.OpenToolStream(ctx, caller, "page.frames", json.RawMessage(`{"page_id":"p_nope"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.Recv(ctx); err == nil || !strings.Contains(err.Error(), "not_found") {
+		t.Fatalf("expected not_found from browser svc, got %v", err)
+	}
+	if _, err := c.OpenToolStream(ctx, caller, "page.bogus", nil); err == nil || !strings.Contains(err.Error(), "Unknown stream endpoint") {
+		t.Fatalf("unknown endpoint: %v", err)
+	}
+}

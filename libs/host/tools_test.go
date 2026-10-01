@@ -15,7 +15,7 @@ import (
 // 验签（含 grant_approved 防篡改）、路由、nonce 去重、归属；RTC 与 NATS
 // 同一分发实现。
 func TestNatsToolsAuthentication(t *testing.T) {
-	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), BrowserStateDir: t.TempDir()})
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir()})
 	t.Cleanup(func() { _ = c.Close() })
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
 	route, _ := natswire.Subject(c.uid, c.hostID)

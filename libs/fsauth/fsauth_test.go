@@ -105,14 +105,14 @@ func TestDefaultTemporaryRootsRemainWritable(t *testing.T) {
 	assertGrades(t, p, filepath.Join(t.TempDir(), "file"), 1, 2)
 }
 
-// newTestPolicy 构造隔离 Policy（公共区/会话区指向测试根，不碰真实 $HOME/.aic）。
+// newTestPolicy 构造隔离 Policy（状态根/会话区指向测试根，不碰真实 $HOME/.aic）。
 // 直接设字段后必须 rebuildBaseRootsLocked（预计算基底，同 New/SetWorkDir 语义）。
 func newTestPolicy(t *testing.T, workDir string) *Policy {
 	t.Helper()
 	base := mkBase(t)
 	p := &Policy{
 		workDir:    canonical(workDir),
-		publicDir:  canonical(filepath.Join(base, ".aic")),
+		stateDir:   canonical(filepath.Join(base, ".aic")),
 		sessionDir: canonical(filepath.Join(base, ".aic", "sessions")),
 		grants:     map[string][]string{},
 	}
@@ -195,12 +195,12 @@ func TestDecideGrading(t *testing.T) {
 
 	// 白名单：work_dir
 	assertGrades(t, p, ws+"/code/x.go", 1, 2)
-	// 白名单：会话区（per-sid）；注意公共区白名单 = 整个 .aic（含 sessions/），
-	// 其他 sid 的会话目录同为 2 级（host 上 per-session 仅是组织约定，非权限边界）
+	// 白名单：会话区（per-sid）；其他 sid 的会话目录不可写——目录两根治理后
+	// .aic 整体退出写白名单，sessions/{sid} 由 WriteRootsFor 按会话单独授写。
 	assertGradesSid(t, p, "s1", p.sessionDir+"/s1/out.txt", 1, 2)
-	assertGradesSid(t, p, "s1", p.sessionDir+"/s2/out.txt", 1, 2)
-	// 白名单：公共区
-	assertGrades(t, p, p.publicDir+"/x.txt", 1, 2)
+	assertGradesSid(t, p, "s1", p.sessionDir+"/s2/out.txt", 1, 0)
+	// 设备状态根只读：.aic 不再是公共可写区（2026-10-01 目录两根治理）
+	assertGrades(t, p, p.stateDir+"/x.txt", 1, 0)
 	// 未匹配：1/0（默认可读，不可写）
 	assertGrades(t, p, base+"/elsewhere/f.txt", 1, 0)
 	// deny：/** 语义含根自身——连 ls 目录一并拒
@@ -326,7 +326,7 @@ func TestDenyDefaults(t *testing.T) {
 	}
 	// browser state 目录口径：json 与保存流程临时文件（含同等全量 cookie）一并命中，
 	p := newTestPolicy(t, "")
-	browserDir := mustExpand(t, "$HOME/.aic/.cache/browser")
+	browserDir := mustExpand(t, "$HOME/.aic/browser")
 	for _, path := range []string{
 		browserDir + "/browser.json",
 		browserDir + "/browser.json.inst3.cli-tmp",
@@ -341,7 +341,7 @@ func TestDenyDefaults(t *testing.T) {
 	if !p2.DenyHit(browserDir + "/x.json") {
 		t.Fatal("sanity: browser state dir deny must hit its own subtree")
 	}
-	if e, _ := expandVars("$HOME/.aic/.cache/browser/**"); matchPattern(canonicalPattern(e),
+	if e, _ := expandVars("$HOME/.aic/browser/**"); matchPattern(canonicalPattern(e),
 		canonical(mustExpand(t, "$HOME/.aic/sessions/s1/x.txt"))) {
 		t.Error("browser state dir deny must not shadow session files")
 	}
@@ -580,10 +580,13 @@ func TestWriteRootsFor(t *testing.T) {
 		}
 		return false
 	}
-	for _, want := range []string{ws, base + "/custom", base + "/granted", p.sessionDir + "/s1", p.publicDir} {
+	for _, want := range []string{ws, base + "/custom", base + "/granted", p.sessionDir + "/s1"} {
 		if !has(want) {
 			t.Errorf("WriteRootsFor missing %s: %v", want, roots)
 		}
+	}
+	if has(p.stateDir) {
+		t.Error("WriteRootsFor must not grant device state root ($HOME/.aic read-only)")
 	}
 	for _, r := range p.WriteRootsFor("s2") {
 		if r == canonical(base+"/granted") {

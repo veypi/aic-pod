@@ -1,0 +1,8 @@
+{
+  "name": "browser-skill-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --max-old-space-size=4096 --test"
+  }
+}

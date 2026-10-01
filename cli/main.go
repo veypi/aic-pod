@@ -4,7 +4,7 @@
 // `bind` / `unbind`（绑定凭证走 stdin）、`wake`（唤醒桌宠/pet 页录音，仅 desktop 形态，
 // 经 Electron 本地指令通道转发 pet:cmd 事件，效果等同 pet 页左键单击）。
 // 临时参数走 flag（AutoRegister），永久生效用户直接改配置文件
-// （UserConfigDir/aic/config.yaml，cli/desktop 共享，cfg 包）。
+// （$HOME/.aic/config.yaml，cli/desktop 共享，cfg 包）。
 //
 // 配置解析由 vigo/flags 承担（AutoRegister 自动注册 flag + env，只需配置结构体）：
 //

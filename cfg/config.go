@@ -2,7 +2,7 @@
 // Distributed under terms of the MIT license.
 
 // Package cfg 是 aic-pod 的配置中心（cli/desktop 共用同一份配置）：
-// Options 结构体 + Global 全局有效配置，落盘 UserConfigDir/aic/config.yaml。
+// Options 结构体 + Global 全局有效配置，落盘 $HOME/.aic/config.yaml。
 package cfg
 
 import (
@@ -41,7 +41,8 @@ var DeviceType = "cli"
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
 //
-// 落盘位置：os.UserConfigDir()/aic/config.yaml（flags.DumpCfg，原子写），
+// 落盘位置：$HOME/.aic/config.yaml（flags.DumpCfg，原子写；Path/StateDir/
+// LogPath 同根，见 design.md 目录契约），
 // cli 与 desktop 读写同一份——任一端的修改（编辑文件 / 页面绑定）另一端启动即生效。
 //
 // 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
@@ -53,10 +54,8 @@ type Options struct {
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
-	// Browser viewport applies to newly created Chrome pages, independently of display layout.
-	BrowserPath   string `json:"browser_path" yaml:"browser_path" desc:"Chrome executable (independent of Electron)"`
-	BrowserWidth  int    `json:"browser_width" yaml:"browser_width" default:"1280" desc:"browser viewport width in pixels (320-4096)"`
-	BrowserHeight int    `json:"browser_height" yaml:"browser_height" default:"720" desc:"browser viewport height in pixels (320-4096)"`
+	// browser 自 v6 P5 起是 skill 包（skill-packages/browser）：Chrome 路径/视口/
+	// 状态目录由包内默认 + AIC_BROWSER_* env 覆盖，不再是 pod 配置项。
 	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
@@ -130,12 +129,6 @@ func (o *Options) Normalize() {
 		o.ExecTimeout = "30m"
 	}
 	o.HomePath = o.NormalizedHomePath()
-	if o.BrowserWidth < 320 || o.BrowserWidth > 4096 {
-		o.BrowserWidth = 1280
-	}
-	if o.BrowserHeight < 320 || o.BrowserHeight > 4096 {
-		o.BrowserHeight = 720
-	}
 	// 类型解析由 flags 完成；这里只处理设备权限规则的业务语义。
 	for _, mode := range []struct {
 		value    *string
@@ -211,49 +204,36 @@ func (o *Options) HomeURL() string {
 	return u.String()
 }
 
-// Path 返回配置文件路径：UserConfigDir/aic/config.yaml。
+// Path 返回配置文件路径：$HOME/.aic/config.yaml。
 func Path() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := StateDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "aic", "config.yaml"), nil
+	return filepath.Join(dir, "config.yaml"), nil
 }
 
-// StateDir 返回工具状态根目录：UserConfigDir/aic（与 config.yaml/log 同根）。
+// StateDir 返回设备状态根目录：$HOME/.aic（三平台统一，2026-10-01 目录两根
+// 治理：弃 os.UserConfigDir 平台分叉根）。config.yaml / aic.log / state.json /
+// browser / sessions / skills 等一切 pod 自持状态同根；对工具会话只读（不进
+// 沙箱写白名单，config.yaml 另在 deny 表），仅 sessions/{sid} 按会话授写。
 // 工具自身的持久状态（browser 数据目录等，不暴露给 AI）一律放这里，
 // 禁止落用户工作区（workdir 可能是 git 仓库）。
 func StateDir() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "aic"), nil
-}
-
-// PublicDir 返回公共可写区根目录：$HOME/.aic（用户家目录下，首次调用时创建，
-// 0700）。两类使用方共享同一事实源：
-//   - exec 进程沙箱 workspace-write 白名单（§5.10）：沙箱内命令可写公共区；
-//   - 工具状态保存（browser state save 等）：AI 与工具共享的跨会话保存区。
-func PublicDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	p := filepath.Join(home, ".aic")
-	if err := os.MkdirAll(p, 0o700); err != nil {
-		return "", err
-	}
-	return p, nil
+	return filepath.Join(home, ".aic"), nil
 }
 
-// LogPath 返回日志文件路径：UserConfigDir/aic/aic.log（get_log 的数据源）。
+// LogPath 返回日志文件路径：$HOME/.aic/aic.log（get_log 的数据源）。
 func LogPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := StateDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "aic", "aic.log"), nil
+	return filepath.Join(dir, "aic.log"), nil
 }
 
 // LogWriter 返回日志文件 writer（console 格式无色，lumberjack 滚动 16MB×3）。

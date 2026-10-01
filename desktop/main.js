@@ -18,7 +18,6 @@
 // local:api 的设置面分支两类 frame 都可用，但只落盘 config.yaml（无 HTTP、无端口、无 code）。
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol } = require('electron')
 const { spawn } = require('child_process')
-const { browserEnv } = require('./browser-path.cjs')
 const { waitForStartup } = require('./backend-startup.cjs')
 const { composeLocalStatus } = require('./host-state.cjs')
 const fs = require('fs')
@@ -225,12 +224,30 @@ function cuaEnv() {
   return fs.existsSync(bin) ? { CUA_DRIVER_PATH: bin } : {}
 }
 
+// ---- 内置 Chrome 目录提示（vendor/browser → resources/browser） ----
+// cjs 只看目录存在性；平台/架构可执行文件解析与系统探测全在 Go provider
+// （chrome.Resolve 候选链：AIC_BROWSER_PATH > AIC_BROWSER_BUNDLE_DIR > 系统候选）。
+function browserBundleEnv() {
+  const dir = app.isPackaged
+    ? path.join(process.resourcesPath, 'browser')
+    : path.join(__dirname, 'vendor', 'browser')
+  return fs.existsSync(dir) ? { AIC_BROWSER_BUNDLE_DIR: dir } : {}
+}
+
+// ---- builtin skill 预装（browser.zip 随包进 resources，首跑装到 ~/.aic/skills） ----
+// 仅 packaged 注入；dev 形态 browser 包经 skill install 本目录手动安装。
+function builtinSkillsEnv() {
+  if (!app.isPackaged) return {}
+  const zip = path.join(process.resourcesPath, 'browser.zip')
+  return fs.existsSync(zip) ? { AIC_BUILTIN_SKILLS: zip } : {}
+}
+
 // ---- 后端子进程：启动 / 停止 / 重启（无端口握手，2026-09-22） ----
 async function spawnBackend() {
   backend = spawn(backendBin, [], {
     // Browser automation runs in Go with a separate Chrome executable.
     // cuaEnv()：内置 cua-driver 路径注入（缺失时空对象，回落系统探测）。
-    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv({packaged: app.isPackaged, resourcesPath: process.resourcesPath, directory: __dirname}), ...cuaEnv() },
+    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...builtinSkillsEnv(), ...cuaEnv() },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
@@ -337,11 +354,11 @@ async function unbindCredential() {
   await runBackendCmd(['unbind'])
 }
 
-// 后端连接状态：读 {appData}/aic/state.json（Go 侧在连接成功 / 断开 / 认证
+// 后端连接状态：读 $HOME/.aic/state.json（Go 侧在连接成功 / 断开 / 认证
 // 失败 / 重试失败时原子写；pid 核对防陈旧文件误读）。
 async function readState() {
   try {
-    const raw = await fs.promises.readFile(path.join(app.getPath('appData'), 'aic', 'state.json'), 'utf8')
+    const raw = await fs.promises.readFile(path.join(configDir(), 'state.json'), 'utf8')
     return JSON.parse(raw)
   } catch (e) {
     return null
@@ -364,10 +381,10 @@ async function localStatus() {
   return out
 }
 
-// 日志尾部（Go logv 写 UserConfigDir/aic/aic.log；截断起点落在行中间时丢弃首段）
+// 日志尾部（Go logv 写 $HOME/.aic/aic.log；截断起点落在行中间时丢弃首段）
 const logReadMax = 256 << 10
 async function readLogTail() {
-  const p = path.join(app.getPath('appData'), 'aic', 'aic.log')
+  const p = path.join(configDir(), 'aic.log')
   let fh
   try { fh = await fs.promises.open(p, 'r') } catch (e) {
     if (e.code === 'ENOENT') return { log: '' }
@@ -467,13 +484,13 @@ function isSettingsFrame(event) {
 }
 
 // ---- 本地指令通道（aic wake 子指令 → pet 组件事件）----
-// unix socket：{appData}/aic/desktop.sock（0600，仅本机同用户进程可连；
-// 路径与 Go 端 os.UserConfigDir()/aic 同位置）。协议 = 换行分隔 JSON 请求/应答。
+// unix socket：$HOME/.aic/desktop.sock（0600，仅本机同用户进程可连；
+// 路径与 Go 端 cfg.StateDir() 同位置）。协议 = 换行分隔 JSON 请求/应答。
 // windows 下 Node 走命名管道、与 Go 端拨号不兼容，暂不开启。
 let cmdServer = null
 
 function cmdSockPath() {
-  return path.join(app.getPath('appData'), 'aic', 'desktop.sock')
+  return path.join(configDir(), 'desktop.sock')
 }
 
 function startCmdServer() {
@@ -836,12 +853,11 @@ function createTray() {
   tray.on('click', () => focusMain())
 }
 
-// Go 后端配置根目录（os.UserConfigDir()/aic：config.yaml / aic.log / browser 状态同根）。
-// Electron 侧按平台推导同一路径，供托盘「打开配置目录」用系统文件管理器打开。
+// Go 后端配置根目录（$HOME/.aic：config.yaml / aic.log / state.json / browser
+// 状态同根，三平台统一；2026-10-01 目录两根治理弃 UserConfigDir 平台分叉根）。
+// Electron 侧取同一路径，供托盘「打开配置目录」用系统文件管理器打开。
 function configDir() {
-  if (process.platform === 'darwin') return path.join(app.getPath('home'), 'Library', 'Application Support', 'aic')
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(app.getPath('home'), 'AppData', 'Roaming'), 'aic')
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(app.getPath('home'), '.config'), 'aic')
+  return path.join(app.getPath('home'), '.aic')
 }
 
 function openConfigDir() {

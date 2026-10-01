@@ -6,9 +6,6 @@ directories:
   buildResources: assets
 files:
   - main.js
-  - browser-path.cjs
-  - browser-bundle.cjs
-  - browser.json
   - backend-startup.cjs
   - host-state.cjs
   - loading.html
@@ -26,6 +23,9 @@ files:
 # cua-driver 发行物（scripts/sync-cua.mjs 同步，固定版本 + sha256 校验）→ resources/cua/
 # 运行时 main.js 注入 CUA_DRIVER_PATH / CUA_DRIVER_APP；vendor 未同步时该平台不带 cua
 # （后端回落系统探测，用户自装 cua-driver 仍可用）
+# browser skill 包（make browser-zip → skill-packages/browser/build.sh 产出）→
+# resources/browser.zip，首跑 builtin 预装（AIC_BUILTIN_SKILLS）；Chrome for Testing
+# （vendor/browser）→ resources/browser，main.js 注入 AIC_BROWSER_BUNDLE_DIR
 extraResources:
   - from: bin
     to: backend
@@ -35,6 +35,8 @@ extraResources:
     to: cua
   - from: vendor/browser/${platform}-${arch}
     to: browser/${platform}-${arch}
+  - from: ../skill-packages/browser/browser.zip
+    to: browser.zip
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg

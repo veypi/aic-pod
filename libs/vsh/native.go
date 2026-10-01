@@ -21,14 +21,14 @@ import (
 // （WriteRoots/DenyPaths/FSRules/…），免沙箱只来自可信 ctx 的
 // NoSandbox（不再读脚本可修改的 env）。
 type NativePolicy struct {
-	WriteRoots   []string // 追加可写根（cfg fs_allow + grant fs）
-	DenyPaths    []string // 预展开 deny 模式
-	WritePaths   []string // 可写 glob
-	FSRules      *vbox.FSRuleSet
-	FsOpen       bool
-	NetOpen      bool
-	NetDeny      []netauth.Entry
-	NetAllow     []netauth.Entry
+	WriteRoots []string // 追加可写根（cfg fs_allow + grant fs）
+	DenyPaths  []string // 预展开 deny 模式
+	WritePaths []string // 可写 glob
+	FSRules    *vbox.FSRuleSet
+	FsOpen     bool
+	NetOpen    bool
+	NetDeny    []netauth.Entry
+	NetAllow   []netauth.Entry
 	// NoSandbox 免沙箱标记（显式 nosandbox，发送前审批下发）。
 	NoSandbox bool
 }
@@ -174,17 +174,17 @@ func (n *NativeRegistry) command(name string) commands.Command {
 			pol = n.deps.Policy(ctx, workdir, name)
 		}
 		code, err := n.deps.Manager.RunProcess(ctx, vbox.StartOptions{
-			Workdir:      workdir,
-			Exec:         append([]string{bin}, inv.Args...),
-			NoSandbox:    pol.NoSandbox,
-			WriteRoots:   pol.WriteRoots,
-			DenyPaths:    pol.DenyPaths,
-			FSRules:      pol.FSRules,
-			WritePaths:   pol.WritePaths,
-			FsOpen:       pol.FsOpen,
-			NetOpen:      pol.NetOpen,
-			NetDeny:      toVboxEntries(pol.NetDeny),
-			NetAllow:     toVboxEntries(pol.NetAllow),
+			Workdir:    workdir,
+			Exec:       append([]string{bin}, inv.Args...),
+			NoSandbox:  pol.NoSandbox,
+			WriteRoots: pol.WriteRoots,
+			DenyPaths:  pol.DenyPaths,
+			FSRules:    pol.FSRules,
+			WritePaths: pol.WritePaths,
+			FsOpen:     pol.FsOpen,
+			NetOpen:    pol.NetOpen,
+			NetDeny:    ToVboxEntries(pol.NetDeny),
+			NetAllow:   ToVboxEntries(pol.NetAllow),
 		}, inv.Stdin, inv.Stdout, inv.Stderr)
 		if err != nil {
 			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", name, err)
@@ -222,17 +222,17 @@ func (n *NativeRegistry) commandPath(filePath string) commands.Command {
 			pol = n.deps.Policy(ctx, workdir, name)
 		}
 		code, err := n.deps.Manager.RunProcess(ctx, vbox.StartOptions{
-			Workdir:      workdir,
-			Exec:         append([]string{bin}, inv.Args...),
-			NoSandbox:    pol.NoSandbox,
-			WriteRoots:   pol.WriteRoots,
-			DenyPaths:    pol.DenyPaths,
-			FSRules:      pol.FSRules,
-			WritePaths:   pol.WritePaths,
-			FsOpen:       pol.FsOpen,
-			NetOpen:      pol.NetOpen,
-			NetDeny:      toVboxEntries(pol.NetDeny),
-			NetAllow:     toVboxEntries(pol.NetAllow),
+			Workdir:    workdir,
+			Exec:       append([]string{bin}, inv.Args...),
+			NoSandbox:  pol.NoSandbox,
+			WriteRoots: pol.WriteRoots,
+			DenyPaths:  pol.DenyPaths,
+			FSRules:    pol.FSRules,
+			WritePaths: pol.WritePaths,
+			FsOpen:     pol.FsOpen,
+			NetOpen:    pol.NetOpen,
+			NetDeny:    ToVboxEntries(pol.NetDeny),
+			NetAllow:   ToVboxEntries(pol.NetAllow),
 		}, inv.Stdin, inv.Stdout, inv.Stderr)
 		if err != nil {
 			return commands.Exitf(inv, exitCodeOr(code, 1), "%s: %s", filePath, err)
@@ -246,9 +246,9 @@ func (n *NativeRegistry) commandPath(filePath string) commands.Command {
 
 // exitCodeOr 保持非零退出码，零值回退 fallback。
 
-// toVboxEntries netauth 目标快照转 vbox 形态（同构 {Host, Port}——
+// ToVboxEntries netauth 目标快照转 vbox 形态（同构 {Host, Port}——
 // 沙箱输入统一为 vbox.Entry）。
-func toVboxEntries(es []netauth.Entry) []vbox.Entry {
+func ToVboxEntries(es []netauth.Entry) []vbox.Entry {
 	if len(es) == 0 {
 		return nil
 	}

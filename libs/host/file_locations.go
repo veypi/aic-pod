@@ -3,6 +3,7 @@ package host
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -13,9 +14,13 @@ import (
 
 // Mount filesystem roots, not WorkDir. WorkDir is only the initial directory.
 // Internal mount IDs never replace full native paths in public /fs URLs.
-func deviceFileRoots(workdir string) ([]hostfs.Root, fsp.Path, error) {
+//
+// 返回 home（fs home = WorkDir，工作区语义）与 osHome（OS 用户主目录，
+// ~/.aic 等运行数据定位用——两者在 pod 上是不同目录，不可混用）。osHome
+// 未落在任一挂载根内时返回零值（fs os_home 方法报不可用）。
+func deviceFileRoots(workdir string) ([]hostfs.Root, fsp.Path, fsp.Path, error) {
 	roots := make([]hostfs.Root, 0)
-	var home fsp.Path
+	var home, osHome fsp.Path
 	for _, path := range filesystemRoots() {
 		if runtime.GOOS == "windows" && path == "/" {
 			continue
@@ -35,11 +40,27 @@ func deviceFileRoots(workdir string) ([]hostfs.Root, fsp.Path, error) {
 				home.Segments = strings.Split(filepath.ToSlash(rel), "/")
 			}
 		}
+		if dir, err := os.UserHomeDir(); err == nil {
+			if rel, err := filepath.Rel(path, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				osHome = fsp.Path{RootID: id, Segments: []string{}}
+				if rel != "." {
+					osHome.Segments = strings.Split(filepath.ToSlash(rel), "/")
+				}
+			}
+		}
 	}
 	if home.RootID == "" {
-		return nil, home, fmt.Errorf("workspace has no filesystem volume")
+		return nil, home, osHome, fmt.Errorf("workspace has no filesystem volume")
 	}
-	return roots, home, nil
+	return roots, home, osHome, nil
+}
+
+// osHomePtr 零值 osHome（未落在任一挂载根内）→ nil（fs os_home 报不可用）。
+func osHomePtr(p fsp.Path) *fsp.Path {
+	if p.RootID == "" {
+		return nil
+	}
+	return &p
 }
 
 // Public file URLs retain full device paths, including files outside WorkDir.

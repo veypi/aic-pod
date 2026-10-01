@@ -35,9 +35,9 @@ type UFSAdapterConfig struct {
 	// Rules 规则表快照源：每次 IO 取当次值（grant temp 动态行即时生效）。
 	// nil = 不挂规则表（仅测试）。
 	Rules func() vbox.FSRuleSet
-	// JailRoot 用户根 jail（cloud = /u/{uid}）：代码硬约束，规则表管不到
-	// 界外——界外路径即使写入规则行也不生效。空 = 不启用（host）。
-	JailRoot string
+	// JailRoots jail 根集（cloud = /u/{uid} + /skill）：代码硬约束，规则表管不到
+	// 界外——界外路径即使写入规则行也不生效。空 = 不启用（host）。cwd = 首根。
+	JailRoots []string
 	// MemPrefixes 内存层前缀集（cloud = /bin /usr/bin /tmp /etc /dev /proc）：
 	// per-session 内存层，用完即弃，UFS 零污染（红线）。
 	MemPrefixes []string
@@ -50,7 +50,7 @@ type UFSAdapterConfig struct {
 type ufsAdapter struct {
 	backing   ufs.FS
 	rules     func() vbox.FSRuleSet
-	jail      string
+	jails     []string
 	mem       *gbfs.MemoryFS
 	memPrefix []string
 	mu        sync.Mutex
@@ -65,13 +65,17 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	a := &ufsAdapter{
 		backing:   cfg.Backing,
 		rules:     cfg.Rules,
-		jail:      strings.TrimSuffix(cfg.JailRoot, "/"),
 		mem:       gbfs.NewMemory(),
 		memPrefix: cfg.MemPrefixes,
 		cwd:       "/",
 	}
-	if a.jail != "" {
-		a.cwd = a.jail
+	for _, j := range cfg.JailRoots {
+		if j = strings.TrimSuffix(j, "/"); j != "" {
+			a.jails = append(a.jails, j)
+		}
+	}
+	if len(a.jails) > 0 {
+		a.cwd = a.jails[0]
 	}
 	for name, data := range cfg.SeedMem {
 		f, err := a.mem.OpenFile(context.Background(), gbfs.Clean(name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
@@ -89,8 +93,10 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 
 // CloudFSConfig cloud 会话文件系统参数。
 type CloudFSConfig struct {
-	// UserRoot = /u/{uid}（HOME；jail 硬约束根）。
+	// UserRoot = /u/{uid}（HOME；jail 首根=cwd）。
 	UserRoot string
+	// JailExtra 额外 jail 根（v6.1 = ["/skill"]：skill 包与云盘同层进执行面）。
+	JailExtra []string
 	// Backing UFS 直通（调用方已包 QuotaFS）。
 	Backing ufs.FS
 	// Rules vbox 规则表快照源（行序：temp → 便利根 rw 会话目录 → ro 行；
@@ -131,7 +137,7 @@ func NewCloudFS(cfg CloudFSConfig) (gbfs.FileSystem, error) {
 	return NewUFSAdapter(UFSAdapterConfig{
 		Backing:     cfg.Backing,
 		Rules:       cfg.Rules,
-		JailRoot:    cfg.UserRoot,
+		JailRoots:   append([]string{cfg.UserRoot}, cfg.JailExtra...),
 		MemPrefixes: CloudMemPrefixes,
 		SeedMem:     cfg.Stubs,
 	})
@@ -228,8 +234,8 @@ func fileOpName(op vbox.FileOp) string {
 // gate 进程内路径权威：jail 硬约束 → vbox 规则表（首命中生效）。
 // noFollow = unlink/rename 语义（作用于链接本身，不跟随末段）。
 func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
-	if a.jail != "" && abs != a.jail && !strings.HasPrefix(abs, a.jail+"/") {
-		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, a.jail)}
+	if !a.inJail(abs) {
+		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
 	}
 	if a.rules == nil {
 		return nil
@@ -253,13 +259,31 @@ func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 // 泄露内容）；Open/ReadDir/OpenFile 仍走 gate 严格判定（ReadDir("/") 会泄露
 // 用户列表，不放行）。
 func (a *ufsAdapter) gateMeta(abs string) error {
-	if a.jail != "" && abs != a.jail && !strings.HasPrefix(abs, a.jail+"/") {
-		if strings.HasPrefix(a.jail, abs+"/") || abs == "/" {
-			return nil // jail 根的祖先：元数据放行
+	if !a.inJail(abs) {
+		for _, j := range a.jails {
+			if strings.HasPrefix(j, abs+"/") {
+				return nil // 某 jail 根的祖先：元数据放行
+			}
 		}
-		return &stdfs.PathError{Op: "read", Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, a.jail)}
+		if abs == "/" {
+			return nil
+		}
+		return &stdfs.PathError{Op: "read", Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
 	}
 	return a.gate(abs, vbox.OpRead, false)
+}
+
+// inJail 报告绝对路径是否落在任一 jail 根之下（无 jail = 全放行，host 形态）。
+func (a *ufsAdapter) inJail(abs string) bool {
+	if len(a.jails) == 0 {
+		return true
+	}
+	for _, j := range a.jails {
+		if abs == j || strings.HasPrefix(abs, j+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // --- gbfs.FileSystem 实现 ---

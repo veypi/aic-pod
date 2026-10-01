@@ -26,7 +26,7 @@ type Policy struct {
 
 	workDir    string // 工作区（cfg work_dir；空 = 无）
 	sessionDir string // 会话区根（$HOME/.aic/sessions）
-	publicDir  string // 公共区（$HOME/.aic）
+	stateDir   string // 设备状态根（$HOME/.aic；只读，不进写白名单）
 	openMode   bool   // fs_policy=open：写除 deny 行外全放（2 级）
 	rules      []fsRule
 	grants     map[string][]string
@@ -34,7 +34,7 @@ type Policy struct {
 	// baseRoots/decideCaches 预计算（重建点 = New/SetWorkDir/Reconcile，锁内）：
 	// Decide 热路径零 syscall 的前提。派生自上述字段 + 平台缓存候选，禁止绕过
 	// rebuildBaseRootsLocked 直接赋值。
-	baseRoots    []string // workDir + 系统临时目录 + publicDir（全 canonical）
+	baseRoots    []string // workDir + 系统临时目录（全 canonical）
 	decideCaches []string // 工具链缓存目录候选（cacheRootDirs，无存在性探测）
 }
 
@@ -81,16 +81,16 @@ type fsRule struct {
 	glob bool     // rw 行且为通配模式：pats 即沙箱写 glob
 }
 
-// New 创建 Policy：会话区/公共区首次调用创建（best-effort，失败不阻断——
+// New 创建 Policy：会话区目录首次调用创建（best-effort，失败不阻断——
 // 白名单宁缺毋滥）；workDir 经 SetWorkDir 同步（cfg 缺省为空 = 无工作区）。
 func New() *Policy {
 	p := &Policy{grants: map[string][]string{}}
-	if dir, err := cfg.PublicDir(); err == nil {
-		p.publicDir = canonical(dir)
+	if dir, err := cfg.StateDir(); err == nil {
+		p.stateDir = canonical(dir)
 		// sessionDir 为 canonical 形（win = /c/ 规范形）：禁止 filepath.Join
 		// （win 上 Join 回填反斜杠，产出 \c\… 毒形态——进 WriteRootsFor 后
 		// win 沙箱 grantDirWrite 必失败，原生命令全灭）。
-		p.sessionDir = p.publicDir + "/sessions"
+		p.sessionDir = p.stateDir + "/sessions"
 		_ = os.MkdirAll(proto.HostPathToOS(p.sessionDir), 0o700)
 	}
 	p.mu.Lock()
@@ -134,9 +134,6 @@ func (p *Policy) rebuildBaseRootsLocked() {
 		roots = append(roots, dualForms(t)...)
 	}
 	roots = append(roots, dualList(tempRoots())...)
-	if p.publicDir != "" {
-		roots = append(roots, dualForms(p.publicDir)...)
-	}
 	p.baseRoots = dedupClean(roots)
 	// Decide 侧缓存目录不做存在性探测：前缀匹配对不存在目录天然生效，白名单
 	// 意图跟目录身份走（未装 rust 时写 ~/.cargo 也是白名单意图内的工具链缓存）。

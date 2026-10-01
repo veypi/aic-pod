@@ -20,9 +20,6 @@ import (
 // View 是设置面读视图（含 key——设置窗口需显示当前凭证；仅本机同用户进程可见）。
 type View struct {
 	Version       string   `json:"version"`
-	BrowserPath   string   `json:"browser_path"`
-	BrowserWidth  int      `json:"browser_width"`
-	BrowserHeight int      `json:"browser_height"`
 	Host          string   `json:"host"`
 	Key           string   `json:"key"`
 	WorkDir       string   `json:"work_dir"`
@@ -48,24 +45,22 @@ func Snapshot() *View {
 	return &View{Version: cfg.Version,
 		Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
 		HomePath:    o.NormalizedHomePath(),
-		BrowserPath: o.BrowserPath, BrowserWidth: o.BrowserWidth, BrowserHeight: o.BrowserHeight,
 		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
 		FsPolicy: a.FsPolicy, FsRules: a.FsRules,
 		NetPolicy: a.NetPolicy, NetRules: a.NetRules,
 		SshPolicy: a.SshPolicy, SshRules: a.SshRules}
 }
 
-// Update 是设置面写请求白名单（host/work_dir/exec_timeout/home_path/browser_*
+// Update 是设置面写请求白名单（host/work_dir/exec_timeout/home_path
 // 与授权键可写；key 不走这里——只走 bind/unbind 子命令）。
+// browser_* 自 v6 P5 起随拆包删除（browser 是 skill 包，配置 = 包内默认 +
+// AIC_BROWSER_* env）。
 // 隐藏配置（no_sandbox 等）不可经此修改，只能改配置文件。
 // 授权键：exec 保持 policy/deny/allow；fs/net/ssh 为 policy + 有序规则表 rules
 // （permanent grant 直接追加在 rules 表尾，无独立键）。policy 空串 = 不改；
 // 列表 nil = 不改（保持现状），非 nil（含空数组）= 整体替换——空数组即清空，
 // 也是撤销 grant --permanent 条目的出口（删行即撤销）。
 type Update struct {
-	BrowserPath   *string   `json:"browser_path"`
-	BrowserWidth  *int      `json:"browser_width"`
-	BrowserHeight *int      `json:"browser_height"`
 	Host          string    `json:"host"`
 	WorkDir       string    `json:"work_dir"`
 	ExecTimeout   string    `json:"exec_timeout"`
@@ -93,11 +88,6 @@ func validPolicy(s string) bool {
 func (u *Update) Apply() error {
 	unlock := cfg.LockUpdate()
 	defer unlock()
-	for name, size := range map[string]*int{"browser_width": u.BrowserWidth, "browser_height": u.BrowserHeight} {
-		if size != nil && (*size < 320 || *size > 4096) {
-			return &InvalidArg{Field: name, Reason: "must be between 320 and 4096"}
-		}
-	}
 	if s := strings.TrimSpace(u.ExecTimeout); s != "" {
 		if _, err := time.ParseDuration(s); err != nil {
 			return &InvalidArg{Field: "exec_timeout", Reason: err.Error()}
@@ -142,15 +132,6 @@ func (u *Update) Apply() error {
 			return &InvalidArg{Field: "work_dir", Reason: "not a directory: " + abs}
 		}
 		wd = abs
-	}
-	if u.BrowserPath != nil {
-		fileCfg.BrowserPath = strings.TrimSpace(*u.BrowserPath)
-	}
-	if u.BrowserWidth != nil {
-		fileCfg.BrowserWidth = *u.BrowserWidth
-	}
-	if u.BrowserHeight != nil {
-		fileCfg.BrowserHeight = *u.BrowserHeight
 	}
 	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(u.ExecTimeout)

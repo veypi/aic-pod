@@ -11,9 +11,11 @@ Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
  │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
  │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
- ├─ browser-path.cjs：只注入 AIC_BROWSER_DEFAULT_PATH（独立 Chrome）
- │    Go libs/browser 经 pipe 自管 Chrome、profile、page、下载和输入租约
- │    browser/cua 经 hosts_tool 一次声明，由 hosts_rtc/1 与 hosts_nats/1 调用
+ ├─ browser：skill 包（skill-packages/browser）——main.js 只注入两个目录级 env：
+ │    AIC_BROWSER_BUNDLE_DIR（vendor/browser → resources/browser，Chrome for Testing
+ │    探测兕底；可执行文件解析与系统候选全在 Go provider chrome.Resolve）
+ │    AIC_BUILTIN_SKILLS（packaged=resources/browser.zip，首跑 builtin 预装到
+ │    ~/.aic/skills；幂等，失败只记日志不阻断启动）
  ├─ cua：Go libs/cua 自管 cua-driver MCP、窗口与快照
  │    scripts/sync-cua.mjs 将固定版本发行物同步到 vendor/cua → resources/cua
  │    main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP

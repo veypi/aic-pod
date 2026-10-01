@@ -2,8 +2,9 @@
 // NATS 连接与认证、能力上报、心跳、exec/fs/cancel 分发、执行管理器装配。
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
-// 内建 90 + jq + 平台命令（commands/bg/grant）与 browser/cua 由引擎 Registry
-// 收口，原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd 扩充）；
+// 内建 90 + jq + 平台命令（commands/bg/grant）与 cua 由引擎 Registry
+// 收口，browser 自 v6 P5 起是已装 skill 包（skill-packages/browser）不再是
+// 内建；原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd 扩充）；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
 // 且全在发送前；pod 不重新分类审批，只在执行点看 rules。
 package host
@@ -20,9 +21,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/browser"
 	"github.com/veypi/aic-pod/libs/cua"
-	"github.com/veypi/vbox"
 	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
@@ -30,6 +29,8 @@ import (
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
+	"github.com/veypi/aic-pod/libs/skillrun"
+	"github.com/veypi/vbox"
 
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
@@ -38,8 +39,6 @@ import (
 
 // Options 客户端配置。
 type Options struct {
-	BrowserPath, BrowserStateDir string
-	BrowserWidth, BrowserHeight  int
 	Transfers                    hostfs.TransferConfig
 	Host                         string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
 	Key                          string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
@@ -56,8 +55,8 @@ type Options struct {
 // Client 是 host agent 客户端。
 type Client struct {
 	sessionRoot string
-	browser     *browser.Service
 	cua         *cua.Service
+	skills      *skillrun.Registry // skill 包注册表（v6；包命令生命周期权威）
 
 	execMu      sync.Mutex
 	execHandles map[string]*execHandleEntry // cancel(request_id) 登记表（前台执行）
@@ -77,11 +76,11 @@ type Client struct {
 	uid             string
 	credVer         uint64
 	replay          *replayCache
-	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
-	policy          *fsauth.Policy      // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
-	vsh             vshState            // vsh 引擎装配态（script 执行，惰性构建）
-	netPol          *netauth.Policy     // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol          *netauth.Policy     // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	procs           *vbox.Manager   // exec 子进程统一托管（§5.8/§5.9）
+	policy          *fsauth.Policy  // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	vsh             vshState        // vsh 引擎装配态（script 执行，惰性构建）
+	netPol          *netauth.Policy // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol          *netauth.Policy // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
 	rtcMu           sync.RWMutex
 	access          *hostauth.Access
 	files           *hostfs.FS
@@ -126,13 +125,9 @@ func New(opts Options) *Client {
 	procs := vbox.NewManager(opts.ExecTimeout)
 	procs.SetNoSandbox(opts.NoSandbox)
 	procs.SetLogf(logf)
-	// vbox 沙箱可写根注入（vbox 不自持配置）：公共区 + 依赖缓存目录。
-	vbox.PublicRootsFn = func() []string {
-		if p, err := cfg.PublicDir(); err == nil {
-			return []string{p}
-		}
-		return nil
-	}
+	// vbox 沙箱可写根注入（vbox 不自持配置）：依赖缓存目录。设备状态根
+	// （$HOME/.aic）不是公共可写区，不注入 PublicRootsFn——沙箱可写面 =
+	// workDir + 系统临时目录 + 本会话便利根（fsauth 派生）。
 	vbox.CacheRootsFn = fsauth.CacheRoots
 	policy := fsauth.New()
 	policy.SetWorkDir(opts.WorkDir)
@@ -154,11 +149,11 @@ func New(opts Options) *Client {
 		_, _, c.kTool, _ = proto.DeriveKeys(parts[2], parts[0])
 		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
 	}
-	// 会话区根 = {PublicDir}/sessions：与 fsauth 会话便利根、vshStubRoot 兜底
+	// 会话区根 = {StateDir}/sessions：与 fsauth 会话便利根、vshStubRoot 兜底
 	// 同路径（生产此前从不赋值 → sessionWorkDir 退 Temp 兜底，「会话区」分裂
 	// 为两个概念；win 沙箱对 fsauth 会话根行 grantDirWrite 因目录从未存在而
 	// fail-closed）。ensureSessionWorkDir 自此创建真实目录，两侧归一。
-	if dir, err := cfg.PublicDir(); err == nil {
+	if dir, err := cfg.StateDir(); err == nil {
 		c.sessionRoot = filepath.Join(dir, "sessions")
 	}
 	c.initTools()
@@ -294,9 +289,6 @@ func (c *Client) Close() error {
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = c.procs.Close(shutdown)
 	cancelRuns()
-	if c.browser != nil {
-		_ = c.browser.Close()
-	}
 	if c.cua != nil {
 		_ = c.cua.Close()
 	}
@@ -348,15 +340,12 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	c.opts = opts
 	c.optsMu.Unlock()
 	if c.files != nil {
-		_, home, err := deviceFileRoots(opts.WorkDir)
+		_, home, osHome, err := deviceFileRoots(opts.WorkDir)
 		if err != nil {
 			return err
 		}
-		c.files.Configure(home, opts.Transfers.ProxyUploadBytes)
+		c.files.Configure(home, osHomePtr(osHome), opts.Transfers.ProxyUploadBytes)
 		c.bytes.Configure(opts.Transfers.MaxUploadBytes, opts.Transfers.MaxSources)
-	}
-	if c.browser != nil {
-		c.browser.Configure(opts.BrowserPath, opts.BrowserWidth, opts.BrowserHeight)
 	}
 	nc := c.connection()
 	if restartRTC && nc != nil {

@@ -76,7 +76,7 @@ func TestClockNowAppliesOffset(t *testing.T) {
 // 设备本机时钟快 2 小时（模拟系统时间误差），平台请求时限按平台时间签署，
 // 校准后必须通过；仍按本机系统时间视角签署的时限必须被拒。
 func TestToolsVerifyUsesCalibratedClock(t *testing.T) {
-	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), BrowserStateDir: t.TempDir()})
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir()})
 	t.Cleanup(func() { _ = c.Close() })
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
 	defer setClockOffset(0)

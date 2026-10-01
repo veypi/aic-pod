@@ -145,6 +145,55 @@ func RtcOutSubject(uid, hostID string, credVer uint64) (string, error) {
 // 无 queue 时同 subject 多订阅者全量 fan-out 双执行）。
 func PageQueueGroup(sid string) string { return "page-" + sid }
 
+// ---- skill 包 fetch subject（v6 P2，docs/skill.md §9.2） ----
+
+// FetchReqSubject 包拉取请求（pod → aic）：u.{uid}.h.{host_id}.{cred_ver}.fetch.req
+// 与 caps/presence 同族（bare host_id 段）；host JWT pub allow 显式放行（natsauth）。
+// payload = FetchRequest JSON。
+func FetchReqSubject(uid, hostID string, credVer uint64) (string, error) {
+	return connSubject(uid, hostID, credVer, "fetch.req")
+}
+
+// FetchInboxSubject 包拉取分块接收地址（aic → pod）：
+// u.{uid}.h.{host_id}.{credVer}.fetch.{reqID}——每次 fetch 一个临时订阅，
+// 分块 = 原生字节（顺序保证），终结帧 = FetchResult JSON（错误亦以终结帧返回）。
+func FetchInboxSubject(uid, hostID string, credVer uint64, reqID string) (string, error) {
+	if !validSeg(reqID) {
+		return "", fmt.Errorf("proto: invalid reqID segment")
+	}
+	return connSubject(uid, hostID, credVer, "fetch."+reqID)
+}
+
+// FetchInboxPattern host JWT sub allow 通配：u.{uid}.h.{host_id}.{credVer}.fetch.*
+// （覆盖 reqID 分块地址；fetch.req 是 pub 方向单独放行）。
+func FetchInboxPattern(uid, hostID string, credVer uint64) (string, error) {
+	return connSubject(uid, hostID, credVer, "fetch.*")
+}
+
+// HostFetchReqWildcard aic 服务端订阅通配：u.*.h.*.*.fetch.req
+func HostFetchReqWildcard() string { return "u.*.h.*.*.fetch.req" }
+
+// FetchRequest 包拉取请求：ref = 注册表 uuid 或 caller 本人本地目录名；
+// version 空 = 当前发布版（仅注册表 ref 有意义）。
+type FetchRequest struct {
+	ReqID   string `json:"req_id"`
+	Ref     string `json:"ref"`
+	Version string `json:"version,omitempty"`
+}
+
+// FetchResult fetch 终结帧（分块后的最后一帧；Error 非空 = 失败无分块）。
+// 身份字段供设备安装记录（来源身份 kind+id，docs/skill.md §9.2）。
+type FetchResult struct {
+	Done    bool   `json:"done"`
+	Name    string `json:"name,omitempty"`    // 包名（SKILL.md name / 目录名）
+	Kind    string `json:"kind,omitempty"`    // private | public
+	ID      string `json:"id,omitempty"`      // 注册表 uuid / 本地目录名
+	Version string `json:"version,omitempty"` // 发布版本（本地包为空）
+	Bytes   int64  `json:"bytes,omitempty"`   // zip 总字节（校验）
+	SHA256  string `json:"sha256,omitempty"`  // zip 摘要（校验）
+	Error   string `json:"error,omitempty"`
+}
+
 // ---- 前端 JWT 权限模板（§6.1） ----
 
 // UserAllowPattern 是前端 JWT 的 pub/sub allow：u.{uid}.>

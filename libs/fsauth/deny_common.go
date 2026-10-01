@@ -28,7 +28,7 @@ func denyCommon() []string {
 		"/var/run/docker.sock",
 		// browser state 目录级拒绝：全量 cookie 库 browser.json 及其
 		// 保存流程临时文件（.cli-tmp/.merge-tmp，含同等全量状态）一并覆盖。
-		"$HOME/.aic/.cache/browser/**",
-		"$UserConfigDir/aic/config.yaml",
+		"$HOME/.aic/browser/**",
+		"$HOME/.aic/config.yaml",
 	}
 }

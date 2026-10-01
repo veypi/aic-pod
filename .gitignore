@@ -44,3 +44,7 @@ dist
 
 # macOS
 .DS_Store
+
+# skill 包构建产物
+skill-packages/*/cli/bin/
+skill-packages/*/browser.zip

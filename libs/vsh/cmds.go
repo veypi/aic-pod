@@ -34,10 +34,33 @@ type PlatformDeps struct {
 	ListHosts func(ctx context.Context, sessionKey string) (string, error)
 	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话。
 	SendUser func(ctx context.Context, sessionKey, message string) error
+	// Skill 注册中心与设备包操作（v6；nil 子命令降级报错）。
+	Skill SkillDeps
+}
+
+// SkillDeps skill 命令的端侧实现（docs/skill.md §4，v6）。
+// cloud = 注册中心直查（search/load/download 转存用户空间）；
+// host = 设备包管理（download 安装、list 安装记录，P2 接线）。
+type SkillDeps struct {
+	// Search 可见 skill 清单（本地在前；query 空 = 全部；limit≤0 = 默认 20）。
+	Search func(ctx context.Context, sessionKey, query string, limit int) (string, error)
+	// Load 按裸寻址 ref 读取 SKILL.md 正文 + 能力清单（公开条目使用即关联/
+	// 计数语义由端侧实现保持）。
+	Load func(ctx context.Context, sessionKey, ref string) (string, error)
+	// Download 获取包（cloud = 转存用户空间；host = 安装到设备）。version 空
+	// = 当前发布版。
+	Download func(ctx context.Context, sessionKey, ref, version string) (string, error)
+	// List 已安装包记录（host；--json 由端侧定输出形态）。
+	List func(ctx context.Context, sessionKey string) (string, error)
+	// SetDisabled 禁用/启用已装包（host；禁用 = 根命令保留但调用显式失败，
+	// 状态落 .install.json 持久）。
+	SetDisabled func(ctx context.Context, sessionKey, name string, disabled bool) error
+	// Remove 卸载已装包（host；停 provider + 删目录 + 解注册）。
+	Remove func(ctx context.Context, sessionKey, name string) error
 }
 
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
-// send_user。全部自带 help 文本（--help/-h 或无参数子命令自答）。
+// send_user / skill。全部自带 help 文本（--help/-h 或无参数子命令自答）。
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	for _, cmd := range []commands.Command{
 		commands.DefineCommand("commands", deps.cmdCommands),
@@ -45,6 +68,7 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 		commands.DefineCommand("grant", deps.cmdGrant),
 		commands.DefineCommand("list_hosts", deps.cmdListHosts),
 		commands.DefineCommand("send_user", deps.cmdSendUser),
+		commands.DefineCommand("skill", deps.cmdSkill),
 	} {
 		if err := reg.Register(cmd); err != nil {
 			return err
@@ -310,6 +334,133 @@ func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation
 }
 
 const sendUserHelp = `usage: send_user <消息...> — 给用户发一条通知消息`
+
+const skillHelp = `usage: skill <search|load|download|list|disable|enable|remove> — skill 注册中心与设备包管理
+  skill search [关键词...] [--limit N]   列出可见 skill（本地在前）
+  skill load <ref>                       读取 SKILL.md 正文 + 能力清单
+  skill download <ref> [--version v]     获取包（cloud = 转存用户空间；host = 安装到设备）
+  skill list                             已安装包记录（host）
+  skill disable <name>                   禁用已装包（host；根命令保留但调用显式失败）
+  skill enable <name>                    启用已装包（host）
+  skill remove <name>                    卸载已装包（host；删目录 + 解注册）`
+
+// cmdSkill skill 注册中心与设备包管理（v6：skills 独立工具废除，动词归 vsh）。
+func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) error {
+	if helpRequested(inv.Args) {
+		fmt.Fprintln(inv.Stdout, skillHelp)
+		return nil
+	}
+	if len(inv.Args) == 0 {
+		return commands.Exitf(inv, 2, "usage: skill <search|load|download|list|disable|enable|remove>（--help 查看详情）")
+	}
+	sub, rest := inv.Args[0], inv.Args[1:]
+	sid := SessionFromContext(ctx)
+	switch sub {
+	case "search":
+		if d.Skill.Search == nil {
+			return commands.Exitf(inv, 1, "skill: 此端未接注册中心查询")
+		}
+		limit := 0
+		var words []string
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == "--limit" && i+1 < len(rest) {
+				v, err := strconv.Atoi(rest[i+1])
+				if err != nil {
+					return commands.Exitf(inv, 2, "skill search: --limit 需为数字")
+				}
+				limit = v
+				i++
+				continue
+			}
+			words = append(words, rest[i])
+		}
+		text, err := d.Skill.Search(ctx, sid, strings.Join(words, " "), limit)
+		if err != nil {
+			return commands.Exitf(inv, 1, "skill search: %s", err)
+		}
+		if text != "" {
+			fmt.Fprintln(inv.Stdout, text)
+		}
+		return nil
+	case "load":
+		if d.Skill.Load == nil {
+			return commands.Exitf(inv, 1, "skill: 此端未接注册中心查询")
+		}
+		if len(rest) == 0 {
+			return commands.Exitf(inv, 2, "usage: skill load <ref>")
+		}
+		text, err := d.Skill.Load(ctx, sid, strings.Join(rest, " "))
+		if err != nil {
+			return commands.Exitf(inv, 1, "skill load: %s", err)
+		}
+		fmt.Fprintln(inv.Stdout, text)
+		return nil
+	case "download":
+		if d.Skill.Download == nil {
+			return commands.Exitf(inv, 1, "skill download: 此端未接包获取通道")
+		}
+		version := ""
+		var words []string
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == "--version" && i+1 < len(rest) {
+				version = rest[i+1]
+				i++
+				continue
+			}
+			words = append(words, rest[i])
+		}
+		if len(words) == 0 {
+			return commands.Exitf(inv, 2, "usage: skill download <ref> [--version v]")
+		}
+		text, err := d.Skill.Download(ctx, sid, strings.Join(words, " "), version)
+		if err != nil {
+			// 实现层错误已自带 skill download: 前缀（skillrun/fetch 同一口径），不再重包。
+			return commands.Exitf(inv, 1, "%s", err)
+		}
+		if text != "" {
+			fmt.Fprintln(inv.Stdout, text)
+		}
+		return nil
+	case "list":
+		if d.Skill.List == nil {
+			return commands.Exitf(inv, 1, "skill list: 此端无设备安装记录（host 端命令）")
+		}
+		text, err := d.Skill.List(ctx, sid)
+		if err != nil {
+			return commands.Exitf(inv, 1, "skill list: %s", err)
+		}
+		if text != "" {
+			fmt.Fprintln(inv.Stdout, text)
+		}
+		return nil
+	case "disable", "enable":
+		if d.Skill.SetDisabled == nil {
+			return commands.Exitf(inv, 1, "skill %s: 此端无设备包管理（host 端命令）", sub)
+		}
+		if len(rest) != 1 {
+			return commands.Exitf(inv, 2, "usage: skill %s <name>", sub)
+		}
+		if err := d.Skill.SetDisabled(ctx, sid, rest[0], sub == "disable"); err != nil {
+			return commands.Exitf(inv, 1, "skill %s: %s", sub, err)
+		}
+		fmt.Fprintf(inv.Stdout, "%s %s\n", rest[0], map[bool]string{true: "disabled", false: "enabled"}[sub == "disable"])
+		return nil
+	case "remove":
+		if d.Skill.Remove == nil {
+			return commands.Exitf(inv, 1, "skill remove: 此端无设备包管理（host 端命令）")
+		}
+		if len(rest) != 1 {
+			return commands.Exitf(inv, 2, "usage: skill remove <name>")
+		}
+		if err := d.Skill.Remove(ctx, sid, rest[0]); err != nil {
+			return commands.Exitf(inv, 1, "skill remove: %s", err)
+		}
+		fmt.Fprintf(inv.Stdout, "%s removed\n", rest[0])
+		return nil
+	default:
+		return commands.Exitf(inv, 2, "skill: 未知子命令 %q（search|load|download|list|disable|enable|remove）", sub)
+	}
+}
 
 func (d PlatformDeps) cmdSendUser(ctx context.Context, inv *commands.Invocation) error {
 	if helpRequested(inv.Args) {

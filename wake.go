@@ -8,23 +8,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/veypi/aic-pod/cfg"
 )
 
 // cmdSockPath 桌面指令通道（Electron 主进程 unix socket）地址；测试可替换
 var cmdSockPath = func() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := cfg.StateDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "aic", "desktop.sock"), nil
+	return filepath.Join(dir, "desktop.sock"), nil
 }
 
 // Wake 唤醒桌宠录音（aic wake 子指令）：经 desktop（Electron 主进程）的本地指令
-// 通道（unix socket UserConfigDir/aic/desktop.sock，换行分隔 JSON 请求/应答）转发
+// 通道（unix socket $HOME/.aic/desktop.sock，换行分隔 JSON 请求/应答）转发
 // pet:cmd 事件给 pet 组件，效果等同 pet 页左键单击。
 // 仅 desktop 形态支持——socket 由 Electron 主进程创建；纯 cli（无桌面）拨号必失败。
 func Wake() error {

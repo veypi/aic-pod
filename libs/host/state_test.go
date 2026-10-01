@@ -9,7 +9,7 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 )
 
-// writeState 落盘 {UserConfigDir}/aic/state.json（HOME 重定向到临时目录），
+// writeState 落盘 $HOME/.aic/state.json（HOME 重定向到临时目录），
 // 产物可被桌面按 pid 核对消费；tmp 文件必须已被 rename 清掉。
 func TestWriteStateRoundTrip(t *testing.T) {
 	home := t.TempDir()

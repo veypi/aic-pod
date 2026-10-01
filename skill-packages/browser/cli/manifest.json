@@ -1,0 +1,24 @@
+{
+  "providers": [
+    {
+      "id": "main",
+      "kind": "process",
+      "entry": "cli/bin/browser"
+    },
+    {
+      "id": "svc",
+      "kind": "service",
+      "entry": "cli/bin/browser-service"
+    }
+  ],
+  "streams": [
+    {
+      "name": "page.frames",
+      "provider": "svc"
+    },
+    {
+      "name": "page.input",
+      "provider": "svc"
+    }
+  ]
+}

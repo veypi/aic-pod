@@ -20,7 +20,10 @@ import (
 
 func testClient(t *testing.T) (*Client, string) {
 	t.Helper()
-	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), BrowserStateDir: t.TempDir(), NoSandbox: true})
+	// HOME 隔离：vsh 布局根 = $HOME/.aic/vsh（buildVSHEngine 真实 MkdirAll），
+	// 测试进程不许写真实 $HOME（沙箱化执行环境下会被规则门拒）。
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true})
 	c.hostID = "host_1"
 	c.uid = "owner"
 	c.kTool = "test-key"

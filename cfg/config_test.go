@@ -16,6 +16,7 @@ func isolateConfigDir(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
 	t.Setenv("APPDATA", dir)
+	t.Setenv("USERPROFILE", dir) // windows 上 os.UserHomeDir 取 USERPROFILE
 	return dir
 }
 
@@ -87,33 +88,33 @@ func TestConfigPathIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(p) != filepath.Join(dir, "aic") && filepath.Base(p) != "config.yaml" {
+	if filepath.Dir(p) != filepath.Join(dir, ".aic") || filepath.Base(p) != "config.yaml" {
 		t.Fatalf("unexpected path %s", p)
 	}
 }
 
-// PublicDir 返回 $HOME/.aic 并创建（0700）。
-func TestPublicDir(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	t.Setenv("USERPROFILE", dir)
-	p, err := PublicDir()
+// StateDir 返回 $HOME/.aic（三平台统一；getter 不创建目录——创建由各
+// 写入方按需 MkdirAll：writeState / LogWriter / fsauth sessions）。
+func TestStateDir(t *testing.T) {
+	dir := isolateConfigDir(t)
+	got, err := StateDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != filepath.Join(dir, ".aic") {
-		t.Fatalf("PublicDir = %q, want %q", p, filepath.Join(dir, ".aic"))
+	if want := filepath.Join(dir, ".aic"); got != want {
+		t.Fatalf("StateDir = %q, want %q", got, want)
 	}
-	st, err := os.Stat(p)
+	// Path/LogPath 与 StateDir 同根派生
+	p, _ := Path()
+	if want := filepath.Join(dir, ".aic", "config.yaml"); p != want {
+		t.Fatalf("Path = %q, want %q", p, want)
+	}
+	l, err := LogPath()
 	if err != nil {
-		t.Fatalf("PublicDir not created: %v", err)
+		t.Fatal(err)
 	}
-	if !st.IsDir() || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o700) {
-		t.Fatalf("PublicDir perm = %v isdir=%v, want dir 0700", st.Mode().Perm(), st.IsDir())
-	}
-	// 幂等：再调不报错
-	if _, err := PublicDir(); err != nil {
-		t.Fatalf("PublicDir idempotent: %v", err)
+	if want := filepath.Join(dir, ".aic", "aic.log"); l != want {
+		t.Fatalf("LogPath = %q, want %q", l, want)
 	}
 }
 
@@ -189,7 +190,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config must not block startup: %v", err)
 		}
-		if Global != o || o.Host != DefaultHost || !o.RTC || o.BrowserWidth != 1280 {
+		if Global != o || o.Host != DefaultHost || !o.RTC {
 			t.Fatalf("missing usable defaults for %q", body)
 		}
 		if err := o.ValidateAuth(); err != nil && CheckAuth() == nil {
@@ -208,7 +209,7 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		t.Fatal(err)
 	}
-	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nbrowser_width: nope\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_rules: ['rw:/workspace']\nexec_allow: [git, {}]\n"
+	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_rules: ['rw:/workspace']\nexec_allow: [git, {}]\n"
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +220,7 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if o.Key != "existing-device-key" || o.Host != "http://localhost:4000" || o.HomePath != "/agents" || o.HostsSources != 64 {
 		t.Fatal("unrelated invalid fields discarded valid configuration")
 	}
-	if !o.RTC || o.BrowserWidth != 1280 || o.ExecTimeout != "30m" || o.FsPolicy != "typo" {
+	if !o.RTC || o.ExecTimeout != "30m" || o.FsPolicy != "typo" {
 		t.Fatal("invalid fields did not fall back to defaults")
 	}
 	if !reflect.DeepEqual(o.FsRules, []string{"rw:/workspace"}) || o.ValidateAuth() == nil {

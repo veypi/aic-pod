@@ -84,7 +84,7 @@ const repairedSettings = `{"host":"http://localhost:4000","home_path":"/agents",
 func TestInvalidConfigStillLoadsAndCanBeRepaired(t *testing.T) {
 	for index, body := range []string{
 		"hosts_streams: 4\nextra_parameter: anything\n",
-		"rtc: bad\nbrowser_width: [wrong]\nexec_policy: wrong\n",
+		"rtc: bad\nexec_policy: wrong\n",
 		"[completely broken yaml\n",
 		"unknown: junk\n",
 	} {
@@ -120,7 +120,6 @@ func TestConfigSetRejectsBadValues(t *testing.T) {
 	for _, body := range []string{
 		`{"fs_policy":"typo"}`,
 		`{"exec_timeout":"not-a-duration"}`,
-		`{"browser_width":100}`,
 		`{"home_path":"//evil.example/"}`,
 		`{"work_dir":"/definitely/not/a/directory"}`,
 	} {

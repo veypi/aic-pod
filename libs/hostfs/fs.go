@@ -34,8 +34,11 @@ type Root struct {
 type Config struct {
 	Roots []Root
 	// Home is the initial browsing directory, not a filesystem boundary.
-	Home  *fsp.Path
-	Bytes *Bytes
+	Home *fsp.Path
+	// OSHome 是 OS 用户主目录（~/.aic 等运行数据定位用；与 Home 的
+	// 工作区语义不同源）。nil = fs os_home 方法不可用。
+	OSHome *fsp.Path
+	Bytes  *Bytes
 	// Check must consult the current device policy; it must not trust args.
 	Check               func(context.Context, Call, string, bool) error
 	MaxProxyUploadBytes int64
@@ -98,6 +101,12 @@ func New(cfg Config) (*FS, error) {
 			return nil, fmt.Errorf("hostfs: invalid home directory")
 		}
 	}
+	if cfg.OSHome != nil {
+		if err := cfg.OSHome.Validate(runtime.GOOS == "windows"); err != nil || f.roots[cfg.OSHome.RootID] == nil {
+			f.Close()
+			return nil, fmt.Errorf("hostfs: invalid os home directory")
+		}
+	}
 	return f, nil
 }
 func (f *FS) Close() error {
@@ -157,7 +166,7 @@ func (f *FS) Handle(ctx context.Context, caller tool.Caller, method string, args
 func (f *FS) validate(method string, raw json.RawMessage) error {
 	var path fsp.Path
 	switch method {
-	case "roots", "home":
+	case "roots", "home", "os_home":
 		var p struct{}
 		return hosts.Decode(raw, &p)
 	case "stat", "read":
@@ -253,7 +262,7 @@ func (f *FS) Authorize(ctx context.Context, call Call) error {
 	if err := f.validate(call.Method, call.Args); err != nil {
 		return err
 	}
-	if call.Method == "roots" || call.Method == "home" {
+	if call.Method == "roots" || call.Method == "home" || call.Method == "os_home" {
 		return nil // Mount metadata grants no access; home checks its actual path.
 	}
 	var p struct {
@@ -314,6 +323,15 @@ func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 					break
 				}
 			}
+		}
+		if _, _, err := f.check(ctx, call, *p, false); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "os_home":
+		p := f.cfg.OSHome
+		if p == nil {
+			return nil, hosts.Fail("unavailable", "OS home is not addressable on this device")
 		}
 		if _, _, err := f.check(ctx, call, *p, false); err != nil {
 			return nil, err
@@ -1017,12 +1035,13 @@ func (f *FS) Run(ctx context.Context, call Call) (any, error) {
 	return f.run(ctx, call)
 }
 
-func (f *FS) Configure(home fsp.Path, proxyLimit int64) {
+func (f *FS) Configure(home fsp.Path, osHome *fsp.Path, proxyLimit int64) {
 	if proxyLimit <= 0 {
 		proxyLimit = 64 << 20
 	}
 	f.mu.Lock()
 	f.cfg.Home = &home
+	f.cfg.OSHome = osHome
 	f.cfg.MaxProxyUploadBytes = proxyLimit
 	f.mu.Unlock()
 }

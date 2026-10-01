@@ -15,11 +15,13 @@ package host
 // 不从脚本可修改的 argv/env 读取；grant 修改入口由引擎内 grant 命令检查
 // GrantApprovedFromContext（pod 唯一审批边界）。
 //
-// 记录在案的设计偏差：
-//  1. stub 目录用进程级 {session_root}/.vsh-host/bin 而非 {sid}/bin——引擎
-//     布局初始化（stub 写入、HOME MkdirAll）吃 Runtime 级 BaseEnv（NewSession
-//     时无 sid 上下文），per-sid 目录需 fork 补丁，违背零补丁红线；registry
-//     优先下同名文件无法 shadow 平台命令，安全性等价。
+// 记录在案的设计决策：
+//  1. stub 目录 = 进程级 $HOME/.aic/vsh/bin（2026-10-01 自 {session_root}/
+//     .vsh-host 挪出并脱离规则门）——布局初始化（stub 写入、HOME MkdirAll）
+//     是引擎自身机械 IO，经 vshcore LayoutFS 专用通道走未过门的 OS 文件
+//     系统：权限门管 exec/工具，不管 pod 自身读写；会话侧对 stub 目录无
+//     任何写通道（篡改面关闭）。registry 优先下同名文件无法 shadow 平台
+//     命令，安全性等价。
 //  2. 旧 exec_procs 的授权复核（revoke 杀运行中任务）未随 vbox 迁移保留——
 //     bg 由引擎任务表统一承接（30min 墙钟到期 124）。
 
@@ -70,18 +72,13 @@ func hostCanonical(p string) string {
 	return proto.NormalizeHostPath(filepath.ToSlash(p))
 }
 
-// vshStubRoot 进程级 stub/布局根（偏差 1，见文件头）。原生态（os.MkdirAll
-// 直接用）；进引擎前经 hostCanonical 转换。
+// vshStubRoot 进程级 stub/布局根（$HOME/.aic/vsh，决策 1，见文件头）。
+// 原生态（os.MkdirAll 直接用）；进引擎前经 hostCanonical 转换。
 func (c *Client) vshStubRoot() string {
-	base := c.sessionRoot
-	if base == "" {
-		if dir, err := cfg.PublicDir(); err == nil {
-			base = filepath.Join(dir, "sessions")
-		} else {
-			base = filepath.Join(os.TempDir(), "aic")
-		}
+	if dir, err := cfg.StateDir(); err == nil {
+		return filepath.Join(dir, "vsh")
 	}
-	return filepath.Join(base, ".vsh-host")
+	return filepath.Join(os.TempDir(), "aic-vsh")
 }
 
 func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, error) {
@@ -95,6 +92,15 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 		return nil, nil, fmt.Errorf("vsh host: layout home: %w", err)
 	}
 	repairStubExecBits(stubBin)
+	// 布局 IO 专用通道（决策 1）：未过规则门的 OS 文件系统——引擎布局初始化
+	//（stub 写入、HOME MkdirAll）是 pod 自身机械读写，不受会话策略影响。
+	layoutFS, err := vshglue.NewHostFS(vshglue.HostFSConfig{
+		Backing: OSVFS{},
+		Rules:   func() vbox.FSRuleSet { return vbox.FSRuleSet{DefaultWrite: vbox.EffRW} },
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("vsh host: layout fs: %w", err)
+	}
 
 	native := vshglue.NewNativeRegistry(vshglue.NativeDeps{
 		Manager: c.procs,
@@ -130,31 +136,46 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			GrantStatus: c.vshGrantStatus,
 			// ListHosts/SendUser：host 端无主机目录与通知通道（命令存在，
 			// 执行给可读报错——零值降级语义）。
-			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令。
+			// Skill host = 设备包管理（download 安装 / list 安装记录 / disable·enable
+			// 启停 / remove 卸载）。
+			Skill: vshglue.SkillDeps{
+				Download: c.skillDownload,
+				List: func(ctx context.Context, sessionKey string) (string, error) {
+					return c.skills.RecordsJSON()
+				},
+				SetDisabled: func(ctx context.Context, sessionKey, name string, disabled bool) error {
+					return c.skills.SetDisabled(name, disabled)
+				},
+				Remove: func(ctx context.Context, sessionKey, name string) error {
+					return c.skills.Uninstall(name)
+				},
+			},
+			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令与已装包命令。
 			Discoverable: func(name string) bool {
 				switch name {
-				case "commands", "bg", "grant", "browser", "cua":
+				case "commands", "bg", "grant", "cua", "skill":
 					return true
 				}
-				return false
+				return c.skills.IsPackageCommand(name)
 			},
 		},
-		// 虚拟指令执行规则门：browser/cua 按 cfg exec 域检查（exec_policy/
-		// exec_deny/exec_allow + 会话 grant）；内建与平台基础设施指令放行
-		//（它们是 shell 本身，旧模型同样不受 exec 域约束）。
+		// 虚拟指令执行规则门：cua/skill 与已装 skill 包根命令按 cfg exec 域
+		// 检查（exec_policy/exec_deny/exec_allow + 会话 grant）；内建与平台
+		// 基础设施指令放行（它们是 shell 本身，旧模型同样不受 exec 域约束）。
 		CommandAllow: func(ctx context.Context, name string) bool {
-			if name == "browser" || name == "cua" {
+			if name == "cua" || name == "skill" || c.skills.IsPackageCommand(name) {
 				return c.execAllowed(vshglue.SessionFromContext(ctx), name)
 			}
 			return true
 		},
-		// Runtime 级布局环境：stub 写入目标 = PATH 目录（须在规则表可写区，
-		// 进程级 stub 根位于会话区便利根之下）。引擎可见路径一律规范形。
+		// Runtime 级布局环境：stub 写入目标 = PATH 目录（布局 IO 经 LayoutFS
+		// 专用通道，不过会话规则门——见文件头决策 1）。引擎可见路径一律规范形。
 		LayoutEnv: map[string]string{
 			"HOME": hostCanonical(layoutHome),
 			"PATH": hostCanonical(stubBin),
 			"USER": "agent",
 		},
+		LayoutFS: layoutFS,
 		// 内置名（echo/bg/help…）重写后的 stub 解析目录 = host stub bin：vsh
 		// 默认 /bin 只适用于有内存层的 cloud；host 无内存层必须显式指向。
 		BuiltinCommandDir: hostCanonical(stubBin),
@@ -164,11 +185,9 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 	if err != nil {
 		return nil, nil, err
 	}
-	// browser/cua 注册为 vsh 指令（§2.2）：caller 由可信 ctx 构造（owner/
+	// cua 注册为 vsh 指令（§2.2）：caller 由可信 ctx 构造（owner/
 	// session/grant_approved），诊断走 stderr、--json 契约走 stdout。
-	if err := engine.Registry().Register(c.browser.VshCommand(vshglue.CallerFromContext)); err != nil {
-		return nil, nil, fmt.Errorf("vsh host: register browser: %w", err)
-	}
+	// browser 自 v6 P5 起是已装 skill 包（skill-packages/browser），不再内建注册。
 	if err := engine.Registry().Register(c.cua.VshCommand(vshglue.CallerFromContext)); err != nil {
 		return nil, nil, fmt.Errorf("vsh host: register cua: %w", err)
 	}
@@ -297,14 +316,14 @@ func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vshglue.
 	deny, allow := c.netPol.Snapshot(sid)
 	fsSnap := c.policy.SnapshotForNative(sid, workdir, cmd)
 	return vshglue.NativePolicy{
-		WriteRoots:   c.policy.WriteRootsFor(sid),
-		DenyPaths:    c.policy.DenyPatterns(),
-		FSRules:      &fsSnap,
-		FsOpen:       c.policy.OpenMode(),
-		NetOpen:      c.netPol.OpenMode(),
-		NetDeny:      deny,
-		NetAllow:     allow,
-		NoSandbox:    vshglue.NoSandboxFromContext(ctx),
+		WriteRoots: c.policy.WriteRootsFor(sid),
+		DenyPaths:  c.policy.DenyPatterns(),
+		FSRules:    &fsSnap,
+		FsOpen:     c.policy.OpenMode(),
+		NetOpen:    c.netPol.OpenMode(),
+		NetDeny:    deny,
+		NetAllow:   allow,
+		NoSandbox:  vshglue.NoSandboxFromContext(ctx),
 	}
 }
 

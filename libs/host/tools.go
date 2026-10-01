@@ -11,9 +11,8 @@ package host
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,13 +20,15 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/browser"
 	"github.com/veypi/aic-pod/libs/cua"
 	"github.com/veypi/aic-pod/libs/fsx"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
+	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/aic-pod/libs/skillrun"
 	vshglue "github.com/veypi/aic-pod/libs/vsh"
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	"github.com/veypi/vsh/commands"
 )
 
 // execHandleEntry 是取消登记表的一项（前台执行按 request_id 登记；
@@ -40,25 +41,61 @@ type execHandleEntry struct {
 
 func (c *Client) initTools() {
 	c.initErr = c.initFilesystem()
-	root := c.options().BrowserStateDir
-	if root == "" {
-		if dir, err := cfg.StateDir(); err == nil {
-			parts := strings.SplitN(c.options().Key, ".", 4)
-			binding := "unbound"
-			if len(parts) == 4 {
-				binding = parts[0] + "\x00" + parts[3]
-			}
-			digest := sha256.Sum256([]byte(binding))
-			root = filepath.Join(dir, "browser", fmt.Sprintf("%x", digest[:16]))
+	c.cua = cua.New(cua.Config{Logf: c.logf})
+	// skill 包注册表（v6 P0）：包命令生命周期唯一权威。Registry 懒解析——
+	// 引擎惰性构建，安装/卸载时才需要命令表。
+	if dir, err := cfg.StateDir(); err == nil {
+		c.skills, c.initErr = skillrun.New(skillrun.Deps{
+			SkillsDir: filepath.Join(dir, "skills"),
+			RunDir:    filepath.Join(dir, "run"),
+			Manager:   c.procs,
+			Policy:    c.nativePolicy,
+			Workdir:   proto.HostPathToOS,
+			Registry: func() (*commands.Registry, error) {
+				e, err := c.engine()
+				if err != nil {
+					return nil, err
+				}
+				return e.Registry(), nil
+			},
+			Tasks: func() (*vshglue.TaskTable, error) {
+				e, err := c.engine()
+				if err != nil {
+					return nil, err
+				}
+				return e.Tasks, nil
+			},
+			// Fetch 包拉取 = NATS fetch subject（pod 不持有平台 HTTP 凭据）。
+			Fetch: c.fetchSkillZip,
+			Logf:  c.logf,
+		})
+		// 启动扫描重注册：已装包命令恢复可用（只认有效 .install.json，
+		// 半包不注册；会触发引擎惰性构建——重启后包命令必须立即可用）。
+		if c.initErr == nil {
+			c.skills.Rescan()
+			// builtin 首跑预装：随安装介质分发的 zip（AIC_BUILTIN_SKILLS，
+			// desktop packaged 注入 resources/browser.zip；幂等，失败只记日志）。
+			c.skills.Preinstall(context.Background(), builtinSkillPaths())
+		}
+	} else {
+		c.initErr = err
+	}
+}
+
+// builtinSkillPaths 读 AIC_BUILTIN_SKILLS（随安装介质分发的 builtin skill zip
+// 路径列表，os.PathListSeparator 分隔；desktop packaged 注入，dev/cli 不注入）。
+func builtinSkillPaths() []string {
+	v := os.Getenv("AIC_BUILTIN_SKILLS")
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, string(os.PathListSeparator)) {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
-	c.browser = browser.New(browser.Config{Path: c.options().BrowserPath, StateDir: root, Width: c.options().BrowserWidth, Height: c.options().BrowserHeight, Logf: c.logf, CheckFile: func(ctx context.Context, caller tool.Caller, path string, write bool) error {
-		if err := caller.Validate(ctx); err != nil {
-			return err
-		}
-		return c.fsGate(caller.Origin)("browser", filepath.ToSlash(path), write)
-	}})
-	c.cua = cua.New(cua.Config{Logf: c.logf})
+	return out
 }
 
 // dispatch 是普通请求的统一分发入口（NATS 与 RTC 同载荷同分发，§4.3）。
@@ -126,12 +163,16 @@ func (c *Client) HandleTool(ctx context.Context, caller tool.Caller, r wire.Requ
 	return c.dispatch(ctx, caller, r)
 }
 
-// OpenToolStream 是 RTC 私有 stream 端点表（§4.3）：page.frames / page.input
-// 直接连接 Browser 服务；不注册为 vsh 指令，不进入 commands/caps。
-// 流检查：调用者身份（票据）+ browser 能力 rules（与 vsh 指令同一判定——
-// 认证不是资源授权；旧 Dispatcher 删除时丢失，此处补回）+ 页面归属与租期
-// 由 Browser 服务在打开时判定；连接失效由 RTC 通道关闭传播（连接撤销 →
-// 通道关闭 → 流关闭，不做运行中规则复核——与 engine_vsh 文件头偏差 2 一致）。
+// OpenToolStream 是 RTC 私有 stream 端点表（§4.3）：不注册为 vsh 指令，不进
+// commands/caps。端点解析全部走 skillrun.ResolveStreamEndpoint（v6 P5 泛化，
+// browser 拆包后唯一路径）：
+//   - {包名}.{流名}        → skill 包 manifest streams[]
+//   - page.frames/page.input → browser 包声明的全名流名（v5 前端契约端点名保留）
+//
+// 权限门 = 解析出的包名经 execAllowed（与 vsh 指令同一判定：认证不是资源授权）。
+// stream.open 负载 = 客户端 args 原样透传（端点参数由包自行解析校验，如 browser
+// 的 PageArgs）。连接失效由 RTC 通道关闭传播（连接撤销 → 通道关闭 → 流关闭，
+// 不做运行中规则复核——与 engine_vsh 文件头偏差 2 一致）。
 func (c *Client) OpenToolStream(ctx context.Context, caller tool.Caller, endpoint string, args json.RawMessage) (tool.Stream, error) {
 	if !caller.AllowStreams {
 		return nil, wire.Fail("unsupported", "Streams require an RTC channel")
@@ -139,27 +180,18 @@ func (c *Client) OpenToolStream(ctx context.Context, caller tool.Caller, endpoin
 	if err := caller.Validate(ctx); err != nil {
 		return nil, err
 	}
-	if !c.execAllowed(caller.Origin, "browser") {
-		return nil, wire.Fail("permission_denied", "browser: command denied by exec rules（grant cmd browser 申请）")
-	}
-	open := func(fn func(context.Context, tool.Caller, browser.PageArgs) (tool.Stream, error)) (tool.Stream, error) {
-		var a browser.PageArgs
-		if err := wire.Decode(args, &a); err != nil {
-			return nil, err
-		}
-		if err := a.Validate(); err != nil {
-			return nil, err
-		}
-		return fn(ctx, caller, a)
-	}
-	switch endpoint {
-	case "page.frames":
-		return open(c.browser.Frames)
-	case "page.input":
-		return open(c.browser.Input)
-	default:
+	pkg, stream, ok := c.skills.ResolveStreamEndpoint(endpoint)
+	if !ok {
 		return nil, wire.Fail("unsupported", "Unknown stream endpoint")
 	}
+	if !c.execAllowed(caller.Origin, pkg) {
+		return nil, wire.Fail("permission_denied", pkg+": command denied by exec rules（grant cmd "+pkg+" 申请）")
+	}
+	s, err := c.skills.OpenStream(ctx, pkg, stream, args)
+	if err != nil {
+		return nil, err
+	}
+	return newSkillToolStream(s), nil
 }
 
 // DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务的取消

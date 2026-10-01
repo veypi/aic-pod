@@ -6,8 +6,8 @@
  *   ① electron-builder.yml 的 files 白名单漏了新文件（leader-grab.js）——
  *      main.js 启动即 require('./leader-grab')，缺则主进程直接崩溃；
  *   ② 壳依赖缺失时，启动失败。
- * 本脚本在打包后校验：各入口（main.js / browser-path.cjs）
- * 的递归相对 require/import 全部能在 asar 中解析，且 resources/backend 后端二进制存在。
+ * 本脚本在打包后校验：入口 main.js 的递归相对 require/import 全部能在 asar
+ * 中解析，且 resources/backend 后端二进制与 resources/browser.zip 存在。
  * 不通过 → exit 1（CI / 本地 make 直接失败，防同类遗漏再发版）。
  *
  * 用法：node scripts/check-asar.mjs [app.asar 路径]
@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
-const { assertBrowserBundle, manifest } = require("../browser-bundle.cjs");
+const { assertBrowserBundle, manifest } = await import("./sync-browser.mjs");
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.resolve(desktopDir, "..", "dist");
@@ -69,7 +69,7 @@ if (!entries.size) {
 }
 
 // ---- 入口文件与其相对 require/import 逐条解析 ----
-const ENTRIES = ["main.js", "browser-path.cjs"];
+const ENTRIES = ["main.js"];
 const RE = /(?:require\(\s*|from\s+|import\(\s*|import\s+)["']([^"']+)["']/g;
 const missing = [];
 
@@ -95,7 +95,7 @@ if ([...entries].some(x=>x.startsWith("/vendor/browser/"))) missing.push("Chrome
 // ---- 设置页（app://aic → desktop/settings-ui，单文件静态页）随包 ----
 if (!entries.has("/settings-ui/settings.html")) missing.push("设置页缺失: /settings-ui/settings.html");
 
-// ---- resources/backend 后端二进制 ----
+// ---- resources/backend 后端二进制 + browser.zip（builtin skill 预装包） ----
 const resDir = path.dirname(asarPath); // mac: Contents/Resources；win/linux: resources
 const backendCandidates = [
   path.join(resDir, "backend", "aic-backend"),
@@ -103,6 +103,9 @@ const backendCandidates = [
 ];
 if (!backendCandidates.some((p) => fs.existsSync(p))) {
   missing.push("resources/backend/aic-backend(.exe)");
+}
+if (!fs.existsSync(path.join(resDir, "browser.zip"))) {
+  missing.push("resources/browser.zip（先跑 make browser-zip / skill-packages/browser/build.sh）");
 }
 
 // Chrome is a required independent runtime, outside asar. Validate the target

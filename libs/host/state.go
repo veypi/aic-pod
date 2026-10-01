@@ -11,7 +11,7 @@ import (
 )
 
 // State 是 host 会话的对外连接状态快照（2026-09-23「重连假成功」修复）：
-// 桌面设置窗读 {UserConfigDir}/aic/state.json 判真实连接，而不是「子进程
+// 桌面设置窗读 $HOME/.aic/state.json 判真实连接，而不是「子进程
 // 存活 + key 非空」。后端在连接成功 / 断开 / 认证失败 / 退避重试失败时原子
 // 更新；PID 供桌面核对是否为当前子进程所写（防陈旧文件误读）。
 type State struct {

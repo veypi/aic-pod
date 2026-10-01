@@ -1,7 +1,7 @@
 // host-state.cjs — 本机连接状态合成（main.js localStatus 的纯函数部分，单测直引）。
 //
 // 背景（2026-09-23「重连假成功」修复）：Go 后端把真实连接状态写
-// {UserConfigDir}/aic/state.json（连接成功 / 断开 / 认证失败 / 重试失败才更新，
+// $HOME/.aic/state.json（连接成功 / 断开 / 认证失败 / 重试失败才更新，
 // pid 为后端进程）。桌面禁止再用「子进程存活 + key 非空」冒充已连接——
 // 换平台未换 key 时 NATS 会在后台无限静默重试，进程一直活着。
 function composeLocalStatus({ alive, key, childPid, state, hostname }) {

@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta name="description" content="Device Browser Windows"
+    details="View and control device browser windows through device tools">
+  <title>{{$t('nav.browser')}}</title>
+</head>
+<style>
+  body {
+    height: 100%;
+    min-width: 0;
+    display: grid;
+    grid-template: "header header" auto "aside main" minmax(0, 1fr) / clamp(160px, 22%, 220px) minmax(0, 1fr);
+    overflow: hidden;
+    background: var(--bg-color);
+    color: var(--text-color);
+  }
+
+  body.collapsed {
+    grid-template: "header" auto "main" minmax(0, 1fr) / minmax(0, 1fr);
+  }
+
+  header {
+    grid-area: header;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 8px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  button {
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    opacity: .35;
+    cursor: default;
+  }
+
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  .icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-color-secondary);
+    font-size: 13px;
+  }
+
+  .icon-button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-color) 7%, transparent);
+    color: var(--text-color);
+  }
+
+  .icon-button.danger:hover:not(:disabled) {
+    color: var(--color-danger, #df6464);
+  }
+
+  .sidebar-toggle {
+    display: block;
+    width: auto;
+    max-width: clamp(80px, 22vw, 180px);
+    padding: 0 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-color);
+  }
+
+  .navigation {
+    display: flex;
+    gap: 2px;
+  }
+
+  .address {
+    flex: 1;
+    min-width: 0;
+    box-sizing: border-box;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--text-color) 5%, transparent);
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .address:focus {
+    border-color: var(--color-primary);
+    outline: none;
+  }
+
+  .address:disabled {
+    background: transparent;
+  }
+
+  aside {
+    grid-area: aside;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 8px;
+    border-right: 1px solid var(--border-color);
+  }
+
+  .aside-heading,
+  .device-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--text-color-secondary);
+    font-size: 12px;
+  }
+
+  .aside-heading {
+    padding: 0 4px 10px;
+  }
+
+  .aside-heading span,
+  .device-select {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  .device-select {
+    padding: 4px 0;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font-size: inherit;
+  }
+
+  .device-select.active {
+    color: var(--color-primary);
+  }
+
+  .device {
+    margin-bottom: 16px;
+  }
+
+  .device-name {
+    padding: 0 4px 4px;
+  }
+
+  .device-name .icon-button {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+  }
+
+  .count {
+    flex-shrink: 0;
+    font-size: 11px;
+    opacity: .65;
+  }
+
+  .device-note {
+    min-width: 0;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    opacity: .65;
+  }
+
+  .no-devices {
+    padding: 6px 4px;
+    color: var(--text-color-secondary);
+    font-size: 12px;
+  }
+
+  .window-row {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    margin: 2px 0;
+    padding-right: 4px;
+    border-radius: 7px;
+  }
+
+  .window-row:hover {
+    background: color-mix(in srgb, var(--text-color) 5%, transparent);
+  }
+
+  .window-row.active {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    color: var(--color-primary);
+  }
+
+  .window {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    box-sizing: border-box;
+    text-align: left;
+    padding: 9px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+  }
+
+  .window-close {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+  }
+
+  .window strong,
+  .window small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: normal;
+  }
+
+  .window strong {
+    font-size: 13px;
+  }
+
+  .window small {
+    margin-top: 4px;
+    font-size: 11px;
+    opacity: .6;
+  }
+
+  main {
+    grid-area: main;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .frames {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+  }
+
+  .empty {
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    height: 100%;
+    padding: 24px;
+    text-align: center;
+    color: var(--text-color-secondary);
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  .blank-page {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    overflow: auto;
+    padding: 32px 24px;
+  }
+
+  .blank-content {
+    width: 100%;
+    max-width: 520px;
+    margin: auto;
+  }
+
+  .blank-content h1 {
+    margin: 0 0 24px;
+    text-align: center;
+    font-size: 24px;
+    font-weight: 500;
+  }
+
+  .blank-address {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 8px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--text-color) 3%, var(--bg-color));
+    color: var(--text-color-secondary);
+  }
+
+  .blank-address:focus-within {
+    border-color: var(--color-primary);
+  }
+
+  .blank-address input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--text-color);
+    font: inherit;
+    font-size: 14px;
+  }
+
+  .open-tabs {
+    margin-top: 32px;
+  }
+
+  .open-tabs h2 {
+    margin: 0 0 10px;
+    color: var(--text-color-secondary);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .open-tabs ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .tab-shortcut {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 12px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    text-align: left;
+  }
+
+  .tab-shortcut:hover {
+    background: color-mix(in srgb, var(--text-color) 5%, transparent);
+  }
+
+  .tab-shortcut > i {
+    flex-shrink: 0;
+    color: var(--text-color-secondary);
+    font-size: 15px;
+  }
+
+  .tab-label {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .tab-label strong,
+  .tab-label small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: normal;
+  }
+
+  .tab-label strong {
+    font-size: 13px;
+  }
+
+  .tab-label small {
+    margin-top: 4px;
+    color: var(--text-color-secondary);
+    font-size: 11px;
+  }
+
+  .no-open-tabs {
+    margin: 0;
+    padding: 12px 0;
+    color: var(--text-color-secondary);
+    font-size: 12px;
+  }
+
+  .page-dialog {
+    position: absolute;
+    z-index: 2;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    box-sizing: border-box;
+    width: 360px;
+    max-width: calc(100% - 24px);
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-color);
+    box-shadow: 0 8px 30px #0003;
+  }
+
+  .page-dialog p {
+    margin: 0 0 16px;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .dialog-actions button {
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-color-secondary);
+    font-size: 12px;
+  }
+
+  .dialog-actions .confirm {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: white;
+  }
+</style>
+
+<body :class="{collapsed:!sidebarOpen}">
+  <header>
+    <button class="icon-button sidebar-toggle" @click="sidebarOpen=!sidebarOpen"
+      :title="selectedDevice()?.name || $t('browser.choose_device')"
+      :aria-label="(selectedDevice()?.name || $t('browser.choose_device')) + ' · ' + $t('browser.window_list')"
+      :aria-expanded="sidebarOpen">
+      {{selectedDevice()?.name || $t('browser.choose_device')}}
+    </button>
+    <div class="navigation">
+      <button class="icon-button" @click="mutate('back')" :disabled="!selected || busy" :title="$t('browser.back')"
+        :aria-label="$t('browser.back')"><i class="fa-solid fa-arrow-left" aria-hidden="true"></i></button>
+      <button class="icon-button" @click="mutate('forward')" :disabled="!selected || busy"
+        :title="$t('browser.forward')" :aria-label="$t('browser.forward')"><i class="fa-solid fa-arrow-right"
+          aria-hidden="true"></i></button>
+      <button class="icon-button" @click="mutate('reload')" :disabled="!selected || busy" :title="$t('browser.reload')"
+        :aria-label="$t('browser.reload')"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i></button>
+    </div>
+    <input class="address" v:value="address" @keydown.enter="navigate" @keydown.esc="resetAddress"
+      v-if="selectedDevice()"
+      :disabled="!selected || busy" :placeholder="$t('browser.address')" :aria-label="$t('browser.address')"
+      autocomplete="off" spellcheck="false">
+    <button class="icon-button new-tab" v-if="selectedDevice()" @click="createWindow(selectedDevice().id)"
+      :disabled="busy" :title="$t('browser.new_tab')" :aria-label="$t('browser.new_tab')">
+      <i class="fa-solid fa-plus" aria-hidden="true"></i>
+    </button>
+  </header>
+  <aside v-show="sidebarOpen" :aria-label="$t('browser.window_list')">
+    <div class="aside-heading">
+      <span>{{$t('browser.window_list')}}</span>
+      <button class="icon-button" @click="refresh" :disabled="refreshing" :title="$t('browser.refresh')"
+        :aria-label="$t('browser.refresh')"><i class="fa-solid fa-arrows-rotate" :class="{'fa-spin':refreshing}"
+          aria-hidden="true"></i></button>
+    </div>
+    <section class="device" v-for="host in devices">
+      <div class="device-name">
+        <button class="device-select" @click="selectDevice(host.id)" :title="host.name"
+          :class="{active:selectedHostId === host.id}" :aria-pressed="selectedHostId === host.id"
+          :disabled="host.status !== 'ready'">{{host.name}}</button>
+        <span class="device-note" v-if="host.status !== 'ready'"
+          :title="host.error || statusText(host.status)">{{statusText(host.status)}}</span>
+        <span class="count" v-else
+          :title="host.windows.length ? '' : $t('browser.no_windows')">{{host.windows.length}}</span>
+        <button class="icon-button new-window" @click="createWindow(host.id)"
+          :disabled="host.status !== 'ready' || busy" :title="$t('browser.new_window') + ' · ' + host.name"
+          :aria-label="$t('browser.new_window') + ' · ' + host.name"><i class="fa-solid fa-plus"
+            aria-hidden="true"></i></button>
+      </div>
+      <div class="window-row" v-for="item in host.windows" :class="{active:selected?.key === item.key}">
+        <button class="window" :aria-pressed="selected?.key === item.key"
+          :title="item.url + ' · ' + item.viewport.width + ' × ' + item.viewport.height" @click="selectWindow(item)">
+          <strong>{{item.title || item.url || item.id}}</strong><small>{{item.url || 'about:blank'}}</small>
+        </button>
+        <button class="icon-button danger window-close" @click="closeWindow(item)"
+          :disabled="busy || host.status !== 'ready'" :title="$t('browser.close_window')"
+          :aria-label="$t('browser.close_window') + ' · ' + (item.title || item.url || item.id)"><i
+            class="fa-solid fa-trash-can" aria-hidden="true"></i></button>
+      </div>
+    </section>
+    <div class="no-devices" v-if="!devices.length">{{$t('browser.no_devices')}}</div>
+  </aside>
+  <main>
+    <div class="frames" ref="frames" v-show="!isBlankPage()">
+      <div class="empty" v-if="!selected">{{selectedDevice() ? $t('browser.no_windows') : $t('browser.select_window')}}</div>
+    </div>
+    <section class="blank-page" v-if="isBlankPage()" :aria-label="$t('browser.new_tab')">
+      <div class="blank-content">
+        <h1>{{$t('browser.new_tab')}}</h1>
+        <form class="blank-address" @submit.prevent="navigate">
+          <i class="fa-solid fa-globe" aria-hidden="true"></i>
+          <input v:value="address" @keydown.esc="resetAddress" :disabled="busy"
+            :placeholder="$t('browser.address')" :aria-label="$t('browser.address')"
+            autocomplete="off" spellcheck="false">
+          <button class="icon-button" type="submit" :disabled="busy || !address.trim()"
+            :title="$t('browser.go')" :aria-label="$t('browser.go')">
+            <i class="fa-solid fa-arrow-right" aria-hidden="true"></i>
+          </button>
+        </form>
+        <section class="open-tabs" :aria-label="$t('browser.open_tabs')">
+          <h2>{{$t('browser.open_tabs')}}</h2>
+          <ul>
+            <li v-for="item in otherTabs()">
+              <button class="tab-shortcut" @click="selectWindow(item)" :title="item.url">
+                <i class="fa-regular fa-window-maximize" aria-hidden="true"></i>
+                <span class="tab-label">
+                  <strong>{{item.title || (item.url === 'about:blank' ? $t('browser.new_tab') : item.url) || item.id}}</strong>
+                  <small>{{item.hostName}} · {{item.url || 'about:blank'}}</small>
+                </span>
+                <i class="fa-solid fa-arrow-right" aria-hidden="true"></i>
+              </button>
+            </li>
+          </ul>
+          <p class="no-open-tabs" v-if="!otherTabs().length">{{$t('browser.no_open_tabs')}}</p>
+        </section>
+      </div>
+    </section>
+    <div class="page-dialog" v-if="selected?.dialog" role="dialog" :aria-label="$t('browser.page_dialog')">
+      <p>{{selected.dialog.message}}</p>
+      <div class="dialog-actions">
+        <button @click="mutate('dialog',{accept:false})" :disabled="busy">{{$t('browser.dismiss_dialog')}}</button>
+        <button class="confirm" @click="mutate('dialog',{accept:true})"
+          :disabled="busy">{{$t('browser.accept_dialog')}}</button>
+      </div>
+    </div>
+  </main>
+</body>
+<script setup>
+  import {BrowserDirectory, BrowserView, browserCall} from './browser.js'
+  import {shellQuote} from './shell_quote.js'
+  import {createBrowserViewer} from './browser-viewer.js'
+  devices = []
+  selectedHostId = ''
+  selected = null
+  address = ''
+  sidebarOpen = true
+  refreshing = false
+  busy = false
+  let directory, view, canvas, element, timer, disposed = false, lastURL = null, lastError = ''
+  // 字面量枚举（不用字符串拼接，让 i18n 扫描器可见；未知状态回落原值）
+  statusText = status => ({
+    connecting: $t('browser.status_connecting'),
+    disabled: $t('browser.status_disabled'),
+    error: $t('browser.status_error'),
+    offline: $t('browser.status_offline'),
+    unavailable: $t('browser.status_unavailable'),
+    unsupported: $t('browser.status_unsupported'),
+  })[status] || status
+  selectedDevice = () => devices.find(host => host.id === selectedHostId && host.status === 'ready') || null
+  isBlankPage = () => selected?.url === 'about:blank'
+  otherTabs = () => devices.flatMap(host => host.windows).filter(item => item.key !== selected?.key)
+  resetAddress = () => {address = isBlankPage() ? '' : selected?.url || ''}
+  const reportError = message => {
+    if (disposed) return
+    if (message && message !== lastError) $message.error(message)
+    lastError = message || ''
+  }
+  const apply = rows => {
+    if (disposed) return
+    devices = rows.map(row => {
+      const old = devices.find(h => h.id === row.id)
+      if (!old) return row
+      const windows = row.windows.map(item => {
+        const previous = old.windows.find(w => w.key === item.key)
+        if (previous) {Object.assign(previous, item); return previous}
+        return item
+      })
+      Object.assign(old, {...row, windows}); return old
+    })
+    if (selected) {
+      const current = devices.flatMap(h => h.windows).find(w => w.key === selected.key)
+      if (!current) selectWindow(null)
+      else if (view && view.connection !== directory.connection(current.hostId)) selectWindow(current, true)
+      else if (current.url !== lastURL) {resetAddress(); lastURL = current.url}
+    }
+  }
+  refresh = async () => {
+    if (!directory || refreshing || disposed) return
+    refreshing = true
+    try {
+      await directory.refresh()
+      if (disposed) return
+      // Choose by directory order after discovery, not by RTC response speed.
+      const host = selectedDevice() || devices.find(host => host.status === 'ready')
+      if (!host) {selectedHostId = ''; await selectWindow(null)}
+      else if (host.id !== selectedHostId) await selectDevice(host.id)
+      else if (!selected) await selectWindow(host.windows[0] || null)
+    } catch (e) {reportError(e.message)}
+    finally {refreshing = false}
+  }
+  selectDevice = async hostId => {
+    const host = devices.find(host => host.id === hostId && host.status === 'ready')
+    if (disposed || !host) return
+    if (host.id === selectedHostId && selected) return
+    selectedHostId = host.id
+    await selectWindow(host.windows[0] || null)
+  }
+  selectWindow = async (item, force = false) => {
+    if (disposed || (!force && selected?.key === item?.key)) return
+    if (item) selectedHostId = item.hostId
+    const previous = view
+    view = null; canvas?.dispose(); canvas = null
+    selected = item; lastError = ''; resetAddress(); lastURL = item?.url
+    await previous?.close()
+    if (disposed || selected !== item || !item) return
+    const connection = directory.connection(item.hostId)
+    if (!connection) {reportError($t('browser.status_offline')); return }
+    const next = new BrowserView(connection, item, {
+      frame: frame => {if (view === next) return canvas?.paint(frame)},
+      changed: state => {if (view === next) {reportError(state.error)}},
+    })
+    view = next
+    canvas = createBrowserViewer({el: element, view: next})
+    next.start()
+  }
+  const act = async fn => {
+    if (busy || disposed) return
+    busy = true; lastError = ''
+    try {return await fn()} catch (e) {reportError(e.message)}
+    finally {busy = false}
+  }
+  mutate = (method, args) => act(async () => {await view?.mutate(method, args); await refresh()})
+  navigate = () => {
+    const value = String(address || '').trim()
+    if (!selected || !value) return
+    return mutate('navigate', {url: /^https?:\/\//i.test(value) || value === 'about:blank' ? value : 'https://' + value})
+  }
+  // doCreateWindow 不带 busy 闸（openLink 已持闸）；按钮入口经 createWindow 包装。
+  const doCreateWindow = async (hostId, url) => {
+    const connection = directory.connection(hostId)
+    if (!connection) throw new Error($t('browser.status_offline'))
+    const result = await browserCall(connection, `browser page.create --json -- ${shellQuote(url || 'about:blank')}`)
+    await refresh()
+    const item = devices.find(h => h.id === hostId)?.windows.find(w => w.page_id === result.page_id)
+    if (item) await selectWindow(item)
+  }
+  createWindow = (hostId, url) => act(() => doCreateWindow(hostId, url))
+  closeWindow = target => act(async () => {
+    if (!target) return
+    const connection = directory.connection(target.hostId)
+    if (!connection) throw new Error($t('browser.status_offline'))
+    const current = selected?.key === target.key ? view : null
+    // Detach first so an intentional close does not show a disconnect toast.
+    await current?.close()
+    try {await browserCall(connection, `browser page.close --json -- ${shellQuote(target.page_id)}`)}
+    catch (e) {if (current && selected?.key === target.key) await selectWindow(target, true); throw e}
+    if (selected?.key === target.key) await selectWindow(null)
+    await refresh()
+  })
+  // openLink 多标签打开（OS 通用 handles 打开机制的页面侧入口，skill.md §9.1）：
+  // 全设备已有同 URL 窗口 → 聚焦；否则在选中/首台就绪设备新建标签并选中。
+  // URL 规范化比较：CDP 报的窗口 URL 是规范形（https://example.com/ 带尾斜杠），
+  // 输入裸写不带——两侧同走 URL 构造器规范形再比较，否则复用永不命中（P5 回归实测）。
+  const canonUrl = u => { try { return new URL(u).href } catch { return u } }
+  openLink = raw => act(async () => {
+    const value = String(raw || '').trim()
+    if (!value) throw new Error('browser.open: URL required, e.g. open --url https://example.com')
+    const url = canonUrl(/^https?:\/\//i.test(value) || value === 'about:blank' ? value : 'https://' + value)
+    await refresh()
+    const existing = devices.flatMap(h => h.windows).find(w => w.url === url)
+    if (existing) {
+      await selectWindow(existing)
+      return {content: JSON.stringify({page_id: existing.page_id, host_id: existing.hostId, url, reused: true})}
+    }
+    const host = selectedDevice() || devices.find(h => h.status === 'ready')
+    if (!host) throw new Error($t('browser.no_devices'))
+    await doCreateWindow(host.id, url)
+    return {content: JSON.stringify({host_id: host.id, url, reused: false})}
+  })
+  // open 指令 argv 解析：--url <url> / --url=<url> / 裸位置参数。
+  const openArgv = argv => {
+    let url = ''
+    const args = (argv || []).map(String)
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--url') {url = args[++i] || ''; continue}
+      if (args[i].startsWith('--url=')) {url = args[i].slice(6); continue}
+      if (!args[i].startsWith('--') && !url) url = args[i]
+    }
+    return url
+  }
+  mount = el => {
+    element = el; directory = new BrowserDirectory($hosts, apply)
+    // ?url= 深链：OS open 经 query 注入（包页面裸 URL + ?url=...）；首刷后消费一次即清
+    let initUrl = String($router?.current?.query?.url || '').trim()
+    const tick = async () => {
+      await refresh()
+      if (disposed) return
+      if (initUrl) {const url = initUrl; initUrl = ''; openLink(url).catch(e => reportError(e.message))}
+      timer = setTimeout(tick, 3000)
+    }
+    tick()
+  }
+  unmount = () => {
+    disposed = true; clearTimeout(timer); canvas?.dispose(); view?.close(); directory?.close()
+  }
+  pageDesc = {
+    desc: 'Manage browser windows running on connected devices. Window lifecycle and automation belong to the host browser command.',
+    commands: [{
+      name: 'open', desc: 'open URL in a device browser tab (existing tab with same URL focused, new tab created otherwise)', help: 'open --url <url>', handler: argv => openLink(openArgv(argv)),
+    }, {
+      name: 'list_windows', desc: 'List device browser windows', help: 'list_windows', handler: async () => {
+        await refresh(); return {content: JSON.stringify(devices.map(h => ({host_id: h.id, name: h.name, status: h.status, windows: h.windows})))}
+      }
+    }],
+  }
+</script>
+<script>mount($refs.frames)</script>
+<script dispose>unmount()</script>
+
+</html>
