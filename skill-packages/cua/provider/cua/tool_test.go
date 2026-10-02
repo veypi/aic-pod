@@ -62,6 +62,10 @@ func TestExportImage(t *testing.T) {
 		"w1": {snapshot: &nativeSnapshot{id: "s1", image: img, mime: "image/png"}},
 	}}
 	dir := t.TempDir()
+	run := func(args ...string) (string, string, int) {
+		var out, errBuf bytes.Buffer
+		return out.String(), errBuf.String(), s.Run(context.Background(), args, dir, &out, &errBuf)
+	}
 	var out, errBuf bytes.Buffer
 	code := s.Run(context.Background(), []string{"observation.image.export", "w1", "s1", "shot.png", "--json"}, dir, &out, &errBuf)
 	if code != 0 {
@@ -71,10 +75,13 @@ func TestExportImage(t *testing.T) {
 	if err != nil || !bytes.Equal(got, img) {
 		t.Fatalf("exported bytes mismatch: err=%v len=%d", err, len(got))
 	}
-	if _, _, code := runCLI(t, s, "observation.image.export", "w1", "s1", "shot.png"); code == 0 {
+	if _, _, code := run("observation.image.export", "w1", "s1", "shot.png"); code == 0 {
 		t.Fatal("existing target admitted")
 	}
-	if _, _, code := runCLI(t, s, "observation.image.export", "w1", "ghost", "other.png"); code == 0 {
+	if _, _, code := run("observation.image.export", "w1", "ghost", "other.png"); code == 0 {
 		t.Fatal("expired image admitted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "other.png")); !os.IsNotExist(err) {
+		t.Fatal("failed export left file behind")
 	}
 }
