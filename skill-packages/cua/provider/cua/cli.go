@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/veypi/aic-pod/libs/cliargs"
@@ -127,6 +128,9 @@ func (s *Service) subcommands() []cuaSub {
 		{usage: "observation.image.read <window_id> <image_id> [--offset N] [--limit N]", positionals: []string{"window_id", "image_id"}, newArgs: func() any { return &ImageArgs{} }, run: func(ctx context.Context, a any) (any, error) {
 			return s.Image(ctx, *a.(*ImageArgs))
 		}},
+		{usage: "observation.image.export <window_id> <image_id> <path>", positionals: []string{"window_id", "image_id", "path"}, newArgs: func() any { return &ExportArgs{} }, run: func(ctx context.Context, a any) (any, error) {
+			return s.ExportImage(ctx, *a.(*ExportArgs))
+		}},
 	}
 	// 窗口动作（click/fill/type/press/scroll/set/move）同形：locator flags
 	//（--ref/--role+--name/--label/--snapshot+--at x,y）+ --text/--key/--value/
@@ -174,12 +178,21 @@ const Help = `usage: cua <subcommand> [args] [--json]
   clipboard.read | clipboard.write <text>
   cursor.state | cursor.set --enabled[=false]
   observation.image.read <window_id> <image_id> [--offset N] [--limit N]
+  observation.image.export <window_id> <image_id> <path>   完整截图写文件（推荐）
 
 locator flags：--ref R | --role R --name N | --label L | --snapshot S --at x,y。
 选项：--text T --key K --value V --button left|right|middle --count 2
       --delivery background|foreground --after none|observation|image
 输出：stdout 只放约定 JSON（--json 紧凑）；诊断写 stderr。
 activate 与 --delivery foreground 不需要审批（由 rules 决定）。`
+
+// absolutize 把文件参数按调用方 cwd 绝对化（svc 进程 cwd 是包目录，与调用方
+// 无关——browser 包同契约）。
+func absolutize(parsed any, cwd string) {
+	if a, ok := parsed.(*ExportArgs); ok && a.Path != "" && !filepath.IsAbs(a.Path) && cwd != "" {
+		a.Path = filepath.Join(cwd, a.Path)
+	}
+}
 
 // Run 执行一条 cua CLI 命令（argv 不含程序名），返回进程退出码。
 // 与 browser.Service.Run 同契约：--json 任意位置生效；子命令表/解析在上面的
@@ -215,6 +228,7 @@ func (s *Service) Run(ctx context.Context, argv []string, cwd string, stdout, st
 	} else {
 		parsed := sub.newArgs()
 		if err = cliargs.Parse(args[1:], sub.positionals, parsed); err == nil {
+			absolutize(parsed, cwd)
 			if validator, ok := parsed.(interface{ Validate() error }); ok {
 				err = validator.Validate()
 			}

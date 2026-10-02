@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,5 +50,31 @@ func TestCLIStrictArgsAndJSONContract(t *testing.T) {
 	out, _, code = runCLI(t, s)
 	if code != 0 || !strings.Contains(out, "usage: cua") {
 		t.Fatalf("help: %q, code=%d", out, code)
+	}
+}
+
+// TestExportImage 截图整文件导出：字节完整、相对路径按调用方 cwd 解析、
+// 目标存在拒绝（O_EXCL）、过期快照 404。
+func TestExportImage(t *testing.T) {
+	s := &Service{native: newNativeUI()}
+	img := bytes.Repeat([]byte{0x7c}, 70000) // 超 32KB 分块上限，证整写
+	s.native.session = &nativeSession{targets: map[string]*nativeTarget{
+		"w1": {snapshot: &nativeSnapshot{id: "s1", image: img, mime: "image/png"}},
+	}}
+	dir := t.TempDir()
+	var out, errBuf bytes.Buffer
+	code := s.Run(context.Background(), []string{"observation.image.export", "w1", "s1", "shot.png", "--json"}, dir, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("export: code=%d stderr=%s", code, errBuf.String())
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "shot.png"))
+	if err != nil || !bytes.Equal(got, img) {
+		t.Fatalf("exported bytes mismatch: err=%v len=%d", err, len(got))
+	}
+	if _, _, code := runCLI(t, s, "observation.image.export", "w1", "s1", "shot.png"); code == 0 {
+		t.Fatal("existing target admitted")
+	}
+	if _, _, code := runCLI(t, s, "observation.image.export", "w1", "ghost", "other.png"); code == 0 {
+		t.Fatal("expired image admitted")
 	}
 }

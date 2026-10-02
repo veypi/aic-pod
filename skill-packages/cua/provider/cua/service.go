@@ -8,6 +8,8 @@ package cua
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -120,22 +122,30 @@ type ImagePart struct {
 	EOF    bool   `json:"eof"`
 }
 
-func (s *Service) Image(ctx context.Context, a ImageArgs) (ImagePart, error) {
+// imageBytes 取观察截图全量字节（gate 持有；找不到 = 过期语义）。
+func (s *Service) imageBytes(ctx context.Context, windowID, imageID string) ([]byte, string, error) {
 	select {
 	case s.native.gate <- struct{}{}:
 		defer func() { <-s.native.gate }()
 	case <-ctx.Done():
-		return ImagePart{}, ctx.Err()
+		return nil, "", ctx.Err()
 	}
 	actor := s.native.session
 	if actor == nil {
-		return ImagePart{}, wire.Fail("not_found", "Observation expired")
+		return nil, "", wire.Fail("not_found", "Observation expired")
 	}
-	target := actor.targets[a.WindowID]
-	if target == nil || target.snapshot == nil || target.snapshot.id != a.ImageID || len(target.snapshot.image) == 0 {
-		return ImagePart{}, wire.Fail("not_found", "Image expired")
+	target := actor.targets[windowID]
+	if target == nil || target.snapshot == nil || target.snapshot.id != imageID || len(target.snapshot.image) == 0 {
+		return nil, "", wire.Fail("not_found", "Image expired")
 	}
-	data := target.snapshot.image
+	return target.snapshot.image, target.snapshot.mime, nil
+}
+
+func (s *Service) Image(ctx context.Context, a ImageArgs) (ImagePart, error) {
+	data, _, err := s.imageBytes(ctx, a.WindowID, a.ImageID)
+	if err != nil {
+		return ImagePart{}, err
+	}
 	if a.Offset < 0 || a.Offset > len(data) || a.Limit < 0 || a.Limit > 32<<10 {
 		return ImagePart{}, wire.Fail("invalid_argument", "Invalid image range")
 	}
@@ -144,4 +154,22 @@ func (s *Service) Image(ctx context.Context, a ImageArgs) (ImagePart, error) {
 	}
 	end := min(a.Offset+a.Limit, len(data))
 	return ImagePart{Bytes: data[a.Offset:end], Offset: a.Offset, Total: len(data), EOF: end == len(data)}, nil
+}
+
+// ExportImage 把观察截图完整写到设备文件（目标不存在才写；调用方 cwd 已在
+// CLI 层绝对化）。AI 截图消费的正路——不用 image.read 手拼分块。
+func (s *Service) ExportImage(ctx context.Context, a ExportArgs) (map[string]any, error) {
+	data, mime, err := s.imageBytes(ctx, a.WindowID, a.ImageID)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(a.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return nil, wire.Fail("already_exists", fmt.Sprintf("target exists or is not writable: %s", err))
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		return nil, wire.Fail("write_failed", err.Error())
+	}
+	return map[string]any{"path": a.Path, "bytes": len(data), "mime": mime}, nil
 }

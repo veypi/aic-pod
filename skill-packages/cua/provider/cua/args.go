@@ -112,6 +112,12 @@ type ImageArgs struct {
 	ImageID  string `json:"image_id" required:"true"`
 }
 
+type ExportArgs struct {
+	Path     string `json:"path" required:"true"`
+	WindowID string `json:"window_id" required:"true"`
+	ImageID  string `json:"image_id" required:"true"`
+}
+
 func fields(v any) map[string]any {
 	b, _ := json.Marshal(v)
 	out := map[string]any{}
