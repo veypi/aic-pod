@@ -23,7 +23,7 @@ import (
 
 // 选择性嵌入：browser.zip（构建产物）在包根被自然排除；cli/bin provider
 // 二进制构建后收进（build.sh 先于 pod 构建）。
-//go:embed all:browser/SKILL.md all:browser/cli all:browser/ui all:cua/SKILL.md all:cua/cli all:cua/ui all:vhtml all:office_studio
+//go:embed all:browser/SKILL.md all:browser/cli all:browser/ui all:cua/SKILL.md all:cua/cli all:cua/ui all:create_skill all:vhtml all:office_studio
 var builtin embed.FS
 
 // List 内建包名（嵌入根下的目录名 = 包名 = 注册表 id）。按名排序，遍历稳定。

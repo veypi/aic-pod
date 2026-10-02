@@ -1,0 +1,25 @@
+#!/bin/sh
+# 最小 process provider（无状态命令）：每次调用起一个进程，argv 全量传入。
+# 输出契约：stdout 只放约定 JSON（--json 紧凑）；诊断写 stderr；非零退出 = 失败。
+# 有状态（持连接/会话/流）才需要 service provider——参考 browser/cua 包源码。
+case "$1" in
+  ""|--help|-h|help)
+    cat <<'USAGE'
+usage: hello <subcommand> [args] [--json]
+
+子命令：
+  greet [name]    打招呼（默认 world）
+USAGE
+    ;;
+  greet)
+    name="world"
+    for a in "$@"; do
+      case "$a" in greet|--json) ;; *) name="$a" ;; esac
+    done
+    printf '{"message":"hello, %s"}\n' "$name"
+    ;;
+  *)
+    echo "hello: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac

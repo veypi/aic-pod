@@ -1,0 +1,7 @@
+{
+  "fields": [
+    {"name": "user_id", "type": "string"},
+    {"name": "title", "type": "string", "required": true},
+    {"name": "qty", "type": "int"}
+  ]
+}

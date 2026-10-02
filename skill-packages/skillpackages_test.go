@@ -10,10 +10,10 @@ import (
 
 func TestListAndOpen(t *testing.T) {
 	names := List()
-	if len(names) != 4 {
-		t.Fatalf("List = %v, want 4 builtin packages", names)
+	if len(names) != 5 {
+		t.Fatalf("List = %v, want 5 builtin packages", names)
 	}
-	want := map[string]bool{"browser": true, "cua": true, "vhtml": true, "office_studio": true}
+	want := map[string]bool{"browser": true, "cua": true, "create_skill": true, "vhtml": true, "office_studio": true}
 	for _, n := range names {
 		if !want[n] {
 			t.Fatalf("unexpected builtin package %q in %v", n, names)
@@ -35,6 +35,7 @@ func TestVersionFromFrontmatter(t *testing.T) {
 	for name, want := range map[string]string{
 		"browser":       "0.1.0",
 		"cua":           "0.2.0",
+		"create_skill":  "0.1.0",
 		"vhtml":         "0.1.0",
 		"office_studio": "1.0.1",
 	} {

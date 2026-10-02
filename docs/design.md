@@ -22,9 +22,8 @@ AIC Pod 是运行在用户设备上的能力代理。CLI 和 Desktop 共用 Go �
 | vbox（外部依赖 ivec/vbox） | 原生子进程托管、OS 沙箱及进程组取消，不自建第二套输出契约 |
 | libs/fsauth、libs/netauth 等 | 现有资源规则、会话 grant 和沙箱约束派生 |
 | libs/hostfs | 文件、版本、字节源、上传与条件提交 |
-| libs/cua | 桌面领域状态；作为普通 vsh 指令调用 |
 | libs/skillrun | skill 包在 pod 端的安装/注册/运行权威（v6）：manifest 校验、包名冲突、根命令注册、懒启动与 stream 路由 |
-| skill-packages/ | skill 包源码（hello、browser）；仓库为源，构建产物落各包 cli/bin/（不入库） |
+| skill-packages/ | skill 包源码（hello、browser、cua、create_skill 等）；仓库为源，构建产物落各包 cli/bin/（不入库） |
 | libs/rtc、protocol/ui | RTC 连接与 UI 领域数据，不承担命令审批分级 |
 
 继续使用现有包，不为这次改造增加权限服务、任务服务或第二个 Registry。旧 hosts_tool 声明体系在迁移时删除，不再维护 Method/Translate/AccessRules/RequiredLevel 或 DeviceCommand 投影。

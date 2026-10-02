@@ -23,7 +23,7 @@
 
 ### 2.1 指令解析
 
-沿用 vsh 自身的命令注册机制，`commands / grant / bg / browser / cua` 都直接注册为 vsh 指令，不另建宿主 Registry。
+沿用 vsh 自身的命令注册机制，`commands / grant / bg / skill` 直接注册为 vsh 指令，不另建宿主 Registry。`browser / cua`（v6 P5/P6 起）是已装 skill 包的根命令——skillrun Registry 按 `~/.aic/skills/*/cli/manifest.json` 懒解析进引擎，与包命令同一门径（execAllowed 检查、禁用显式报错），不再内建注册。
 
 vsh 按 shell 语义执行整个脚本；执行到其中一条指令时，按以下顺序查找实现：
 
@@ -39,7 +39,7 @@ vsh 按 shell 语义执行整个脚本；执行到其中一条指令时，按以
 
 ### 2.2 commands 只展示需要发现的能力
 
-- host/cloud：默认只展示核心自定义指令，例如 `commands / grant / bg / browser / cua`，以及该端实际提供的 `list_hosts / send_user`。
+- host/cloud：默认只展示核心自定义指令（`commands / grant / bg / skill`）与已装 skill 包根命令（browser/cua 等），以及该端实际提供的 `list_hosts / send_user`。
 - `ls / rm / mkdir / cat` 等常见指令不占发现目录；不枚举 PATH，不展示本机全部二进制。
 - page：展示该端全部已注册指令，因为没有本机命令环境可供假定。
 - 具体用法通过 `<command> --help` 获取。
@@ -205,11 +205,11 @@ shellQuote 使用 vsh 支持的单引号字面量规则，处理内嵌单引号�
 
 viewer 使用的 Browser/CUA 指令和 bg 查询提供 `--json`：stdout 只输出约定 JSON，提示、诊断和进度写 stderr。成功 JSON 的字段、类型和空列表形状固定；同一主版本只能做兼容新增，不能随人类可读输出调整。非零退出不能当成功数据使用；未知字段可忽略，必需字段缺失或类型变化显式报错。
 
-- `browser page.list --json` 输出 `PageInfo[]`，沿用 `libs/browser/types.go` 的字段定义。
+- `browser page.list --json` 输出 `PageInfo[]`，字段定义在 `skill-packages/browser/provider/browser/types.go`（v6 P5 起包自维护）。
 - CUA 的 app/window 列表及其他 viewer 操作沿用 `protocol/ui` 的 Result 结构；实施时补齐每个操作的结果 JSON Schema，data 内被 viewer 使用的字段也要显式定义和用固定样例锁定，不能只依赖 Go 的 any 或输入 schema。
 - `bg list --json` 输出任务数组，固定字段为 id、state、script、output、error_output；已完成时有 exit_code。`bg wait <id> --json` 输出同形单个任务对象，运行中不伪造退出码。state 固定为 running/done/timeout/killed/error。
 
-JSON schema、黄金样例和命令输出测试由各命令所属包维护；实施时同步增加 Browser/CUA/bg 的 CLI 样例，并在前端做消费契约测试。它们约束 stdout 内容，不进入命令目录或协议分发，不是第二套单指令调用机制。
+JSON schema、黄金样例和命令输出测试由各命令所属包维护（browser/cua 包内测试已锁定输出契约）；实施时同步增加 bg 的 CLI 样例，并在前端做消费契约测试。它们约束 stdout 内容，不进入命令目录或协议分发，不是第二套单指令调用机制。
 
 viewer 只在整段脚本完成且成功后解析 stdout；若 attrs.truncated=true，则读取 attrs.output 的完整内容再解析，绝不从 stderr 或混合日志中过滤出 JSON。后台执行先查询完成状态再读文件，不能解析仍在增长的半截 JSON。脚本组合后的最终格式由提交方负责；用户主动写 `2>&1` 或拼出多个 JSON 文档，不是执行端应修复的情况。删除 tool_utils 的旧方法翻译及兼容分支。
 
