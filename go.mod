@@ -81,7 +81,7 @@ require (
 )
 
 // vsh/vbox 为本地姊妹仓（go.work 接线；replace 供非 workspace 构建——
-// Docker/CI 构建前需先发布或拷贝两仓，见 vsh/docs/design.md 里程碑）。
+// Docker/CI 构建前需先发布或拷贝两仓）。
 // aic-skills 同：官方 skill 专仓（内建包嵌入源 + Go SDK），单向依赖。
 replace (
 	github.com/veypi/aic-skills => ../aic-skills

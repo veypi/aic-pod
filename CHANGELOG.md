@@ -8,6 +8,7 @@
 ## 未发布
 
 - **skill-packages 迁出至 aic-skills 专仓（破坏性）**：官方 skill 包源码（browser/cua/hello 整包）与 provider 依赖的契约包（protocol/skillproc、protocol/ui、libs/cliargs）移入 aic-skills 仓（Go module，`sdk/go` 自包含、不反向依赖 pod）；skillrun/uiscript 改 import github.com/veypi/aic-skills（go.mod replace ../aic-skills，go.work 接线）；libs/fsx/image.go 保留 pod 侧（read 管线），provider 侧副本在 sdk/go/fsx。Makefile browser-zip/cua-bin 与 desktop 打包链路（before-pack/electron-builder/check-asar）路径改道 ../aic-skills。
+- **三仓评审清理**：① libs/fsx 的 image_data 编解码/600KB 阈值/viewable 格式判定改引 aic-skills `sdk/go/fsx` 单一实现（read 管线保留 imageResult 形态；三处逐字重复消除）；② 残留指针：Makefile「skillpackages embed 输入」注释、docs/design.md 的 skill-packages 路径、go.mod 失效文档指针（vsh/docs/design.md）；③ CI `go test ./protocol/ui`（包已迁 sdk/go/ui）改 `go test ./libs/uiscript`。
 
 ## v0.8.5 — 2026-10-01
 

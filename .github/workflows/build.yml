@@ -39,7 +39,7 @@ jobs:
         run: npm ci --prefix desktop
       - name: Test UI protocol
         run: |
-          go test ./protocol/ui
+          go test ./libs/uiscript
           npm test --prefix desktop
       - name: Test native files and authorization config
         run: go test ./libs/hostfs ./cfg

@@ -79,7 +79,7 @@ cli-windows-amd64:
 
 # Go 后端二进制：dev 运行（desktop/bin/）与 electron-builder extraResources
 # （resources/backend/）共用。先清掉两侧旧名，避免跨平台残留被打进包。
-# 依赖 browser-zip/cua-bin：cli/bin provider 二进制是 skillpackages embed 输入，必须先于 go build。
+# 依赖 browser-zip/cua-bin：cli/bin provider 二进制是 aic-skills 内建包 embed 输入，必须先于 go build。
 backend-bin: browser-zip cua-bin
 	@mkdir -p $(DESKTOP_DIR)/bin
 	@rm -f $(DESKTOP_DIR)/bin/aic-backend $(DESKTOP_DIR)/bin/aic-backend.exe

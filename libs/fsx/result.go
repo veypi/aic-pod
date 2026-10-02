@@ -107,15 +107,6 @@ func detectMIME(data []byte, path string) string {
 	return mime
 }
 
-// isViewableImageMime 判定图片格式是否可被模型直接查看（§2.2）。
-func isViewableImageMime(mime string) bool {
-	switch mime {
-	case "image/png", "image/jpeg", "image/gif", "image/webp":
-		return true
-	}
-	return false
-}
-
 // ---- 错误构造（格式锁定，§2.3/§5.4） ----
 
 // execErr 构造虚拟指令错误：消息为 {cmd}: {原因}（§5.4 基准，不带 exec 前缀——

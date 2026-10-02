@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	fsxsdk "github.com/veypi/aic-skills/sdk/go/fsx"
 )
 
 // readTailLines 是 read 越界回退窗口的行数（§4.2）：offset 越过文件头/尾时
@@ -303,7 +305,7 @@ func binaryResult(env *Env, abs string, data []byte) (*Result, error) {
 	r := newResult("read", abs)
 	r.Attrs["mime"] = mime
 	r.set("size", len(data))
-	if isViewableImageMime(mime) {
+	if fsxsdk.IsViewableImageMime(mime) {
 		return imageResult(env, abs, data, mime)
 	}
 	r.Content = fmt.Sprintf("Binary file: %s (%s, %d bytes)", abs, mime, len(data))
@@ -320,7 +322,7 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 	r := newResult("read", abs)
 	r.Attrs["mime"] = mime
 	r.set("size", info.Size())
-	if isViewableImageMime(mime) {
+	if fsxsdk.IsViewableImageMime(mime) {
 		if env.ImageData {
 			// host/page 端图片仍需整读以压缩产出 image_data（§4.2 环境能力差异）
 			data, err := env.FS.ReadFile(abs)
