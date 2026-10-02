@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="description" content="Office Studio — 打开/审阅/保存 docx（docx-core 审阅工作台）；AI 与用户共用同一文档" />
+  <title>Office Studio · Word</title>
+</head>
+<style>
+  body {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    container-type: inline-size;
+  }
+
+  /* ===== 编辑器视图 ===== */
+  .ed {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .topbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-color-secondary);
+  }
+
+  .brand { font-weight: var(--font-weight-semibold); color: var(--color-primary); white-space: nowrap; }
+  .path { font-size: var(--font-size-xs); opacity: .75; max-width: 38%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .grow { flex: 1; }
+  .st { font-size: var(--font-size-xs); opacity: .75; white-space: nowrap; }
+  .err { font-size: var(--font-size-xs); color: var(--color-danger); white-space: nowrap; }
+  .rev-label { display: inline-flex; align-items: center; gap: 4px; font-size: var(--font-size-xs); opacity: .75; white-space: nowrap; }
+
+  button {
+    padding: 4px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-color-tertiary);
+    font-size: var(--font-size-sm);
+    cursor: pointer;
+    color: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+  }
+
+  button:hover { border-color: var(--border-color-hover); }
+  button.primary { background: var(--color-primary); border-color: transparent; color: var(--color-primary-text); }
+  button.primary:hover { background: var(--color-primary-hover); color: var(--color-primary-text); }
+  button.ai { background: var(--color-secondary); border-color: transparent; color: var(--color-secondary-text); }
+  button.ai:hover { background: var(--color-secondary-hover); color: var(--color-secondary-text); }
+
+  .main { flex: 1; min-height: 0; display: flex; position: relative; }
+
+  .empty-hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-size-sm);
+    color: var(--text-color-tertiary);
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  /* ===== 文档渲染区 ===== */
+  /* 注意：docx-preview 的 DOM 是运行时创建的 —— 选择器必须带 body 前缀穿透组件作用域 */
+  .doc-wrap { flex: 1; min-width: 0; overflow: auto; background: var(--bg-color-tertiary); }
+  body .doc-wrap .docx-wrapper { background: transparent; padding: 16px; }
+  body .doc-wrap .docx-wrapper > section.docx { max-width: 100%; box-shadow: var(--shadow-md); }
+  /* 修订样式：红=删除，绿=插入（docx-preview renderChanges 输出真实 ins/del 标签） */
+  body .doc-wrap ins { color: color-mix(in srgb, var(--color-success) 80%, var(--text-color)); text-decoration: underline; background: color-mix(in srgb, var(--color-success) 16%, transparent); }
+  body .doc-wrap del { color: color-mix(in srgb, var(--color-danger) 80%, var(--text-color)); text-decoration: line-through; background: color-mix(in srgb, var(--color-danger) 14%, transparent); }
+  body .doc-wrap p[data-para-id]:hover { outline: 1px dashed color-mix(in srgb, var(--color-primary) 50%, transparent); }
+  body .doc-wrap p.para-selected { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  /* 编辑定位短闪：AI/用户编辑后目标段落闪一下（引擎渲染后自动添加 .para-flash） */
+  body .doc-wrap p.para-flash { animation: para-flash 1.6s ease-out; }
+  @keyframes para-flash {
+    0% { background: color-mix(in srgb, var(--color-primary) 30%, transparent); }
+    100% { background: transparent; }
+  }
+
+  /* ===== 侧面板 ===== */
+  .side {
+    flex: none;
+    width: 320px;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border-color);
+    background: var(--bg-color-secondary);
+    min-height: 0;
+  }
+
+  .panel { padding: 8px 10px; border-bottom: 1px solid var(--border-color); }
+  .panel h3 { font-size: var(--font-size-xs); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 6px; opacity: .6; }
+
+  /* ===== 审阅队列 ===== */
+  .review-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .review-head h3 { margin: 0; }
+  .review-stat { font-size: var(--font-size-xs); color: var(--text-color-tertiary); white-space: nowrap; }
+  .batch-row { display: flex; gap: 6px; margin-top: 6px; }
+  .batch-row button { padding: 3px 10px; font-size: var(--font-size-xs); }
+  .review-list { flex: 1; overflow: auto; padding: 6px 8px; min-height: 0; }
+  .rev-empty { text-align: center; color: var(--text-color-tertiary); padding: 24px 0; font-size: var(--font-size-xs); }
+  .rev-item { padding: 6px 8px; border-radius: var(--radius-md); cursor: pointer; margin-bottom: 4px; }
+  .rev-item:hover { background: color-mix(in srgb, var(--text-color) 6%, transparent); }
+  .rev-item .row1 { display: flex; align-items: flex-start; gap: 6px; }
+  .rev-tag { flex: none; font-size: var(--font-size-xs); line-height: 18px; padding: 0 6px; border-radius: var(--radius-full); }
+  .rev-tag.t-del { background: color-mix(in srgb, var(--color-danger) 14%, transparent); color: var(--color-danger); }
+  .rev-tag.t-ins { background: color-mix(in srgb, var(--color-success) 14%, transparent); color: var(--color-success); }
+  .rev-tag.t-move, .rev-tag.t-cell { background: color-mix(in srgb, var(--color-warning) 16%, transparent); color: var(--color-warning); }
+  .rev-tag.t-cmt { background: color-mix(in srgb, var(--color-info) 14%, transparent); color: var(--color-info); }
+  .rev-text { flex: 1; min-width: 0; font-size: var(--font-size-xs); word-break: break-all; }
+  .rev-item .row2 { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 4px; padding-left: 2px; }
+  .rev-sub { font-size: var(--font-size-xs); color: var(--text-color-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rev-ops { display: flex; gap: 4px; flex: none; }
+  .rev-ops button { padding: 2px 10px; font-size: var(--font-size-xs); border-radius: var(--radius-md); }
+
+  .sel-info {
+    font-size: var(--font-size-xs);
+    color: var(--color-info);
+    background: color-mix(in srgb, var(--color-info) 14%, transparent);
+    border-radius: var(--radius-md);
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    min-height: 24px;
+    word-break: break-all;
+  }
+
+  input[type="text"] {
+    width: 100%;
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-sm);
+    margin-bottom: 5px;
+    background: var(--bg-color);
+    color: inherit;
+  }
+
+  .op-row { display: flex; gap: 6px; margin-bottom: 5px; }
+  .op-row input { flex: 1; min-width: 0; margin-bottom: 0; }
+  .op-row button { flex: none; }
+
+  /* ===== 响应式（@container = 窗口宽度，不要用 @media） ===== */
+  .panel-toggle { display: none; }
+
+  /* 窄窗：侧栏收为浮层抽屉，顶栏出现「面板」开关 */
+  @container (max-width: 960px) {
+    .panel-toggle { display: inline-block; }
+    .side {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: min(340px, 88cqw);
+      display: none;
+      z-index: 6;
+      box-shadow: var(--shadow-lg);
+    }
+    .side.open { display: flex; }
+  }
+
+  @container (max-width: 720px) {
+    .brand { display: none; }
+    body .doc-wrap .docx-wrapper { padding: 8px; }
+  }
+
+  @container (max-width: 560px) {
+    .path { display: none; }
+  }
+</style>
+
+<body>
+  <div class="ed">
+    <div class="topbar">
+      <button @click="goHome">首页</button>
+      <button @click="onOpen">打开</button>
+      <button @click="onSave">保存</button>
+      <button @click="onInsertImage">插入图片</button>
+      <button class="panel-toggle" @click="onTogglePanel">面板</button>
+      <span class="brand">Office Studio · Word</span>
+      <span class="path">{{ file_path || '未打开文件' }}</span>
+      <span class="grow"></span>
+      <label class="rev-label"><input type="checkbox" :checked="rev_render" @change="onToggleRev"> 显示修订</label>
+      <span class="st">{{ status_text }}</span>
+      <span v-if="boot_err" class="err">· {{ boot_err }}</span>
+    </div>
+    <div class="main">
+      <div class="doc-wrap" :id="host_id"></div>
+      <div class="empty-hint" v-if="!file_path">未打开文件 — 从「首页」选择文件，或点「打开」</div>
+      <div class="side" :class="{ open: panel_open }">
+        <div class="panel">
+          <div class="review-head">
+            <h3>审阅</h3>
+            <span class="review-stat">{{ rev_stat }}</span>
+          </div>
+          <div class="batch-row">
+            <button @click="onAcceptAI">接受 AI 修订</button>
+            <button @click="onAcceptAll">接受全部</button>
+            <button @click="onRejectAll">拒绝全部</button>
+          </div>
+        </div>
+        <div class="review-list">
+          <div class="rev-empty" v-if="!rev_items.length">没有待审的修订</div>
+          <div class="rev-item" v-for="it in rev_items" @click="() => onItemLocate(it)">
+            <div class="row1">
+              <span class="rev-tag" :class="'t-' + it.type">{{ it.tag }}</span>
+              <span class="rev-text">{{ it.display }}</span>
+            </div>
+            <div class="row2">
+              <span class="rev-sub">{{ it.sub }}</span>
+              <span class="rev-ops">
+                <button v-if="it.kind === 'rev'" @click.stop="onRevAccept(it)">接受</button>
+                <button v-if="it.kind === 'rev'" @click.stop="onRevReject(it)">拒绝</button>
+                <button v-if="it.kind === 'cmt'" @click.stop="onCommentDelete(it)">{{ pending_delete_comment === it.id ? '确认删除？' : '删除' }}</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>选区操作</h3>
+          <div class="sel-info">{{ sel_text || '在文档中选择文字后操作' }}</div>
+          <div class="op-row">
+            <input type="text" v:value="op_replace" placeholder="替换为……（回车提交）" @keyup.enter="onHumanReplace" />
+            <button class="primary" @click="onHumanReplace">替换</button>
+          </div>
+          <div class="op-row">
+            <input type="text" v:value="op_comment" placeholder="批注内容……（回车提交）" @keyup.enter="onHumanComment" />
+            <button @click="onHumanComment">批注</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+
+<script setup>
+  import { pushRecent } from './recent.js'
+
+  // ===== 界面状态 =====
+  ready = false
+  boot_err = ''
+  status_text = ''
+  file_path = ''
+  is_new = false         // 新建（未保存）模式：保存时写入目标路径
+  rev_items = []         // 审阅队列条目（修订 + 批注）
+  rev_stat = ''          // 统计行文案
+  pending_delete_comment = -1 // 批注删除二次确认（待确认的批注 id；-1 = 无）
+  sel_text = ''          // 当前选区描述
+  op_replace = ''
+  op_comment = ''
+  rev_render = true
+  panel_open = false     // 窄窗（≤960px）下侧栏抽屉是否展开
+  active_para = ''       // 最近点击选中的段落 id（插入图片等的默认锚点）
+  home_armed = false     // 「首页」未保存退出二次确认（再次点击才真正离开）
+
+  // ===== 引擎引用（窗口级，避免响应式包装）=====
+  modRef = null
+  reviewRef = null       // createDocxReview 返回组合
+  selRef = null          // 最近一次选区 {paragraphId, start, end, text}
+  _route_off = null      // $router.onChange 取消函数（dispose 时调用）
+  _last_route = ''       // 已处理的路由 fullPath（同页 query 变化去重）
+  // 本页面实例的文档容器 id：平台是“单文档多窗口”，全局 getElementById('docx-host')
+  // 会命中第一个窗口的容器——每实例生成唯一 id（模板 :id 绑定），确保只命中自己的容器
+  host_id = 'docx-host-' + Math.random().toString(36).slice(2, 8)
+
+  // 磁盘一致性 / 未保存追踪 / 诊断计数（非响应式内部状态）
+  let _disk_hash = ''   // 打开或保存时的磁盘内容 sha-256（save 冲突检测基线）
+  let _saved_seq = 0    // 最近一次保存时 doc 操作序号（doc._seq > _saved_seq 即有未保存修改）
+  let _load_seq = 0     // 文档加载次数（诊断）
+  let _save_seq = 0     // 保存次数（诊断）
+  let _home_timer = 0   // 「首页」二次确认复位计时器
+
+  const toTree = (p) => String(p || '').replace(/^\/fs(?=\/)/, '')
+  const nameOf = (p) => String(p || '').split('/').filter(Boolean).pop() || 'document.docx'
+  const reply = (o) => ({ content: JSON.stringify(o) })
+  const errReply = (e) => ({ content: JSON.stringify({ ok: false, error: String((e && e.message) || e) }) })
+  const argOf = (argv, key, def) => {
+    const a = argv || []
+    for (let i = 0; i < a.length; i++) if (a[i] === '--' + key) return a[i + 1]
+    return def
+  }
+  const firstPos = (argv) => (argv || []).find((x) => !String(x).startsWith('--'))
+  const sha256Hex = async (buf) => {
+    const d = await crypto.subtle.digest('SHA-256', buf)
+    return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  // insert_table --data：JSON 二维数组（[["a","b"],["c","d"]]）或旧式 "a|b;c|d"（支持 \| \; \\ 转义）
+  const parseTableData = (s) => {
+    const raw = String(s)
+    if (/^\s*\[/.test(raw)) {
+      let j = null
+      try { j = JSON.parse(raw) } catch (e) { throw new Error('--data JSON 解析失败：' + String((e && e.message) || e)) }
+      if (!Array.isArray(j)) throw new Error('--data 需要二维数组')
+      return j.map((row) => (Array.isArray(row) ? row.map((c) => (c == null ? '' : String(c))) : [String(row)]))
+    }
+    const splitEscaped = (str, delim) => {
+      const out = []
+      let cur = ''
+      let esc = false
+      for (const ch of String(str)) {
+        if (esc) { cur += ch; esc = false; continue }
+        if (ch === '\\') { esc = true; continue }
+        if (ch === delim) { out.push(cur); cur = ''; continue }
+        cur += ch
+      }
+      if (esc) cur += '\\'
+      out.push(cur)
+      return out
+    }
+    return raw.split(';').filter((x) => x.length).map((rowS) => splitEscaped(rowS, '|'))
+  }
+
+  // ===== 引擎资源：本地优先，CDN 回退（构建产物随仓库发布）=====
+  // ENGINE_V：引擎与空白模板资源版本——更新 vendor 资源后递增以破浏览器缓存
+  const CDN_VENDOR = 'https://cdn.jsdelivr.net/gh/veypi/aic-skills@main/office_studio/ui/vendor/'
+  const ENGINE_V = '2026-09-13-6'
+  const importLocal = (p) => import(new URL(((($mod.scoped || '').replace(/\/$/, '')) || '.') + '/' + p, location.origin).href)
+  const loadEngineModule = async () => {
+    try {
+      return await importLocal('vendor/docx-review.bundle.js?v=' + ENGINE_V)
+    } catch (e) {
+      return await import(CDN_VENDOR + 'docx-review.bundle.js')
+    }
+  }
+
+  // 空白文档模板（新建 Word 用；本地优先，CDN 回退）
+  const loadBlankBytes = async () => {
+    let r = null
+    try { r = await fetch('vendor/blank.docx?v=' + ENGINE_V) } catch (e) { r = null }
+    if (!r || !r.ok) {
+      try { r = await fetch(CDN_VENDOR + 'blank.docx') } catch (e) { r = null }
+    }
+    if (!r || !r.ok) throw new Error('空白模板加载失败（blank.docx）')
+    return await r.arrayBuffer()
+  }
+
+  // ===== 引擎引导（懒启动）=====
+  const ensureEngine = async () => {
+    if (reviewRef) return
+    if (!modRef) {
+      boot_err = ''
+      try {
+        modRef = await loadEngineModule()
+      } catch (e) {
+        boot_err = String((e && e.message) || e)
+        status_text = '引擎加载失败'
+        throw new Error('引擎加载失败：' + boot_err)
+      }
+    }
+    await new Promise((r) => setTimeout(r, 40))
+    reviewRef = modRef.createDocxReview({ container: document.getElementById(host_id), revisionRendering: rev_render })
+    document.getElementById(host_id).addEventListener('mouseup', () => {
+      setTimeout(() => { selRef = reviewRef.view.getSelection(); refreshSel() }, 0)
+    })
+    reviewRef.view.onPick((id) => { active_para = id })
+    ready = true
+    status_text = '就绪'
+  }
+
+  // ===== 视图刷新 =====
+  const truncText = (s, n) => {
+    const t = String(s || '')
+    return t.length > n ? t.slice(0, n) + '…' : t
+  }
+  const refreshSel = () => {
+    sel_text = selRef ? ('已选：「' + truncText(selRef.text, 30) + '」（' + selRef.start + '-' + selRef.end + '）') : ''
+  }
+  // 渲染调度（合并 + 不阻塞指令返回）：静默 400ms 后发起一次全量重渲染；
+  // 批次最长 2000ms 强制渲染一次。指令 reply 不等渲染（渲染在后台队列执行，
+  // 引擎侧另有串行+合并兜底），保证 AI 批量编辑时指令流水不被打断。
+  let _refresh_timer = 0
+  let _refresh_first = 0
+  const refreshAll = () => {
+    const now = Date.now()
+    if (!_refresh_first) _refresh_first = now
+    clearTimeout(_refresh_timer)
+    const quiet = Math.max(60, Math.min(400, 2000 - (now - _refresh_first)))
+    _refresh_timer = setTimeout(() => {
+      _refresh_timer = 0
+      _refresh_first = 0
+      try {
+        if (reviewRef) {
+          reviewRef.refresh().then(() => {
+            refreshSel()
+            return refreshRevisions()
+          }).catch(() => { /* 刷新失败不影响指令 */ })
+        }
+      } catch (e) { /* 忽略 */ }
+    }, quiet)
+    return Promise.resolve(true)
+  }
+  // 审阅队列：修订（引擎列表序）+ 批注（段落序），按段落号合并排序
+  const TAG_LABEL = { del: '删除', ins: '插入', moveFrom: '移出', moveTo: '移入', cellIns: '表格', cellDel: '表格', cellMerge: '表格' }
+  const TYPE_CLASS = { del: 'del', ins: 'ins', moveFrom: 'move', moveTo: 'move', cellIns: 'cell', cellDel: 'cell', cellMerge: 'cell' }
+  const refreshRevisions = async () => {
+    if (!reviewRef || !reviewRef.doc.loaded) { rev_items = []; rev_stat = ''; return }
+    const paras = reviewRef.doc.readParagraphs({}).paragraphs
+    const noOf = new Map(paras.map((p, i) => [p.id, i + 1]))
+    const items = []
+    for (const r of reviewRef.doc.listRevisions()) {
+      if (r.commentMark) continue   // 批注锚点标记不单列（批注本体展示）
+      items.push({
+        kind: 'rev', id: r.id, type: TYPE_CLASS[r.type] || 'move', tag: TAG_LABEL[r.type] || r.type,
+        display: r.text ? '「' + truncText(r.text, 60) + '」' : '（标记）',
+        sub: (r.author || '?') + ' · 第 ' + (noOf.get(r.paraId) || '?') + ' 段',
+        paraId: r.paraId,
+      })
+    }
+    let cs = []
+    try { cs = await reviewRef.doc.getComments() } catch (e) { cs = [] }
+    for (const c of cs) {
+      const pid = c.anchoredParagraphId || c.paragraphId || ''
+      items.push({
+        kind: 'cmt', id: c.id, type: 'cmt', tag: '批注',
+        display: '「' + truncText(c.text, 60) + '」',
+        sub: (c.author || '?') + ' · 第 ' + (noOf.get(pid) || '?') + ' 段',
+        paraId: pid,
+      })
+    }
+    items.sort((a, b) => {
+      const d = (noOf.get(a.paraId) || 9999) - (noOf.get(b.paraId) || 9999)
+      if (d) return d
+      if (a.kind !== b.kind) return a.kind === 'rev' ? -1 : 1
+      return String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
+    })
+    rev_items = items
+    const nRev = items.filter((x) => x.kind === 'rev').length
+    const nCmt = items.length - nRev
+    rev_stat = items.length ? ((nRev ? nRev + ' 处修订' : '') + (nRev && nCmt ? ' · ' : '') + (nCmt ? nCmt + ' 条批注' : '')) : '无待审内容'
+  }
+
+  // ===== 核心操作 =====
+  // opts.newFile = 新建模式：加载空白模板（vendor/blank.docx），点「保存」时才写入目标路径
+  const openPath = async (p, opts = {}) => {
+    if (!p) throw new Error('需要文件路径')
+    const asNew = !!(opts && opts.newFile)
+    const forceReload = !!(opts && opts.reload)
+    // 同一文件重复打开防护：有未保存修改时不静默重载（防丢编辑；open --reload 强制）
+    if (!asNew && !forceReload && file_path === p && reviewRef && reviewRef.doc.loaded
+      && reviewRef.doc._seq > _saved_seq) {
+      status_text = '未重载：有未保存修改（可用 open --reload 强制重载）'
+      throw new Error('该文件已打开且有未保存修改；如确认从磁盘重载请用 open --reload，或先 save')
+    }
+    try {
+      status_text = '加载中…'
+      await ensureEngine()
+      if (asNew) {
+        const ab = await loadBlankBytes()
+        await reviewRef.loadBytes(ab)
+        selRef = null
+        file_path = p
+        is_new = true
+        _disk_hash = ''
+        _saved_seq = reviewRef.doc._seq
+        _load_seq += 1
+        refreshSel()
+        await refreshRevisions()
+        status_text = '新建（未保存）：' + nameOf(p)
+        return { ok: true, path: p, created: true }
+      }
+      const r = await $mod.$fs.get(toTree(p))
+      if (r && r.ok === false) throw new Error(r.message || '读取失败')
+      const content = r && r.content
+      const blob = (content instanceof Blob) ? content : new Blob([content], { type: (r && r.mime) || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+      const name = nameOf(p)
+      const ab = await blob.arrayBuffer()
+      const head = Array.from(new Uint8Array(ab.slice(0, 4))).map((b) => b.toString(16).padStart(2, '0')).join(' ')
+      if (head !== '50 4b 03 04' && blob.size > 4 && head.slice(0, 5) !== '50 4b') {
+        throw new Error('不是有效的 docx（zip 头缺失：' + head + '）')
+      }
+      const info = await reviewRef.loadBytes(ab)
+      selRef = null
+      file_path = p
+      is_new = false
+      _disk_hash = await sha256Hex(ab)
+      _saved_seq = reviewRef.doc._seq
+      _load_seq += 1
+      pushRecent(p, name)
+      refreshSel()
+      await refreshRevisions()
+      status_text = '已打开 ' + name + '（' + blob.size + ' B · ' + info.bookmarks.paragraphCount + ' 段落）'
+      return { ok: true, path: p, size: blob.size, paragraphs: info.bookmarks.paragraphCount }
+    } catch (e) {
+      const msg = String((e && e.message) || e)
+      status_text = '打开失败：' + msg
+      throw e
+    }
+  }
+
+  const saveNow = async (opts = {}) => {
+    if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件（可先 open <fs 路径>）')
+    if (!file_path) throw new Error('无保存路径')
+    // 保存前冲突检测：磁盘内容与打开/上次保存时不一致 → 拒绝覆盖（save --force 可跳过）
+    if (!is_new && !opts.force) {
+      let conflict = false
+      try {
+        const r2 = await $mod.$fs.get(toTree(file_path))
+        if (r2 && r2.ok !== false) {
+          const c2 = r2 && r2.content
+          const b2 = (c2 instanceof Blob) ? c2 : new Blob([c2])
+          const h2 = await sha256Hex(await b2.arrayBuffer())
+          conflict = !!_disk_hash && h2 !== _disk_hash
+        }
+      } catch (e) { conflict = false }
+      if (conflict) {
+        throw new Error('文件已被外部修改（磁盘与打开时不一致）。如确认覆盖请用 save --force，或重新打开该文件')
+      }
+    }
+    const bytes = await reviewRef.exportBytes()
+    const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    await $mod.$fs.put(toTree(file_path), blob)
+    _disk_hash = await sha256Hex(bytes)
+    _saved_seq = reviewRef.doc._seq
+    _save_seq += 1
+    const created = is_new
+    is_new = false
+    pushRecent(file_path, nameOf(file_path))
+    status_text = '已保存 ' + nameOf(file_path) + '（' + blob.size + ' B）'
+    return { ok: true, path: file_path, size: blob.size, created }
+  }
+
+  // ===== 用户界面事件 =====
+  goHome = () => {
+    const dirty = !!(reviewRef && reviewRef.doc.loaded && reviewRef.doc._seq > _saved_seq)
+    if (dirty && !home_armed) {
+      home_armed = true
+      status_text = '有未保存修改——再点一次「首页」确认离开'
+      clearTimeout(_home_timer)
+      _home_timer = setTimeout(() => { home_armed = false; if (String(status_text).indexOf('未保存修改') >= 0) status_text = '就绪' }, 4000)
+      return
+    }
+    home_armed = false
+    clearTimeout(_home_timer)
+    $router.push('index')
+  }
+
+  onOpen = async () => {
+    try {
+      const f = await $mod.$fs.open({ accept: ['.docx', '.doc'] })
+      if (!f) return
+      await openPath(f.path)
+    } catch (e) { status_text = '打开失败：' + String((e && e.message) || e) }
+  }
+
+  onSave = async () => {
+    try { await saveNow() } catch (e) { status_text = '保存失败：' + String((e && e.message) || e) }
+  }
+
+  // 插入图片：选图 → 图从 $fs 读入 → 插入到「最近点击的段落」之后（未点选则文末）
+  onInsertImage = async () => {
+    try {
+      if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件')
+      const f = await $mod.$fs.open({ accept: ['.png', '.jpg', '.jpeg', '.gif', '.bmp'] })
+      if (!f) return
+      status_text = '读取图片…'
+      const r = await $mod.$fs.get(toTree(f.path))
+      const content = r && r.content
+      const blob = (content instanceof Blob) ? content : new Blob([content])
+      const bytes = new Uint8Array(await blob.arrayBuffer())
+      const anchor = active_para || '@end'
+      const rr = await reviewRef.doc.run('ai', 'insert_image', { bytes, ext: '', paragraphId: anchor, position: 'AFTER', author: 'AI' })
+      if (!rr.ok) throw new Error(rr.error)
+      await refreshAll()
+      status_text = '已插入图片（' + rr.result.widthPx + '×' + rr.result.heightPx + ' px，AI 修订）'
+    } catch (e) { status_text = '插图失败：' + String((e && e.message) || e) }
+  }
+
+  onTogglePanel = () => { panel_open = !panel_open }
+
+  onToggleRev = async (e) => {
+    rev_render = !!(e && e.target && e.target.checked)
+    if (reviewRef) {
+      reviewRef.view.opts.revisionRendering = rev_render
+      await reviewRef.refresh()
+    }
+  }
+
+  onHumanReplace = async () => {
+    try {
+      if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件')
+      if (!selRef) throw new Error('请先在文档中选择文字')
+      const r = await reviewRef.doc.run('human', 'replace_range', { paragraphId: selRef.paragraphId, start: selRef.start, end: selRef.end, replaceText: op_replace, author: 'Human Reviewer' })
+      if (!r.ok) throw new Error(r.error)
+      selRef = null
+      op_replace = ''
+      status_text = '已替换（人工修订）'
+      await refreshAll()
+    } catch (e) { status_text = '替换失败：' + String((e && e.message) || e) }
+  }
+
+  onHumanComment = async () => {
+    try {
+      if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件')
+      if (!selRef) throw new Error('请先在文档中选择文字')
+      const text = op_comment || '请确认此处表述。'
+      const r = await reviewRef.doc.run('human', 'add_comment', { paragraphId: selRef.paragraphId, start: selRef.start, end: selRef.end, text, author: 'Human Reviewer' })
+      if (!r.ok) throw new Error(r.error)
+      selRef = null
+      op_comment = ''
+      status_text = '已加批注'
+      await refreshAll()
+    } catch (e) { status_text = '批注失败：' + String((e && e.message) || e) }
+  }
+
+  // ===== 审阅队列操作 =====
+  const humanizeRevErr = (e) => {
+    const msg = String((e && e.message) || e)
+    return /ambiguous/i.test(msg) ? '该修订与其它修订相互嵌套，无法单独处理（可整批接受/拒绝）' : msg
+  }
+
+  onItemLocate = (it) => {
+    try { reviewRef.view.scrollTo(it.paraId); reviewRef.view.highlight(it.paraId) } catch (e) { /* 忽略 */ }
+  }
+
+  onRevAccept = async (it) => {
+    try {
+      const r = await reviewRef.doc.run('human', 'resolve_revisions', { op: 'accept', revisionIds: [it.id] })
+      if (!r.ok) throw new Error(r.error)
+      status_text = '已接受 1 处修订'
+      await refreshAll()
+    } catch (e) { status_text = '接受失败：' + humanizeRevErr(e) }
+  }
+
+  onRevReject = async (it) => {
+    try {
+      const r = await reviewRef.doc.run('human', 'resolve_revisions', { op: 'reject', revisionIds: [it.id] })
+      if (!r.ok) throw new Error(r.error)
+      status_text = '已拒绝 1 处修订'
+      await refreshAll()
+    } catch (e) { status_text = '拒绝失败：' + humanizeRevErr(e) }
+  }
+
+  onCommentDelete = async (it) => {
+    if (pending_delete_comment !== it.id) { pending_delete_comment = it.id; return }
+    try {
+      const r = await reviewRef.doc.run('human', 'delete_comment', { commentId: it.id })
+      if (!r.ok) throw new Error(r.error)
+      pending_delete_comment = -1
+      status_text = '已删除批注'
+      await refreshAll()
+    } catch (e) { status_text = '删除批注失败：' + String((e && e.message) || e) }
+  }
+
+  onAcceptAI = async () => {
+    try {
+      const r = await reviewRef.doc.acceptAIEdits({ author: 'AI' })
+      status_text = '已接受 AI 修订 ' + r.selectedIds.length + ' 处'
+      await refreshAll()
+    } catch (e) { status_text = '接受失败：' + String((e && e.message) || e) }
+  }
+
+  onAcceptAll = async () => {
+    try { await reviewRef.doc.acceptAll(); await refreshAll() } catch (e) { status_text = '接受失败：' + String((e && e.message) || e) }
+  }
+
+  onRejectAll = async () => {
+    try { await reviewRef.doc.rejectAll(); await refreshAll() } catch (e) { status_text = '拒绝失败：' + String((e && e.message) || e) }
+  }
+
+  // ===== 平台操控面（pageDesc：AI 经 {win_id}.{cmd} 调用）=====
+  // AI 编辑默认 author='AI'（红字修订）；人类在页面上的操作记 'Human Reviewer'。
+  pageDesc = {
+    desc: 'Office Studio Word 工作台（docx 审阅）：打开、读取、替换、批注、接受/拒绝修订、保存；AI 与用户共用同一文档（人类在页面上实时看到 AI 的每次修改）',
+    commands: [
+      { name: 'open', desc: '打开一个 /fs 路径的 docx 文件',
+        help: 'open /fs/cloud/u/<uid>/xxx.docx（平台打开协议派发同此指令）；同一文件有未保存修改时拒绝静默重载，--reload 强制',
+        handler: async (argv) => { try { const p = firstPos(argv) || argOf(argv, 'path'); if (!p) throw new Error('需要 /fs 文件路径'); const reload = !!(argv && argv.includes('--reload')); return reply(await openPath(p, { reload })) } catch (e) { return errReply(e) } } },
+      { name: 'status', desc: '页面与文档状态（未就绪时也可调用）',
+        handler: async () => reply({ ok: true, ready, boot_err, path: file_path, is_new, status: status_text, pending: rev_items.length, canSave: !!(reviewRef && reviewRef.doc.loaded), dirty: !!(reviewRef && reviewRef.doc.loaded && reviewRef.doc._seq > _saved_seq), loads: _load_seq, saves: _save_seq }) },
+      { name: 'list_revisions', desc: '列出待处理修订与批注（结构化 JSON）',
+        help: '无参数。返回 {ok, revisions:[{id,type,author,text,paraId}], comments:[...]}',
+        handler: async () => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const revisions = reviewRef.doc.listRevisions().filter((r) => !r.commentMark).map(({ id, type, author, text, paraId }) => ({ id, type, author, text, paraId })); const comments = (await reviewRef.doc.getComments()).map(({ id, author, text, anchoredParagraphId, paragraphId }) => ({ id, author, text, paraId: anchoredParagraphId || paragraphId })); return reply({ ok: true, revisions, comments }) } catch (e) { return errReply(e) } } },
+      { name: 'read_text', desc: '读文档文本：无参返回段落索引 [{id,text}]；--para <id> 单段全文；--offset/--limit 分页（含空段）；--empty 只列空段；--ids 指定段落',
+        help: 'read_text / read_text --para _bk_xxxx / read_text --offset 100 --limit 50 / read_text --empty / read_text --ids _bk_a,_bk_b',
+        handler: async (argv) => {
+          try {
+            if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件')
+            const pid = argOf(argv, 'para')
+            if (pid) {
+              const p = reviewRef.doc.readParagraphs({}).paragraphs.find((x) => x.id === pid)
+              if (!p) throw new Error('段落不存在：' + pid)
+              return reply({ ok: true, id: p.id, text: p.text })
+            }
+            const idsArg = argOf(argv, 'ids')
+            if (idsArg != null) {
+              const ids = String(idsArg).split(',').map((s) => s.trim()).filter(Boolean)
+              const r = reviewRef.doc.readParagraphs({ nodeIds: ids })
+              return reply({ ok: true, ...r })
+            }
+            const offset = argOf(argv, 'offset')
+            const limit = argOf(argv, 'limit')
+            const empty = !!(argv && argv.includes('--empty'))
+            if (empty || offset != null || limit != null) {
+              const r = reviewRef.doc.readParagraphIndex({
+                empty,
+                offset: offset != null ? Number(offset) : undefined,
+                limit: limit != null ? Number(limit) : undefined,
+              })
+              return reply({ ok: true, ...r })
+            }
+            const ps = reviewRef.doc.readParagraphs({}).paragraphs
+            return reply({ ok: true, paragraphs: ps })
+          } catch (e) { return errReply(e) }
+        } },
+      { name: 'read_tables', desc: '读表格结构：全部表格的行列、单元格文本、段落 id、空单元格标记（含合并信息）',
+        help: 'read_tables [--index N]（只列第 N 张表）',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const idx = argOf(argv, 'index'); const r = reviewRef.doc.listTables(idx != null && idx !== '' ? { index: Number(idx) } : {}); return reply({ ok: true, ...r }) } catch (e) { return errReply(e) } } },
+      { name: 'search_text', desc: '按文本搜索段落（子串匹配）',
+        help: 'search_text --q "条款"',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const q = argOf(argv, 'q') || firstPos(argv); if (!q) throw new Error('需要 --q'); const ps = reviewRef.doc.readParagraphs({}).paragraphs; const hits = ps.filter((p) => p.text.includes(q)).map((p) => ({ id: p.id, text: p.text })); return reply({ ok: true, query: q, hits }) } catch (e) { return errReply(e) } } },
+      { name: 'replace_text', desc: '替换段落内文本（唯一匹配；默认产生 AI 红字修订）',
+        help: 'replace_text --para <id> --find "原文" --replace "新文" [--author AI]；也可 --plain 直接改（无修订）',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const para = argOf(argv, 'para'); const find = argOf(argv, 'find'); const repl = argOf(argv, 'replace'); if (!para || find == null || repl == null) throw new Error('需要 --para --find --replace'); const plain = argv && argv.includes('--plain'); const author = plain ? undefined : (argOf(argv, 'author', 'AI')); const r = await reviewRef.doc.run('ai', 'replace_text', { paragraphId: para, findText: find, replaceText: repl, author }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result, author: author || '(plain)' }) } catch (e) { return errReply(e) } } },
+      { name: 'replace_range', desc: '按字符范围替换段落文本（默认 AI 红字）',
+        help: 'replace_range --para <id> --start 5 --end 18 --replace "新文" [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const para = argOf(argv, 'para'); const start = Number(argOf(argv, 'start')); const end = Number(argOf(argv, 'end')); const repl = argOf(argv, 'replace'); if (!para || Number.isNaN(start) || Number.isNaN(end) || repl == null) throw new Error('需要 --para --start --end --replace'); const r = await reviewRef.doc.run('ai', 'replace_range', { paragraphId: para, start, end, replaceText: repl, author: argOf(argv, 'author', 'AI') }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'insert_paragraph', desc: '插入新段落（默认 AI 红字）：锚点段落前后，或文档首/末',
+        help: 'insert_paragraph --anchor <id> [--pos after|before] --text "新段落" [--from <段落id> 指定格式源，默认取锚点]；或 --anchor @start|@end 插入到文档首/末（空文档写首段）[--author AI]；支持 \\n\\n 分多段',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const anchor = argOf(argv, 'anchor'); const text = argOf(argv, 'text'); const pos = (argOf(argv, 'pos', 'after') || 'after').toUpperCase(); if (!anchor || text == null) throw new Error('需要 --anchor --text'); const r = await reviewRef.doc.run('ai', 'insert_paragraph', { anchorNodeId: anchor, relativePosition: pos, newText: text, styleSourceId: argOf(argv, 'from') || undefined, author: argOf(argv, 'author', 'AI') }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'comment', desc: '加批注：--para + --find 按文本匹配，或 --para + --start/--end 按范围',
+        help: 'comment --para <id> --find "要批注的文字" --text "批注内容" [--author AI]（或 --start 5 --end 18）',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const para = argOf(argv, 'para'); const text = argOf(argv, 'text'); const find = argOf(argv, 'find'); const start = argOf(argv, 'start'); const end = argOf(argv, 'end'); if (!para || text == null) throw new Error('需要 --para 与 --text'); let r; if (find != null) { r = await reviewRef.doc.run('ai', 'comment_on_text', { paragraphId: para, findText: find, text, author: argOf(argv, 'author', 'AI') }) } else if (start != null && end != null) { r = await reviewRef.doc.run('ai', 'add_comment', { paragraphId: para, start: Number(start), end: Number(end), text, author: argOf(argv, 'author', 'AI') }) } else { throw new Error('需要 --find 或 --start/--end') } await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'set_cell_text', desc: '填/改单元格文本（默认 AI 红字）：空单元格写入；非空替换首段',
+        help: 'set_cell_text --table 0 --row 1 --col 2 --text "内容" [--mode replace|append] [--plain] [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const t = argOf(argv, 'table'); const row = argOf(argv, 'row'); const col = argOf(argv, 'col'); const text = argOf(argv, 'text'); if (t == null || row == null || col == null || text == null) throw new Error('需要 --table --row --col --text'); const plain = argv && argv.includes('--plain'); const r = await reviewRef.doc.run('ai', 'set_cell_text', { tableIndex: Number(t), row: Number(row), col: Number(col), text, mode: argOf(argv, 'mode', 'replace'), author: plain ? undefined : argOf(argv, 'author', 'AI') }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'add_table_row', desc: '表格加行（默认 AI 行修订：接受=行保留，拒绝=删行）',
+        help: 'add_table_row --table 1 [--at 2] [--cells "A|B|C"] [--plain] [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const t = argOf(argv, 'table'); if (t == null) throw new Error('需要 --table'); const cellsArg = argOf(argv, 'cells'); const cells = cellsArg != null ? String(cellsArg).split('|') : undefined; const plain = argv && argv.includes('--plain'); const r = await reviewRef.doc.run('ai', 'add_table_row', { tableIndex: Number(t), at: argOf(argv, 'at'), cells, plain, author: argOf(argv, 'author', 'AI') }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'add_table_col', desc: '表格加列（默认 AI 单元格修订：接受=列保留，拒绝=删列）',
+        help: 'add_table_col --table 1 [--at 3] [--plain] [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const t = argOf(argv, 'table'); if (t == null) throw new Error('需要 --table'); const plain = argv && argv.includes('--plain'); const r = await reviewRef.doc.run('ai', 'add_table_col', { tableIndex: Number(t), at: argOf(argv, 'at'), plain, author: argOf(argv, 'author', 'AI') }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'insert_table', desc: '插入新表格（直接插入；可带二维初始数据）',
+        help: 'insert_table --anchor <段落id>|@end [--pos after|before] --rows 2 --cols 3 [--data "a|b;c|d" 或 JSON [["a","b"],["c","d"]]；旧格式支持 \\| \\; 转义]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const anchor = argOf(argv, 'anchor', '@end'); const rows = Number(argOf(argv, 'rows', '2')) || 2; const cols = Number(argOf(argv, 'cols', '3')) || 3; const dataArg = argOf(argv, 'data'); const data = dataArg != null ? parseTableData(dataArg) : undefined; const pos = (argOf(argv, 'pos', 'after') || 'after').toUpperCase(); const r = await reviewRef.doc.run('ai', 'insert_table', { anchorNodeId: anchor, relativePosition: pos, rows, cols, data }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'insert_image', desc: '在段落前/后插入图片（png/jpg/gif/bmp；默认 AI 红字修订）',
+        help: 'insert_image --src <fs路径> [--anchor <段落id>|@end] [--pos after|before] [--from <段落id> 格式源，默认取锚点] [--width px] [--height px] [--alt "说明"] [--plain] [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const src = argOf(argv, 'src') || firstPos(argv); if (!src) throw new Error('需要 --src <fs 路径>'); const r0 = await $mod.$fs.get(toTree(src)); if (r0 && r0.ok === false) throw new Error(r0.message || '读取图片失败'); const content = r0 && r0.content; const blob = (content instanceof Blob) ? content : new Blob([content]); const bytes = new Uint8Array(await blob.arrayBuffer()); const anchor = argOf(argv, 'anchor', '@end'); const pos = (argOf(argv, 'pos', 'after') || 'after').toUpperCase(); const w = argOf(argv, 'width'); const h = argOf(argv, 'height'); const plain = argv && argv.includes('--plain'); const r = await reviewRef.doc.run('ai', 'insert_image', { bytes, ext: '', paragraphId: anchor, position: pos, styleSourceId: argOf(argv, 'from') || undefined, widthPx: w != null ? Number(w) : undefined, heightPx: h != null ? Number(h) : undefined, altText: argOf(argv, 'alt'), author: plain ? undefined : argOf(argv, 'author', 'AI') }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result, src }) } catch (e) { return errReply(e) } } },
+      { name: 'delete_paragraph', desc: '删除段落（默认 AI 红字修订：接受=删段，拒绝=恢复）',
+        help: 'delete_paragraph --para <id> [--plain 直接删除] [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const para = argOf(argv, 'para'); if (!para) throw new Error('需要 --para'); const plain = !!(argv && argv.includes('--plain')); const r = await reviewRef.doc.run('ai', 'delete_paragraph', { paragraphId: para, author: plain ? undefined : argOf(argv, 'author', 'AI'), plain }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'move_paragraph', desc: '移动段落（默认修订式：目标处插入+原处删除；接受=移动生效，拒绝=原位保留）',
+        help: 'move_paragraph --para <id> --anchor <id|@start|@end> [--pos after|before] [--plain] [--author AI]',
+        handler: async (argv) => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); const para = argOf(argv, 'para'); const anchorNode = argOf(argv, 'anchor'); if (!para || !anchorNode) throw new Error('需要 --para 与 --anchor'); const pos = (argOf(argv, 'pos', 'after') || 'after').toUpperCase(); const plain = !!(argv && argv.includes('--plain')); const r = await reviewRef.doc.run('ai', 'move_paragraph', { paragraphId: para, anchorNodeId: anchorNode, relativePosition: pos, author: plain ? undefined : argOf(argv, 'author', 'AI'), plain }); await refreshAll(); if (!r.ok) throw new Error(r.error); return reply({ ok: true, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'style_report', desc: '样式与标题结构报告（只读）：段落样式统计 + 标题大纲（含解析后的自动编号）',
+        help: 'style_report（无参数）；返回 {total, styles, headings:[{id,text,level,source,style_name,number,num_id,ilvl}], numbering_groups}',
+        handler: async () => { try { if (!reviewRef || !reviewRef.doc.loaded) throw new Error('未打开文件'); return reply({ ok: true, ...reviewRef.doc.styleReport() }) } catch (e) { return errReply(e) } } },
+      { name: 'accept_ai', desc: '接受 AI 的修订（其余作者修订保留）',
+        help: 'accept_ai [--author AI]',
+        handler: async (argv) => { try { const author = argOf(argv, 'author', 'AI'); const r = await reviewRef.doc.acceptAIEdits({ author }); await refreshAll(); return reply({ ok: true, selected: r.selectedIds, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'reject_ai', desc: '拒绝 AI 的修订（恢复 AI 改动前状态，其余修订保留）',
+        help: 'reject_ai [--author AI]',
+        handler: async (argv) => { try { const author = argOf(argv, 'author', 'AI'); const r = await reviewRef.doc.rejectAIEdits({ author }); await refreshAll(); return reply({ ok: true, selected: r.selectedIds, ...r.result }) } catch (e) { return errReply(e) } } },
+      { name: 'accept_all', desc: '接受全部修订', handler: async () => { try { const r = await reviewRef.doc.acceptAll(); await refreshAll(); return reply({ ok: true, ...r }) } catch (e) { return errReply(e) } } },
+      { name: 'reject_all', desc: '拒绝全部修订', handler: async () => { try { const r = await reviewRef.doc.rejectAll(); await refreshAll(); return reply({ ok: true, ...r }) } catch (e) { return errReply(e) } } },
+      { name: 'save', desc: '把当前文档写回打开时的 /fs 路径（docx）；磁盘被外部修改时拒绝覆盖（--force 强制）',
+        help: '无参数；可选 --path <fs 路径> 另存；--force 跳过外部修改检测',
+        handler: async (argv) => { try { const p = argOf(argv, 'path'); if (p) file_path = p; const force = !!(argv && argv.includes('--force')); return reply(await saveNow({ force })) } catch (e) { return errReply(e) } } },
+    ],
+  }
+
+  // ===== 路由参数（单值 query.path；new=1 = 新建模式）=====
+  const looksLikeFsPath = (p) => /^\/(fs\/)?(cloud|page)\//.test(p) || /^\/(fs\/)?[a-f0-9]{32}\//.test(p)
+  const routeTask = () => {
+    const p = String(($router.query && $router.query.path) || '')
+    if (!p || !looksLikeFsPath(p)) return null
+    return { path: p, newFile: String(($router.query && $router.query.new) || '') === '1' }
+  }
+  const applyRoute = () => {
+    const fp = String(($router.current && $router.current.fullPath) || '')
+    if (fp && fp === _last_route) return
+    const t = routeTask()
+    if (!t) return
+    _last_route = fp
+    openPath(t.path, { newFile: t.newFile }).catch(() => { /* openPath 已置状态 */ })
+  }
+  applyRoute()
+  _route_off = $router.onChange(applyRoute)
+</script>
+
+<script dispose>
+  // 页面销毁：取消路由订阅（页面缓存复用时不触发）
+  try { if (_route_off) _route_off() } catch (e) { /* 忽略 */ }
+</script>
+
+</html>

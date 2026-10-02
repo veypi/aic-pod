@@ -73,8 +73,10 @@ func (c *Client) initTools() {
 		// 半包不注册；会触发引擎惰性构建——重启后包命令必须立即可用）。
 		if c.initErr == nil {
 			c.skills.Rescan()
-			// builtin 首跑预装：随安装介质分发的 zip（AIC_BUILTIN_SKILLS，
-			// desktop packaged 注入 resources/browser.zip；幂等，失败只记日志）。
+			// builtin 预装两源（同一 installZip 序列、幂等、失败只记日志）：
+			// ①二进制内嵌包（v6.1 内建机制，设备零下载）；
+			// ②随安装介质分发的 zip（AIC_BUILTIN_SKILLS，dev/桌面兼容路径）。
+			c.skills.PreinstallEmbedded(context.Background())
 			c.skills.Preinstall(context.Background(), builtinSkillPaths())
 		}
 	} else {

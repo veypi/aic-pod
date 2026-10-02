@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	skillpackages "github.com/veypi/aic-pod/skill-packages"
 )
 
 // KindBuiltin builtin 来源标识（安装记录 kind；id = 包名）。
@@ -34,8 +36,23 @@ func (r *Registry) Preinstall(ctx context.Context, zipPaths []string) {
 	}
 }
 
-// installBuiltin 预装单个 zip：读 bytes → 解析包身份（SKILL.md frontmatter
-// name/version）→ 同源同版本跳过 → installZip。
+// PreinstallEmbedded 二进制内嵌包预装（skillpackages；v6.1 内建机制——pod
+// 二进制自带内建 skill，设备零下载）。与 zip 预装同一 installZip 原子序列、
+// 同一幂等语义；单项失败记日志继续。
+func (r *Registry) PreinstallEmbedded(ctx context.Context) {
+	for _, name := range skillpackages.List() {
+		data, err := skillpackages.Zip(name)
+		if err != nil {
+			r.logf("skillrun: embedded builtin %s: %v", name, err)
+			continue
+		}
+		if err := r.installBuiltinZip(ctx, data, "embedded:"+name); err != nil {
+			r.logf("skillrun: embedded builtin %s: %v", name, err)
+		}
+	}
+}
+
+// installBuiltin 预装单个 zip：读 bytes → installBuiltinZip。
 func (r *Registry) installBuiltin(ctx context.Context, zipPath string) error {
 	if !strings.HasSuffix(strings.ToLower(zipPath), ".zip") {
 		return fmt.Errorf("not a zip: %s", zipPath)
@@ -44,9 +61,15 @@ func (r *Registry) installBuiltin(ctx context.Context, zipPath string) error {
 	if err != nil {
 		return err
 	}
+	return r.installBuiltinZip(ctx, data, zipPath)
+}
+
+// installBuiltinZip builtin 预装主体：解析包身份（SKILL.md frontmatter
+// name/version）→ 同源同版本跳过 → installZip。origin 仅用于日志。
+func (r *Registry) installBuiltinZip(ctx context.Context, data []byte, origin string) error {
 	files, err := readZipEntries(data)
 	if err != nil {
-		return fmt.Errorf("bad zip: %w", err)
+		return fmt.Errorf("bad zip %s: %w", origin, err)
 	}
 	var skillDoc []byte
 	if e := findZipEntry(files, "SKILL.md"); e != nil {
@@ -54,7 +77,7 @@ func (r *Registry) installBuiltin(ctx context.Context, zipPath string) error {
 	}
 	name, version := skillFrontmatter(skillDoc)
 	if name == "" {
-		return fmt.Errorf("SKILL.md frontmatter name missing")
+		return fmt.Errorf("%s: SKILL.md frontmatter name missing", origin)
 	}
 	meta := &FetchMeta{Name: name, Kind: KindBuiltin, ID: name, Version: version}
 	// 幂等：同源 builtin 同名同版本 → 跳过（不重装）。

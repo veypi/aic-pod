@@ -79,7 +79,8 @@ cli-windows-amd64:
 
 # Go 后端二进制：dev 运行（desktop/bin/）与 electron-builder extraResources
 # （resources/backend/）共用。先清掉两侧旧名，避免跨平台残留被打进包。
-backend-bin:
+# 依赖 browser-zip：cli/bin provider 二进制是 skillpackages embed 输入，必须先于 go build。
+backend-bin: browser-zip
 	@mkdir -p $(DESKTOP_DIR)/bin
 	@rm -f $(DESKTOP_DIR)/bin/aic-backend $(DESKTOP_DIR)/bin/aic-backend.exe
 	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" .
@@ -107,7 +108,7 @@ desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
 # macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	$(MAKE) desktop-version backend-bin cua-sync browser-zip
+	$(MAKE) desktop-version backend-bin cua-sync
 	@arch=$$(echo $* | sed 's/amd64/x64/'); \
 	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
@@ -115,7 +116,7 @@ desktop-darwin-%:
 
 # Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	$(MAKE) desktop-version backend-bin cua-sync browser-zip
+	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --win
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@test -f $(BIN_DIR)/win-unpacked/resources/backend/aic-backend.exe || { echo "✗ 打包缺 resources/backend/aic-backend.exe（backend-bin 命名回归？）"; exit 1; }

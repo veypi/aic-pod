@@ -1,0 +1,20 @@
+{
+  "providers": [
+    {
+      "id": "main",
+      "kind": "process",
+      "entry": "cli/bin/hello-process"
+    },
+    {
+      "id": "svc",
+      "kind": "service",
+      "entry": "cli/bin/hello-service"
+    }
+  ],
+  "streams": [
+    {
+      "name": "echo",
+      "provider": "svc"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 ---
 name: browser
+version: 0.1.0
 description: 设备浏览器能力（page.* 页面自动化 + download.* 下载管理 + page.frames/page.input 实时流）。驱动本机 Chrome，供 AI 浏览、观察与操作网页。
 ui:
   - path: index.html
