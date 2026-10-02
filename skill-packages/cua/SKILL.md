@@ -39,6 +39,8 @@ cua <subcommand> [args] [--json]
 
 locator flags：`--ref R`（observe 返回的元素引用；窗口变化/新快照即失效）| `--role R --name N` | `--label L` | `--snapshot S --at x,y`（截图坐标）。
 
+实证契约：press 的 `--key` 修饰键用 `Meta/Control/Alt/Shift`（如 `Meta+q`；`cmd+q` 报 invalid key modifier），且 press 必须带 locator；click/press 后台投递返回 `effect=unverifiable` 属常态（不回读），效果靠 observe/截图核验；`observation.image.read` 的 offset 单位是解码后字节，分块拼到 `eof=true` 即完整图片。
+
 ### 典型流程
 
 1. `cua status --json` 确认驱动 ready（unavailable = 未装/未授权，见下）。
