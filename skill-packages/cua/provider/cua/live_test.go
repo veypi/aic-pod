@@ -13,9 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
-	"github.com/veypi/vsh/commands"
 )
 
 // Explicitly opt in; only the temporary fixture window is operated on.
@@ -33,14 +30,12 @@ func TestNativeTypedLive(t *testing.T) {
 	s := New(Config{Logf: t.Logf})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	caller := wire.Caller{Subject: "fixture-owner", ConnectionID: "rtc", ExpiresAt: time.Now().Add(time.Minute)}
-	vshCmd := s.VshCommand(func(context.Context) wire.Caller { return caller })
 	invoke := func(args ...string) map[string]any {
 		t.Helper()
 		var out, errBuf bytes.Buffer
-		inv := &commands.Invocation{Args: append(args, "--json"), Env: map[string]string{}, Stdout: &out, Stderr: &errBuf}
-		if err := commands.RunCommand(ctx, vshCmd, inv); err != nil {
-			t.Fatalf("%v: %v (%s)", args, err, errBuf.String())
+		code := s.Run(ctx, append(args, "--json"), "", &out, &errBuf)
+		if code != 0 {
+			t.Fatalf("%v: code=%d (%s)", args, code, errBuf.String())
 		}
 		var m map[string]any
 		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &m); err != nil {

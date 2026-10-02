@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -50,8 +51,10 @@ func main() {
 // serveConn 单连接服务循环：invoke 与 stream 通道都在这条连接上多路复用。
 func serveConn(conn *skillproc.Conn) {
 	defer conn.Close()
+	connCtx, connCancel := context.WithCancel(context.Background())
+	defer connCancel()
 	var mu sync.Mutex
-	var cancelInvoke context_cancel
+	var invokeCancel context.CancelFunc
 	streams := map[string]bool{}
 	for {
 		h, payload, err := conn.Recv()
@@ -60,16 +63,16 @@ func serveConn(conn *skillproc.Conn) {
 		}
 		switch h.Type {
 		case skillproc.TypeInvoke:
+			ctx, cancel := context.WithCancel(connCtx)
 			mu.Lock()
-			cancel := context_cancel{ch: make(chan struct{})}
-			cancelInvoke = cancel
+			invokeCancel = cancel
 			mu.Unlock()
-			go runInvoke(conn, h, payload, cancel, &mu, &cancelInvoke)
+			go runInvoke(ctx, conn, h, payload, &mu, &invokeCancel)
 		case skillproc.TypeCancel:
 			mu.Lock()
-			if cancelInvoke.ch != nil {
-				close(cancelInvoke.ch)
-				cancelInvoke.ch = nil
+			if invokeCancel != nil {
+				invokeCancel()
+				invokeCancel = nil
 			}
 			mu.Unlock()
 		case skillproc.TypeStreamOpen:
@@ -89,22 +92,15 @@ func serveConn(conn *skillproc.Conn) {
 	}
 }
 
-type context_cancel struct {
-	ch   chan struct{}
-	once sync.Once
-}
-
-func (c *context_cancel) cancelled() <-chan struct{} { return c.ch }
-
 // runInvoke 处理一次调用：子命令与 hello-process 同族（service 形态）。
-func runInvoke(conn *skillproc.Conn, h skillproc.Header, stdin []byte, cancel context_cancel, mu *sync.Mutex, current *context_cancel) {
+func runInvoke(ctx context.Context, conn *skillproc.Conn, h skillproc.Header, stdin []byte, mu *sync.Mutex, current *context.CancelFunc) {
 	send := func(typ, stream string, payload []byte) {
 		_ = conn.Send(skillproc.Header{ID: h.ID, Type: typ, Stream: stream}, payload)
 	}
 	exit := func(code int, errStr string) {
 		_ = conn.Send(skillproc.Header{ID: h.ID, Type: skillproc.TypeExit, Code: code, Error: errStr}, nil)
 		mu.Lock()
-		current.ch = nil
+		*current = nil
 		mu.Unlock()
 	}
 	args := h.Argv
@@ -133,7 +129,7 @@ func runInvoke(conn *skillproc.Conn, h skillproc.Header, stdin []byte, cancel co
 		case <-time.After(time.Duration(sec) * time.Second):
 			send(skillproc.TypeFrame, skillproc.StreamStdout, []byte(fmt.Sprintf("slept %d\n", sec)))
 			exit(0, "")
-		case <-cancel.cancelled():
+		case <-ctx.Done():
 			exit(124, "cancelled")
 		}
 	case "exit":

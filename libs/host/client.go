@@ -2,7 +2,7 @@
 // NATS 连接与认证、能力上报、心跳、exec/fs/cancel 分发、执行管理器装配。
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
-// 内建 90 + jq + 平台命令（commands/bg/grant）与 cua 由引擎 Registry
+// 内建 90 + jq + 平台命令（commands/bg/grant）由引擎 Registry
 // 收口，browser 自 v6 P5 起是已装 skill 包（skill-packages/browser）不再是
 // 内建；原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd 扩充）；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
@@ -21,7 +21,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/cua"
 	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
@@ -55,7 +54,6 @@ type Options struct {
 // Client 是 host agent 客户端。
 type Client struct {
 	sessionRoot string
-	cua         *cua.Service
 	skills      *skillrun.Registry // skill 包注册表（v6；包命令生命周期权威）
 
 	execMu      sync.Mutex
@@ -289,9 +287,6 @@ func (c *Client) Close() error {
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = c.procs.Close(shutdown)
 	cancelRuns()
-	if c.cua != nil {
-		_ = c.cua.Close()
-	}
 	if c.files != nil {
 		_ = c.files.Close()
 	}

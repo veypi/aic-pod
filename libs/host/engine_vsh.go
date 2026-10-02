@@ -153,17 +153,18 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令与已装包命令。
 			Discoverable: func(name string) bool {
 				switch name {
-				case "commands", "bg", "grant", "cua", "skill":
+				case "commands", "bg", "grant", "skill":
 					return true
 				}
 				return c.skills.IsPackageCommand(name)
 			},
 		},
-		// 虚拟指令执行规则门：cua/skill 与已装 skill 包根命令按 cfg exec 域
-		// 检查（exec_policy/exec_deny/exec_allow + 会话 grant）；内建与平台
-		// 基础设施指令放行（它们是 shell 本身，旧模型同样不受 exec 域约束）。
+		// 虚拟指令执行规则门：skill 与已装 skill 包根命令（browser/cua 等）
+		// 按 cfg exec 域检查（exec_policy/exec_deny/exec_allow + 会话 grant）；
+		// 内建与平台基础设施指令放行（它们是 shell 本身，旧模型同样不受
+		// exec 域约束）。
 		CommandAllow: func(ctx context.Context, name string) bool {
-			if name == "cua" || name == "skill" || c.skills.IsPackageCommand(name) {
+			if name == "skill" || c.skills.IsPackageCommand(name) {
 				return c.execAllowed(vshglue.SessionFromContext(ctx), name)
 			}
 			return true
@@ -185,12 +186,8 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 	if err != nil {
 		return nil, nil, err
 	}
-	// cua 注册为 vsh 指令（§2.2）：caller 由可信 ctx 构造（owner/
-	// session/grant_approved），诊断走 stderr、--json 契约走 stdout。
-	// browser 自 v6 P5 起是已装 skill 包（skill-packages/browser），不再内建注册。
-	if err := engine.Registry().Register(c.cua.VshCommand(vshglue.CallerFromContext)); err != nil {
-		return nil, nil, fmt.Errorf("vsh host: register cua: %w", err)
-	}
+	// browser（v6 P5）与 cua（v6 P6）都是已装 skill 包（skill-packages/），
+	// 不再内建注册——包根命令经 skillrun Registry 懒解析进引擎。
 	return engine, native, nil
 }
 

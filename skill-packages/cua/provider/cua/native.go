@@ -50,12 +50,14 @@ type nativeSession struct {
 type nativeUI struct {
 	gate     chan struct{}
 	epoch    uint64
-	sessions map[string]*nativeSession
+	// session 设备级唯一会话（v6 P6：per-subject 多会话与容量限制删除——
+	// pod 入口已强制 caller=owner，设备本身就是隔离边界）。
+	session  *nativeSession
 	identity func(context.Context, int) (string, error)
 }
 
 func newNativeUI() *nativeUI {
-	return &nativeUI{gate: make(chan struct{}, 1), sessions: map[string]*nativeSession{}, identity: nativeProcessIdentity}
+	return &nativeUI{gate: make(chan struct{}, 1), identity: nativeProcessIdentity}
 }
 
 func uiID(prefix string) string {
@@ -119,11 +121,12 @@ func (t *nativeTarget) public() map[string]any {
 }
 func nativeKey(t *nativeTarget) string { return fmt.Sprintf("%d:%d:%s", t.pid, t.window, t.birth) }
 func (e *nativeUI) invalidate(t *nativeTarget) {
-	for _, s := range e.sessions {
-		for _, x := range s.targets {
-			if nativeKey(x) == nativeKey(t) {
-				x.snapshot = nil
-			}
+	if e.session == nil {
+		return
+	}
+	for _, x := range e.session.targets {
+		if nativeKey(x) == nativeKey(t) {
+			x.snapshot = nil
 		}
 	}
 }
@@ -201,7 +204,7 @@ func (e *nativeUI) discover(ctx context.Context, s *nativeSession, call nativeCa
 func nativeArgs(t *nativeTarget, session string) map[string]any {
 	return map[string]any{"pid": t.pid, "window_id": t.window, "session": session}
 }
-func (e *nativeUI) observe(ctx context.Context, s *nativeSession, t *nativeTarget, call nativeCall, o *ui.Operation, r *ui.Result, root string, wantImage bool) (map[string]any, error) {
+func (e *nativeUI) observe(ctx context.Context, s *nativeSession, t *nativeTarget, call nativeCall, o *ui.Operation, r *ui.Result, wantImage bool) (map[string]any, error) {
 	e.invalidate(t)
 	args := nativeArgs(t, s.driverSession)
 	args["include_screenshot"] = wantImage
@@ -315,7 +318,7 @@ func (e *nativeUI) observe(ctx context.Context, s *nativeSession, t *nativeTarge
 	t.snapshot = snap
 	return obs, nil
 }
-func (e *nativeUI) resolve(ctx context.Context, s *nativeSession, t *nativeTarget, call nativeCall, locator map[string]any, o *ui.Operation, r *ui.Result, root string) (map[string]any, *nativeElement, error) {
+func (e *nativeUI) resolve(ctx context.Context, s *nativeSession, t *nativeTarget, call nativeCall, locator map[string]any, o *ui.Operation, r *ui.Result) (map[string]any, *nativeElement, error) {
 	args := nativeArgs(t, s.driverSession)
 	if ref := str(locator["ref"]); ref != "" {
 		if t.snapshot == nil || t.snapshot.elements[ref] == nil {
@@ -343,7 +346,7 @@ func (e *nativeUI) resolve(ctx context.Context, s *nativeSession, t *nativeTarge
 		return args, nil, nil
 	}
 	if locator["role"] != nil || locator["label"] != nil {
-		if _, err := e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, root, false); err != nil {
+		if _, err := e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, false); err != nil {
 			return nil, nil, err
 		}
 		var matches []*nativeElement
@@ -410,7 +413,7 @@ func nativePress(s string) (string, []string, error) {
 	return "", nil, ui.Err("invalid_argument", "unsupported key")
 }
 
-func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root string, epoch uint64, call nativeCall) *ui.Result {
+func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, epoch uint64, call nativeCall) *ui.Result {
 	r := ui.NewResult(o)
 	select {
 	case e.gate <- struct{}{}:
@@ -425,16 +428,12 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 	}
 	if e.epoch != epoch {
 		e.epoch = epoch
-		e.sessions = map[string]*nativeSession{}
+		e.session = nil
 	}
-	s := e.sessions[sid]
+	s := e.session
 	if s == nil {
-		if len(e.sessions) >= 256 {
-			r.Fail(ui.Err("resource_limit", "too many active UI sessions"), false)
-			return r
-		}
 		s = &nativeSession{targets: map[string]*nativeTarget{}, driverSession: uiID("aicui-")}
-		e.sessions[sid] = s
+		e.session = s
 	}
 	var t *nativeTarget
 	started := false
@@ -450,7 +449,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 			e.invalidate(t)
 		}
 		if cuaSessionEndedErr(err) {
-			delete(e.sessions, sid)
+			e.session = nil
 			r.Error = ui.Err("session_expired", "driver session ended; the next command will restore the connection; discover and bind a new target")
 		}
 		return r
@@ -580,7 +579,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 		if o.Bool("full") {
 			return finishError(ui.Err("unsupported", "full-page screenshots are browser-only"))
 		}
-		r.Observation, err = e.observe(ctx, s, t, call, o, r, root, op == "screenshot" || o.Bool("image"))
+		r.Observation, err = e.observe(ctx, s, t, call, o, r, op == "screenshot" || o.Bool("image"))
 	case "read", "get":
 		if len(o.Locator) == 0 {
 			if op == "get" {
@@ -590,19 +589,19 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 				case "bounds":
 					r.Data = map[string]any{"bounds": t.bounds}
 				case "text":
-					r.Observation, err = e.observe(ctx, s, t, call, o, r, root, false)
+					r.Observation, err = e.observe(ctx, s, t, call, o, r, false)
 				default:
 					err = ui.Err("invalid_argument", "field requires an element locator")
 				}
 			} else {
-				r.Observation, err = e.observe(ctx, s, t, call, o, r, root, false)
+				r.Observation, err = e.observe(ctx, s, t, call, o, r, false)
 			}
 			if err == nil && (op == "read" || o.String("field") == "text") {
 				r.Data = map[string]any{"text": nativeText(t.snapshot)}
 			}
 		} else {
 			var el *nativeElement
-			_, el, err = e.resolve(ctx, s, t, call, o.Locator, o, r, root)
+			_, el, err = e.resolve(ctx, s, t, call, o.Locator, o, r)
 			if err == nil {
 				if el == nil {
 					err = ui.Err("unsupported", "read/get require an element")
@@ -639,7 +638,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 				if err = ctx.Err(); err != nil {
 					break
 				}
-				obs, er := e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, root, false)
+				obs, er := e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, false)
 				if er != nil {
 					err = er
 					break
@@ -657,7 +656,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 						err = ui.Err("stale_ref", "native wait refreshes driver snapshots; use a semantic locator")
 						break
 					}
-					_, el, er := e.resolve(ctx, s, t, call, o.Locator, o, r, root)
+					_, el, er := e.resolve(ctx, s, t, call, o.Locator, o, r)
 					if er != nil {
 						if ue, ok := er.(*ui.Error); ok && ue.Code == "not_found" {
 							matched = o.String("state") == "hidden"
@@ -723,12 +722,12 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 			err = ui.Err("unsupported", "native drag currently requires image coordinates")
 			break
 		}
-		a, _, er := e.resolve(ctx, s, t, call, map[string]any{"at": o.Args["from_at"], "snapshot": o.Args["snapshot"]}, o, r, root)
+		a, _, er := e.resolve(ctx, s, t, call, map[string]any{"at": o.Args["from_at"], "snapshot": o.Args["snapshot"]}, o, r)
 		if er != nil {
 			err = er
 			break
 		}
-		b, _, er := e.resolve(ctx, s, t, call, map[string]any{"at": o.Args["to_at"], "snapshot": o.Args["snapshot"]}, o, r, root)
+		b, _, er := e.resolve(ctx, s, t, call, map[string]any{"at": o.Args["to_at"], "snapshot": o.Args["snapshot"]}, o, r)
 		if er != nil {
 			err = er
 			break
@@ -743,7 +742,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 	default:
 		var args map[string]any
 		var el *nativeElement
-		args, el, err = e.resolve(ctx, s, t, call, o.Locator, o, r, root)
+		args, el, err = e.resolve(ctx, s, t, call, o.Locator, o, r)
 		if err != nil {
 			break
 		}
@@ -798,7 +797,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 			_, err = action("set_value", args)
 			if err == nil && op == "fill" {
 				var obs map[string]any
-				obs, err = e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, root, false)
+				obs, err = e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, false)
 				if err == nil {
 					r.Observation = obs
 					matches := []*nativeElement{}
@@ -902,7 +901,7 @@ func (e *nativeUI) execute(ctx context.Context, o *ui.Operation, sid, root strin
 		return finishError(err)
 	}
 	if o.Options.After != "none" {
-		r.Observation, err = e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, root, o.Options.After == "screenshot")
+		r.Observation, err = e.observe(ctx, s, t, call, &ui.Operation{Args: map[string]any{}}, r, o.Options.After == "screenshot")
 		if err != nil {
 			r.Warn("observation_failed", err.Error())
 		}

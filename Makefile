@@ -79,8 +79,8 @@ cli-windows-amd64:
 
 # Go 后端二进制：dev 运行（desktop/bin/）与 electron-builder extraResources
 # （resources/backend/）共用。先清掉两侧旧名，避免跨平台残留被打进包。
-# 依赖 browser-zip：cli/bin provider 二进制是 skillpackages embed 输入，必须先于 go build。
-backend-bin: browser-zip
+# 依赖 browser-zip/cua-bin：cli/bin provider 二进制是 skillpackages embed 输入，必须先于 go build。
+backend-bin: browser-zip cua-bin
 	@mkdir -p $(DESKTOP_DIR)/bin
 	@rm -f $(DESKTOP_DIR)/bin/aic-backend $(DESKTOP_DIR)/bin/aic-backend.exe
 	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" .
@@ -98,11 +98,15 @@ cua-sync:
 browser-zip:
 	cd skill-packages/browser && sh build.sh
 
+# cua skill 包构建（cli/bin 两产物，embed 输入；产物 gitignore）
+cua-bin:
+	cd skill-packages/cua && sh build.sh
+
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version cua-sync browser-zip
+.PHONY: backend-bin desktop-deps desktop-version cua-sync browser-zip cua-bin
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 

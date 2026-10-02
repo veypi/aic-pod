@@ -20,7 +20,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/cua"
 	"github.com/veypi/aic-pod/libs/fsx"
 	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/proto"
@@ -41,7 +40,6 @@ type execHandleEntry struct {
 
 func (c *Client) initTools() {
 	c.initErr = c.initFilesystem()
-	c.cua = cua.New(cua.Config{Logf: c.logf})
 	// skill 包注册表（v6 P0）：包命令生命周期唯一权威。Registry 懒解析——
 	// 引擎惰性构建，安装/卸载时才需要命令表。
 	if dir, err := cfg.StateDir(); err == nil {

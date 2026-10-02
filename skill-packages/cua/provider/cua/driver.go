@@ -103,10 +103,9 @@ func ensureCuaDaemon(ctx context.Context, logf func(string, ...any)) error {
 	cuaDaemonLastTry = time.Now()
 	cuaDaemonLaunchMu.Unlock()
 
-	// CUA_DRIVER_APP：桌面端内置 CuaDriver.app 路径（resources/cua/darwin/）——
-	// 路径直启（签名/公证原样保留，TCC 授权仍归 com.trycua.driver）；
-	// 未设置时回落用户自装形态（open -a CuaDriver）。
-	appPath := os.Getenv("CUA_DRIVER_APP")
+	// 内置发行物形态 = 路径直启（签名/公证原样保留，TCC 授权仍归
+	// com.trycua.driver）；未内置时回落用户自装形态（open -a CuaDriver）。
+	appPath := findCuaDriverApp()
 	launchArgs := cuaDaemonLaunchArgs(appPath)
 	logf("[cua] daemon absent, launching: open %s", strings.Join(launchArgs, " "))
 	if out, err := exec.CommandContext(ctx, "open", launchArgs...).CombinedOutput(); err != nil {
@@ -129,21 +128,20 @@ func ensureCuaDaemon(ctx context.Context, logf func(string, ...any)) error {
 		cuaDaemonReadyTimeout.Seconds(), sock)
 }
 
-// findCuaDriver 探测 cua-driver 二进制：CUA_DRIVER_PATH 环境变量 →
-// CUA_DRIVER_APP（内置 app 派生 Contents/MacOS/cua-driver）→ PATH → 常见安装
-// 路径。找不到返回空串，由 cua.status 报告 unavailable。
+// findCuaDriver 探测 cua-driver 二进制（v6 P6 拆包：探测链与 browser
+// chrome.Resolve 同构——包内解析，pod/desktop 只递目录提示）：
+// AIC_CUA_DRIVER_PATH 显式覆盖 → AIC_CUA_BUNDLE_DIR（Electron 内置发行物
+// 目录提示；darwin = $DIR/CuaDriver.app/Contents/MacOS/cua-driver，win =
+// $DIR/cua-driver.exe，linux = $DIR/cua-driver）→ PATH → 常见安装路径。
+// 找不到返回空串，由 cua status 报告 unavailable。
 func findCuaDriver() string {
-	if p := os.Getenv("CUA_DRIVER_PATH"); p != "" {
+	if p := os.Getenv("AIC_CUA_DRIVER_PATH"); p != "" {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	// CUA_DRIVER_APP：桌面端内置 CuaDriver.app 路径（仅设 APP 未设 PATH 时兜底）
-	if app := os.Getenv("CUA_DRIVER_APP"); app != "" {
-		p := filepath.Join(app, "Contents", "MacOS", "cua-driver")
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
+	if p := cuaBundleBin(); p != "" {
+		return p
 	}
 	if p, err := exec.LookPath("cua-driver"); err == nil {
 		return p
@@ -159,6 +157,44 @@ func findCuaDriver() string {
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
+	}
+	return ""
+}
+
+// cuaBundleBin 从 AIC_CUA_BUNDLE_DIR 目录提示派生平台二进制路径（存在才返回）。
+func cuaBundleBin() string {
+	dir := os.Getenv("AIC_CUA_BUNDLE_DIR")
+	if dir == "" {
+		return ""
+	}
+	var p string
+	switch runtime.GOOS {
+	case "darwin":
+		p = filepath.Join(dir, "CuaDriver.app", "Contents", "MacOS", "cua-driver")
+	case "windows":
+		p = filepath.Join(dir, "cua-driver.exe")
+	default:
+		p = filepath.Join(dir, "cua-driver")
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
+
+// findCuaDriverApp 解析 CuaDriver.app 路径（darwin daemon 拉起用）：
+// AIC_CUA_BUNDLE_DIR 内置发行物 → /Applications 用户自装；空 = 靠
+// LaunchServices 名称解析（open -a CuaDriver）。签名/公证原样保留，TCC
+// 授权仍归 com.trycua.driver。
+func findCuaDriverApp() string {
+	if dir := os.Getenv("AIC_CUA_BUNDLE_DIR"); dir != "" {
+		app := filepath.Join(dir, "CuaDriver.app")
+		if _, err := os.Stat(filepath.Join(app, "Contents", "MacOS", "cua-driver")); err == nil {
+			return app
+		}
+	}
+	if _, err := os.Stat("/Applications/CuaDriver.app/Contents/MacOS/cua-driver"); err == nil {
+		return "/Applications/CuaDriver.app"
 	}
 	return ""
 }

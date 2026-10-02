@@ -1,7 +1,10 @@
 package cua
 
 // service.go 是 cua 的业务服务：原生驱动会话、窗口、快照令牌与输入状态。
-// 指令面见 vsh.go（hosts-vsh-redesign：不再有 hosts_tool 声明层）。
+// 指令面见 cli.go（v6 P6 拆包：原 pod 内建 vsh 指令面改造为包内 CLI，
+// svc provider 经 skillproc invoke 收 argv 调 Run）。会话收敛设备级一份
+// （2026-10-02 用户定）——pod 入口已强制 caller=owner，per-subject 隔离
+// 属多用户遗留，与 browser 拆包同批删除。
 
 import (
 	"context"
@@ -27,10 +30,7 @@ func New(cfg Config) *Service {
 	return &Service{driver: newCuaMcp(findCuaDriver(), cfg.Logf), native: newNativeUI()}
 }
 
-func (s *Service) execute(ctx context.Context, c wire.Caller, op, target string, locator, args map[string]any, after, delivery string) (*ui.Result, error) {
-	if err := c.Validate(ctx); err != nil {
-		return nil, err
-	}
+func (s *Service) execute(ctx context.Context, op, target string, locator, args map[string]any, after, delivery string) (*ui.Result, error) {
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
@@ -67,10 +67,7 @@ func (s *Service) execute(ctx context.Context, c wire.Caller, op, target string,
 	}
 	o := &ui.Operation{Domain: "cua", Op: op, Target: target, Locator: locator, Args: args, Options: ui.Options{After: after, Delivery: delivery, Format: "json"}, Spec: spec}
 	// The actor workspace and driver's session are cua business state, independent of transport.
-	r := s.native.execute(ctx, o, c.Subject, "", epoch, func(ctx context.Context, name string, args map[string]any) (*mcpResult, error) {
-		if err := c.Validate(ctx); err != nil {
-			return nil, err
-		}
+	r := s.native.execute(ctx, o, epoch, func(ctx context.Context, name string, args map[string]any) (*mcpResult, error) {
 		return s.driver.callEpoch(ctx, epoch, name, args)
 	})
 	if r.Error != nil {
@@ -78,7 +75,7 @@ func (s *Service) execute(ctx context.Context, c wire.Caller, op, target string,
 	}
 	return r, nil
 }
-func (s *Service) Status(ctx context.Context, c wire.Caller, a Empty) (map[string]any, error) {
+func (s *Service) Status(ctx context.Context, a Empty) (map[string]any, error) {
 	path := s.driver.bin
 	state := "stopped"
 	s.driver.mu.Lock()
@@ -103,13 +100,10 @@ func (s *Service) Close() error {
 	defer cancel()
 	select {
 	case s.native.gate <- struct{}{}:
-		for _, actor := range s.native.sessions {
-			if ctx.Err() != nil {
-				break
-			}
+		if actor := s.native.session; actor != nil && ctx.Err() == nil {
 			_, _ = s.driver.callEpoch(ctx, s.native.epoch, "end_session", map[string]any{"session": actor.driverSession})
 		}
-		s.native.sessions = map[string]*nativeSession{}
+		s.native.session = nil
 		<-s.native.gate
 	case <-ctx.Done():
 	}
@@ -126,14 +120,14 @@ type ImagePart struct {
 	EOF    bool   `json:"eof"`
 }
 
-func (s *Service) Image(ctx context.Context, c wire.Caller, a ImageArgs) (ImagePart, error) {
+func (s *Service) Image(ctx context.Context, a ImageArgs) (ImagePart, error) {
 	select {
 	case s.native.gate <- struct{}{}:
 		defer func() { <-s.native.gate }()
 	case <-ctx.Done():
 		return ImagePart{}, ctx.Err()
 	}
-	actor := s.native.sessions[c.Subject]
+	actor := s.native.session
 	if actor == nil {
 		return ImagePart{}, wire.Fail("not_found", "Observation expired")
 	}

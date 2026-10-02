@@ -205,23 +205,17 @@ async function start() {
   }
 }
 
-// ---- 内置 cua-driver（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----
-// 固定版本随包分发：macOS 指向 CuaDriver.app（签名/公证原样，TCC 授权归
-// com.trycua.driver），win/linux 指向裸二进制。未同步时不注入——Go 后端
-// findCuaDriver 回落系统安装路径（用户自装 cua-driver 仍可用）。
-function cuaEnv() {
+// ---- 内置 cua-driver 目录提示（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----
+// 固定版本随包分发（签名/公证原样，TCC 授权归 com.trycua.driver）。cjs 只看
+// 目录存在性；平台二进制/app 派生与系统探测全在 Go provider（cua 包
+// findCuaDriver 候选链：AIC_CUA_DRIVER_PATH > AIC_CUA_BUNDLE_DIR > PATH >
+// 系统候选——v6 P6 起 cua 是 skill 包，desktop 不再注入具体二进制路径）。
+function cuaBundleEnv() {
   const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
-  const root = app.isPackaged
+  const dir = app.isPackaged
     ? path.join(process.resourcesPath, 'cua', plat)
     : path.join(__dirname, 'vendor', 'cua', plat)
-  if (process.platform === 'darwin') {
-    const appPath = path.join(root, 'CuaDriver.app')
-    const bin = path.join(appPath, 'Contents', 'MacOS', 'cua-driver')
-    if (!fs.existsSync(bin)) return {}
-    return { CUA_DRIVER_PATH: bin, CUA_DRIVER_APP: appPath }
-  }
-  const bin = path.join(root, process.platform === 'win32' ? 'cua-driver.exe' : 'cua-driver')
-  return fs.existsSync(bin) ? { CUA_DRIVER_PATH: bin } : {}
+  return fs.existsSync(dir) ? { AIC_CUA_BUNDLE_DIR: dir } : {}
 }
 
 // ---- 内置 Chrome 目录提示（vendor/browser → resources/browser） ----
@@ -246,8 +240,8 @@ function builtinSkillsEnv() {
 async function spawnBackend() {
   backend = spawn(backendBin, [], {
     // Browser automation runs in Go with a separate Chrome executable.
-    // cuaEnv()：内置 cua-driver 路径注入（缺失时空对象，回落系统探测）。
-    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...builtinSkillsEnv(), ...cuaEnv() },
+    // cuaBundleEnv()/browserBundleEnv()：内置驱动目录提示注入（缺失时空对象，包内回落系统探测）。
+    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...builtinSkillsEnv(), ...cuaBundleEnv() },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))

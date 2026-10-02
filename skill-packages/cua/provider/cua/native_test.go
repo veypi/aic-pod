@@ -11,7 +11,6 @@ import (
 func TestNativeUIBindingsAndDelivery(t *testing.T) {
 	e := newNativeUI()
 	e.identity = func(context.Context, int) (string, error) { return "birth-one", nil }
-	root := t.TempDir()
 	calls := []string{}
 	observeID := 0
 	failObserve := false
@@ -37,39 +36,40 @@ func TestNativeUIBindingsAndDelivery(t *testing.T) {
 		}
 		return &mcpResult{StructuredContent: map[string]any{"status": "ok"}}, nil
 	}
-	run := func(sid string, epoch uint64, argv ...string) *ui.Result {
+	run := func(epoch uint64, argv ...string) *ui.Result {
 		o, err := ui.Parse("cua", argv)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return e.execute(context.Background(), o, sid, root, epoch, call)
+		return e.execute(context.Background(), o, epoch, call)
 	}
-	list := run("one", 1, "target", "list")
+	list := run(1, "target", "list")
 	target := list.Data.([]map[string]any)[0]["id"].(string)
-	first := run("one", 1, "snapshot", "--target", target)
+	first := run(1, "snapshot", "--target", target)
 	ref := first.Observation["elements"].([]map[string]any)[0]["ref"].(string)
-	r := run("one", 1, "click", ref, "--target", target, "--count", "2", "--after", "none")
+	r := run(1, "click", ref, "--target", target, "--count", "2", "--after", "none")
 	if r.State != "completed" {
 		t.Fatalf("%+v", r)
 	}
-	r = run("one", 1, "click", ref, "--target", target)
+	r = run(1, "click", ref, "--target", target)
 	if r.Error == nil || r.Error.Code != "stale_ref" {
 		t.Fatalf("old ref accepted: %+v", r)
 	}
-	fresh := run("one", 1, "snapshot", "--target", target)
+	fresh := run(1, "snapshot", "--target", target)
 	ref = fresh.Observation["elements"].([]map[string]any)[0]["ref"].(string)
-	run("two", 1, "target", "list")
-	r = run("two", 1, "snapshot", "--target", target)
-	if r.Error == nil || r.Error.Code != "target_closed" {
-		t.Fatal("target crossed session")
+	// 设备级单会话（v6 P6）：绑定不随调用身份隔离，同设备共享同一份会话。
+	r = run(1, "snapshot", "--target", target)
+	if r.Error != nil {
+		t.Fatalf("shared device session lost binding: %+v", r)
 	}
+	ref = r.Observation["elements"].([]map[string]any)[0]["ref"].(string)
 	failObserve = true
-	r = run("one", 1, "click", ref, "--target", target)
+	r = run(1, "click", ref, "--target", target)
 	if r.State != "completed" || r.Action["performed"] != true || len(r.Warnings) == 0 {
 		t.Fatalf("observation failure erased success: %+v", r)
 	}
 	failObserve = false
-	r = run("one", 2, "snapshot", "--target", target)
+	r = run(2, "snapshot", "--target", target)
 	if r.Error == nil || r.Error.Code != "target_closed" {
 		t.Fatal("runtime restart retained binding")
 	}

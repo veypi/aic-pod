@@ -1,12 +1,12 @@
 // Package skillpackages — 内建 skill 包（v6.1 内建机制，docs/skill.md §9.4）：
 // 仓库为源、二进制内嵌、单一嵌入点。aic 与 aic-pod 同一数据源：
-//   - aic    InitBuiltin 定版到注册表（id=包名、owner='' 公开行）+ /skill/{id}/；
+//   - aic    InitBuiltin 定版到注册表（id=包名、owner='system' 公开行）+ /skills/{id}/；
 //   - aic-pod 启动预装到 ~/.aic/skills（installZip 同一原子序列，零下载）。
 //
 // 版本真相 = 各包 SKILL.md frontmatter 的 version 标量（前端解析契约同步
-// aic libs/skillhub）。browser 的 cli/bin provider 二进制由 build.sh 先于
-// pod 构建产出（gitignore，embed 在构建期收进——pod 二进制按目标平台编译，
-// 内嵌的即本平台 provider，不存在跨平台错配）。
+// aic libs/skillhub）。browser/cua 的 cli/bin provider 二进制由各包 build.sh
+// 先于 pod 构建产出（gitignore，embed 在构建期收进——pod 二进制按目标平台
+// 编译，内嵌的即本平台 provider，不存在跨平台错配）。
 package skillpackages
 
 import (
@@ -23,7 +23,7 @@ import (
 
 // 选择性嵌入：browser.zip（构建产物）在包根被自然排除；cli/bin provider
 // 二进制构建后收进（build.sh 先于 pod 构建）。
-//go:embed all:browser/SKILL.md all:browser/cli all:browser/ui all:vhtml all:office_studio
+//go:embed all:browser/SKILL.md all:browser/cli all:browser/ui all:cua/SKILL.md all:cua/cli all:cua/ui all:vhtml all:office_studio
 var builtin embed.FS
 
 // List 内建包名（嵌入根下的目录名 = 包名 = 注册表 id）。按名排序，遍历稳定。
