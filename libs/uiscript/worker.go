@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
-	"github.com/veypi/aic-pod/protocol/ui"
+	"github.com/veypi/aic-skills/sdk/go/ui"
 )
 
 const WorkerArg = "__ui_script_worker"

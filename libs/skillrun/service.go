@@ -15,7 +15,7 @@ import (
 	"github.com/veypi/vsh/commands"
 
 	vshglue "github.com/veypi/aic-pod/libs/vsh"
-	"github.com/veypi/aic-pod/protocol/skillproc"
+	"github.com/veypi/aic-skills/sdk/go/skillproc"
 )
 
 // service.go service 类 provider 的运行时（aic/docs/skill.md §9.2）：

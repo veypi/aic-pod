@@ -1,1 +1,0 @@
-insert into items (user_id, title, qty) values (:user_id, :title, :qty)

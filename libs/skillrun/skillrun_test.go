@@ -29,7 +29,7 @@ func buildHelloPkg(t *testing.T) string {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := os.ReadFile(filepath.Join("..", "..", "skill-packages", "hello", "cli", "manifest.json"))
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "aic-skills", "hello", "cli", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,12 +37,12 @@ func buildHelloPkg(t *testing.T) string {
 		t.Fatal(err)
 	}
 	out := filepath.Join(binDir, "hello-process")
-	build := exec.Command("go", "build", "-o", out, filepath.Join("..", "..", "skill-packages", "hello", "provider", "process"))
+	build := exec.Command("go", "build", "-o", out, filepath.Join("..", "..", "..", "aic-skills", "hello", "provider", "process"))
 	if b, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build hello-process: %v\n%s", err, b)
 	}
 	outSvc := filepath.Join(binDir, "hello-service")
-	buildSvc := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "skill-packages", "hello", "provider", "service"))
+	buildSvc := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "..", "aic-skills", "hello", "provider", "service"))
 	if b, err := buildSvc.CombinedOutput(); err != nil {
 		t.Fatalf("build hello-service: %v\n%s", err, b)
 	}

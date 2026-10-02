@@ -1,9 +1,0 @@
-{
-  "providers": [
-    {
-      "id": "main",
-      "kind": "process",
-      "entry": "cli/bin/hello"
-    }
-  ]
-}

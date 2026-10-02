@@ -23,8 +23,8 @@ AIC Pod 是运行在用户设备上的能力代理。CLI 和 Desktop 共用 Go �
 | libs/fsauth、libs/netauth 等 | 现有资源规则、会话 grant 和沙箱约束派生 |
 | libs/hostfs | 文件、版本、字节源、上传与条件提交 |
 | libs/skillrun | skill 包在 pod 端的安装/注册/运行权威（v6）：manifest 校验、包名冲突、根命令注册、懒启动与 stream 路由 |
-| skill-packages/ | skill 包源码（hello、browser、cua、create_skill 等）；仓库为源，构建产物落各包 cli/bin/（不入库） |
-| libs/rtc、protocol/ui | RTC 连接与 UI 领域数据，不承担命令审批分级 |
+| ../aic-skills/ | 官方 skill 专仓：内建包（browser/cua/create_skill/vhtml/office_studio，embed 源）+ 广场集源码 + provider Go SDK（sdk/go，零 pod 依赖）；构建产物落各包 cli/bin/（不入库） |
+| libs/rtc、sdk/go/ui | RTC 连接与 UI 领域数据，不承担命令审批分级 |
 
 继续使用现有包，不为这次改造增加权限服务、任务服务或第二个 Registry。旧 hosts_tool 声明体系在迁移时删除，不再维护 Method/Translate/AccessRules/RequiredLevel 或 DeviceCommand 投影。
 
@@ -75,7 +75,7 @@ skill 包是 pod 能力的分发形态（契约：aic/docs/skill.md §9.2；权�
 - streams[]：二进制流端点由 service provider 经 stream.open 提供（帧负载 = 端点打开参数，原样透传由包自行解析）。端点解析是 OpenToolStream 唯一路径（skillrun.ResolveStreamEndpoint）：先 {包名}.{流名} 直查，再全端点名 = 流名全名；权限门 = 解析出的包名走 execAllowed（与 vsh 指令同一判定）。
 - 安装来源：本地目录（skill install）或 NATS fetch zip；pod 启动扫描 ~/.aic/skills 自恢复（只认有效 .install.json）。
 
-browser 自 P5 批①a 起从内建迁为 skill 包 skill-packages/browser/，行为不变是最高准则：
+browser 自 P5 批①a 起从内建迁为 skill 包（现居 aic-skills/browser/），行为不变是最高准则：
 
 - **包布局**：cli/manifest.json（providers：main=process → cli/bin/browser，svc=service → cli/bin/browser-service；streams：page.frames/page.input → svc）；provider/browser = 能力内核（页面/动作/下载/上传/流，原内建 browser 包）；provider/chrome = CDP 传输与 Chrome 探测；provider/process = CLI（无状态 skillproc 转发器）；provider/service = svc（持有 Chrome 与全部状态的唯一进程）。构建 = 包内 build.sh → cli/bin/。
 - **RPC 边界**：一切触碰 Chrome 的操作都在 svc；CLI 只把 argv/cwd 经 invoke 帧转发——子命令表、参数解析、JSON 输出契约都在 svc 的 Service.Run（单一事实源）。取消 = vbox 杀 CLI 进程组 → 连接断开 → svc 取消该连接的 invoke。stream 的 stream id = 连接身份（输入租约持有者判定）。

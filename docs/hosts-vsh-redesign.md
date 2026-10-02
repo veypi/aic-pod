@@ -205,8 +205,8 @@ shellQuote 使用 vsh 支持的单引号字面量规则，处理内嵌单引号�
 
 viewer 使用的 Browser/CUA 指令和 bg 查询提供 `--json`：stdout 只输出约定 JSON，提示、诊断和进度写 stderr。成功 JSON 的字段、类型和空列表形状固定；同一主版本只能做兼容新增，不能随人类可读输出调整。非零退出不能当成功数据使用；未知字段可忽略，必需字段缺失或类型变化显式报错。
 
-- `browser page.list --json` 输出 `PageInfo[]`，字段定义在 `skill-packages/browser/provider/browser/types.go`（v6 P5 起包自维护）。
-- CUA 的 app/window 列表及其他 viewer 操作沿用 `protocol/ui` 的 Result 结构；实施时补齐每个操作的结果 JSON Schema，data 内被 viewer 使用的字段也要显式定义和用固定样例锁定，不能只依赖 Go 的 any 或输入 schema。
+- `browser page.list --json` 输出 `PageInfo[]`，字段定义在 `aic-skills/browser/provider/browser/types.go`（v6 P5 起包自维护）。
+- CUA 的 app/window 列表及其他 viewer 操作沿用 `sdk/go/ui` 的 Result 结构；实施时补齐每个操作的结果 JSON Schema，data 内被 viewer 使用的字段也要显式定义和用固定样例锁定，不能只依赖 Go 的 any 或输入 schema。
 - `bg list --json` 输出任务数组，固定字段为 id、state、script、output、error_output；已完成时有 exit_code。`bg wait <id> --json` 输出同形单个任务对象，运行中不伪造退出码。state 固定为 running/done/timeout/killed/error。
 
 JSON schema、黄金样例和命令输出测试由各命令所属包维护（browser/cua 包内测试已锁定输出契约）；实施时同步增加 bg 的 CLI 样例，并在前端做消费契约测试。它们约束 stdout 内容，不进入命令目录或协议分发，不是第二套单指令调用机制。

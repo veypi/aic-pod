@@ -16,7 +16,7 @@ import (
 	"os"
 	"strings"
 
-	skillpackages "github.com/veypi/aic-pod/skill-packages"
+	aicskills "github.com/veypi/aic-skills"
 )
 
 // KindBuiltin builtin 来源标识（安装记录 kind；id = 包名）。
@@ -36,12 +36,12 @@ func (r *Registry) Preinstall(ctx context.Context, zipPaths []string) {
 	}
 }
 
-// PreinstallEmbedded 二进制内嵌包预装（skillpackages；v6.1 内建机制——pod
+// PreinstallEmbedded 二进制内嵌包预装（aicskills；v6.1 内建机制——pod
 // 二进制自带内建 skill，设备零下载）。与 zip 预装同一 installZip 原子序列、
 // 同一幂等语义；单项失败记日志继续。
 func (r *Registry) PreinstallEmbedded(ctx context.Context) {
-	for _, name := range skillpackages.List() {
-		data, err := skillpackages.Zip(name)
+	for _, name := range aicskills.List() {
+		data, err := aicskills.Zip(name)
 		if err != nil {
 			r.logf("skillrun: embedded builtin %s: %v", name, err)
 			continue
@@ -75,7 +75,7 @@ func (r *Registry) installBuiltinZip(ctx context.Context, data []byte, origin st
 	if e := findZipEntry(files, "SKILL.md"); e != nil {
 		skillDoc = e.data
 	}
-	name, version := skillpackages.Frontmatter(skillDoc)
+	name, version := aicskills.Frontmatter(skillDoc)
 	if name == "" {
 		return fmt.Errorf("%s: SKILL.md frontmatter name missing", origin)
 	}

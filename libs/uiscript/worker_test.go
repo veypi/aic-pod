@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/veypi/aic-pod/protocol/ui"
+	"github.com/veypi/aic-skills/sdk/go/ui"
 )
 
 func runWorker(t *testing.T, domain, code string, results ...*ui.Result) []Message {

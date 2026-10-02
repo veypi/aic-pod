@@ -96,11 +96,11 @@ cua-sync:
 
 # browser skill 包构建（cli/bin 两产物 + browser.zip builtin 预装包；产物 gitignore）
 browser-zip:
-	cd skill-packages/browser && sh build.sh
+	cd ../aic-skills/browser && sh build.sh
 
 # cua skill 包构建（cli/bin 两产物，embed 输入；产物 gitignore）
 cua-bin:
-	cd skill-packages/cua && sh build.sh
+	cd ../aic-skills/cua && sh build.sh
 
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:

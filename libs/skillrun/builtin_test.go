@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	skillpackages "github.com/veypi/aic-pod/skill-packages"
+	aicskills "github.com/veypi/aic-skills"
 )
 
 // builtinZip 装配 hello 包（含 SKILL.md frontmatter name/version）并打成 zip 文件。
@@ -105,17 +105,17 @@ func TestPreinstallBadZipNotFatal(t *testing.T) {
 }
 
 // TestSkillFrontmatter frontmatter 解析：只取顶层 name/version 标量——
-// 解析器唯一实现 = skillpackages.Frontmatter，本测试经它验证契约。
+// 解析器唯一实现 = aicskills.Frontmatter，本测试经它验证契约。
 func TestSkillFrontmatter(t *testing.T) {
-	name, version := skillpackages.Frontmatter([]byte("---\nname: browser\ndescription: x\nui:\n  - path: index.html\nversion: 1.2.3\n---\nbody"))
+	name, version := aicskills.Frontmatter([]byte("---\nname: browser\ndescription: x\nui:\n  - path: index.html\nversion: 1.2.3\n---\nbody"))
 	if name != "browser" || version != "1.2.3" {
 		t.Fatalf("frontmatter = %q %q", name, version)
 	}
-	if n, v := skillpackages.Frontmatter([]byte("no frontmatter")); n != "" || v != "" {
+	if n, v := aicskills.Frontmatter([]byte("no frontmatter")); n != "" || v != "" {
 		t.Fatalf("no frontmatter = %q %q", n, v)
 	}
 	// 缩进键（嵌套）不算顶层
-	if n, _ := skillpackages.Frontmatter([]byte("---\nui:\n  name: nested\n---\n")); n != "" {
+	if n, _ := aicskills.Frontmatter([]byte("---\nui:\n  name: nested\n---\n")); n != "" {
 		t.Fatalf("nested key must not leak: %q", n)
 	}
 }

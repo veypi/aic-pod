@@ -3,7 +3,7 @@
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
 // 内建 90 + jq + 平台命令（commands/bg/grant）由引擎 Registry
-// 收口，browser 自 v6 P5 起是已装 skill 包（skill-packages/browser）不再是
+// 收口，browser 自 v6 P5 起是已装 skill 包（aic-skills/browser）不再是
 // 内建；原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd 扩充）；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
 // 且全在发送前；pod 不重新分类审批，只在执行点看 rules。

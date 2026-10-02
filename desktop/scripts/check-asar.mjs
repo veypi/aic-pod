@@ -105,7 +105,7 @@ if (!backendCandidates.some((p) => fs.existsSync(p))) {
   missing.push("resources/backend/aic-backend(.exe)");
 }
 if (!fs.existsSync(path.join(resDir, "browser.zip"))) {
-  missing.push("resources/browser.zip（先跑 make browser-zip / skill-packages/browser/build.sh）");
+  missing.push("resources/browser.zip（先跑 make browser-zip / aic-skills/browser/build.sh）");
 }
 
 // Chrome is a required independent runtime, outside asar. Validate the target

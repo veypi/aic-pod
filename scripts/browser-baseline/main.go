@@ -3,7 +3,7 @@
 
 // browser-baseline 是 Browser v5（进程内服务形态）的性能基线探针
 // （v6 P0⑤，aic/docs/todo.md）：直驱 browser.Service（v6 P5 起在
-// skill-packages/browser/provider/browser）真实 Chrome，产出
+// aic-skills/browser/provider/browser）真实 Chrome，产出
 // 命令延迟 / 输入→画面 p95 / 帧率 / CPU / 内存五项指标 JSON，供 P5 拆包
 // （browser 移出为 skill 包）前后对比。P5 验收时用同一探针复测。
 //
@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/veypi/aic-pod/skill-packages/browser/provider/browser"
+	"github.com/veypi/aic-skills/browser/provider/browser"
 )
 
 const fixtureHTML = `<!doctype html><title>Baseline</title>

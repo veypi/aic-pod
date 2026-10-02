@@ -5,6 +5,10 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **skill-packages 迁出至 aic-skills 专仓（破坏性）**：官方 skill 包源码（browser/cua/hello 整包）与 provider 依赖的契约包（protocol/skillproc、protocol/ui、libs/cliargs）移入 aic-skills 仓（Go module，`sdk/go` 自包含、不反向依赖 pod）；skillrun/uiscript 改 import github.com/veypi/aic-skills（go.mod replace ../aic-skills，go.work 接线）；libs/fsx/image.go 保留 pod 侧（read 管线），provider 侧副本在 sdk/go/fsx。Makefile browser-zip/cua-bin 与 desktop 打包链路（before-pack/electron-builder/check-asar）路径改道 ../aic-skills。
+
 ## v0.8.5 — 2026-10-01
 
 - **hosts-vsh-redesign 落地（阶段 1-7，破坏性）**：exec 只接收完整 vsh 脚本；browser/cua/bg/grant 为 vsh 指令；协议升 hosts_tools/2 + hosts_nats/2 + hosts_rtc/2（无旧协议兼容入口）；审批事实收敛为布尔 grant_approved（数字等级删除）；规则表三域有序表 + vbox first-wins matcher；execwait 统一外层（前台等待/超时转后台/双流日志）；vcore 与旧 wire 面物理删除。契约 docs/hosts-vsh-redesign.md + docs/hosts-tools.md。

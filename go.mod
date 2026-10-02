@@ -62,6 +62,7 @@ require (
 	github.com/pion/turn/v5 v5.1.0 // indirect
 	github.com/redis/go-redis/v9 v9.18.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/veypi/aic-skills v0.0.0
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
@@ -81,7 +82,9 @@ require (
 
 // vsh/vbox 为本地姊妹仓（go.work 接线；replace 供非 workspace 构建——
 // Docker/CI 构建前需先发布或拷贝两仓，见 vsh/docs/design.md 里程碑）。
+// aic-skills 同：官方 skill 专仓（内建包嵌入源 + Go SDK），单向依赖。
 replace (
+	github.com/veypi/aic-skills => ../aic-skills
 	github.com/veypi/vbox => ../vbox
 	github.com/veypi/vsh => ../vsh
 	github.com/veypi/vsh/contrib/jq => ../vsh/contrib/jq

@@ -4,7 +4,7 @@
  *
  * 用途：内置进安装包（electron-builder extraResources → resources/cua/），运行时由
  * main.js 注入 AIC_CUA_BUNDLE_DIR 目录提示；平台二进制/app 派生与系统探测全在
- * cua skill 包 Go provider（skill-packages/cua，v6 P6）。
+ * cua skill 包 Go provider（aic-skills/cua，v6 P6）。
  *
  * 版本固定 + sha256 校验：desktop/cua.json（升级 = 改 tag/sha256 后重跑；--force 强制重下）。
  * 布局（vendor/ 已 gitignore，不进仓库）：

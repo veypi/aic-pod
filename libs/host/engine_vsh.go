@@ -186,7 +186,7 @@ func (c *Client) buildVSHEngine() (*vshglue.Engine, *vshglue.NativeRegistry, err
 	if err != nil {
 		return nil, nil, err
 	}
-	// browser（v6 P5）与 cua（v6 P6）都是已装 skill 包（skill-packages/），
+	// browser（v6 P5）与 cua（v6 P6）都是已装 skill 包（aic-skills 仓），
 	// 不再内建注册——包根命令经 skillrun Registry 懒解析进引擎。
 	return engine, native, nil
 }

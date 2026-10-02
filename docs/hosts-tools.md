@@ -13,8 +13,8 @@ AI 只有内建 `fs` 和 `exec` 两个工具。exec 是唯一执行动作：一�
 - `libs/hostauth` 负责 RTC 票据、DTLS 身份绑定和续期。
 - `vbox`（外部依赖 ivec/vbox）托管原生进程：OS 沙箱 profile 一律由规则表派生（数字等级已删除），免沙箱只来自可信上下文的 nosandbox。
 - `libs/hostfs` 拥有路径、版本、上传和字节源；AI 文本操作与前端二进制文件操作使用同一 FS 实现。
-- `skill-packages/browser` / `skill-packages/cua`（v6 P5/P6 起）拥有 Chrome/窗口/快照：包根命令经 skillrun 注册进 vsh（与包命令同门径）；`page.frames`/`page.input` 是 RTC 私有 stream 端点，不注册为指令。
-- `ui/1` 保留为 browser/cua 包内部操作与结果词汇（target/snapshot/ref 等，protocol/ui 共享），不是独立的协议入口；对外统一经 hosts_tools/2 与 vsh 指令。
+- `browser` / `cua` 包（aic-skills 仓，v6 P5/P6 起）拥有 Chrome/窗口/快照：包根命令经 skillrun 注册进 vsh（与包命令同门径）；`page.frames`/`page.input` 是 RTC 私有 stream 端点，不注册为指令。
+- `ui/1` 保留为 browser/cua 包内部操作与结果词汇（target/snapshot/ref 等，sdk/go/ui 共享），不是独立的协议入口；对外统一经 hosts_tools/2 与 vsh 指令。
 
 ## 审批模型
 

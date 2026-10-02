@@ -11,7 +11,7 @@ Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
  │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
  │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
- ├─ browser：skill 包（skill-packages/browser）——main.js 只注入两个目录级 env：
+ ├─ browser：skill 包（aic-skills/browser）——main.js 只注入两个目录级 env：
  │    AIC_BROWSER_BUNDLE_DIR（vendor/browser → resources/browser，Chrome for Testing
  │    探测兕底；可执行文件解析与系统候选全在 Go provider chrome.Resolve）
  │    AIC_BUILTIN_SKILLS（packaged=resources/browser.zip，首跑 builtin 预装到

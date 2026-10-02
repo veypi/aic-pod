@@ -23,7 +23,7 @@ func buildBrowserPkg(t *testing.T) string {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	src := filepath.Join("..", "..", "skill-packages", "browser")
+	src := filepath.Join("..", "..", "..", "aic-skills", "browser")
 	manifest, err := os.ReadFile(filepath.Join(src, "cli", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)

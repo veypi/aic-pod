@@ -30,7 +30,7 @@ func newStreamTestRegistry(t *testing.T) *skillrun.Registry {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := os.ReadFile(filepath.Join("..", "..", "skill-packages", "hello", "cli", "manifest.json"))
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "aic-skills", "hello", "cli", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,11 +38,11 @@ func newStreamTestRegistry(t *testing.T) *skillrun.Registry {
 		t.Fatal(err)
 	}
 	out := filepath.Join(binDir, "hello-process")
-	if b, err := exec.Command("go", "build", "-o", out, filepath.Join("..", "..", "skill-packages", "hello", "provider", "process")).CombinedOutput(); err != nil {
+	if b, err := exec.Command("go", "build", "-o", out, filepath.Join("..", "..", "..", "aic-skills", "hello", "provider", "process")).CombinedOutput(); err != nil {
 		t.Fatalf("build hello-process: %v\n%s", err, b)
 	}
 	outSvc := filepath.Join(binDir, "hello-service")
-	if b, err := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "skill-packages", "hello", "provider", "service")).CombinedOutput(); err != nil {
+	if b, err := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "..", "aic-skills", "hello", "provider", "service")).CombinedOutput(); err != nil {
 		t.Fatalf("build hello-service: %v\n%s", err, b)
 	}
 	// macOS unix socket 104 字符上限：run 目录用短路径。
@@ -160,7 +160,7 @@ func buildBrowserPkg(t *testing.T) string {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	src := filepath.Join("..", "..", "skill-packages", "browser")
+	src := filepath.Join("..", "..", "..", "aic-skills", "browser")
 	manifest, err := os.ReadFile(filepath.Join(src, "cli", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
