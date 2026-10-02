@@ -3,8 +3,8 @@ package skillrun
 // skill download 的原子安装序列与安装记录（v6 P2，docs/skill.md §9.2）：
 // fetch 暂存 → 校验 manifest → 包名冲突全检 → 停旧 provider → 目录切换 →
 // 写 .install.json（**最后写 = 提交标记**）→ 注册。启动扫描只认带有效
-// .install.json 的目录，半包不注册。来源身份 = kind(local|public|builtin)+id：
-// 同源同名 = 更新（停 provider、替换目录、重新注册）；异源同名 = 显式报错。
+// .install.json 的目录，半包不注册。来源身份 = kind(private|public|builtin)
+// +id：同源同名 = 更新（停 provider、替换目录、重新注册）；异源同名 = 显式报错。
 
 import (
 	"context"
@@ -43,7 +43,7 @@ type FetchMeta struct {
 	Version string
 }
 
-// Download 经 NATS fetch 下载并原子安装。ref = 注册表 uuid 或云端本地目录名。
+// Download 经 NATS fetch 下载并原子安装。ref = 注册表 uuid 或 caller 私有行 name。
 func (r *Registry) Download(ctx context.Context, ref, version string) (*Package, error) {
 	if r.deps.Fetch == nil {
 		return nil, fmt.Errorf("skillrun: 此端未接包获取通道")
@@ -95,23 +95,28 @@ func (r *Registry) installZip(ctx context.Context, zipData []byte, meta *FetchMe
 	r.killServicesLocked(meta.Name)
 	reg.Unregister(meta.Name)
 
-	// 目录切换：解压 .next → 删旧 → 上位（失败尽力回滚）。
+	// 目录切换：解压 .next → 旧包挪 .old → 上位 → 删 .old（失败尽力回滚）。
 	final := filepath.Join(r.deps.SkillsDir, meta.Name)
 	next := final + ".next"
 	_ = os.RemoveAll(next)
 	if err := extractZipEntries(files, next); err != nil {
 		return nil, fmt.Errorf("skill download: extract: %w", err)
 	}
+	backup := final + ".old"
+	backed := false
 	if _, err := os.Stat(final); err == nil {
-		backup := final + ".old"
 		_ = os.RemoveAll(backup)
 		if err := os.Rename(final, backup); err != nil {
 			_ = os.RemoveAll(next)
 			return nil, fmt.Errorf("skill download: swap: %w", err)
 		}
+		backed = true
 		defer os.RemoveAll(backup)
 	}
 	if err := os.Rename(next, final); err != nil {
+		if backed {
+			_ = os.Rename(backup, final) // 尽力恢复原包
+		}
 		return nil, fmt.Errorf("skill download: promote: %w", err)
 	}
 	// entry 执行位 + artifacts.lock 设备侧下载（失败 = 安装失败；无

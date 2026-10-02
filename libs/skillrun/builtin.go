@@ -75,7 +75,7 @@ func (r *Registry) installBuiltinZip(ctx context.Context, data []byte, origin st
 	if e := findZipEntry(files, "SKILL.md"); e != nil {
 		skillDoc = e.data
 	}
-	name, version := skillFrontmatter(skillDoc)
+	name, version := skillpackages.Frontmatter(skillDoc)
 	if name == "" {
 		return fmt.Errorf("%s: SKILL.md frontmatter name missing", origin)
 	}
@@ -90,33 +90,4 @@ func (r *Registry) installBuiltinZip(ctx context.Context, data []byte, origin st
 	}
 	_, err = r.installZip(ctx, data, meta)
 	return err
-}
-
-// skillFrontmatter 读 SKILL.md frontmatter 顶层 name/version（`---` 围栏内
-// 无缩进 `key: value`；不引 yaml 依赖，只取两个标量键）。
-func skillFrontmatter(doc []byte) (name, version string) {
-	lines := strings.Split(string(doc), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", ""
-	}
-	for _, line := range lines[1:] {
-		if strings.TrimSpace(line) == "---" {
-			break
-		}
-		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
-			continue // 只取顶层标量键
-		}
-		key, value, found := strings.Cut(line, ":")
-		if !found {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		switch strings.TrimSpace(key) {
-		case "name":
-			name = value
-		case "version":
-			version = value
-		}
-	}
-	return name, version
 }
