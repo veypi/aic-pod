@@ -40,9 +40,14 @@ type UFSAdapterConfig struct {
 	// JailRoots jail 根集（cloud = /u/{uid} + /skill）：代码硬约束，规则表管不到
 	// 界外——界外路径即使写入规则行也不生效。空 = 不启用（host）。cwd = 首根。
 	JailRoots []string
-	// MemPrefixes 内存层前缀集（cloud = /tmp /etc /dev /proc）：
-	// per-session 内存层，用完即弃，UFS 零污染（红线）。
+	// MemPrefixes 内存层前缀集（cloud = /dev /proc）：伪系统目录，
+	// per-exec 内存层，用完即弃，UFS 零污染（红线）。
 	MemPrefixes []string
+	// Aliases 路径别名重定向（cloud = /tmp → 会话空间 tmp）：命中前缀的
+	// 路径在 resolve 期改写为目标，后续走 backing + 规则表门，与真实
+	// 目录同语义（跨 exec 持久、过配额闸门、随会话目录清理）。
+	// 目标必须落在 jail 根内且被便利 rw 根覆盖，否则门会拒。
+	Aliases map[string]string
 }
 
 // ufsAdapter 把 ufs.FS 适配为引擎 gbfs.FileSystem，并在进程内执行
@@ -54,6 +59,7 @@ type ufsAdapter struct {
 	jails         []string
 	mem           *gbfs.MemoryFS
 	memPrefix     []string
+	aliases       map[string]string
 	mu            sync.Mutex
 	cwd           string
 }
@@ -69,6 +75,7 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 		normalizePath: cfg.NormalizePath,
 		mem:           gbfs.NewMemory(),
 		memPrefix:     cfg.MemPrefixes,
+		aliases:       cfg.Aliases,
 		cwd:           "/",
 	}
 	for _, j := range cfg.JailRoots {
@@ -82,6 +89,12 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	for _, dir := range cfg.MemPrefixes {
 		if err := a.mem.MkdirAll(context.Background(), dir, 0755); err != nil {
 			return nil, err
+		}
+	}
+	for _, target := range cfg.Aliases {
+		// 别名目标初始化（平台初始化动作，与 UserRoot 同级直写 backing）。
+		if err := cfg.Backing.MkdirAll(target, 0o755); err != nil {
+			return nil, fmt.Errorf("vsh glue: init alias target %s: %w", target, err)
 		}
 	}
 
@@ -99,12 +112,16 @@ type CloudFSConfig struct {
 	// Rules vbox 规则表快照源（行序：temp → 便利根 rw 会话目录 → ro 行；
 	// DefaultWrite deny）。
 	Rules func() vbox.FSRuleSet
+	// Aliases 路径别名（/tmp → /u/{uid}/.sessions/{sid}/tmp），见
+	// UFSAdapterConfig.Aliases。
+	Aliases map[string]string
 }
 
-// CloudMemPrefixes cloud 内存层系统目录（per-session，用完即弃，UFS 零污染）。
+// CloudMemPrefixes cloud 内存层伪系统目录（per-exec，用完即弃，UFS 零污染）。
 // 导出供 aic 预检使用（F1：字面写目标落内存层前缀 = 运行期放行、永不落
-// UFS，预检不应拦）。
-var CloudMemPrefixes = []string{"/tmp", "/etc", "/dev", "/proc"}
+// UFS，预检不应拦）。/etc 不在此列——写 /etc 与 host 同语义，吃规则表
+// 硬拒；/tmp 由 Aliases 重定向到会话空间（跨 exec 持久、过配额闸门）。
+var CloudMemPrefixes = []string{"/dev", "/proc"}
 
 // NewCloudFS cloud：UFS 直通 + 系统目录内存层 + 用户根 jail + vbox 规则表门。
 // 用户根在此确保存在（构造期直写 backing，不经规则表门——平台初始化动作；
@@ -124,10 +141,12 @@ func NewCloudFS(cfg CloudFSConfig) (gbfs.FileSystem, error) {
 		Rules:       cfg.Rules,
 		JailRoots:   append([]string{cfg.UserRoot}, cfg.JailExtra...),
 		MemPrefixes: CloudMemPrefixes,
+		Aliases:     cfg.Aliases,
 	})
 }
 
-// resolve 把引擎传入路径（可相对）归一为绝对逻辑路径（posix 语义）。
+// resolve 把引擎传入路径（可相对）归一为绝对逻辑路径（posix 语义），
+// 末尾应用别名重定向（/tmp → 会话空间；目标自身不会再命中别名前缀）。
 func (a *ufsAdapter) resolve(name string) string {
 	if name == "" {
 		a.mu.Lock()
@@ -139,7 +158,16 @@ func (a *ufsAdapter) resolve(name string) string {
 		name = a.cwd + "/" + name
 		a.mu.Unlock()
 	}
-	return gbfs.Clean(name)
+	abs := gbfs.Clean(name)
+	for prefix, target := range a.aliases {
+		if abs == prefix {
+			return target
+		}
+		if strings.HasPrefix(abs, prefix+"/") {
+			return target + strings.TrimPrefix(abs, prefix)
+		}
+	}
+	return abs
 }
 
 // isMem 判定路径是否路由进内存层。

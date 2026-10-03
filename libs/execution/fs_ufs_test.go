@@ -30,6 +30,7 @@ func newCloudAdapter(t *testing.T) (gbfs.FileSystem, ufs.FS) {
 		UserRoot: "/u/u1",
 		Backing:  backing,
 		Rules:    func() vbox.FSRuleSet { return rules },
+		Aliases:  map[string]string{"/tmp": "/u/u1/.sessions/s1/tmp"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +54,8 @@ func TestCloudFSJailHardConstraint(t *testing.T) {
 	fsys, _ := newCloudAdapter(t)
 	ctx := context.Background()
 	// jail 外读/写一律拒（规则表管不到界外——代码硬约束）。
-	// /etc、/tmp 等是内存层（per-session scratch），不在此用例范围。
+	// /etc 不在 jail 内（与 host 语义对齐：写 /etc = 明确报错而非假成功）；
+	// /tmp 经别名重定向进会话空间。
 	if _, err := fsys.Open(ctx, "/u/other/secrets.txt"); !errors.Is(err, ErrOutsideJail) {
 		t.Fatalf("cross-user read = %v, want ErrOutsideJail", err)
 	}
@@ -103,14 +105,11 @@ func TestCloudFSMemoryLayerNoPollution(t *testing.T) {
 	t.Parallel()
 	fsys, backing := newCloudAdapter(t)
 	ctx := context.Background()
-	// 内存层写：/tmp 自由读写，且不落 UFS（红线）。
-	if err := writeFile(t, fsys, "/tmp/scratch.txt", "tmp"); err != nil {
-		t.Fatalf("/tmp write = %v", err)
+	// 内存层写：/proc 自由读写，且不落 UFS（红线）。
+	if err := writeFile(t, fsys, "/proc/scratch.txt", "tmp"); err != nil {
+		t.Fatalf("/proc write = %v", err)
 	}
-	if err := writeFile(t, fsys, "/tmp/memfile", "scratch"); err != nil {
-		t.Fatalf("/tmp memfile write = %v", err)
-	}
-	f, err := fsys.Open(ctx, "/tmp/scratch.txt")
+	f, err := fsys.Open(ctx, "/proc/scratch.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,13 +118,45 @@ func TestCloudFSMemoryLayerNoPollution(t *testing.T) {
 	if string(data) != "tmp" {
 		t.Fatalf("mem read = %q", data)
 	}
-	// UFS 直通侧不可见（红线：临时文件不落持久层）。
-	if _, err := backing.Stat("/tmp/scratch.txt"); !errors.Is(err, stdfs.ErrNotExist) {
-		t.Fatalf("UFS polluted by /tmp: %v", err)
+	// UFS 直通侧不可见（红线：伪系统目录不落持久层）。
+	if _, err := backing.Stat("/proc/scratch.txt"); !errors.Is(err, stdfs.ErrNotExist) {
+		t.Fatalf("UFS polluted by /proc: %v", err)
 	}
-	if _, err := backing.Stat("/tmp/memfile"); !errors.Is(err, stdfs.ErrNotExist) {
-		t.Fatalf("UFS polluted by /tmp: %v", err)
+}
+
+// /tmp 别名重定向：写落会话空间（跨 exec 持久、过规则表门），与真实目录同语义。
+func TestCloudFSTmpAliasToSessionSpace(t *testing.T) {
+	t.Parallel()
+	fsys, backing := newCloudAdapter(t)
+	ctx := context.Background()
+	if err := writeFile(t, fsys, "/tmp/scratch.txt", "tmp"); err != nil {
+		t.Fatalf("/tmp write = %v", err)
 	}
+	// 落点在 backing 的会话 tmp 目录。
+	data, err := backing.ReadFile("/u/u1/.sessions/s1/tmp/scratch.txt")
+	if err != nil || string(data) != "tmp" {
+		t.Fatalf("backing tmp read = %q %v", data, err)
+	}
+	// 读回一致。
+	f, err := fsys.Open(ctx, "/tmp/scratch.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+}
+
+// /etc 无内存层：写 = 明确报错（jail 外硬拒），不假成功。
+func TestCloudFSEtcWriteDenied(t *testing.T) {
+	t.Parallel()
+	fsys, backing := newCloudAdapter(t)
+	ctx := context.Background()
+	if err := writeFile(t, fsys, "/etc/deny-test", "x"); !errors.Is(err, ErrOutsideJail) {
+		t.Fatalf("/etc write = %v, want ErrOutsideJail", err)
+	}
+	if _, err := backing.Stat("/etc/deny-test"); !errors.Is(err, stdfs.ErrNotExist) {
+		t.Fatalf("/etc must not land anywhere: %v", err)
+	}
+	_ = ctx
 }
 
 func TestCloudFSRemoveRmdirSemantics(t *testing.T) {
@@ -213,6 +244,7 @@ func TestCloudFSChdirGetwd(t *testing.T) {
 }
 
 // F4 回归（2026-09-24 实测）：内存层 symlink 指向 backing 必须先 follow 后
+// （链接落点用 /proc——/tmp 已改为会话空间别名，不再是内存层）。
 // 路由——读拿到真实内容、写落 backing（不过影子）、ro 区经链接写被门拒。
 func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
 	t.Parallel()
@@ -224,12 +256,12 @@ func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 内存层链接 -> backing rw 区。
-	if err := fsys.Symlink(ctx, "/u/u1/.sessions/s1/data", "/tmp/link"); err != nil {
+	if err := fsys.Symlink(ctx, "/u/u1/.sessions/s1/data", "/proc/link"); err != nil {
 		t.Fatal(err)
 	}
 
 	// 读经链接 = 读真实内容。
-	f, err := fsys.Open(ctx, "/tmp/link/real.txt")
+	f, err := fsys.Open(ctx, "/proc/link/real.txt")
 	if err != nil {
 		t.Fatalf("read through link: %v", err)
 	}
@@ -240,13 +272,13 @@ func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
 	}
 
 	// ReadDir 经链接 = backing 真实条目。
-	entries, err := fsys.ReadDir(ctx, "/tmp/link")
+	entries, err := fsys.ReadDir(ctx, "/proc/link")
 	if err != nil || len(entries) != 1 || entries[0].Name() != "real.txt" {
 		t.Fatalf("readdir through link = %v, %v", entries, err)
 	}
 
 	// 写经链接落 backing（不落内存层影子）。
-	if err := writeFile(t, fsys, "/tmp/link/new.txt", "new"); err != nil {
+	if err := writeFile(t, fsys, "/proc/link/new.txt", "new"); err != nil {
 		t.Fatalf("write through link: %v", err)
 	}
 	if fi, err := backing.Stat("/u/u1/.sessions/s1/data/new.txt"); err != nil || fi.IsDir() {
@@ -260,10 +292,10 @@ func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
 	f2.Close()
 
 	// 内存层链接 -> ro 区：经链接写被规则表门拒（不是假成功）。
-	if err := fsys.Symlink(ctx, "/u/u1", "/tmp/rolink"); err != nil {
+	if err := fsys.Symlink(ctx, "/u/u1", "/proc/rolink"); err != nil {
 		t.Fatal(err)
 	}
-	err = writeFile(t, fsys, "/tmp/rolink/x.txt", "evil")
+	err = writeFile(t, fsys, "/proc/rolink/x.txt", "evil")
 	if !errors.Is(err, ErrRuleDenied) {
 		t.Fatalf("write through link to ro = %v, want ErrRuleDenied", err)
 	}
@@ -272,13 +304,13 @@ func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
 	}
 
 	// Remove 作用于链接本身（NoFollow）：链接删除、目标完好。
-	if err := fsys.Remove(ctx, "/tmp/link", false); err != nil {
+	if err := fsys.Remove(ctx, "/proc/link", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := backing.Stat("/u/u1/.sessions/s1/data/real.txt"); err != nil {
 		t.Fatalf("remove link must not touch target: %v", err)
 	}
-	if _, err := fsys.Lstat(ctx, "/tmp/link"); err == nil {
+	if _, err := fsys.Lstat(ctx, "/proc/link"); err == nil {
 		t.Fatal("link should be removed")
 	}
 }
