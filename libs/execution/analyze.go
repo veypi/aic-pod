@@ -13,17 +13,10 @@ const maxAnalyzeScriptDepth = 3
 
 // Analysis 是脚本语法与字面 grant 的静态分析结果，不作权限判定。
 type Analysis struct {
-	// GrantRequests 字面 grant 调用（domain/target 均为字面量才收录）——
-	// grant 恒 4 级审批（唯一扩权入口）：工具层据此提升 required。
-	GrantRequests []GrantRequest
+	// HasGrant detects a literal grant command even when its arguments are dynamic.
+	HasGrant bool
 	// SyntaxError 语法错误（非空时 exec 直接返回，不进引擎）。
 	SyntaxError string
-}
-
-// GrantRequest 一次字面 grant 调用。
-type GrantRequest struct {
-	Domain string // fs | net | cmd | ssh
-	Target string
 }
 
 // Analyze 只识别语法错误与字面 grant，不推测文件写入。readFile 用于脚本递归
@@ -57,11 +50,9 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 			return true // 动态命令名跳过
 		}
 		args := literalArgsEach(call.Args[1:])
-		// grant 调用收录（字面 domain/target 才算——动态构造的 grant 进不了
-		// 预检升档，但 Grant 通道本身仍会执行：服务端/端侧按脚本是否含字面
-		// grant 决定是否抬 4 级，动态 grant 由端侧执行时的审批语义兜底）。
-		if name == "grant" && len(args) >= 2 && args[0].ok && args[1].ok {
-			a.GrantRequests = append(a.GrantRequests, GrantRequest{Domain: args[0].lit, Target: args[1].lit})
+		// Arguments may be dynamic; approval covers the complete script.
+		if name == "grant" {
+			a.HasGrant = true
 		}
 		// 脚本递归：bash x.sh / sh x.sh / source x.sh / . x.sh / ./x.sh。
 		if depth < maxAnalyzeScriptDepth && readFile != nil {
