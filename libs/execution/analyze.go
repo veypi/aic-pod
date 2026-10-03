@@ -11,15 +11,16 @@ import (
 // 本分析仅作预检报错材料，拦截由运行期 FS 适配器规则表门兜底）。
 const maxAnalyzeScriptDepth = 3
 
-// Analysis 是脚本语法与字面 grant 的静态分析结果，不作权限判定。
+// Analysis 是脚本语法与字面授权申请的静态分析结果，不作权限判定。
 type Analysis struct {
-	// HasGrant detects a literal grant command even when its arguments are dynamic.
+	// HasGrant detects a grant that may modify authorization. Status/help are
+	// read-only; a dynamic subcommand still requires preflight approval.
 	HasGrant bool
 	// SyntaxError 语法错误（非空时 exec 直接返回，不进引擎）。
 	SyntaxError string
 }
 
-// Analyze 只识别语法错误与字面 grant，不推测文件写入。readFile 用于脚本递归
+// Analyze 只识别语法错误与字面 grant 授权申请，不推测文件写入。readFile 用于脚本递归
 // （bash x.sh / sh x.sh / source x.sh / ./x.sh 的脚本正文读入后递归分析）；
 // nil = 不递归（仅分析本脚本）。
 func Analyze(script string, readFile func(path string) ([]byte, error)) Analysis {
@@ -50,8 +51,10 @@ func (a *Analysis) walk(f *syntax.File, readFile func(string) ([]byte, error), s
 			return true // 动态命令名跳过
 		}
 		args := literalArgsEach(call.Args[1:])
-		// Arguments may be dynamic; approval covers the complete script.
-		if name == "grant" {
+		// Match cmdGrant's read-only branches. Continue walking even for help
+		// and status: argument substitutions may contain a separate grant request.
+		if name == "grant" && len(args) > 0 &&
+			(!args[0].ok || (args[0].lit != "status" && !helpRequested([]string{args[0].lit}))) {
 			a.HasGrant = true
 		}
 		// 脚本递归：bash x.sh / sh x.sh / source x.sh / . x.sh / ./x.sh。

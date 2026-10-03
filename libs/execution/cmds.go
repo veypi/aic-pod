@@ -266,7 +266,7 @@ const grantHelp = `usage:
   grant ssh <host:port> [--permanent]  授权 SSH 目标访问（host）
   grant cmd <命令名> [--permanent]     授权原生命令（host；授予解释器 = 授予该进程一切能力）
 
-授权修改需要服务端审批：含 grant 的脚本在发送前审批（grant_approved），
+查看 status 或帮助无需审批；包含授权申请的脚本在发送前审批（grant_approved），
 无批准事实时本命令报 permission_denied、规则不变。`
 
 func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) error {

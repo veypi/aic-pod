@@ -133,6 +133,14 @@ func TestCmdGrantRequiresApprovalFact(t *testing.T) {
 	if err != nil || !strings.Contains(out, "fs_policy") {
 		t.Fatalf("status: %q %v", out, err)
 	}
+	for _, args := range [][]string{nil, {"--help"}, {"-h"}, {"help"}, {"status"}, {"status", "--help"}} {
+		if out, _, err := runCmdCtx(identityCtx("u1", "s1", false), t, reg, "grant", args...); err != nil || out == "" {
+			t.Fatalf("read-only grant %v: %q %v", args, out, err)
+		}
+		if called {
+			t.Fatalf("read-only grant %v modified permissions", args)
+		}
+	}
 	// 批准事实：执行
 	out, _, err = runCmdCtx(identityCtx("u1", "s1", true), t, reg, "grant", "fs", "/x")
 	if err != nil || !strings.Contains(out, "已授权") || !called {

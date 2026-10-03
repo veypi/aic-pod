@@ -33,3 +33,41 @@ func TestAnalyzeDoesNotGuessDynamicCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestAnalyzeGrantReadOnlyCommands(t *testing.T) {
+	for _, tc := range []struct {
+		script   string
+		approval bool
+	}{
+		{`grant`, false},
+		{`grant status`, false},
+		{`'grant' "status"`, false},
+		{`grant --help`, false},
+		{`grant -h`, false},
+		{`grant help`, false},
+		{`grant status; grant --help`, false},
+		{`grant status "$DETAIL"`, false},
+		{`grant status | cat`, false},
+		{`grant status; grant fs /tmp`, true},
+		{`grant --help; grant net example.com:443`, true},
+		{`grant status "$(grant fs /tmp)"`, true},
+		{`grant --help "$(grant fs /tmp)"`, true},
+		{`grant "$ACTION"`, true},
+		{`grant fs --help`, true},
+		{`grant --permanent fs /tmp`, true},
+	} {
+		t.Run(tc.script, func(t *testing.T) {
+			a := Analyze(tc.script, nil)
+			if a.SyntaxError != "" || a.HasGrant != tc.approval {
+				t.Fatalf("approval=%v analysis=%+v", tc.approval, a)
+			}
+		})
+	}
+	files := map[string]string{"view.sh": "grant status; grant --help", "request.sh": "grant status; grant fs /tmp"}
+	for _, name := range []string{"view.sh", "request.sh"} {
+		a := Analyze("source "+name, func(path string) ([]byte, error) { return []byte(files[path]), nil })
+		if a.SyntaxError != "" || a.HasGrant != (name == "request.sh") {
+			t.Fatalf("%s: %+v", name, a)
+		}
+	}
+}
