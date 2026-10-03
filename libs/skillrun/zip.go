@@ -35,6 +35,7 @@ func readZipEntries(zipData []byte) ([]zipEntry, error) {
 	}
 	files := make([]zipEntry, 0, len(zr.File))
 	var total int64
+	seen := map[string]bool{}
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
@@ -43,6 +44,13 @@ func readZipEntries(zipData []byte) ([]zipEntry, error) {
 		if !ok {
 			return nil, fmt.Errorf("unsafe zip entry %q", f.Name)
 		}
+		if !f.Mode().IsRegular() {
+			return nil, fmt.Errorf("non-regular zip entry %q", f.Name)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate zip entry %q", name)
+		}
+		seen[name] = true
 		rc, err := f.Open()
 		if err != nil {
 			return nil, err

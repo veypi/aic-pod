@@ -157,7 +157,7 @@ func TestNormalizedHomePath(t *testing.T) {
 
 func TestConfigExecutionPolicyRoundTrip(t *testing.T) {
 	isolateConfigDir(t)
-	o := &Options{FsPolicy: PolicyDeny, FsRules: []string{"rw:/workspace", "rw:/skills/*/**", "rw:C:/public/**"}, ExecPolicy: PolicyDeny, ExecAllow: []string{"git", "json"}, ExecDeny: []string{"bash"}}
+	o := &Options{FsPolicy: PolicyDeny, FsRules: []string{"rw:/workspace", "rw:/skills/*/**", "rw:C:/public/**"}, ExecPolicy: PolicyDeny, ExecRules: []string{"deny:bash", "allow:git", "allow:json"}}
 	if err := Save(o); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestConfigExecutionPolicyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(o.FsRules, got.FsRules) || !reflect.DeepEqual(o.ExecAllow, got.ExecAllow) || !reflect.DeepEqual(o.ExecDeny, got.ExecDeny) || o.FsPolicy != got.FsPolicy || o.ExecPolicy != got.ExecPolicy {
+	if !reflect.DeepEqual(o.FsRules, got.FsRules) || !reflect.DeepEqual(o.ExecRules, got.ExecRules) || o.FsPolicy != got.FsPolicy || o.ExecPolicy != got.ExecPolicy {
 		t.Fatalf("policy round trip: %+v != %+v", AuthFrom(o), AuthFrom(got))
 	}
 }
@@ -180,7 +180,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 	p, _ := Path()
 	for _, body := range []string{
 		"::::broken yaml::::\n[\n", "fspolicy: open\n", "fs_policy: typo\n", "fs_allow: [ 'ro:' ]\n",
-		"fs_allow: [ {path: /, access: rw} ]\n", "fs_deny: [ 'ro:/secret' ]\n", "exec_allow: [ 'git*' ]\n", "net_allow: [ '*:443' ]\n",
+		"fs_allow: [ {path: /, access: rw} ]\n", "fs_deny: [ 'ro:/secret' ]\n", "exec_rules: [ 'git*' ]\n", "net_allow: [ '*:443' ]\n",
 		"plain text", "[arbitrary, values]", "", "rtc: invalid\nbrowser_width: [bad]\n",
 	} {
 		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
@@ -209,7 +209,7 @@ func TestConfigIgnoresBadFieldsAndPreservesValidFields(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		t.Fatal(err)
 	}
-	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_rules: ['rw:/workspace']\nexec_allow: [git, {}]\n"
+	body := "key: existing-device-key\nhost: http://localhost:4000\nhome_path: /agents\nhosts_streams: 4\ncustom: anything\nrtc: typo\nhosts_sources: 64\nexec_timeout: invalid\nfs_policy: typo\nfs_rules: ['rw:/workspace']\nexec_rules: ['allow:git', {}]\n"
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -243,9 +243,9 @@ func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 		gated bool   // ValidateAuth 仍失败（工具 fail-closed）
 		keep  string // 保存后仍应可见的片段（空 = 不检查）
 	}{
-		{"exec_policy: dney\nexec_deny: [sh]\n", true, "dney"},
-		{"exec_policy: open\nexec_deny: [sh, 'bad rule']\n", true, "bad rule"},
-		{"exec_policy: open\nexec_deny: [sh, {}]\n", true, "INVALID exec_deny"},
+		{"exec_policy: dney\nexec_rules: ['deny:sh']\n", true, "dney"},
+		{"exec_policy: open\nexec_rules: ['deny:sh', 'bad rule']\n", true, "bad rule"},
+		{"exec_policy: open\nexec_rules: ['deny:sh', {}]\n", true, "INVALID exec_rules"},
 		{"[broken yaml\n", true, "INVALID"},
 		{"fs_policy: open\nfs_deny: [/private, 'ro:/secret']\n", false, ""}, // 旧键直接失效
 		{"net_policy: open\nnet_deny: [example.com, '*:443']\n", false, ""},
@@ -287,9 +287,9 @@ func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 		})
 	}
 	o := NewOptions()
-	o.ExecPolicy, o.ExecDeny = PolicyOpen, []string{"sh", "bad rule"}
+	o.ExecPolicy, o.ExecRules = PolicyOpen, []string{"sh", "bad rule"}
 	o.Normalize()
-	if !reflect.DeepEqual(o.ExecDeny, []string{"sh", "bad rule"}) {
+	if !reflect.DeepEqual(o.ExecRules, []string{"sh", "bad rule"}) {
 		t.Fatal("deny entries were discarded")
 	}
 }

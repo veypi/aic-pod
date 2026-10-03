@@ -29,7 +29,7 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 	}
 	for _, corrupt := range []func(){
 		func() { cfg.Global.ExecPolicy = "dney" },
-		func() { cfg.Global.ExecDeny = []string{"fixture", "bad rule"} },
+		func() { cfg.Global.ExecRules = []string{"fixture", "bad rule"} },
 		func() { cfg.Global.FsRules = []string{"rw:/private", "rw:**"} },
 		func() { cfg.Global.NetRules = []string{"allow:example.com", "allow:*:443"} },
 	} {

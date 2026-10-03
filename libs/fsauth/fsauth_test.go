@@ -1,6 +1,7 @@
 package fsauth
 
 import (
+	"github.com/veypi/vbox"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,7 +23,7 @@ func mkBase(t *testing.T) string {
 func TestEmptyRootsNeverMatchAll(t *testing.T) {
 	t.Setenv("GOCACHE", "")
 	t.Setenv("XDG_CACHE_HOME", "")
-	p := New()
+	p := mustNewPolicy(t)
 	p.SetWorkDir(t.TempDir())
 	for _, roots := range [][]string{p.baseRoots, p.decideCaches} {
 		for _, r := range roots {
@@ -31,14 +32,14 @@ func TestEmptyRootsNeverMatchAll(t *testing.T) {
 			}
 		}
 	}
-	if got := joinPattern("", "**"); got != "" {
-		t.Fatalf("joinPattern(%q, %q) = %q, want empty", "", "**", got)
+	if got := vbox.JoinPattern("", "**"); got != "" {
+		t.Fatalf("vbox.JoinPattern(%q, %q) = %q, want empty", "", "**", got)
 	}
 
 	// 正向对照：显式设置 GOCACHE（未 canonical 的 t.TempDir 路径）时必须出现。
 	cache := filepath.Join(t.TempDir(), "gocache")
 	t.Setenv("GOCACHE", cache)
-	p2 := New()
+	p2 := mustNewPolicy(t)
 	p2.SetWorkDir(t.TempDir())
 	found := false
 	for _, pat := range p2.decideCaches {
@@ -59,9 +60,9 @@ func TestWriteRootsCoverLiteralSpellings(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("darwin symlink spellings")
 	}
-	p := New()
+	p := mustNewPolicy(t)
 	p.SetWorkDir(t.TempDir())
-	roots := p.WriteRootsFor("")
+	roots := rulePatterns(p, "", vbox.EffRW)
 	for _, want := range []string{"/tmp", os.TempDir()} {
 		want = strings.TrimSuffix(want, "/")
 		found := false
@@ -82,12 +83,12 @@ func TestWriteRootsCoverLiteralSpellings(t *testing.T) {
 func isolateTemporaryRoots(p *Policy) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	temporary := append(tempRoots(), canonical(os.TempDir()))
+	temporary := append(tempRoots(), vbox.Canonical(os.TempDir()))
 	roots := p.baseRoots[:0]
 	for _, root := range p.baseRoots {
 		isTemporary := false
 		for _, tmp := range temporary {
-			if canonical(root) == canonical(tmp) {
+			if vbox.Canonical(root) == vbox.Canonical(tmp) {
 				isTemporary = true
 				break
 			}
@@ -111,9 +112,9 @@ func newTestPolicy(t *testing.T, workDir string) *Policy {
 	t.Helper()
 	base := mkBase(t)
 	p := &Policy{
-		workDir:    canonical(workDir),
-		stateDir:   canonical(filepath.Join(base, ".aic")),
-		sessionDir: canonical(filepath.Join(base, ".aic", "sessions")),
+		workDir:    vbox.Canonical(workDir),
+		stateDir:   vbox.Canonical(filepath.Join(base, ".aic")),
+		sessionDir: vbox.Canonical(filepath.Join(base, ".aic", "sessions")),
 		grants:     map[string][]string{},
 	}
 	mkdir(t, p.sessionDir)
@@ -126,25 +127,23 @@ func newTestPolicy(t *testing.T, workDir string) *Policy {
 }
 
 // builtinRules 编译出厂初始表（同 rebuildLocked 的 builtin 段）。
-func builtinRules() []fsRule {
-	out := []fsRule{}
-	for _, d := range defaultDenyPaths() {
-		if r, ok := compileFSRule("deny:"+d, "builtin"); ok {
-			out = append(out, r)
-		}
+func builtinRules() []vbox.Rule {
+	rows := defaultDenyPaths()
+	for i := range rows {
+		rows[i] = "deny:" + rows[i]
 	}
-	return out
+	rules, err := vbox.CompileFSRules(rows, vbox.ClassBuiltin)
+	if err != nil {
+		panic(err)
+	}
+	return rules
 }
-
-// compileRows 编译给定规则行（非法行跳过，同 rebuildLocked 防御语义）。
-func compileRows(rows ...string) []fsRule {
-	out := []fsRule{}
-	for _, raw := range rows {
-		if r, ok := compileFSRule(raw, "cfg"); ok {
-			out = append(out, r)
-		}
+func compileRows(rows ...string) []vbox.Rule {
+	rules, err := vbox.CompileFSRules(rows, vbox.ClassCfg)
+	if err != nil {
+		panic(err)
 	}
-	return out
+	return rules
 }
 
 // setRules 重设规则表（包内测试 helper；builtin 初始表 + 给定行按序拼接，
@@ -154,7 +153,7 @@ func setRules(t *testing.T, p *Policy, rows ...string) {
 	defer isolateTemporaryRoots(p)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.rules = append(builtinRules(), compileRows(rows...)...)
+	p.rules = append(compileRows(rows...), builtinRules()...)
 }
 
 // TestDenyPatterns：预展开 deny 模式快照（exec 沙箱读拒绝单源）——
@@ -162,7 +161,7 @@ func setRules(t *testing.T, p *Policy, rows ...string) {
 // 且与断言相同为同一份列表（快照语义，调用方修改不影响 Policy）。
 func TestDenyPatterns(t *testing.T) {
 	p := newTestPolicy(t, "")
-	pats := p.DenyPatterns()
+	pats := rulePatterns(p, "", vbox.EffDeny)
 	if len(pats) == 0 {
 		t.Fatalf("default deny patterns must not be empty")
 	}
@@ -181,7 +180,7 @@ func TestDenyPatterns(t *testing.T) {
 	}
 	// 快照：修改返回切片不影响 Policy 内部表
 	pats[0] = "__mutated__"
-	if got := p.DenyPatterns()[0]; got == "__mutated__" {
+	if got := rulePatterns(p, "", vbox.EffDeny)[0]; got == "__mutated__" {
 		t.Fatalf("DenyPatterns must return a copy")
 	}
 }
@@ -196,7 +195,7 @@ func TestDecideGrading(t *testing.T) {
 	// 白名单：work_dir
 	assertGrades(t, p, ws+"/code/x.go", 1, 2)
 	// 白名单：会话区（per-sid）；其他 sid 的会话目录不可写——目录两根治理后
-	// .aic 整体退出写白名单，sessions/{sid} 由 WriteRootsFor 按会话单独授写。
+	// .aic 整体退出写白名单，sessions/{sid} 由 Snapshot write rules 按会话单独授写。
 	assertGradesSid(t, p, "s1", p.sessionDir+"/s1/out.txt", 1, 2)
 	assertGradesSid(t, p, "s1", p.sessionDir+"/s2/out.txt", 1, 0)
 	// 设备状态根只读：.aic 不再是公共可写区（2026-10-01 目录两根治理）
@@ -210,18 +209,18 @@ func TestDecideGrading(t *testing.T) {
 	assertGrades(t, p, base+"/secrets-sub/x", 1, 0) // 前缀不同名不命中 deny（默认可读不可写）
 }
 
-// TestOrderedLastMatchWins：有序表核心语义——优先级即书写顺序。
+// TestOrderedFirstMatchWins：有序表核心语义——优先级即书写顺序。
 // 后置 rw 行给 deny 行开洞合法（cfg 显式选择）；反序则 deny 终局。
-func TestOrderedLastMatchWins(t *testing.T) {
+func TestOrderedFirstMatchWins(t *testing.T) {
 	base := mkBase(t)
 	p := newTestPolicy(t, "")
 	// deny 前置 + rw 后置：洞内可写，洞外仍拒
-	setRules(t, p, "deny:"+base+"/secure/**", "rw:"+base+"/secure/cache/**")
+	setRules(t, p, "rw:"+base+"/secure/cache/**", "deny:"+base+"/secure/**")
 	assertGrades(t, p, base+"/secure/cache/x", 1, 2)
 	assertGrades(t, p, base+"/secure/key.pem", 0, 0)
 	// 反序：deny 终局——便利根/open 姿态不可放宽；temp grant 插表头可覆盖
 	//（v4 新语义，2.7.4「用户点就点了」）
-	setRules(t, p, "rw:"+base+"/secure/cache/**", "deny:"+base+"/secure/**")
+	setRules(t, p, "deny:"+base+"/secure/**", "rw:"+base+"/secure/cache/**")
 	assertGrades(t, p, base+"/secure/cache/x", 0, 0)
 	p.Grant("s1", base+"/secure/cache")
 	assertGradesSid(t, p, "s1", base+"/secure/cache/x", 1, 2)
@@ -230,14 +229,11 @@ func TestOrderedLastMatchWins(t *testing.T) {
 	p.openMode = true
 	assertGrades(t, p, base+"/secure/cache/x", 0, 0)
 	p.openMode = false
-	// Rules() 快照：拼接序与效果/来源标注
-	rules := p.Rules()
-	if len(rules) < 2 || rules[len(rules)-2].Effect != "rw" || rules[len(rules)-1].Effect != "deny" {
-		t.Fatalf("Rules snapshot order/effects broken: %+v", rules[len(rules)-2:])
+	rows := p.Snapshot("").Rules
+	if len(rows) < 2 || rows[0].Effect != vbox.EffDeny || rows[0].Class != vbox.ClassCfg {
+		t.Fatalf("snapshot order: %+v", rows)
 	}
-	if rules[len(rules)-1].Source != "cfg" || rules[0].Source != "builtin" {
-		t.Fatalf("Rules snapshot source labels broken")
-	}
+
 }
 
 // TestDenyFinalExceptTempGrant：deny 终局对便利根与 open 姿态仍是硬约束；
@@ -246,7 +242,7 @@ func TestOrderedLastMatchWins(t *testing.T) {
 func TestDenyFinalExceptTempGrant(t *testing.T) {
 	base := mkBase(t)
 	p := newTestPolicy(t, "")
-	setRules(t, p, "rw:"+base, "deny:"+base+"/secret/**")
+	setRules(t, p, "deny:"+base+"/secret/**", "rw:"+base)
 	p.Grant("s1", base+"/secret")
 	assertGradesSid(t, p, "s1", base+"/secret/key", 1, 2)
 	// 会话隔离：别的 sid 仍被 deny
@@ -272,7 +268,7 @@ func TestAllowWriteAndRevocation(t *testing.T) {
 	assertGrades(t, p, base+"/read/file", 1, 0)
 	assertGrades(t, p, base+"/write/file", 1, 2)
 	assertGrades(t, p, base+"/outside/file", 1, 0)
-	for _, root := range p.WriteRootsFor("s1") {
+	for _, root := range rulePatterns(p, "s1", vbox.EffRW) {
 		if root == base+"/read" {
 			t.Fatal("non-allow root became writable")
 		}
@@ -289,19 +285,19 @@ func TestAllowWriteAndRevocation(t *testing.T) {
 func TestROHoleSemantics(t *testing.T) {
 	base := mkBase(t)
 	p := newTestPolicy(t, "")
-	setRules(t, p, "deny:"+base+"/secure/**", "ro:"+base+"/secure/doc")
+	setRules(t, p, "ro:"+base+"/secure/doc", "deny:"+base+"/secure/**")
 	assertGrades(t, p, base+"/secure/key", 0, 0)
 	assertGrades(t, p, base+"/secure/doc", 1, 0)
 	assertGrades(t, p, base+"/secure/doc/sub", 1, 0) // 裸模式覆盖子树
 	p.Grant("s1", base+"/secure/doc")
 	assertGradesSid(t, p, "s1", base+"/secure/doc", 1, 2)
 	assertGradesSid(t, p, "s2", base+"/secure/doc", 1, 0)
-	// DenyHit 只认终局：doc 已开洞不再是 deny，key 仍是（host 层 temp grant 校验同源）
-	if p.DenyHit(base + "/secure/doc") {
-		t.Error("ro hole must not report DenyHit")
+	// deniedPath 只认终局：doc 已开洞不再是 deny，key 仍是
+	if denied(p, base+"/secure/doc") {
+		t.Error("ro hole must not report deniedPath")
 	}
-	if !p.DenyHit(base + "/secure/key") {
-		t.Error("denied path must report DenyHit")
+	if !denied(p, base+"/secure/key") {
+		t.Error("denied path must report deniedPath")
 	}
 	// open 姿态下 ro 是写的唯一约束（§8.5）
 	p.openMode = true
@@ -313,11 +309,11 @@ func TestROHoleSemantics(t *testing.T) {
 // expandVars + canonicalPattern 后自匹配，且不误伤兄弟路径）。
 func TestDenyDefaults(t *testing.T) {
 	self := func(pat string) bool {
-		e, ok := expandVars(pat)
+		e, ok := vbox.ExpandVars(pat)
 		if !ok {
 			return false
 		}
-		return matchPattern(canonicalPattern(e), canonical(e))
+		return vbox.MatchPattern(vbox.CanonicalPattern(e), vbox.Canonical(e))
 	}
 	for _, pat := range defaultDenyPaths() {
 		if !self(pat) {
@@ -332,17 +328,17 @@ func TestDenyDefaults(t *testing.T) {
 		browserDir + "/browser.json.inst3.cli-tmp",
 		browserDir + "/browser.json.merge-tmp",
 	} {
-		if !p.DenyHit(path) {
-			t.Errorf("DenyHit(%q) = false, want true (browser state dir scope)", path)
+		if !denied(p, path) {
+			t.Errorf("deniedPath(%q) = false, want true (browser state dir scope)", path)
 		}
 	}
 	// browser state deny 不得罩住会话区兄弟路径（目录口径向量）
 	p2 := newTestPolicy(t, "")
-	if !p2.DenyHit(browserDir + "/x.json") {
+	if !denied(p2, browserDir+"/x.json") {
 		t.Fatal("sanity: browser state dir deny must hit its own subtree")
 	}
-	if e, _ := expandVars("$HOME/.aic/browser/**"); matchPattern(canonicalPattern(e),
-		canonical(mustExpand(t, "$HOME/.aic/sessions/s1/x.txt"))) {
+	if e, _ := vbox.ExpandVars("$HOME/.aic/browser/**"); vbox.MatchPattern(vbox.CanonicalPattern(e),
+		vbox.Canonical(mustExpand(t, "$HOME/.aic/sessions/s1/x.txt"))) {
 		t.Error("browser state dir deny must not shadow session files")
 	}
 }
@@ -394,8 +390,8 @@ func TestDenyTildeEntries(t *testing.T) {
 		)
 	}
 	for _, path := range paths {
-		if !p.DenyHit(path) {
-			t.Errorf("DenyHit(%q) = false, want true (tilde entry must hit real home path)", path)
+		if !denied(p, path) {
+			t.Errorf("deniedPath(%q) = false, want true (tilde entry must hit real home path)", path)
 		}
 	}
 	// 兄弟路径不误伤
@@ -403,8 +399,8 @@ func TestDenyTildeEntries(t *testing.T) {
 		home + "/.aws-backup/credentials", // 前缀不同名
 		home + "/work/.env.sample",        // 段内 * 不跨后缀？**.env 命中 .env 本身——.env.sample 不命中
 	} {
-		if p.DenyHit(path) {
-			t.Errorf("DenyHit(%q) = true, want false (sibling path must not be denied)", path)
+		if denied(p, path) {
+			t.Errorf("deniedPath(%q) = true, want false (sibling path must not be denied)", path)
 		}
 	}
 }
@@ -412,21 +408,9 @@ func TestDenyTildeEntries(t *testing.T) {
 // TestDenyUndefinedVarEntrySkipped：未定义变量的条目整条跳过——初始名单已按平台分表，
 // 此规则只防御用户 cfg 条目（修复背景：单张跨平台表时代，unix 上 %LOCALAPPDATA% 为空，
 // 模式退化成 /Google/Chrome/User Data/** 匹配任意位置的同名路径）。
-func TestDenyUndefinedVarEntrySkipped(t *testing.T) {
-	r, ok := compileFSRule("deny:%LOCALAPPDATA%/Google/Chrome/User Data/**", "cfg")
-	if runtime.GOOS == "windows" {
-		if !ok || len(r.pats) == 0 {
-			t.Errorf("windows: compiled %v, want >=1 pattern", r.pats)
-		}
-		return
-	}
-	if ok {
-		t.Errorf("non-windows: dangling %%LOCALAPPDATA%% entry must be skipped, got %v", r.pats)
-	}
-	// 端到端：任意位置的 Google/Chrome/User Data 路径不得被 deny
-	p := newTestPolicy(t, "")
-	if p.DenyHit("/home/someone/Google/Chrome/User Data/Default/Cookies") {
-		t.Error("dangling windows pattern must not deny arbitrary unix path")
+func TestDenyUndefinedVarRejectsTable(t *testing.T) {
+	if _, err := vbox.CompileFSRules([]string{"deny:$AIC_UNDEFINED_POLICY_VAR/**"}, vbox.ClassCfg); err == nil {
+		t.Fatal("undefined variable accepted")
 	}
 }
 
@@ -444,14 +428,17 @@ func TestCompileRuleDualForm(t *testing.T) {
 	}
 	litPat := filepath.ToSlash(link) + "/x.txt"
 	globPat := filepath.ToSlash(link) + "/**"
-	lit, ok1 := compileFSRule("deny:"+litPat, "cfg")
-	glob, ok2 := compileFSRule("deny:"+globPat, "cfg")
-	if !ok1 || !ok2 {
+	lit, err1 := vbox.CompileFSRules([]string{"deny:" + litPat}, vbox.ClassCfg)
+	glob, err2 := vbox.CompileFSRules([]string{"deny:" + globPat}, vbox.ClassCfg)
+	if err1 != nil || err2 != nil {
 		t.Fatal("compile failed")
 	}
-	got := append(append([]string{}, lit.pats...), glob.pats...)
+	var got []string
+	for _, row := range append(lit, glob...) {
+		got = append(got, row.Pattern)
+	}
 	wantLink := filepath.ToSlash(link) + "/x.txt"
-	wantReal := canonical(litPat)
+	wantReal := vbox.Canonical(litPat)
 	if wantReal == wantLink {
 		t.Skip("symlink not resolved on this platform")
 	}
@@ -468,7 +455,7 @@ func TestCompileRuleDualForm(t *testing.T) {
 		t.Fatalf("dual form missing: got %v, want both %q and %q", got, wantLink, wantReal)
 	}
 	// 裸模式覆盖子树（双拼写）+ glob 条目 canonical 形态
-	for _, want := range []string{wantReal + "/**", wantLink + "/**", canonicalPattern(mustExpand(t, globPat))} {
+	for _, want := range []string{wantReal, wantLink, vbox.CanonicalPattern(mustExpand(t, globPat))} {
 		found := false
 		for _, g := range got {
 			if g == want {
@@ -495,13 +482,13 @@ func TestGrantTemp(t *testing.T) {
 	// 跨 session 失效（写撤销，读仍在）
 	assertGradesSid(t, p, "s2", ext+"/a.txt", 1, 0)
 
-	// DenyHit：deny 行命中 / 界外失配
+	// deniedPath：deny 行命中 / 界外失配
 	setRules(t, p, "deny:"+base+"/secrets/**")
-	if !p.DenyHit(base + "/secrets/x") {
-		t.Error("DenyHit should hit deny row")
+	if !denied(p, base+"/secrets/x") {
+		t.Error("deniedPath should hit deny row")
 	}
-	if p.DenyHit(ext + "/x") {
-		t.Error("DenyHit should miss outside deny")
+	if denied(p, ext+"/x") {
+		t.Error("deniedPath should miss outside deny")
 	}
 	// grant 插表头压 deny（v4 新语义——旧「deny 优先」硬底线作废）；会话隔离
 	p.Grant("s3", base+"/secrets")
@@ -532,7 +519,7 @@ func TestCanonicalSymlinkBypass(t *testing.T) {
 }
 
 // TestCanonicalMissingTopLevel：顶层组件不存在的路径保持绝对形态。
-// 修复前递归到根基后 TrimSuffix 得空串/盘符，canonical("") 退化为 "."，
+// 修复前递归到根基后 TrimSuffix 得空串/盘符，vbox.Canonical("") 退化为 "."，
 // 产出 "./x" 相对形态（安全敏感 helper 的确定性错误）。
 func TestCanonicalMissingTopLevel(t *testing.T) {
 	vol := filepath.VolumeName(os.TempDir()) // unix ""；windows "C:"
@@ -541,12 +528,12 @@ func TestCanonicalMissingTopLevel(t *testing.T) {
 		t.Skip("unexpectedly exists:", missing)
 	}
 	want := filepath.ToSlash(missing + string(filepath.Separator) + "x")
-	if got := Canonical(missing + string(filepath.Separator) + "x"); got != want {
+	if got := vbox.Canonical(missing + string(filepath.Separator) + "x"); got != want {
 		t.Errorf("Canonical = %q, want %q", got, want)
 	}
 	// glob 模式同口径（字面前缀经同一 canonical）
 	pat := filepath.ToSlash(missing) + "/**"
-	if got := canonicalPattern(pat); got != pat {
+	if got := vbox.CanonicalPattern(pat); got != pat {
 		t.Errorf("canonicalPattern = %q, want %q", got, pat)
 	}
 }
@@ -557,13 +544,13 @@ func TestDecideMissingTopLevelConsistency(t *testing.T) {
 	vol := filepath.VolumeName(os.TempDir())
 	missing := filepath.ToSlash(vol + string(filepath.Separator) + "aic-nonexistent-xyz")
 	p := newTestPolicy(t, "")
-	setRules(t, p, "deny:"+missing+"/secrets/**", "rw:"+missing+"/work")
+	setRules(t, p, "rw:"+missing+"/work", "deny:"+missing+"/secrets/**")
 	assertGrades(t, p, missing+"/secrets/key.pem", 0, 0)
 	assertGrades(t, p, missing+"/work/f.txt", 1, 2)
 }
 
-// TestWriteRootsFor：沙箱白名单 = 便利根 + rw 行裸模式根 + grant，canonical 去重，跨 session 隔离。
-func TestWriteRootsFor(t *testing.T) {
+// TestSnapshotWriteRules：沙箱白名单 = 便利根 + rw 行裸模式根 + grant，canonical 去重，跨 session 隔离。
+func TestSnapshotWriteRules(t *testing.T) {
 	base := mkBase(t)
 	ws := filepath.Join(base, "ws")
 	mkdir(t, ws)
@@ -571,10 +558,10 @@ func TestWriteRootsFor(t *testing.T) {
 	setRules(t, p, "rw:"+base+"/custom")
 	p.Grant("s1", base+"/granted")
 
-	roots := p.WriteRootsFor("s1")
+	roots := rulePatterns(p, "s1", vbox.EffRW)
 	has := func(want string) bool {
 		for _, r := range roots {
-			if r == canonical(want) {
+			if r == vbox.Canonical(want) {
 				return true
 			}
 		}
@@ -582,14 +569,14 @@ func TestWriteRootsFor(t *testing.T) {
 	}
 	for _, want := range []string{ws, base + "/custom", base + "/granted", p.sessionDir + "/s1"} {
 		if !has(want) {
-			t.Errorf("WriteRootsFor missing %s: %v", want, roots)
+			t.Errorf("Snapshot write rules missing %s: %v", want, roots)
 		}
 	}
 	if has(p.stateDir) {
-		t.Error("WriteRootsFor must not grant device state root ($HOME/.aic read-only)")
+		t.Error("Snapshot write rules must not grant device state root ($HOME/.aic read-only)")
 	}
-	for _, r := range p.WriteRootsFor("s2") {
-		if r == canonical(base+"/granted") {
+	for _, r := range rulePatterns(p, "s2", vbox.EffRW) {
+		if r == vbox.Canonical(base+"/granted") {
 			t.Error("grant leaked across sessions")
 		}
 	}
@@ -633,9 +620,9 @@ func mkdir(t *testing.T, dirs ...string) {
 
 func mustExpand(t *testing.T, s string) string {
 	t.Helper()
-	e, ok := expandVars(s)
+	e, ok := vbox.ExpandVars(s)
 	if !ok {
-		t.Fatalf("expandVars(%q) failed", s)
+		t.Fatalf("vbox.ExpandVars(%q) failed", s)
 	}
 	return e
 }
@@ -647,7 +634,14 @@ func assertGrades(t *testing.T, p *Policy, path string, wantR, wantW int) {
 
 func assertGradesSid(t *testing.T, p *Policy, sid, path string, wantR, wantW int) {
 	t.Helper()
-	r, w := p.View(sid).Decide(path)
+	r, w := 0, 0
+	snap := p.Snapshot(sid)
+	if snap.Match(path, vbox.OpRead).Allow {
+		r = 1
+	}
+	if snap.Match(path, vbox.OpWrite).Allow {
+		w = 2
+	}
 	if r != wantR || w != wantW {
 		t.Errorf("Decide(%q, sid=%q) = (%d,%d), want (%d,%d)", path, sid, r, w, wantR, wantW)
 	}
@@ -655,7 +649,7 @@ func assertGradesSid(t *testing.T, p *Policy, sid, path string, wantR, wantW int
 
 // TestDecideCachesWithoutStat：Decide 与 bind 对不存在缓存目录的语义分茠——
 // 判定側无存在性探测（白名单意图跟目录身份：未装 rust 时写 ~/.cargo 也是 2 级），
-// bind 侧要求源存在（WriteRootsFor 不含不存在目录）。
+// bind 侧要求源存在（Snapshot write rules 不含不存在目录）。
 func TestDecideCachesWithoutStat(t *testing.T) {
 	var missing string
 	for _, d := range cacheRootDirs() {
@@ -674,51 +668,43 @@ func TestDecideCachesWithoutStat(t *testing.T) {
 	// Decide：不存在的缓存目录仍 2 级（预计算候选，无 stat）
 	assertGrades(t, p, filepath.Join(missing, "pkg"), 1, 2)
 	// bind：不存在则不进白名单
-	for _, r := range p.WriteRootsFor("s1") {
-		if r == missing {
-			t.Errorf("WriteRootsFor should exclude missing cache dir %s", missing)
-		}
-	}
+
 }
 
 // canonical 形路径禁止 filepath.Join 回填反斜杠（win \c\… 毒形态回归：
-// 该行进 WriteRootsFor 后 win 沙箱 grantDirWrite 必失败）。会话根行任何
+// 该行进 Snapshot write rules 后 win 沙箱 grantDirWrite 必失败）。会话根行任何
 // 平台都不得含反斜杠（缓存/临时根的原生态字面行不在此列——只断言行内
 // 含 sid 的会话根）。
 func TestSessionRootRowsNoBackslash(t *testing.T) {
-	p := New()
+	p := mustNewPolicy(t)
 	if strings.Contains(p.sessionDir, `\`) {
 		t.Fatalf("sessionDir = %q", p.sessionDir)
 	}
-	for _, r := range p.decideRootsLocked("s1") {
+	for _, r := range rulePatterns(p, "s1", vbox.EffRW) {
 		if strings.Contains(r, "s1") && strings.Contains(r, `\`) {
 			t.Fatalf("decideRoots session row = %q", r)
 		}
 	}
-	for _, r := range p.bindRootsLocked("s1") {
-		if strings.Contains(r, "s1") && strings.Contains(r, `\`) {
-			t.Fatalf("bindRoots session row = %q", r)
-		}
-	}
+
 }
 
 // canonical 盘符输入归一（2026-09-24 /c/ 规范形）：windows 上裸盘符按盘根
 // 展开为 /c；posix 上 "C:" 是普通相对路径名，不特殊处理。
 func TestCanonicalBareDrive(t *testing.T) {
-	got := Canonical("C:")
+	got := vbox.Canonical("C:")
 	if runtime.GOOS == "windows" {
 		if got != "/c" {
-			t.Errorf("Canonical(C:) = %q, want /c", got)
+			t.Errorf("vbox.Canonical(C:) = %q, want /c", got)
 		}
 	} else if got != "C:" {
-		t.Errorf("Canonical(C:) = %q, want C:", got)
+		t.Errorf("vbox.Canonical(C:) = %q, want C:", got)
 	}
 	if runtime.GOOS == "windows" {
-		if got := Canonical(`C:\Users`); got != "/c/Users" {
-			t.Errorf("Canonical(C:\\Users) = %q, want /c/Users", got)
+		if got := vbox.Canonical(`C:\Users`); got != "/c/Users" {
+			t.Errorf("vbox.Canonical(C:\\Users) = %q, want /c/Users", got)
 		}
-		if got := Canonical("/c/Users"); got != "/c/Users" {
-			t.Errorf("Canonical(/c/Users) = %q, want /c/Users", got)
+		if got := vbox.Canonical("/c/Users"); got != "/c/Users" {
+			t.Errorf("vbox.Canonical(/c/Users) = %q, want /c/Users", got)
 		}
 	}
 }
@@ -746,26 +732,45 @@ func TestDecideNoFollowUnlink(t *testing.T) {
 	p := newTestPolicy(t, "")
 	setRules(t, p, "rw:"+ws)
 	// 跟随语义（现状不变）：目标在可写根外 → 写 0。
-	if rd, wr := p.decide("", canonical(link)); rd != 1 || wr != 0 {
-		t.Fatalf("Decide(link) = %d/%d, want 1/0", rd, wr)
-	}
+	assertGrades(t, p, link, 1, 0)
 	// unlink 语义：字面路径在可写根内 → 1/2。
-	if rd, wr := p.decide("", canonicalNoFollow(link)); rd != 1 || wr != 2 {
-		t.Fatalf("DecideNoFollow(link) = %d/%d, want 1/2", rd, wr)
+	if d := p.Snapshot("").MatchNoFollow(link, vbox.OpWrite); !d.Allow {
+		t.Fatal("unlink should check link path")
 	}
 	// 父链穿越仍拒：可写根内的目录链接指向根外，其子路径按解析后的父目录判定。
 	dirLink := filepath.Join(ws, "dirlink")
 	if err := os.Symlink(outside, dirLink); err != nil {
 		t.Fatal(err)
 	}
-	if rd, wr := p.decide("", canonicalNoFollow(filepath.Join(dirLink, "f.txt"))); rd != 1 || wr != 0 {
-		t.Fatalf("DecideNoFollow(dirlink/f.txt) = %d/%d, want 1/0 (父链解析到根外)", rd, wr)
+	if d := p.Snapshot("").MatchNoFollow(filepath.Join(dirLink, "f.txt"), vbox.OpWrite); d.Allow {
+		t.Fatal("parent symlink must resolve outside")
 	}
 	// deny 终局仍压过 unlink 判定：deny 命中的字面路径照旧 0/0。
 	denied := filepath.Join(base, "secrets")
 	mkdir(t, denied)
-	setRules(t, p, "rw:"+ws, "deny:"+denied+"/**")
-	if rd, wr := p.decide("", canonicalNoFollow(filepath.Join(denied, "key.pem"))); rd != 0 || wr != 0 {
-		t.Fatalf("DecideNoFollow(denied) = %d/%d, want 0/0", rd, wr)
+	setRules(t, p, "deny:"+denied+"/**", "rw:"+ws)
+	if d := p.Snapshot("").MatchNoFollow(filepath.Join(denied, "key.pem"), vbox.OpRead); d.Allow {
+		t.Fatal("deny must block link path")
 	}
+}
+
+func mustNewPolicy(t *testing.T) *Policy {
+	t.Helper()
+	p, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+func rulePatterns(p *Policy, sid string, effect vbox.Effect) []string {
+	var out []string
+	for _, r := range p.Snapshot(sid).Rules {
+		if r.Effect == effect {
+			out = append(out, r.Pattern)
+		}
+	}
+	return out
+}
+func denied(p *Policy, target string) bool {
+	return p.Snapshot("").Match(target, vbox.OpRead).Effect == vbox.EffDeny
 }

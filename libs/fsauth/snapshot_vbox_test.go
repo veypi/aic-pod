@@ -28,7 +28,7 @@ func TestSnapshotCfgOverridesBuiltinDeny(t *testing.T) {
 	a.FsRules = []string{"rw:" + target}
 	cfg.SetAuth(a)
 
-	p := New()
+	p := mustNewPolicy(t)
 	snap := p.Snapshot("s1")
 	d := snap.Match(target, vbox.OpWrite)
 	if !d.Allow {
@@ -45,19 +45,19 @@ func TestSnapshotCfgOverridesBuiltinDeny(t *testing.T) {
 	}
 }
 
-// TestSnapshotCfgTailAppendWins permanent 追加语义钉死（todo 3.4.3）：新行
+// TestSnapshotCfgFirstRowWins permanent 追加语义钉死（todo 3.4.3）：新行
 // append 到 config <域>_rules 文件尾 → cfg 组内反转（old last-wins → new
 // first-wins 映射）使其位于 cfg 段最前 → 首命中压过同段更早的 deny 行。
-func TestSnapshotCfgTailAppendWins(t *testing.T) {
+func TestSnapshotCfgFirstRowWins(t *testing.T) {
 	old := cfg.AuthSnapshot()
 	t.Cleanup(func() { cfg.SetAuth(old) })
 	a := old
 	a.FsPolicy = cfg.PolicyDeny
 	dir := t.TempDir()
 	// 文件行序 = persistGrant 落盘形态：deny 在先、rw 追加在尾。
-	a.FsRules = []string{"deny:" + dir, "rw:" + dir}
+	a.FsRules = []string{"rw:" + dir, "deny:" + dir}
 	cfg.SetAuth(a)
-	p := New()
+	p := mustNewPolicy(t)
 	if d := p.Snapshot("s1").Match(dir+string(filepath.Separator)+"x", vbox.OpWrite); !d.Allow {
 		t.Fatalf("appended tail row should win within cfg segment under first-wins: %+v", d)
 	}
@@ -71,7 +71,7 @@ func TestSnapshotTempGrantBeatsAll(t *testing.T) {
 	a := old
 	a.FsPolicy = cfg.PolicyDeny
 	cfg.SetAuth(a)
-	p := New()
+	p := mustNewPolicy(t)
 	denied := defaultDenyPaths()
 	if len(denied) == 0 {
 		t.Skip("no builtin deny on this platform")
@@ -93,7 +93,7 @@ func TestSnapshotConvenienceBelowDeny(t *testing.T) {
 	a := old
 	a.FsPolicy = cfg.PolicyDeny
 	cfg.SetAuth(a)
-	p := New()
+	p := mustNewPolicy(t)
 	wd := t.TempDir()
 	p.SetWorkDir(wd)
 	// 便利根内正常放行。
@@ -117,7 +117,7 @@ func TestSnapshotOpenMode(t *testing.T) {
 	a := old
 	a.FsPolicy = cfg.PolicyOpen
 	cfg.SetAuth(a)
-	p := New()
+	p := mustNewPolicy(t)
 	if d := p.Snapshot("").Match("/anywhere/else", vbox.OpWrite); !d.Allow {
 		t.Fatalf("open mode should allow unmatched writes")
 	}

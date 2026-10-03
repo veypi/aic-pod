@@ -73,8 +73,7 @@ type Options struct {
 
 	// Execution policies: deny first, then operation-covering allow, then default.
 	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
-	ExecDeny   []string `json:"exec_deny" yaml:"exec_deny" desc:"denied registered command names or *"`
-	ExecAllow  []string `json:"exec_allow" yaml:"exec_allow" desc:"allowed registered command names or *"`
+	ExecRules  []string `json:"exec_rules" yaml:"exec_rules" desc:"ordered allow:name / deny:name rules (first match wins)"`
 	FsPolicy   string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write stance: deny (writable via rules/roots only) | open (all writes except deny rules); reads are open except deny rules"`
 	FsRules    []string `json:"fs_rules" yaml:"fs_rules" desc:"ordered fs rules: 'deny:|ro:|rw:' + path glob, last match wins; bare path covers its subtree; global patterns are rejected; permanent grants append here"`
 	NetPolicy  string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
@@ -149,7 +148,7 @@ func (o *Options) Normalize() {
 // itself remains untouched and the local management API can still start.
 func (o *Options) ApplyConfigIssues(issues []flags.ConfigIssue) {
 	fields := map[string]any{
-		"exec_policy": &o.ExecPolicy, "exec_allow": &o.ExecAllow, "exec_deny": &o.ExecDeny,
+		"exec_policy": &o.ExecPolicy, "exec_rules": &o.ExecRules,
 		"fs_policy": &o.FsPolicy, "fs_rules": &o.FsRules,
 		"net_policy": &o.NetPolicy, "net_rules": &o.NetRules,
 		"ssh_policy": &o.SshPolicy, "ssh_rules": &o.SshRules,
@@ -280,12 +279,10 @@ func Load() (*Options, error) {
 // host grant --permanent（AI 经审批）两条写入路径共用。
 var authMu sync.RWMutex
 
-// AuthCfg 是四域执行策略快照（exec 保持 policy/deny/allow 三键；
-// fs/net/ssh 为 policy + 有序规则表 rules——permanent grant 直接追加在 rules 表尾）。
+// AuthCfg is a snapshot of four first-match rule tables.
 type AuthCfg struct {
 	ExecPolicy string
-	ExecDeny   []string
-	ExecAllow  []string
+	ExecRules  []string
 	FsPolicy   string
 	FsRules    []string
 	NetPolicy  string
@@ -326,7 +323,7 @@ func CheckAuth() error {
 func SetAuth(c AuthCfg) {
 	authMu.Lock()
 	defer authMu.Unlock()
-	Global.ExecPolicy, Global.ExecDeny, Global.ExecAllow = NormalizePolicy(c.ExecPolicy, PolicyOpen), c.ExecDeny, c.ExecAllow
+	Global.ExecPolicy, Global.ExecRules = NormalizePolicy(c.ExecPolicy, PolicyOpen), c.ExecRules
 	Global.FsPolicy, Global.FsRules = NormalizePolicy(c.FsPolicy, PolicyDeny), c.FsRules
 	Global.NetPolicy, Global.NetRules = NormalizePolicy(c.NetPolicy, PolicyOpen), c.NetRules
 	Global.SshPolicy, Global.SshRules = NormalizePolicy(c.SshPolicy, PolicyDeny), c.SshRules
@@ -335,7 +332,7 @@ func SetAuth(c AuthCfg) {
 // AuthFrom 从 Options 取授权快照（SetAuth 的入参装配）。
 func AuthFrom(o *Options) AuthCfg {
 	return AuthCfg{
-		ExecPolicy: o.ExecPolicy, ExecDeny: o.ExecDeny, ExecAllow: o.ExecAllow,
+		ExecPolicy: o.ExecPolicy, ExecRules: append([]string(nil), o.ExecRules...),
 		FsPolicy: o.FsPolicy, FsRules: o.FsRules,
 		NetPolicy: o.NetPolicy, NetRules: o.NetRules,
 		SshPolicy: o.SshPolicy, SshRules: o.SshRules,
@@ -371,10 +368,7 @@ func (o *Options) ValidateAuth() error {
 	if err := policy.ValidateFSRules(o.FsRules); err != nil {
 		return err
 	}
-	if err := policy.ValidateExec(o.ExecAllow); err != nil {
-		return err
-	}
-	if err := policy.ValidateExec(o.ExecDeny); err != nil {
+	if err := policy.ValidateExecRules(o.ExecRules); err != nil {
 		return err
 	}
 	for _, list := range [][]string{o.NetRules, o.SshRules} {

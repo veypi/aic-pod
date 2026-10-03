@@ -113,17 +113,17 @@ func TestValidateLists(t *testing.T) {
 }
 
 func TestCommandAllowed(t *testing.T) {
-	if CommandAllowed("open", []string{"bash"}, []string{"*"}, "bash") {
+	if CommandAllowed("open", []string{"deny:bash"}, "bash") {
 		t.Fatal("allow overrode deny")
 	}
-	if CommandAllowed("deny", nil, nil, "git") {
+	if CommandAllowed("deny", nil, "git") {
 		t.Fatal("missing command allowed")
 	}
-	if !CommandAllowed("deny", nil, []string{"git"}, "git") {
+	if !CommandAllowed("deny", []string{"allow:git"}, "git") {
 		t.Fatal("explicit command denied")
 	}
 	for _, bad := range []string{"git*", "/bin/sh", "bash -c", "git?"} {
-		if ValidateExec([]string{bad}) == nil {
+		if ValidateCommandName(bad) == nil {
 			t.Fatalf("accepted %q", bad)
 		}
 	}

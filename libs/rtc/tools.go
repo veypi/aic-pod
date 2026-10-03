@@ -6,29 +6,28 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 // ToolBackend 是 RTC 直连的业务入口（hosts_rtc/2）：
-// 普通请求与 NATS 同载荷同分发；stream.open 走私有端点表（page.frames/
-// page.input 直接连接业务服务，不注册为 vsh 指令、不进 commands/caps）。
+// 普通请求与 NATS 同载荷同分发；stream.open 走包限定端点（browser.page.frames/
+// browser.page.input 直接连接业务服务，不注册为 vsh 指令、不进 commands/caps）。
 type ToolBackend interface {
-	HandleTool(context.Context, tool.Caller, wire.Request) wire.Response
-	DisconnectTools(tool.Caller)
-	OpenToolStream(ctx context.Context, c tool.Caller, endpoint string, args json.RawMessage) (tool.Stream, error)
+	HandleTool(context.Context, wire.Caller, wire.Request) wire.Response
+	DisconnectTools(wire.Caller)
+	OpenToolStream(ctx context.Context, c wire.Caller, endpoint string, args json.RawMessage) (wire.Stream, error)
 }
 
-func (p *peer) toolCaller() (tool.Caller, error) {
+func (p *peer) toolCaller() (wire.Caller, error) {
 	p.mu.Lock()
 	connection := p.connection
 	p.mu.Unlock()
 	c, err := p.s.cfg.Authorization.Caller(connection)
 	if err != nil {
-		return tool.Caller{}, err
+		return wire.Caller{}, err
 	}
-	return tool.Caller{AllowStreams: true, Expiry: func() time.Time {
+	return wire.Caller{AllowStreams: true, Expiry: func() time.Time {
 		current, err := p.s.cfg.Authorization.Caller(connection)
 		if err != nil {
 			return time.Time{}

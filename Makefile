@@ -47,7 +47,7 @@ LDFLAGS    := -s -w -X github.com/veypi/aic-pod/cfg.Version=$(VERSION)
 
 build:
 	@mkdir -p $(BIN_DIR)
-	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)" .
+	go run ../aic-skills/cmd/build -- -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)"
 
 cli-all: cli-linux-amd64 cli-linux-arm64 cli-darwin-amd64 cli-darwin-arm64 cli-windows-amd64
@@ -57,7 +57,7 @@ cli-%:
 	@mkdir -p $(BIN_DIR)
 	@os=$$(echo $* | cut -d- -f1); arch=$$(echo $* | cut -d- -f2-); \
 	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
-	cd $(MAIN_DIR) && GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" .
+	go run ../aic-skills/cmd/build -goos $$os -goarch $$arch -- -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$*"
 
 # windows 资源（icon + version info，go-winres）
@@ -66,7 +66,7 @@ cli-windows-amd64:
 	@echo "→ generating Windows resources (icon + version info)..."
 	cd $(MAIN_DIR) && go-winres make --in ../resources/winres.json --arch amd64 \
 		--product-version $(WIN_VERSION) --file-version $(WIN_VERSION) --out rsrc
-	cd $(MAIN_DIR) && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe" .
+	go run ../aic-skills/cmd/build -goos windows -goarch amd64 -- -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe"
 
 # ==============================================================================
@@ -79,11 +79,11 @@ cli-windows-amd64:
 
 # Go 后端二进制：dev 运行（desktop/bin/）与 electron-builder extraResources
 # （resources/backend/）共用。先清掉两侧旧名，避免跨平台残留被打进包。
-# 依赖 browser-zip/cua-bin：cli/bin provider 二进制是 aic-skills 内建包 embed 输入，必须先于 go build。
-backend-bin: browser-zip cua-bin
+# cmd/build 同时构建目标平台的 provider，所有临时产物按调用隔离。
+backend-bin:
 	@mkdir -p $(DESKTOP_DIR)/bin
 	@rm -f $(DESKTOP_DIR)/bin/aic-backend $(DESKTOP_DIR)/bin/aic-backend.exe
-	cd $(MAIN_DIR) && CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o "../$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" .
+	go run ../aic-skills/cmd/build -- -ldflags "$(LDFLAGS)" -o "$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" $(MAIN_DIR)
 	@echo "→ $(DESKTOP_DIR)/bin/$(BACKEND_BIN)"
 
 # electron-builder 依赖安装（node_modules）
@@ -94,19 +94,11 @@ desktop-deps:
 cua-sync:
 	cd $(DESKTOP_DIR) && node scripts/sync-cua.mjs
 
-# browser skill 包构建（cli/bin 两产物 + browser.zip builtin 预装包；产物 gitignore）
-browser-zip:
-	cd ../aic-skills/browser && sh build.sh
-
-# cua skill 包构建（cli/bin 两产物，embed 输入；产物 gitignore）
-cua-bin:
-	cd ../aic-skills/cua && sh build.sh
-
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version cua-sync browser-zip cua-bin
+.PHONY: backend-bin desktop-deps desktop-version cua-sync
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
@@ -128,7 +120,7 @@ desktop-windows-%:
 
 # Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	$(MAKE) desktop-version backend-bin cua-sync browser-zip
+	$(MAKE) desktop-version backend-bin cua-sync
 	cd $(DESKTOP_DIR) && npx electron-builder --linux
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"

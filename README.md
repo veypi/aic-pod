@@ -152,6 +152,8 @@ Chrome 扩展已移除；browser 由 Go 直接驱动真实 Chrome（CDP），不
 
 ## 构建
 
+完整应用通过下方 Makefile 构建，统一调用 `aic-skills/cmd/build`，将 browser/cua service 与技能资源嵌入后端。直接 `go build` / `go run` 只带纯资源技能，**不嵌入 browser/cua**，干净设备无法自动预装这两项能力。开发启动可用 `go run ../aic-skills/cmd/build -command run -- ./cli`。
+
 产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
 
 ```bash

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"github.com/pion/webrtc/v4"
 	"github.com/veypi/aic-pod/libs/hostauth"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
 	hosts "github.com/veypi/aic-pod/protocol/hosts_rtc"
@@ -24,7 +23,7 @@ type rtcTools struct {
 	source *duplexFixture
 }
 
-func (b *rtcTools) HandleTool(ctx context.Context, c tool.Caller, r wire.Request) wire.Response {
+func (b *rtcTools) HandleTool(ctx context.Context, c wire.Caller, r wire.Request) wire.Response {
 	if err := r.Validate(); err != nil {
 		return wire.Reply(r.Protocol, r.ID, nil, err)
 	}
@@ -36,13 +35,13 @@ func (b *rtcTools) HandleTool(ctx context.Context, c tool.Caller, r wire.Request
 		return wire.Reply(r.Protocol, r.ID, nil, wire.Fail("unsupported", "test backend: exec only"))
 	}
 }
-func (b *rtcTools) OpenToolStream(ctx context.Context, c tool.Caller, endpoint string, args json.RawMessage) (tool.Stream, error) {
+func (b *rtcTools) OpenToolStream(ctx context.Context, c wire.Caller, endpoint string, args json.RawMessage) (wire.Stream, error) {
 	if endpoint != "duplex" {
 		return nil, wire.Fail("unsupported", "Unknown stream endpoint")
 	}
 	return b.source, nil
 }
-func (b *rtcTools) DisconnectTools(c tool.Caller) {}
+func (b *rtcTools) DisconnectTools(c wire.Caller) {}
 func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	key, _ := hosts.DirectKey("secret", "host_1")
 	auth, err := hostauth.NewAccess(hostauth.AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key})
@@ -172,10 +171,10 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error != nil || r.Result != float64(2) {
 		t.Fatalf("%+v", r)
 	}
-	// 端点校验：真实端点含点号（page.frames/page.input）必须过 ValidName
+	// 端点校验：真实端点含点号（browser.page.frames/browser.page.input）必须过 ValidName
 	// 校验（此处无对应 channel → not_found，证明未被 invalid_argument 拒）；
 	// 非法字符才 invalid_argument。
-	streamOpen = &rtcwire.StreamOpen{Endpoint: "page.frames", Args: json.RawMessage(`{}`)}
+	streamOpen = &rtcwire.StreamOpen{Endpoint: "browser.page.frames", Args: json.RawMessage(`{}`)}
 	if r := request(wire.Request{Action: "stream.open"}, "hosts-stream/ch_none"); r.Error == nil || r.Error.Code == "invalid_argument" {
 		t.Fatalf("dotted endpoint must pass validation (expect not_found): %+v", r.Error)
 	}

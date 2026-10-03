@@ -1,9 +1,7 @@
-package vsh
+package execution
 
 import (
-	"context"
 	"fmt"
-	stdfs "io/fs"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/contrib/ufs"
@@ -22,42 +20,22 @@ type HostFSConfig struct {
 }
 
 // NewHostFS host：OS backing + vbox 规则表门，不引内存覆盖层（host 会话目录
-// 本就是 scratch，无 cloud 污染红线）。布局 IO（stub 钉 $HOME/.aic/vsh/bin
-// 真实目录）经 vshcore LayoutFS 专用通道——同样经本函数构造但 Rules 全放行
+// 本就是 scratch）。FS factory 不生成命令文件。
 // （pod 自身机械读写不过门，见 libs/host/engine_vsh.go 文件头决策 1）。
 func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 	if cfg.Backing == nil {
 		return nil, fmt.Errorf("vsh glue: host backing required")
 	}
-	fsys, err := NewUFSAdapter(UFSAdapterConfig{
+	return NewUFSAdapter(UFSAdapterConfig{
 		Backing: cfg.Backing,
 		Rules:   cfg.Rules,
+		NormalizePath: func(p string, noFollow bool) string {
+			if noFollow {
+				return vbox.CanonicalNoFollow(p)
+			}
+			return vbox.Canonical(p)
+		},
 		// 无 jail：host 的边界由规则表表达（读默认开放、写白名单制）。
 		// 无内存层：会话 FS 直读直写宿主盘（规则门拦截越界写）。
 	})
-	if err != nil {
-		return nil, err
-	}
-	return hostLayoutFS{fsys}, nil
-}
-
-// hostLayoutFS host 布局特化：布局初始化（每次 NewSession）会对 /tmp 做
-// MkdirAll + Chmod(sticky|0777)——posix 真实 OS 的 /tmp 本已存在且为
-// sticky|1777，非 root chmod 必 EPERM；windows 的 /tmp 是 OSVFS 虚拟别名
-// （映射 os.TempDir()，必已存在）。两个调用对精确路径 /tmp noop（只拦 /tmp
-// 本身；/tmp 下子路径照常委派 backing——win 上经虚拟别名落临时目录）。
-type hostLayoutFS struct{ gbfs.FileSystem }
-
-func (h hostLayoutFS) MkdirAll(ctx context.Context, name string, perm stdfs.FileMode) error {
-	if gbfs.Clean(name) == "/tmp" {
-		return nil
-	}
-	return h.FileSystem.MkdirAll(ctx, name, perm)
-}
-
-func (h hostLayoutFS) Chmod(ctx context.Context, name string, mode stdfs.FileMode) error {
-	if gbfs.Clean(name) == "/tmp" {
-		return nil
-	}
-	return h.FileSystem.Chmod(ctx, name, mode)
 }

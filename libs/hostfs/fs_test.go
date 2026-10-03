@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	hosts "github.com/veypi/aic-pod/protocol/fs"
+	tool "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 type fixture struct {

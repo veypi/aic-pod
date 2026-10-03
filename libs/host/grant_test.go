@@ -10,16 +10,21 @@ import (
 
 // grantTarget 域路由与 temp 授权（不触盘——permanent 落盘路径见
 // TestPersistGrantAppendsRuleRow）。argv 解析在 glue 平台命令层
-// （aic-pod/libs/vsh/cmds.go），本包只承接已解析的域+目标。
+// （aic-pod/libs/execution/cmds.go），本包只承接已解析的域+目标。
 // M3c：DenyHit 拒批已废（temp 行插表头可覆盖 deny——「用户点就点了」）。
 func TestRunGrantTarget(t *testing.T) {
 	saved := cfg.Global
 	defer func() { cfg.Global = saved }()
 	cfg.Global = cfg.NewOptions()
-	c := &Client{
-		netPol: netauth.New(netauth.NetKeys),
-		sshPol: netauth.New(netauth.SshKeys),
+	netPolicy, err := netauth.New(netauth.NetKeys)
+	if err != nil {
+		t.Fatal(err)
 	}
+	sshPolicy, err := netauth.New(netauth.SshKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{netPol: netPolicy, sshPol: sshPolicy}
 	c.netPol.Configure("deny", []string{"deny:bad.com:22"})
 
 	// deny 目标同样可授（temp 行插表头压一切——2.7.4 拒批删除后的新语义）
@@ -74,6 +79,31 @@ func TestExecAllowedGatesBrowserAndCUA(t *testing.T) {
 	}
 	if c.execAllowed("s1", "cua") {
 		t.Fatal("grant leaked across commands")
+	}
+}
+
+func TestExecRulesReloadAndGrantOrder(t *testing.T) {
+	saved := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	t.Cleanup(func() { cfg.Global = saved })
+	cfg.Global.ExecPolicy = cfg.PolicyDeny
+	c := &Client{execGrants: map[string][]string{}}
+	cfg.Global.ExecRules = []string{"allow:git"}
+	if !c.execAllowed("s1", "git") {
+		t.Fatal("allow not applied")
+	}
+	cfg.Global.ExecRules = []string{"deny:git", "allow:git"}
+	if c.execAllowed("s1", "git") {
+		t.Fatal("first deny did not revoke permission")
+	}
+	c.execGrants["s1"] = []string{"git"}
+	if !c.execAllowed("s1", "git") || c.execAllowed("s2", "git") {
+		t.Fatal("session grant precedence or isolation broken")
+	}
+	delete(c.execGrants, "s1")
+	cfg.Global.ExecRules = nil
+	if c.execAllowed("s1", "git") {
+		t.Fatal("removed allow remained cached")
 	}
 }
 

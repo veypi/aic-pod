@@ -1,4 +1,4 @@
-package vsh
+package execution
 
 import (
 	"context"
@@ -103,12 +103,12 @@ func TestCloudFSMemoryLayerNoPollution(t *testing.T) {
 	t.Parallel()
 	fsys, backing := newCloudAdapter(t)
 	ctx := context.Background()
-	// 内存层写：/tmp、/bin 自由读写，且不落 UFS（红线）。
+	// 内存层写：/tmp 自由读写，且不落 UFS（红线）。
 	if err := writeFile(t, fsys, "/tmp/scratch.txt", "tmp"); err != nil {
 		t.Fatalf("/tmp write = %v", err)
 	}
-	if err := writeFile(t, fsys, "/bin/mystub", "#!stub"); err != nil {
-		t.Fatalf("/bin stub write = %v", err)
+	if err := writeFile(t, fsys, "/tmp/memfile", "scratch"); err != nil {
+		t.Fatalf("/tmp memfile write = %v", err)
 	}
 	f, err := fsys.Open(ctx, "/tmp/scratch.txt")
 	if err != nil {
@@ -119,37 +119,12 @@ func TestCloudFSMemoryLayerNoPollution(t *testing.T) {
 	if string(data) != "tmp" {
 		t.Fatalf("mem read = %q", data)
 	}
-	// UFS 直通侧不可见（红线：无 stub 污染）。
+	// UFS 直通侧不可见（红线：临时文件不落持久层）。
 	if _, err := backing.Stat("/tmp/scratch.txt"); !errors.Is(err, stdfs.ErrNotExist) {
 		t.Fatalf("UFS polluted by /tmp: %v", err)
 	}
-	if _, err := backing.Stat("/bin/mystub"); !errors.Is(err, stdfs.ErrNotExist) {
-		t.Fatalf("UFS polluted by /bin: %v", err)
-	}
-}
-
-func TestCloudFSStubsSeeded(t *testing.T) {
-	t.Parallel()
-	backing, err := ufs.NewLocalFS(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fsys, err := NewCloudFS(CloudFSConfig{
-		UserRoot: "/u/u1",
-		Backing:  backing,
-		Stubs:    map[string][]byte{"/usr/bin/python": []byte("#! stub: python 未授权\n")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := fsys.Open(context.Background(), "/usr/bin/python")
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := io.ReadAll(f)
-	f.Close()
-	if !strings.Contains(string(data), "stub") {
-		t.Fatalf("stub = %q", data)
+	if _, err := backing.Stat("/tmp/memfile"); !errors.Is(err, stdfs.ErrNotExist) {
+		t.Fatalf("UFS polluted by /tmp: %v", err)
 	}
 }
 

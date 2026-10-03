@@ -1,4 +1,4 @@
-package vsh
+package execution
 
 // engine_stress_test.go 是 todo 4.1.8 的稳定性基线：连续 500 次 exec 无
 // 泄漏（goroutine/FD/RSS 前后对比）、Session P95 记录数值、并发满载下
@@ -79,7 +79,7 @@ func TestEngineStability500(t *testing.T) {
 		}
 		return time.Since(start)
 	}
-	// 预热：layout/stub 初始化等一次性成本不进测量。
+	// 预热：session 初始化等一次性成本不进测量。
 	for i := 0; i < 10; i++ {
 		execOnce("echo warm | cat")
 	}

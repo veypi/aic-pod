@@ -18,7 +18,7 @@ AIC Pod 是运行在用户设备上的能力代理。CLI 和 Desktop 共用 Go �
 | protocol/hosts_tools | 脚本、FS、取消请求及响应的数据结构，不注册业务指令 |
 | protocol/hosts_nats、protocol/hosts_rtc | NATS 签名信封与 RTC 认证连接；共用脚本分发 |
 | libs/host | 宿主装配、请求路由；exec 外层统一前台等待、后台登记和分流日志 |
-| libs/vsh | vsh 集成，注册平台指令；保留虚拟指令优先与宿主 PATH fallback |
+| libs/execution | vsh 装配、执行句柄、等待与 bg；Registry 优先，真实文件仅经显式 NativeExec |
 | vbox（外部依赖 ivec/vbox） | 原生子进程托管、OS 沙箱及进程组取消，不自建第二套输出契约 |
 | libs/fsauth、libs/netauth 等 | 现有资源规则、会话 grant 和沙箱约束派生 |
 | libs/hostfs | 文件、版本、字节源、上传与条件提交 |
@@ -51,7 +51,7 @@ pod 在设备上只有两根（2026-10-01 两根治理，三平台统一，无�
 
 - `$HOME/.aic` **可读不可写**——不进沙箱写白名单，也不是「公共可写区」；例外两条：`config.yaml` 在 deny 表（含凭证，不可读），`browser/` 在 deny 表（含全量 cookie，不可读写）。
 - `sessions/{sid}` 由 fsauth 按会话显式授写（本会话便利根），是 .aic 下唯一可写子树。
-- **权限门管 exec/工具，不管 pod 自身读写**：pod 的机械 IO（vsh 布局 stub、状态快照、日志）走未过门的 OS 通道（vshcore LayoutFS / 直接 os 调用），不依赖也不授予任何 .aic 白名单条目。`vsh/`（stub bin/home）对会话无写通道。
+- **权限门管 exec/工具**：pod 自己的状态与日志使用 OS IO；会话文件操作经过 FS 门。不存在运行时布局写入或 stub 目录。
 - 公共可写区 = 系统临时目录（os.TempDir + 平台 tempRoots）；跨会话保存请落 /tmp 或工作区。
 - 该保护只覆盖默认拒写策略；fs_policy=open 或显式 grant 可覆盖（用户显式选择优先）。
 
@@ -69,21 +69,21 @@ host/cloud 的 commands 只展示核心自定义能力；page 展示全部已注
 
 skill 包是 pod 能力的分发形态（契约：aic/docs/skill.md §9.2；权威实现 libs/skillrun）：
 
-- 根命令 = 包名隐式（manifest 无 commands[]）；argv/stdin 全量透传 providers[0]；子命令与 --help 由包 CLI 自行实现。
-- process 类 provider：每调用独立 vbox 沙箱进程；service 类：首调用懒启动 + bg 登记 + skillproc 拨号（SKILLPROC_SOCKET 经 env 注入 provider）；**service 一律 NoSandbox 原生权限边界**（2026-10-02 用户定：会话沙箱是给 AI 调用戴的，不套驻留服务；详见 aic/docs/skill.md §9.3 数据与文件访问）。
-- **确保机制（P5 补）**：包命令被调用时若 manifest 含 service 类 provider，skillrun 先全部确保懒启动，并把 socket 路径注入 process provider 的 env——单 service 包同时给约定键 SKILLPROC_SOCKET，每个 service 恒给 SKILLPROC_SOCKET_\<ID 大写\>。process provider 经该 socket 拨号 svc。
-- streams[]：二进制流端点由 service provider 经 stream.open 提供（帧负载 = 端点打开参数，原样透传由包自行解析）。端点解析是 OpenToolStream 唯一路径（skillrun.ResolveStreamEndpoint）：先 {包名}.{流名} 直查，再全端点名 = 流名全名；权限门 = 解析出的包名走 execAllowed（与 vsh 指令同一判定）。
+- 根命令 = 包名，manifest 只含 kind/entry/args/streams，一个包一个 provider；格式校验共用 aic-skills/sdk/go/skillpkg。
+- process 每次调用独立 vbox 进程；service 由 skillrun 按包懒启动并等待就绪，不进入 bg；后者沿用已安装设备服务的 NoSandbox 信任边界。
+- 并发调用共享一个 service 启动结果；禁用/更新/卸载停止并等待实际退出。process 活动时更新和卸载返回 busy，禁用只阻止新调用。
+- streams 是 service 的包内流名列表。外部端点只接受 `<包名>.<流名>`，解析后按包名检查 execAllowed；没有全局流名查找。
 - 安装来源：本地目录（skill install）或 NATS fetch zip；pod 启动扫描 ~/.aic/skills 自恢复（只认有效 .install.json）。
 
 browser 自 P5 批①a 起从内建迁为 skill 包（现居 aic-skills/browser/），行为不变是最高准则：
 
-- **包布局**：cli/manifest.json（providers：main=process → cli/bin/browser，svc=service → cli/bin/browser-service；streams：page.frames/page.input → svc）；provider/browser = 能力内核（页面/动作/下载/上传/流，原内建 browser 包）；provider/chrome = CDP 传输与 Chrome 探测；provider/process = CLI（无状态 skillproc 转发器）；provider/service = svc（持有 Chrome 与全部状态的唯一进程）。构建 = 包内 build.sh → cli/bin/。
-- **RPC 边界**：一切触碰 Chrome 的操作都在 svc；CLI 只把 argv/cwd 经 invoke 帧转发——子命令表、参数解析、JSON 输出契约都在 svc 的 Service.Run（单一事实源）。取消 = vbox 杀 CLI 进程组 → 连接断开 → svc 取消该连接的 invoke。stream 的 stream id = 连接身份（输入租约持有者判定）。
-- **端点名映射**：manifest StreamDecl.Name 直接声明全名 page.frames/page.input（端点名 = 流名全名，v5 前端契约不变；不引入包名别名机制）。
+- **包布局**：browser/CUA 各自一个 service provider；provider/service 监听 SKILLPROC_SOCKET，业务实现在 provider/browser 或 provider/cua。
+- **RPC 边界**：pod 直接把 argv、OS 形态 cwd、stdin 经 skillproc invoke 交给 service。每次调用独占连接；取消时关闭该连接，服务端随断连取消调用。子命令解析与输出契约只在 service 实现。
+- **端点名映射**：browser.page.frames/browser.page.input → browser 包中的 page.frames/page.input；前端和 RTC 使用带包名的端点。
 - **配置下发**：pod 不再持有 browser 配置项（cfg browser_* 与 host Options 字段删除）；svc 读自身环境（vbox 子进程继承 pod env 清洗后 + 显式注入）：AIC_BROWSER_PATH（显式覆盖，最高优先）/ AIC_BROWSER_BUNDLE_DIR（打包器提示：目录内含 Chrome for Testing，{platform}-{arch}/ 布局，desktop 注入 resources/browser 或 vendor/browser）、AIC_BROWSER_STATE_DIR（默认 $HOME/.aic/browser）、AIC_BROWSER_WIDTH / AIC_BROWSER_HEIGHT（默认 1280/720）。Chrome 可执行文件探测全在 Go provider（chrome.Resolve）：AIC_BROWSER_PATH > bundle dir > 系统候选（macOS .app / Windows PROGRAMFILES 系 / Linux PATH 名）。
 - **单用户语义**（P3/todo 决策随本批落地）：v5 的文件门回调删除（文件权限 = 进程沙箱）；caller/subject 身份模型删除（Service.owner、页面/下载/元素引用的 subject 过滤、运行中 auth Validate）。租约语义收紧：自动化动作遇输入租约一律 control_busy——v5 的「同连接 viewer 就地终租」路径在生产不可达（vsh 调用身份是 vsh:owner:session，永不等于 RTC stream 连接 id），删除不改变可观察行为。
-- **路径解析**：page.upload / download.export 的相对路径按 invoke cwd（CLI 进程 cwd = vsh 会话 workdir）绝对化；v5 相对 pod 进程 cwd 解析是隐性缺陷，随拆包修正。
-- **首装形态**：仓库 aic-skills/browser/ 为源，build.sh 构建后经 skill install 本地目录安装；pod 二进制内嵌整包（v6.1 内建机制：构建前跑 build.sh 把 cli/bin 收进 embed，启动预装零下载）；desktop 形态另由 build.sh 产出 browser.zip 随包进 resources，pod 启动经 AIC_BUILTIN_SKILLS 首跑预装（builtin 来源，kind=builtin id=包名，Name/Version 取自 zip 内 SKILL.md frontmatter；同源同版本幂等跳过，异源同名显式报错与 Download 同语义，单项失败只记日志不阻断启动）。
+- **路径解析**：page.upload / download.export 的相对路径按 invoke cwd（vsh 会话 workdir 经宿主转换为 OS 路径）绝对化；v5 相对 pod 进程 cwd 解析是隐性缺陷，随拆包修正。
+- **首装形态**：内建包只有 pod 二进制嵌入一个来源。应用 Makefile 通过 aic-skills/cmd/build 在临时目录构建目标平台 provider 并用 Go overlay 嵌入，启动后统一 PreinstallEmbedded。目录只包含完整包；直接源码构建只含三个纯资源包，build/run/test 包装入口补齐 browser/cua。安装器先在暂存目录完成解包、artifact 下载、入口和记录校验，再切换目录与命令；失败保留旧包。
 - **包 UI（P5 批①b1）**：`ui/` = 设备浏览器查看器（原 aic `ui/page/local/browser.html` + `ui/hosts/browser*.js` + `ui/os/browser-*.js` 迁入，入口 index.html；shell_quote.js 复制入包保持自包含）。SKILL.md frontmatter 声明 `ui: [{path: index.html, handles: [http, https]}]`——平台 OS `open` 遇 http(s) 外链经通用 handles 机制打开本包页面（窗口身份 = 包页面裸 URL，单实例；`?url=` 深链与 pageDesc `open` 指令 = 多标签入口，页面侧 `openLink`：全设备同 URL 窗口聚焦复用，否则选中/首台就绪设备新建标签）。包页面经平台固定 env.js root 链用 `$hosts`/`$message` 等宿主服务；`ui/langs.json` 自带 browser.* 双语键（vhtml i18n 管道维护）。测试：`cd ui && node --test`（32 例，无 aic 基建依赖）。
 - **资源回收语义（P5 批②）**：元素引用从「2 分钟墙钟 + 满 4096 报 overloaded」改纯序 LRU（无墙钟）——单页容量 4096，observe 插入队首、resolve 命中提队首、满容从队尾淘汰最久未用（淘汰替代等待，不再报错）；失效只靠导航 document 检查（stale_ref / observation_changed 语义不变）。下载删除 DownloadTTL——回收 = 页面关闭（进行中走 CDP 取消，删文件+删记录）+ 容量淘汰（触发点 = 新下载登记：记录数达 128 或总字节预留不出一份单文件上限时，按创建先后淘汰最旧的非进行中记录；inProgress 永不被动淘汰）。进行中超 MaxDownloadBytes/MaxTotalDownloadBytes 仍即取消；上限只防卡死与无限堆积。
 
@@ -111,7 +111,7 @@ bg wait 共用当前 exec 剩余前台预算，提前返回目标状态，不独
 
 保留 hosts_tools / hosts_nats / hosts_rtc 分工，升主版本整体切换，不设兼容层。NATS 信封继续校验身份、目标、scope、签名、nonce 和有效期；新增的 grant_approved 由既有签名保护，不增加第二次握手。
 
-FS 仍使用领域 method/args；RTC 的 page.frames/page.input 是私有流，不进入 vsh 或 caps（v6 P5 起由 browser 包 manifest streams[] 声明，经 skillproc 桥接——端点名不变）。移出目录不代表免除身份、页面归属和资源检查。
+FS 仍使用领域 method/args；RTC 的 browser.page.frames/browser.page.input 是私有流，不进入 vsh 或 caps（v6 P5 起由 browser 包 manifest streams[] 声明，经 skillproc 桥接）。移出目录不代表免除身份、页面归属和资源检查。
 
 前端只提交普通脚本。动态值统一经共享 shellQuote 处理；viewer 使用稳定 --json 输出，等待整段脚本成功后仅解析 stdout，截断时读取 stdout 文件，不从混合文本中过滤诊断。
 

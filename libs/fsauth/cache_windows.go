@@ -39,7 +39,3 @@ func cacheRootDirs() []string {
 	}
 	return appendEnvDirs(dirs, "GOCACHE", "XDG_CACHE_HOME")
 }
-
-// CacheRoots（windows）= cacheRootDirs 存在性过滤版（exec 沙箱 bind 白名单用）。
-// 单一事实源说明见 cache_darwin.go。
-func CacheRoots() []string { return existingDirs(cacheRootDirs()...) }

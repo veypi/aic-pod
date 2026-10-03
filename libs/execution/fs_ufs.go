@@ -1,4 +1,4 @@
-package vsh
+package execution
 
 import (
 	"context"
@@ -35,39 +35,41 @@ type UFSAdapterConfig struct {
 	// Rules 规则表快照源：每次 IO 取当次值（grant temp 动态行即时生效）。
 	// nil = 不挂规则表（仅测试）。
 	Rules func() vbox.FSRuleSet
+	// NormalizePath is supplied only by an OS backing; logical UFS paths stay logical.
+	NormalizePath func(string, bool) string
 	// JailRoots jail 根集（cloud = /u/{uid} + /skill）：代码硬约束，规则表管不到
 	// 界外——界外路径即使写入规则行也不生效。空 = 不启用（host）。cwd = 首根。
 	JailRoots []string
-	// MemPrefixes 内存层前缀集（cloud = /bin /usr/bin /tmp /etc /dev /proc）：
+	// MemPrefixes 内存层前缀集（cloud = /tmp /etc /dev /proc）：
 	// per-session 内存层，用完即弃，UFS 零污染（红线）。
 	MemPrefixes []string
-	// SeedMem 内存层初始文件（stub）；键为绝对路径。
-	SeedMem map[string][]byte
 }
 
 // ufsAdapter 把 ufs.FS 适配为引擎 gbfs.FileSystem，并在进程内执行
 // canonicalize-then-check 的 vbox 规则表门（唯一进程内路径权威）。
 type ufsAdapter struct {
-	backing   ufs.FS
-	rules     func() vbox.FSRuleSet
-	jails     []string
-	mem       *gbfs.MemoryFS
-	memPrefix []string
-	mu        sync.Mutex
-	cwd       string
+	backing       ufs.FS
+	rules         func() vbox.FSRuleSet
+	normalizePath func(string, bool) string
+	jails         []string
+	mem           *gbfs.MemoryFS
+	memPrefix     []string
+	mu            sync.Mutex
+	cwd           string
 }
 
-// NewUFSAdapter 构造适配器（mem 层种子写入失败即报错——stub 落位是启动契约）。
+// NewUFSAdapter 构造适配器并初始化所属的内存目录。
 func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	if cfg.Backing == nil {
 		return nil, fmt.Errorf("vsh glue: ufs backing required")
 	}
 	a := &ufsAdapter{
-		backing:   cfg.Backing,
-		rules:     cfg.Rules,
-		mem:       gbfs.NewMemory(),
-		memPrefix: cfg.MemPrefixes,
-		cwd:       "/",
+		backing:       cfg.Backing,
+		rules:         cfg.Rules,
+		normalizePath: cfg.NormalizePath,
+		mem:           gbfs.NewMemory(),
+		memPrefix:     cfg.MemPrefixes,
+		cwd:           "/",
 	}
 	for _, j := range cfg.JailRoots {
 		if j = strings.TrimSuffix(j, "/"); j != "" {
@@ -77,17 +79,12 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	if len(a.jails) > 0 {
 		a.cwd = a.jails[0]
 	}
-	for name, data := range cfg.SeedMem {
-		f, err := a.mem.OpenFile(context.Background(), gbfs.Clean(name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-		if err != nil {
-			return nil, fmt.Errorf("vsh glue: seed mem %s: %w", name, err)
+	for _, dir := range cfg.MemPrefixes {
+		if err := a.mem.MkdirAll(context.Background(), dir, 0755); err != nil {
+			return nil, err
 		}
-		if _, err := f.Write(data); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("vsh glue: seed mem %s: %w", name, err)
-		}
-		_ = f.Close()
 	}
+
 	return a, nil
 }
 
@@ -102,24 +99,12 @@ type CloudFSConfig struct {
 	// Rules vbox 规则表快照源（行序：temp → 便利根 rw 会话目录 → ro 行；
 	// DefaultWrite deny）。
 	Rules func() vbox.FSRuleSet
-	// Stubs 内存层 stub 文件（/bin、/usr/bin 下；PATH 钉死 /usr/bin:/bin）。
-	Stubs map[string][]byte
 }
 
 // CloudMemPrefixes cloud 内存层系统目录（per-session，用完即弃，UFS 零污染）。
 // 导出供 aic 预检使用（F1：字面写目标落内存层前缀 = 运行期放行、永不落
 // UFS，预检不应拦）。
-var CloudMemPrefixes = []string{"/bin", "/usr/bin", "/tmp", "/etc", "/dev", "/proc"}
-
-// UnderMemPrefix 报告绝对路径是否落在内存层前缀之下。
-func UnderMemPrefix(abs string) bool {
-	for _, p := range CloudMemPrefixes {
-		if abs == p || strings.HasPrefix(abs, p+"/") {
-			return true
-		}
-	}
-	return false
-}
+var CloudMemPrefixes = []string{"/tmp", "/etc", "/dev", "/proc"}
 
 // NewCloudFS cloud：UFS 直通 + 系统目录内存层 + 用户根 jail + vbox 规则表门。
 // 用户根在此确保存在（构造期直写 backing，不经规则表门——平台初始化动作；
@@ -139,7 +124,6 @@ func NewCloudFS(cfg CloudFSConfig) (gbfs.FileSystem, error) {
 		Rules:       cfg.Rules,
 		JailRoots:   append([]string{cfg.UserRoot}, cfg.JailExtra...),
 		MemPrefixes: CloudMemPrefixes,
-		SeedMem:     cfg.Stubs,
 	})
 }
 
@@ -241,12 +225,11 @@ func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 		return nil
 	}
 	rules := a.rules()
-	var d vbox.Decision
-	if noFollow {
-		d = rules.MatchNoFollow(abs, op)
-	} else {
-		d = rules.Match(abs, op)
+	target := abs
+	if a.normalizePath != nil {
+		target = a.normalizePath(abs, noFollow)
 	}
+	d := rules.MatchPath(target, op)
 	if !d.Allow {
 		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s（越界硬拒绝；如需访问请 grant fs %s）", ErrRuleDenied, abs, abs)}
 	}
@@ -334,7 +317,7 @@ func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm s
 		return newBufferedWriteFile(a.backing, abs, flag&os.O_APPEND != 0)
 	case flag&(os.O_CREATE|os.O_TRUNC) != 0:
 		// Create = 创建或截断（ufs 语义）。ufs.Create 无 perm 参：新建且请求
-		// 执行位时补 Chmod（stub 0755 依赖执行位做 PATH/内置名解析；仅执行位
+		// 执行位时补 Chmod（真实脚本的 PATH 查找需要执行位；仅执行位
 		// 请求才补——普通重定向 perm=0666 保持 os.Create 的 umask 结果，避免
 		// 绕过 umask 产出 0666）。已存在文件的截断不动既有位。
 		_, statErr := a.backing.Stat(abs)

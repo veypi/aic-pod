@@ -40,8 +40,8 @@ func TestParseEntry(t *testing.T) {
 }
 
 func TestAllowedDenyMode(t *testing.T) {
-	p := New(NetKeys)
-	p.Configure("deny", []string{"deny:bad.com:*", "allow:example.com:443", "allow:10.0.0.1:*"})
+	p := mustNewPolicy(t, NetKeys)
+	p.Configure("deny", []string{"allow:10.0.0.1:*", "allow:example.com:443", "deny:bad.com:*"})
 	// allow 命中
 	if !p.Allowed("s1", "example.com", 443) {
 		t.Error("example.com:443 should be allowed")
@@ -65,7 +65,7 @@ func TestAllowedDenyMode(t *testing.T) {
 }
 
 func TestAllowedOpenMode(t *testing.T) {
-	p := New(NetKeys)
+	p := mustNewPolicy(t, NetKeys)
 	p.Configure("open", []string{"deny:bad.com:*"})
 	if !p.Allowed("s1", "anything.example", 8080) {
 		t.Error("open mode should allow unlisted target")
@@ -75,8 +75,32 @@ func TestAllowedOpenMode(t *testing.T) {
 	}
 }
 
+func TestAllowedRejectsMalformedTargets(t *testing.T) {
+	for _, mode := range []string{"open", "deny"} {
+		t.Run(mode, func(t *testing.T) {
+			p := mustNewPolicy(t, NetKeys, "localhost:*")
+			p.Configure(mode, []string{"allow:example.com:*"})
+			for _, target := range []struct {
+				host string
+				port int
+			}{
+				{"", 443}, {"*", 443}, {"bad host", 443}, {"https://example.com", 443},
+				{"example.com", 0}, {"example.com", -1}, {"example.com", 65536},
+				{"localhost", 0},
+			} {
+				if p.Allowed("s1", target.host, target.port) {
+					t.Errorf("malformed target %q:%d was allowed", target.host, target.port)
+				}
+			}
+			if !p.Allowed("s1", "example.com", 443) {
+				t.Fatal("valid allowed target was denied")
+			}
+		})
+	}
+}
+
 func TestBuiltinLoopback(t *testing.T) {
-	p := New(NetKeys, "localhost:*")
+	p := mustNewPolicy(t, NetKeys, "localhost:*")
 	p.Configure("deny", nil)
 	if !p.Allowed("s1", "localhost", 3000) {
 		t.Error("builtin localhost:* should be allowed in deny mode")
@@ -87,35 +111,27 @@ func TestBuiltinLoopback(t *testing.T) {
 		t.Error("net_rules deny localhost:* should override builtin allow")
 	}
 	// ssh 实例无内建
-	q := New(SshKeys)
+	q := mustNewPolicy(t, SshKeys)
 	q.Configure("deny", nil)
 	if q.Allowed("s1", "localhost", 22) {
 		t.Error("ssh instance should have no builtin loopback")
 	}
 }
 
-// TestOrderedLastMatchWins：有序表核心语义——优先级即书写顺序，无具体度比较。
+// TestOrderedFirstMatchWins：有序表核心语义——优先级即书写顺序，无具体度比较。
 // 宽 deny 可被后置窄 allow 开洞，窄 deny 也可后置反杀宽 allow；临时 grant
 // 不压 deny 终局；Snapshot 按效果分列。
-func TestOrderedLastMatchWins(t *testing.T) {
-	has := func(list []Entry, host, port string) bool {
-		for _, e := range list {
-			if e.Host == host && e.Port == port {
-				return true
-			}
-		}
-		return false
-	}
-	p := New(NetKeys)
+func TestOrderedFirstMatchWins(t *testing.T) {
+	p := mustNewPolicy(t, NetKeys)
 	// 宽 deny + 后置窄 allow：例外端口放行，其余端口仍拒（deny/open 两模式同效）
-	p.Configure("deny", []string{"deny:bad.com", "allow:bad.com:443"})
+	p.Configure("deny", []string{"allow:bad.com:443", "deny:bad.com"})
 	if !p.Allowed("s1", "bad.com", 443) {
 		t.Error("later allow should poke a hole into wider deny")
 	}
 	if p.Allowed("s1", "bad.com", 80) {
 		t.Error("non-excepted port should stay denied")
 	}
-	p.Configure("open", []string{"deny:bad.com", "allow:bad.com:443"})
+	p.Configure("open", []string{"allow:bad.com:443", "deny:bad.com"})
 	if !p.Allowed("s1", "bad.com", 443) {
 		t.Error("open mode: later allow should win")
 	}
@@ -123,12 +139,12 @@ func TestOrderedLastMatchWins(t *testing.T) {
 		t.Error("open mode: non-excepted port should stay denied")
 	}
 	// 同目标反序：后置 deny 胜
-	p.Configure("deny", []string{"allow:bad.com:443", "deny:bad.com:443"})
+	p.Configure("deny", []string{"deny:bad.com:443", "allow:bad.com:443"})
 	if p.Allowed("s1", "bad.com", 443) {
 		t.Error("later deny should win over earlier allow")
 	}
 	// 窄 deny 前置 + 宽 allow 后置 → allow 胜（反杀不再存在，顺序即优先级）
-	p.Configure("deny", []string{"deny:bad.com:443", "allow:bad.com"})
+	p.Configure("deny", []string{"allow:bad.com", "deny:bad.com:443"})
 	if !p.Allowed("s1", "bad.com", 443) {
 		t.Error("later all-port allow should override earlier specific deny")
 	}
@@ -147,19 +163,16 @@ func TestOrderedLastMatchWins(t *testing.T) {
 	if p.Allowed("s2", "bad.com", 443) {
 		t.Error("temp grant must be session-scoped")
 	}
-	// Snapshot 按效果分列（deny 行与 allow 行各归其列）
-	p.Configure("deny", []string{"deny:bad.com", "deny:other.com:22", "allow:bad.com:443"})
-	deny, allow := p.Snapshot("s1")
-	if !has(deny, "bad.com", "*") || !has(deny, "other.com", "22") {
-		t.Error("deny rows missing from snapshot")
+	p.Configure("deny", []string{"allow:bad.com:443", "deny:other.com:22", "deny:bad.com"})
+	snap := p.Snapshot("s1")
+	if !snap.Match("bad.com:443") || snap.Match("bad.com:80") || snap.Match("other.com:22") {
+		t.Fatal("snapshot must preserve rule priority")
 	}
-	if !has(allow, "bad.com", "443") {
-		t.Error("allow rows missing from snapshot")
-	}
+
 }
 
 func TestTempGrantSessionScope(t *testing.T) {
-	p := New(NetKeys)
+	p := mustNewPolicy(t, NetKeys)
 	p.Configure("deny", nil)
 	e, _ := ParseEntry("example.com:443")
 	p.Grant("s1", e)
@@ -171,35 +184,32 @@ func TestTempGrantSessionScope(t *testing.T) {
 	}
 	// 幂等
 	p.Grant("s1", e)
-	if got := len(p.List("s1")); got != 1 {
+	if got := len(allowEntries(p, "s1")); got != 1 {
 		t.Errorf("List after idempotent grant = %d entries, want 1", got)
 	}
 }
 
-func TestDenyHitOverlap(t *testing.T) {
-	p := New(NetKeys)
+func TestSnapshotDenyOverlap(t *testing.T) {
+	p := mustNewPolicy(t, NetKeys)
 	p.Configure("deny", []string{"deny:bad.com:22"})
-	if !p.DenyHit(Entry{Host: "bad.com", Port: "22"}) {
+	if !deniedTarget(p, Entry{Host: "bad.com", Port: "22"}) {
 		t.Error("exact deny entry should hit")
 	}
-	if !p.DenyHit(Entry{Host: "bad.com", Port: "*"}) {
+	if !deniedTarget(p, Entry{Host: "bad.com", Port: "*"}) {
 		t.Error("wildcard grant overlapping specific deny should hit (conservative)")
 	}
-	if p.DenyHit(Entry{Host: "bad.com", Port: "443"}) {
+	if deniedTarget(p, Entry{Host: "bad.com", Port: "443"}) {
 		t.Error("non-overlapping port should not hit")
 	}
-	if p.DenyHit(Entry{Host: "good.com", Port: "22"}) {
+	if deniedTarget(p, Entry{Host: "good.com", Port: "22"}) {
 		t.Error("different host should not hit")
 	}
-	// 终局语义：后置 allow 行已开洞的目标不再视为 deny（permanent grant 可覆盖）
-	p.Configure("deny", []string{"deny:bad.com:22", "allow:bad.com:22"})
-	if p.DenyHit(Entry{Host: "bad.com", Port: "22"}) {
-		t.Error("overridden deny outcome should not report DenyHit")
+	// 终局语义：前置 allow 行已开洞的目标不再视为 deny（permanent grant 可覆盖）
+	p.Configure("deny", []string{"allow:bad.com:22", "deny:bad.com:22"})
+	if deniedTarget(p, Entry{Host: "bad.com", Port: "22"}) {
+		t.Error("earlier allow must override deny")
 	}
-	// LastDenyRow：最后重叠的 deny 行（1 起）
-	if row, raw, ok := p.LastDenyRow(Entry{Host: "bad.com", Port: "22"}); !ok || row != 1 || raw != "bad.com:22" {
-		t.Errorf("LastDenyRow = %d %q %v, want 1 bad.com:22 true", row, raw, ok)
-	}
+
 }
 
 // TestReconcileFromCfg：cfg 快照驱动重载（set_config 动态生效向量）。
@@ -210,7 +220,7 @@ func TestReconcileFromCfg(t *testing.T) {
 	o.NetPolicy = "deny"
 	o.NetRules = []string{"allow:cfg-example.com:8443"}
 	cfg.Global = o
-	p := New(NetKeys)
+	p := mustNewPolicy(t, NetKeys)
 	if !p.Allowed("s1", "cfg-example.com", 8443) {
 		t.Error("cfg net_rules entry should be allowed after New/Reconcile")
 	}
@@ -225,8 +235,8 @@ func TestReconcileFromCfg(t *testing.T) {
 // TestGrantRowOverridesEarlierDeny：permanent grant = 追加到表尾的普通规则行
 // （无独立键）——顺序即语义，后命中者胜过上方 deny 行（permission_rules.md §2）。
 func TestGrantRowOverridesEarlierDeny(t *testing.T) {
-	p := New(NetKeys)
-	p.Configure("deny", []string{"deny:meta.example:*", "allow:meta.example:443"})
+	p := mustNewPolicy(t, NetKeys)
+	p.Configure("deny", []string{"allow:meta.example:443", "deny:meta.example:*"})
 	if !p.Allowed("s1", "meta.example", 443) {
 		t.Error("row appended after deny should override it (last match wins)")
 	}
@@ -237,13 +247,39 @@ func TestGrantRowOverridesEarlierDeny(t *testing.T) {
 
 // TestPolicyNormalize：非法 policy 值一律归一 deny（安全侧失败）。
 func TestPolicyNormalize(t *testing.T) {
-	p := New(NetKeys)
-	p.Configure("bogus", nil)
-	if p.Mode() != cfg.PolicyDeny {
-		t.Errorf("bogus policy = %q, want deny", p.Mode())
+	p := mustNewPolicy(t, NetKeys)
+	before := p.Mode()
+	if err := p.Configure("bogus", nil); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+	if p.Mode() != before {
+		t.Fatal("failed reload changed active mode")
 	}
 	p.Configure("open", nil)
 	if p.Mode() != cfg.PolicyOpen {
 		t.Errorf("open policy = %q, want open", p.Mode())
 	}
+}
+
+func mustNewPolicy(t *testing.T, sel Selector, builtin ...string) *Policy {
+	t.Helper()
+	p, err := New(sel, builtin...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+func allowEntries(p *Policy, sid string) []string {
+	s := p.Snapshot(sid)
+	var out []string
+	for _, r := range s.Rules {
+		if r.Allow && s.Match(r.HostPort) {
+			out = append(out, r.HostPort)
+		}
+	}
+	return out
+}
+func deniedTarget(p *Policy, e Entry) bool {
+	allow, row := p.Snapshot("").Resolve(e.String())
+	return row >= 0 && !allow
 }

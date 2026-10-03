@@ -117,7 +117,7 @@ func isLetter(b byte) bool {
 //
 // windows 上 /tmp 是虚拟别名：cygwin 式映射到 os.TempDir()（规则表侧
 // canonical 经本函数同样映射——/tmp 查询落进临时目录便利根，无需任何字面
-// /tmp 规则行；字面根进 WriteRootsFor 会让 win 沙箱 grantDirWrite 失败）。
+// /tmp 规则行；字面根进 Snapshot write rules 会让 win 沙箱 grantDirWrite 失败）。
 func HostPathToOS(p string) string {
 	if runtime.GOOS != "windows" {
 		return p

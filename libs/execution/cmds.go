@@ -1,4 +1,4 @@
-package vsh
+package execution
 
 import (
 	"context"
@@ -62,18 +62,29 @@ type SkillDeps struct {
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
 // send_user / skill。全部自带 help 文本（--help/-h 或无参数子命令自答）。
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
-	for _, cmd := range []commands.Command{
-		commands.DefineCommand("commands", deps.cmdCommands),
-		commands.DefineCommand("bg", deps.cmdBG),
-		commands.DefineCommand("grant", deps.cmdGrant),
-		commands.DefineCommand("list_hosts", deps.cmdListHosts),
-		commands.DefineCommand("send_user", deps.cmdSendUser),
-		commands.DefineCommand("skill", deps.cmdSkill),
-	} {
-		if err := reg.Register(cmd); err != nil {
+	list := []commands.Command{commands.DefineCommand("commands", deps.cmdCommands)}
+	add := func(name string, fn commands.CommandFunc) { list = append(list, commands.DefineCommand(name, fn)) }
+	if deps.Tasks != nil {
+		add("bg", deps.cmdBG)
+	}
+	if deps.Grant != nil || deps.GrantStatus != nil {
+		add("grant", deps.cmdGrant)
+	}
+	if deps.ListHosts != nil {
+		add("list_hosts", deps.cmdListHosts)
+	}
+	if deps.SendUser != nil {
+		add("send_user", deps.cmdSendUser)
+	}
+	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Download != nil || deps.Skill.List != nil {
+		add("skill", deps.cmdSkill)
+	}
+	for _, cmd := range list {
+		if err := reg.RegisterGuarded(cmd); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 

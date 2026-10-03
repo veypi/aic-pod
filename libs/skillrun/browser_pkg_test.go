@@ -1,8 +1,6 @@
 package skillrun
 
-// browser 包（v6 P5 拆包）端到端测试：真实构建两个 provider 二进制，验证
-// 根命令 → process（无状态转发器）→ skillrun 确保 svc 懒启动 + SKILLPROC_SOCKET
-// 注入 → svc 执行的全链路（browser status 不触碰 Chrome，输出确定）。
+// browser 根命令直接调用驻留 service；status 不启动 Chrome。
 
 import (
 	"context"
@@ -31,7 +29,7 @@ func buildBrowserPkg(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(pkgDir, "cli", "manifest.json"), manifest, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for name, dir := range map[string]string{"browser": "process", "browser-service": "service"} {
+	for name, dir := range map[string]string{"browser-service": "service"} {
 		out := filepath.Join(binDir, name)
 		if b, err := exec.Command("go", "build", "-o", out, filepath.Join(src, "provider", dir)).CombinedOutput(); err != nil {
 			t.Fatalf("build %s: %v\n%s", name, err, b)
@@ -40,12 +38,10 @@ func buildBrowserPkg(t *testing.T) string {
 	return pkgDir
 }
 
-// TestBrowserPackageStatusEndToEnd 根命令调用 → process provider 转发 → svc
-// 懒启动（skillrun 确保机制 + env 注入——没有 SKILLPROC_SOCKET 时 CLI 会
-// exit 2，本测试通过即证明注入生效）。
+// TestBrowserPackageStatusEndToEnd 验证 service 默认 provider 的命令与错误透传。
 func TestBrowserPackageStatusEndToEnd(t *testing.T) {
 	r, reg := newTestRegistry(t, true)
-	if _, err := r.Install(buildBrowserPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildBrowserPkg(t)); err != nil {
 		t.Fatal(err)
 	}
 	stdout, _, err := invoke(t, reg, "browser", []string{"status", "--json"}, "")
@@ -56,9 +52,7 @@ func TestBrowserPackageStatusEndToEnd(t *testing.T) {
 		t.Fatalf("status output: %s", stdout)
 	}
 	// svc 懒启动登记（确保机制生效的事实断言）。
-	r.mu.Lock()
-	_, up := r.svcs["browser/svc"]
-	r.mu.Unlock()
+	up := packageService(r, "browser") != nil
 	if !up {
 		t.Fatal("svc provider not started by package command invocation")
 	}
@@ -74,27 +68,26 @@ func TestBrowserPackageStatusEndToEnd(t *testing.T) {
 	}
 }
 
-// TestResolveStreamEndpoint 端点名泛化解析（v6 P5）：{包}.{流} 直查优先，
-// 全端点名 = 流名全名（page.frames/page.input 保留 v5 前端契约）。
+// TestResolveStreamEndpoint 只接受包名限定端点，不扫描裸流名。
 func TestResolveStreamEndpoint(t *testing.T) {
 	r, _ := newTestRegistry(t, true)
-	if _, err := r.Install(buildHelloPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildHelloServicePkg(t)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Install(buildBrowserPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildBrowserPkg(t)); err != nil {
 		t.Fatal(err)
 	}
 	for endpoint, want := range map[string][2]string{
-		"hello.echo":  {"hello", "echo"},
-		"page.frames": {"browser", "page.frames"},
-		"page.input":  {"browser", "page.input"},
+		"hello.echo":          {"hello", "echo"},
+		"browser.page.frames": {"browser", "page.frames"},
+		"browser.page.input":  {"browser", "page.input"},
 	} {
 		pkg, stream, ok := r.ResolveStreamEndpoint(endpoint)
 		if !ok || pkg != want[0] || stream != want[1] {
 			t.Fatalf("ResolveStreamEndpoint(%q) = %q, %q, %v", endpoint, pkg, stream, ok)
 		}
 	}
-	for _, endpoint := range []string{"page.bogus", "browser.page.frames", "nope", "hello.page.frames"} {
+	for _, endpoint := range []string{"page.bogus", "page.frames", "page.input", "nope", "hello.page.frames"} {
 		if _, _, ok := r.ResolveStreamEndpoint(endpoint); ok {
 			t.Fatalf("ResolveStreamEndpoint(%q) unexpectedly resolved", endpoint)
 		}
@@ -105,7 +98,7 @@ func TestResolveStreamEndpoint(t *testing.T) {
 // 不存在的页面 → svc 侧参数校验/查找错误经 error 帧回来（证明 args 到达 svc）。
 func TestBrowserStreamOpenArgs(t *testing.T) {
 	r, _ := newTestRegistry(t, true)
-	if _, err := r.Install(buildBrowserPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildBrowserPkg(t)); err != nil {
 		t.Fatal(err)
 	}
 	s, err := r.OpenStream(context.Background(), "browser", "page.frames", []byte(`{"page_id":"p_nope"}`))

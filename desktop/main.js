@@ -228,20 +228,12 @@ function browserBundleEnv() {
   return fs.existsSync(dir) ? { AIC_BROWSER_BUNDLE_DIR: dir } : {}
 }
 
-// ---- builtin skill 预装（browser.zip 随包进 resources，首跑装到 ~/.aic/skills） ----
-// 仅 packaged 注入；dev 形态 browser 包经 skill install 本目录手动安装。
-function builtinSkillsEnv() {
-  if (!app.isPackaged) return {}
-  const zip = path.join(process.resourcesPath, 'browser.zip')
-  return fs.existsSync(zip) ? { AIC_BUILTIN_SKILLS: zip } : {}
-}
-
 // ---- 后端子进程：启动 / 停止 / 重启（无端口握手，2026-09-22） ----
 async function spawnBackend() {
   backend = spawn(backendBin, [], {
     // Browser automation runs in Go with a separate Chrome executable.
     // cuaBundleEnv()/browserBundleEnv()：内置驱动目录提示注入（缺失时空对象，包内回落系统探测）。
-    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...builtinSkillsEnv(), ...cuaBundleEnv() },
+    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...cuaBundleEnv() },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))

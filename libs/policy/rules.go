@@ -1,175 +1,62 @@
-// Package policy defines the common execution-policy primitives. It has no
-// session approval state and cannot elevate a call.
+// Package policy provides product command rules and delegates filesystem and
+// network rule parsing to vbox. It owns no configuration or approval state.
 package policy
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"regexp"
+	"github.com/veypi/vbox"
 	"strings"
-
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
-// ---- 有序规则表（docs/permission_rules.md §1）：行首效果前缀 + 全域模式禁写 ----
-//
-// 每域一张字符串表，一行一条规则，按书写顺序逐条匹配、后写者优先（文件序视图；
-// 执行时经快照拼接转 vbox first-wins）；全表未命中走 *_policy 兜底姿态。fs 域效果：deny（读写双拒）/ ro（读开放写拒）/
-// rw（读写）；net/ssh 域效果：allow / deny。
-
-// fs 规则效果（行首白名单前缀）。
 const (
 	EffectDeny = "deny"
 	EffectRO   = "ro"
 	EffectRW   = "rw"
 )
 
-var fsEffectPrefixes = []struct{ prefix, effect string }{
-	{"deny:", EffectDeny}, {"ro:", EffectRO}, {"rw:", EffectRW},
+func ParseFSRule(raw string) (string, string, error) {
+	effect, pattern, err := vbox.ParseFSRule(raw)
+	return effect.String(), pattern, err
 }
+func ValidateFSRules(rows []string) error             { return vbox.ValidateFSRules(rows) }
+func ValidateFSGrantTarget(target string) error       { return vbox.ValidateFSGrantTarget(target) }
+func ParseTargetRule(raw string) (bool, Entry, error) { return vbox.ParseTargetRule(raw) }
+func ValidateTargetRules(rows []string) error         { return vbox.ValidateTargetRules(rows) }
 
-// ParseFSRule 解析一条 fs 规则行：白名单化剥取行首效果前缀（deny:/ro:/rw:），
-// 其余一律按字面路径（保护 C:/ 盘符——"C:" 不在白名单，整行按缺前缀报错）。
-// 全域模式禁写（§1）：放行类（ro/rw）禁字面全域、家目录根与整盘根；
-// deny 禁字面全域——全域姿态只用 fs_policy 表达。
-func ParseFSRule(raw string) (effect, pattern string, err error) {
-	s := strings.TrimSpace(raw)
-	for _, p := range fsEffectPrefixes {
-		if strings.HasPrefix(s, p.prefix) {
-			effect, pattern = p.effect, strings.TrimSpace(strings.TrimPrefix(s, p.prefix))
-			break
-		}
+// ParseExecRule accepts one exact name. Whole-domain behavior belongs to policy.
+func ParseExecRule(raw string) (allow bool, name string, err error) {
+	effect, name, ok := strings.Cut(raw, ":")
+	if !ok || (effect != "allow" && effect != "deny") || ValidateCommandName(name) != nil {
+		return false, "", fmt.Errorf("invalid exec rule %q (want allow:name or deny:name)", raw)
 	}
-	if effect == "" {
-		return "", "", fmt.Errorf("invalid fs rule %q: missing effect prefix (deny: / ro: / rw:)", raw)
-	}
-	if pattern == "" || strings.ContainsRune(pattern, 0) {
-		return "", "", fmt.Errorf("invalid fs rule %q: empty or invalid pattern", raw)
-	}
-	if err := checkGlobalFS(effect, pattern); err != nil {
-		return "", "", fmt.Errorf("invalid fs rule %q: %v", raw, err)
-	}
-	return effect, pattern, nil
+	return effect == "allow", name, nil
 }
-
-// checkGlobalFS 全域模式禁写（§1）：字面全域三形态全效果禁写（一条放行全域
-// 拆光整张表含 builtin 凭证 deny；deny 全域与 fs_policy 同义，保持单一表达）；
-// 放行类另禁家目录根与整盘根。报错信息指向 fs_policy 或更细条目。
-func checkGlobalFS(effect, pattern string) error {
-	p := strings.TrimSpace(pattern)
-	if isLiteralGlobal(p) {
-		return fmt.Errorf("global pattern is not expressible as a rule (use fs_policy for the whole-stance, or a narrower entry)")
-	}
-	if effect == EffectDeny {
-		return nil
-	}
-	if p == "~" || p == "~/" || p == "~/**" {
-		return fmt.Errorf("home directory root is not expressible as an allow rule (use fs_policy: open or narrower entries)")
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		// 双形态归一后比较：win 家根 C:\… / C:/… / /c/… 任一书写都拦截。
-		h := proto.NormalizeHostPath(filepath.ToSlash(home))
-		if pn := proto.NormalizeHostPath(p); pn == h || pn == h+"/" || pn == h+"/**" {
-			return fmt.Errorf("home directory root is not expressible as an allow rule (use fs_policy: open or narrower entries)")
-		}
-	}
-	if driveRootRe.MatchString(strings.ReplaceAll(p, "\\", "/")) {
-		return fmt.Errorf("drive root is not expressible as an allow rule (use narrower entries)")
+func ValidateCommandName(name string) error {
+	if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, "/\\ \t\r\n\x00*?") {
+		return fmt.Errorf("invalid exec command %q", name)
 	}
 	return nil
 }
-
-func isLiteralGlobal(p string) bool {
-	return p == "/" || p == "**" || p == "/**"
-}
-
-// driveRootRe 匹配整盘根：旧输入形 C: / C:/ / C:/** 与 /c/ 规范形
-// /c / /c/ / /c/**（大小写不限；配置跨平台共享，统一禁写——与 vbox
-// fsrule.go 同源）。
-var driveRootRe = regexp.MustCompile(`(?i)^([a-z]:|/[a-z])(/\*\*)?/?$`)
-
-// ValidateFSGrantTarget 校验 grant fs 目标（具体绝对路径，非模式）——
-// temp/permanent grant 与规则行同护栏（§1）：全域/家根/盘根不可授。
-// 输入任意盘符书写先归一为 /c/ 规范形再判（win 上 C:\… 与 /c/… 同口径）。
-func ValidateFSGrantTarget(abs string) error {
-	p := filepath.ToSlash(strings.TrimSpace(abs))
-	p = proto.NormalizeHostPath(p)
-	if p == "" || strings.ContainsRune(p, 0) {
-		return fmt.Errorf("invalid grant target %q", abs)
-	}
-	if p == "/" {
-		return fmt.Errorf("filesystem root cannot be granted (use fs_policy: open or narrower paths)")
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if p == proto.NormalizeHostPath(filepath.ToSlash(home)) {
-			return fmt.Errorf("home directory root cannot be granted (use fs_policy: open or narrower paths)")
-		}
-	}
-	if driveRootRe.MatchString(strings.ReplaceAll(p, "\\", "/")) {
-		return fmt.Errorf("drive root cannot be granted (use narrower paths)")
-	}
-	return nil
-}
-
-// ValidateFSRules 批量校验 fs 规则行（加载/入表即报错；首个非法行即返回）。
-func ValidateFSRules(list []string) error {
-	for _, raw := range list {
-		if _, _, err := ParseFSRule(raw); err != nil {
+func ValidateExecRules(rows []string) error {
+	for _, raw := range rows {
+		if _, _, err := ParseExecRule(raw); err != nil {
 			return err
 		}
 	}
 	return nil
 }
-
-// ParseTargetRule 解析 net/ssh 规则行：剥 allow:/deny: 前缀后按 Entry 归一。
-// Entry 解析本身拒绝通配 host（含 "*"），allow:* / deny:* 等全域行在此自然报错（§1 指向 *_policy）。
-func ParseTargetRule(raw string) (allow bool, e Entry, err error) {
-	s := strings.TrimSpace(raw)
-	switch {
-	case strings.HasPrefix(s, "allow:"):
-		allow, s = true, strings.TrimSpace(strings.TrimPrefix(s, "allow:"))
-	case strings.HasPrefix(s, "deny:"):
-		s = strings.TrimSpace(strings.TrimPrefix(s, "deny:"))
-	default:
-		return false, Entry{}, fmt.Errorf("invalid target rule %q: missing effect prefix (allow: / deny:)", raw)
-	}
-	e, err = ParseEntry(s)
-	if err != nil {
-		return false, Entry{}, err
-	}
-	return allow, e, nil
-}
-
-// ValidateTargetRules 批量校验 net/ssh 规则行（加载/入表即报错；首个非法行即返回）。
-func ValidateTargetRules(list []string) error {
-	for _, raw := range list {
-		if _, _, err := ParseTargetRule(raw); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func ValidateExec(entries []string) error {
-	for _, name := range entries {
-		if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, "/\\ \t\r\n\x00") || (name != "*" && strings.ContainsAny(name, "*?")) {
-			return fmt.Errorf("invalid exec command %q", name)
-		}
-	}
-	return nil
-}
-func CommandAllowed(mode string, deny, allow []string, name string) bool {
-	hit := func(list []string) bool {
-		for _, p := range list {
-			if p == "*" || p == name {
-				return true
-			}
-		}
+func CommandAllowed(mode string, rows []string, name string) bool {
+	if (mode != "open" && mode != "deny") || ValidateCommandName(name) != nil {
 		return false
 	}
-	if mode != "open" && mode != "deny" {
-		return false
+	for _, raw := range rows {
+		allow, target, err := ParseExecRule(raw)
+		if err != nil {
+			return false
+		}
+		if target == name {
+			return allow
+		}
 	}
-	return !hit(deny) && (hit(allow) || mode == "open")
+	return mode == "open"
 }

@@ -1,10 +1,7 @@
 package skillrun
 
-// skill download 的原子安装序列与安装记录（v6 P2，docs/skill.md §9.2）：
-// fetch 暂存 → 校验 manifest → 包名冲突全检 → 停旧 provider → 目录切换 →
-// 写 .install.json（**最后写 = 提交标记**）→ 注册。启动扫描只认带有效
-// .install.json 的目录，半包不注册。来源身份 = kind(private|public|builtin)
-// +id：同源同名 = 更新（停 provider、替换目录、重新注册）；异源同名 = 显式报错。
+// Installation prepares and validates .next before stopping the old service.
+// Same-source updates switch directories via .old; failure preserves the old package.
 
 import (
 	"context"
@@ -12,11 +9,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/veypi/vsh/commands"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -52,106 +51,142 @@ func (r *Registry) Download(ctx context.Context, ref, version string) (*Package,
 	if err != nil {
 		return nil, err
 	}
-	return r.installZip(ctx, zipData, meta)
+	return r.InstallZip(ctx, zipData, meta)
 }
 
-// installZip 原子安装序列（Download 与后续 builtin 首跑安装共用）。
-func (r *Registry) installZip(ctx context.Context, zipData []byte, meta *FetchMeta) (*Package, error) {
-	// 暂存校验：zip 完整性与 CLI 契约（含 cli/ 必有有效 manifest）。
-	files, err := readZipEntries(zipData)
+// InstallZip is the only installation path, including embedded packages.
+// Staging never changes the running package. Mutations serialize per name.
+func (r *Registry) InstallZip(ctx context.Context, data []byte, meta *FetchMeta) (*Package, error) {
+	if meta == nil || !namePattern.MatchString(meta.Name) || meta.ID == "" || (meta.Kind != "private" && meta.Kind != "public" && meta.Kind != "builtin") {
+		return nil, fmt.Errorf("skill install: invalid package identity")
+	}
+	files, err := readZipEntries(data)
 	if err != nil {
-		return nil, fmt.Errorf("skill download: bad zip: %w", err)
+		return nil, err
 	}
 	manifest, lock, err := validateZipCLI(files)
 	if err != nil {
-		return nil, fmt.Errorf("skill download: %w", err)
+		return nil, err
 	}
-	if !namePattern.MatchString(meta.Name) {
-		return nil, fmt.Errorf("skill download: invalid package name %q", meta.Name)
-	}
-
+	unlock := r.lockPackage(meta.Name)
+	defer unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	// 来源裁决：同源同名 = 更新；异源同名 = 显式报错不覆盖。
-	var rec InstallRecord
-	if old, exists := r.pkgs[meta.Name]; exists {
-		oldRec := old.record
-		if oldRec.Kind != meta.Kind || oldRec.ID != meta.ID {
-			return nil, fmt.Errorf("skill download: %q 已安装且来源不同（%s:%s vs %s:%s）——先卸载再安装", meta.Name, oldRec.Kind, oldRec.ID, meta.Kind, meta.ID)
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		return nil, fmt.Errorf("skill registry closed")
+	}
+	old := r.Get(meta.Name)
+	rec := InstallRecord{Name: meta.Name, Kind: meta.Kind, ID: meta.ID, Version: meta.Version, InstalledAt: time.Now().UTC()}
+	if old != nil {
+		previous := old.Record()
+		if previous.Kind != meta.Kind || previous.ID != meta.ID {
+			return nil, fmt.Errorf("skill %q already installed from different source", meta.Name)
 		}
-		rec.Disabled = oldRec.Disabled // 更新保留禁用态
+		rec.Disabled = previous.Disabled
 	}
-	// 包名冲突全检（新装）：vs 内建/保留名/已装包。
-	reg, err := r.deps.Registry()
-	if err != nil {
-		return nil, fmt.Errorf("skillrun: engine registry: %w", err)
-	}
-	if _, exists := r.pkgs[meta.Name]; !exists {
-		if _, taken := reg.Lookup(meta.Name); taken {
-			return nil, fmt.Errorf("skill download: command %q already registered（包名冲突，显式拒绝）", meta.Name)
+	reg := r.deps.Registry
+	if manifest != nil {
+		if commands.IsShellBuiltin(meta.Name) {
+			return nil, fmt.Errorf("command %q is a shell builtin", meta.Name)
+		}
+		if _, taken := reg.Lookup(meta.Name); taken && (old == nil || old.Manifest == nil) {
+			return nil, fmt.Errorf("command %q already registered", meta.Name)
 		}
 	}
-	// 停旧 provider + 解注册（更新路径；Unregister 幂等）。
-	r.killServicesLocked(meta.Name)
-	reg.Unregister(meta.Name)
-
-	// 目录切换：解压 .next → 旧包挪 .old → 上位 → 删 .old（失败尽力回滚）。
 	final := filepath.Join(r.deps.SkillsDir, meta.Name)
 	next := final + ".next"
-	_ = os.RemoveAll(next)
-	if err := extractZipEntries(files, next); err != nil {
-		return nil, fmt.Errorf("skill download: extract: %w", err)
-	}
 	backup := final + ".old"
-	backed := false
-	if _, err := os.Stat(final); err == nil {
-		_ = os.RemoveAll(backup)
-		if err := os.Rename(final, backup); err != nil {
-			_ = os.RemoveAll(next)
-			return nil, fmt.Errorf("skill download: swap: %w", err)
-		}
-		backed = true
-		defer os.RemoveAll(backup)
+	if err := os.RemoveAll(next); err != nil {
+		return nil, err
 	}
-	if err := os.Rename(next, final); err != nil {
-		if backed {
-			_ = os.Rename(backup, final) // 尽力恢复原包
-		}
-		return nil, fmt.Errorf("skill download: promote: %w", err)
-	}
-	// entry 执行位 + artifacts.lock 设备侧下载（失败 = 安装失败；无
-	// .install.json = 半包，启动扫描不注册——显式报错由用户重试/卸载）。
-	if manifest != nil {
-		for _, p := range manifest.Providers {
-			if err := os.Chmod(filepath.Join(final, filepath.FromSlash(p.Entry)), 0o755); err != nil {
-				return nil, fmt.Errorf("skill download: provider %q entry exec bit: %w", p.ID, err)
-			}
-		}
+	defer os.RemoveAll(next)
+	if err := extractZipEntries(files, next); err != nil {
+		return nil, err
 	}
 	if lock != nil {
-		if err := r.fetchArtifacts(ctx, lock, final); err != nil {
-			return nil, fmt.Errorf("skill download: %w", err)
+		if err := r.fetchArtifacts(ctx, lock, next); err != nil {
+			return nil, err
 		}
 	}
-	// 写 .install.json = 提交标记（最后写）。
-	rec.Name = meta.Name
-	rec.Kind = meta.Kind
-	rec.ID = meta.ID
-	rec.Version = meta.Version
-	rec.InstalledAt = time.Now().UTC()
-	if err := writeRecord(final, rec); err != nil {
-		return nil, fmt.Errorf("skill download: write install record: %w", err)
-	}
-	pkg := &Package{Name: meta.Name, Dir: final, Manifest: manifest, record: rec}
-	pkg.disabled = rec.Disabled
-	// 注册根命令（仅 CLI 包；非 CLI 资源包无根命令）。
 	if manifest != nil {
-		if err := reg.RegisterGuarded(r.rootCommand(pkg)); err != nil {
-			return nil, fmt.Errorf("skill download: register root command: %w", err)
+		entry := filepath.Join(next, filepath.FromSlash(manifest.Entry))
+		info, err := os.Lstat(entry)
+		if err != nil {
+			return nil, fmt.Errorf("skill entry: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("skill entry must be a regular file")
+		}
+		if err := os.Chmod(entry, 0755); err != nil {
+			return nil, err
 		}
 	}
+	if err := writeRecord(next, rec); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.prepareChange(old); err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			finishChange(old)
+		}
+	}()
+	if old != nil {
+		if err := r.stopService(old); err != nil {
+			return nil, err
+		}
+	}
+	backed := false
+	if _, err := os.Stat(final); err == nil {
+		if err := os.RemoveAll(backup); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(final, backup); err != nil {
+			return nil, err
+		}
+		backed = true
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	rollback := func(cause error) (*Package, error) {
+		if backed {
+			if err := os.Rename(backup, final); err != nil {
+				return nil, fmt.Errorf("%w; rollback failed, preserved %s: %v", cause, backup, err)
+			}
+		}
+		return nil, cause
+	}
+	if err := os.Rename(next, final); err != nil {
+		return rollback(err)
+	}
+	pkg := &Package{Name: meta.Name, Dir: final, Manifest: manifest, record: rec, disabled: rec.Disabled}
+	// Register only when adding CLI capability. Existing root handles resolve by name.
+	if manifest != nil && (old == nil || old.Manifest == nil) {
+		if err := reg.RegisterGuarded(r.rootCommand(meta.Name)); err != nil {
+			if removeErr := os.RemoveAll(final); removeErr != nil {
+				return nil, fmt.Errorf("%w; preserve backup %s: %v", err, backup, removeErr)
+			}
+			return rollback(err)
+		}
+	}
+	r.mu.Lock()
 	r.pkgs[meta.Name] = pkg
-	r.logf("skillrun: downloaded %s (%s:%s@%s) -> %s", meta.Name, meta.Kind, meta.ID, meta.Version, final)
+	r.mu.Unlock()
+	if manifest == nil && old != nil && old.Manifest != nil {
+		reg.Unregister(meta.Name)
+	}
+	if backed {
+		if err := os.RemoveAll(backup); err != nil {
+			r.logf("skill %s: backup cleanup: %v", meta.Name, err)
+		}
+	}
+	committed = true
 	return pkg, nil
 }
 
@@ -172,6 +207,9 @@ func (r *Registry) fetchArtifacts(ctx context.Context, lock *ArtifactsLock, pkgD
 		resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("artifact %s: %w", a.Path, err)
+		}
+		if int64(len(data)) > maxZipFileSize {
+			return fmt.Errorf("artifact %s exceeds size limit", a.Path)
 		}
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("artifact %s: http %d", a.Path, resp.StatusCode)
@@ -212,55 +250,100 @@ func readRecord(pkgDir string) *InstallRecord {
 		return nil
 	}
 	var rec InstallRecord
-	if err := json.Unmarshal(data, &rec); err != nil || rec.Name == "" || rec.Kind == "" || rec.ID == "" {
+	if err := json.Unmarshal(data, &rec); err != nil || !namePattern.MatchString(rec.Name) || (rec.Kind != "private" && rec.Kind != "public" && rec.Kind != "builtin") || rec.ID == "" {
 		return nil
 	}
 	return &rec
 }
 
-// Rescan 启动扫描重注册：只认带有效 .install.json 的目录（半包不注册）；
-// CLI 包（有效 cli/manifest.json）注册根命令，禁用态随记录恢复。
-// 引擎尚未构建的注册表冲突逐包日志跳过（重启自恢复不阻断启动）。
+// recoverPackage handles only .next/.old left by the rename sequence.
+func (r *Registry) recoverPackage(name string) error {
+	final := filepath.Join(r.deps.SkillsDir, name)
+	if _, err := os.Stat(final); err == nil {
+		if _, err := loadInstalled(final, name); err != nil {
+			return fmt.Errorf("invalid installed package %s: %w", name, err)
+		}
+		if err := os.RemoveAll(final + ".old"); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	} else if _, err := os.Stat(final + ".old"); err == nil {
+		if _, err := loadInstalled(final+".old", name); err != nil {
+			return fmt.Errorf("invalid backup %s: %w", name, err)
+		}
+		if err := os.Rename(final+".old", final); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.RemoveAll(final + ".next")
+}
+func loadInstalled(dir, name string) (*Package, error) {
+	rec := readRecord(dir)
+	if rec == nil || rec.Name != name {
+		return nil, fmt.Errorf("invalid install record")
+	}
+	var manifest *Manifest
+	cli := filepath.Join(dir, "cli")
+	if _, err := os.Stat(cli); err == nil {
+		manifest, err = ParseManifest(filepath.Join(cli, "manifest.json"))
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(manifest.Entry)))
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("entry is not a regular file")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return &Package{Name: name, Dir: dir, Manifest: manifest, record: *rec, disabled: rec.Disabled}, nil
+}
+
+// Rescan runs at startup before serving requests. Invalid packages stay unregistered.
 func (r *Registry) Rescan() {
 	entries, err := os.ReadDir(r.deps.SkillsDir)
 	if err != nil {
+		r.logf("skill rescan: %v", err)
 		return
 	}
-	reg, err := r.deps.Registry()
-	if err != nil {
-		r.logf("skillrun: rescan: engine registry unavailable: %v", err)
-		return
+	names := map[string]bool{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			name := strings.TrimSuffix(strings.TrimSuffix(entry.Name(), ".next"), ".old")
+			if namePattern.MatchString(name) {
+				names[name] = true
+			}
+		}
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
+	for name := range names {
+		unlock := r.lockPackage(name)
+		if err := r.recoverPackage(name); err != nil {
+			r.logf("skill %s recovery: %v", name, err)
+			unlock()
 			continue
 		}
-		dir := filepath.Join(r.deps.SkillsDir, e.Name())
-		rec := readRecord(dir)
-		if rec == nil {
-			continue // 半包不注册
-		}
-		var manifest *Manifest
-		mpath := filepath.Join(dir, "cli", "manifest.json")
-		if _, err := os.Stat(mpath); err == nil {
-			m, err := ParseManifest(mpath)
-			if err != nil {
-				r.logf("skillrun: rescan: %s manifest invalid, skipped: %v", rec.Name, err)
-				continue
-			}
-			manifest = m
-		}
-		pkg := &Package{Name: rec.Name, Dir: dir, Manifest: manifest, record: *rec}
-		pkg.disabled = rec.Disabled
-		r.mu.Lock()
-		r.pkgs[rec.Name] = pkg
-		r.mu.Unlock()
-		if manifest != nil {
-			if err := reg.RegisterGuarded(r.rootCommand(pkg)); err != nil {
-				r.logf("skillrun: rescan: register %s: %v", rec.Name, err)
+		pkg, err := loadInstalled(filepath.Join(r.deps.SkillsDir, name), name)
+		if err == nil && pkg.Manifest != nil {
+			if commands.IsShellBuiltin(name) {
+				err = fmt.Errorf("shell builtin collision")
+			} else {
+				err = r.deps.Registry.RegisterGuarded(r.rootCommand(name))
 			}
 		}
-		r.logf("skillrun: rescan: %s (%s:%s@%s) registered", rec.Name, rec.Kind, rec.ID, rec.Version)
+		if err != nil {
+			r.logf("skill %s skipped: %v", name, err)
+		} else {
+			r.mu.Lock()
+			r.pkgs[name] = pkg
+			r.mu.Unlock()
+		}
+		unlock()
 	}
 }
 
@@ -270,7 +353,7 @@ func (r *Registry) Records() []InstallRecord {
 	defer r.mu.Unlock()
 	out := make([]InstallRecord, 0, len(r.pkgs))
 	for _, pkg := range r.pkgs {
-		out = append(out, pkg.record)
+		out = append(out, pkg.Record())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

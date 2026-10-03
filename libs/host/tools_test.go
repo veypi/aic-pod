@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
@@ -15,6 +14,7 @@ import (
 // 验签（含 grant_approved 防篡改）、路由、nonce 去重、归属；RTC 与 NATS
 // 同一分发实现。
 func TestNatsToolsAuthentication(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir()})
 	t.Cleanup(func() { _ = c.Close() })
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
@@ -56,7 +56,7 @@ func TestNatsToolsAuthentication(t *testing.T) {
 		t.Fatal("foreign owner admitted")
 	}
 	// RTC 与 NATS 同一分发实现（普通请求同载荷同语义）。
-	got := c.HandleTool(context.Background(), tool.Caller{Subject: c.uid, ConnectionID: "rtc", ExpiresAt: time.Now().Add(time.Minute)}, wire.Request{Protocol: "hosts_rtc/2", ID: "r_rtc", Action: wire.ActionFS, FS: &wire.FSInvocation{Method: "roots", Args: json.RawMessage(`{}`)}})
+	got := c.HandleTool(context.Background(), wire.Caller{Subject: c.uid, ConnectionID: "rtc", ExpiresAt: time.Now().Add(time.Minute)}, wire.Request{Protocol: "hosts_rtc/2", ID: "r_rtc", Action: wire.ActionFS, FS: &wire.FSInvocation{Method: "roots", Args: json.RawMessage(`{}`)}})
 	if got.Error != nil {
 		t.Fatalf("transports didn't share dispatch: %+v", got)
 	}

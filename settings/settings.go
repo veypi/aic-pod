@@ -19,21 +19,20 @@ import (
 
 // View 是设置面读视图（含 key——设置窗口需显示当前凭证；仅本机同用户进程可见）。
 type View struct {
-	Version       string   `json:"version"`
-	Host          string   `json:"host"`
-	Key           string   `json:"key"`
-	WorkDir       string   `json:"work_dir"`
-	ExecTimeout   string   `json:"exec_timeout"`
-	HomePath      string   `json:"home_path"`
-	ExecPolicy    string   `json:"exec_policy"`
-	ExecDeny      []string `json:"exec_deny"`
-	ExecAllow     []string `json:"exec_allow"`
-	FsPolicy      string   `json:"fs_policy"`
-	FsRules       []string `json:"fs_rules"`
-	NetPolicy     string   `json:"net_policy"`
-	NetRules      []string `json:"net_rules"`
-	SshPolicy     string   `json:"ssh_policy"`
-	SshRules      []string `json:"ssh_rules"`
+	Version     string   `json:"version"`
+	Host        string   `json:"host"`
+	Key         string   `json:"key"`
+	WorkDir     string   `json:"work_dir"`
+	ExecTimeout string   `json:"exec_timeout"`
+	HomePath    string   `json:"home_path"`
+	ExecPolicy  string   `json:"exec_policy"`
+	ExecRules   []string `json:"exec_rules"`
+	FsPolicy    string   `json:"fs_policy"`
+	FsRules     []string `json:"fs_rules"`
+	NetPolicy   string   `json:"net_policy"`
+	NetRules    []string `json:"net_rules"`
+	SshPolicy   string   `json:"ssh_policy"`
+	SshRules    []string `json:"ssh_rules"`
 }
 
 // Snapshot 返回当前有效配置（cfg.Global：启动解析值；caller 需已 cfg.Load）。
@@ -44,8 +43,8 @@ func Snapshot() *View {
 	a := cfg.RawAuthSnapshot()
 	return &View{Version: cfg.Version,
 		Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
-		HomePath:    o.NormalizedHomePath(),
-		ExecPolicy: a.ExecPolicy, ExecDeny: a.ExecDeny, ExecAllow: a.ExecAllow,
+		HomePath:   o.NormalizedHomePath(),
+		ExecPolicy: a.ExecPolicy, ExecRules: a.ExecRules,
 		FsPolicy: a.FsPolicy, FsRules: a.FsRules,
 		NetPolicy: a.NetPolicy, NetRules: a.NetRules,
 		SshPolicy: a.SshPolicy, SshRules: a.SshRules}
@@ -61,19 +60,18 @@ func Snapshot() *View {
 // 列表 nil = 不改（保持现状），非 nil（含空数组）= 整体替换——空数组即清空，
 // 也是撤销 grant --permanent 条目的出口（删行即撤销）。
 type Update struct {
-	Host          string    `json:"host"`
-	WorkDir       string    `json:"work_dir"`
-	ExecTimeout   string    `json:"exec_timeout"`
-	HomePath      string    `json:"home_path"`
-	ExecPolicy    string    `json:"exec_policy"`
-	ExecDeny      *[]string `json:"exec_deny"`
-	ExecAllow     *[]string `json:"exec_allow"`
-	FsPolicy      string    `json:"fs_policy"`
-	FsRules       *[]string `json:"fs_rules"`
-	NetPolicy     string    `json:"net_policy"`
-	NetRules      *[]string `json:"net_rules"`
-	SshPolicy     string    `json:"ssh_policy"`
-	SshRules      *[]string `json:"ssh_rules"`
+	Host        string    `json:"host"`
+	WorkDir     string    `json:"work_dir"`
+	ExecTimeout string    `json:"exec_timeout"`
+	HomePath    string    `json:"home_path"`
+	ExecPolicy  string    `json:"exec_policy"`
+	ExecRules   *[]string `json:"exec_rules"`
+	FsPolicy    string    `json:"fs_policy"`
+	FsRules     *[]string `json:"fs_rules"`
+	NetPolicy   string    `json:"net_policy"`
+	NetRules    *[]string `json:"net_rules"`
+	SshPolicy   string    `json:"ssh_policy"`
+	SshRules    *[]string `json:"ssh_rules"`
 }
 
 // validPolicy 校验 policy 取值（空串 = 不改，合法）。
@@ -96,6 +94,11 @@ func (u *Update) Apply() error {
 	// 本次提交内容的表单校验（值域/语法）；不拦文件里已有的内容。
 	if !validPolicy(u.ExecPolicy) || !validPolicy(u.FsPolicy) || !validPolicy(u.NetPolicy) || !validPolicy(u.SshPolicy) {
 		return &InvalidArg{Field: "policy", Reason: "want deny | open"}
+	}
+	if u.ExecRules != nil {
+		if err := policy.ValidateExecRules(*u.ExecRules); err != nil {
+			return &InvalidArg{Field: "exec_rules", Reason: err.Error()}
+		}
 	}
 	for name, list := range map[string]*[]string{"net_rules": u.NetRules, "ssh_rules": u.SshRules} {
 		if list != nil {
@@ -169,7 +172,7 @@ func applyAuth(u *Update, o *cfg.Options) {
 		}
 	}
 	for _, field := range []struct{ value, target *[]string }{
-		{u.ExecAllow, &o.ExecAllow}, {u.ExecDeny, &o.ExecDeny},
+		{u.ExecRules, &o.ExecRules},
 		{u.FsRules, &o.FsRules},
 		{u.NetRules, &o.NetRules},
 		{u.SshRules, &o.SshRules},

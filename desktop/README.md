@@ -11,14 +11,14 @@ Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
  │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
  │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
- ├─ browser：skill 包（aic-skills/browser）——main.js 只注入两个目录级 env：
+ ├─ browser/cua：aic-skills 技能包与 Go service 经 cmd/build 嵌入后端，
+ │    首跑预装到 ~/.aic/skills，pod 经 skillproc 直连 service
+ ├─ Chrome：main.js 注入目录级 env：
  │    AIC_BROWSER_BUNDLE_DIR（vendor/browser → resources/browser，Chrome for Testing
- │    探测兕底；可执行文件解析与系统候选全在 Go provider chrome.Resolve）
- │    AIC_BUILTIN_SKILLS（packaged=resources/browser.zip，首跑 builtin 预装到
- │    ~/.aic/skills；幂等，失败只记日志不阻断启动）
- ├─ cua：Go libs/cua 自管 cua-driver MCP、窗口与快照
+ │    探测兜底；可执行文件解析与系统候选全在 Go provider chrome.Resolve）
+ ├─ cua-driver：aic-skills/cua provider 管理 MCP 连接、窗口与快照
  │    scripts/sync-cua.mjs 将固定版本发行物同步到 vendor/cua → resources/cua
- │    main.js 注入 CUA_DRIVER_PATH/CUA_DRIVER_APP
+ │    main.js 注入 AIC_CUA_BUNDLE_DIR，provider 解析平台可执行文件
  ├─ BaseWindow 主窗口：平台页 WebContentsView
  │    Browser viewer 通过 RTC 观看 Go 管理的 Chrome，接管后才能输入
  │    固定设备视口，viewer 关闭或缩放不影响页面生命周期
@@ -39,8 +39,8 @@ Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢�
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
 键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
 
-浏览器分辨率：本地设置中的「浏览器分辨率」默认 1280×720，保存为
-`browser_width` / `browser_height`（各 320–4096）。新建标签读取最新配置，已有标签不变。
+浏览器分辨率：service 读取 `AIC_BROWSER_WIDTH` / `AIC_BROWSER_HEIGHT`，默认
+1280×720；单次 `browser page.create --width N --height N` 可指定新页面视口。
 修改 desktop 代码后需重启，并更新平台的 Browser 页面与 `os/browser-viewer.js`。
 
 键盘焦点保留在平台 viewer 中，已有 leader/窗口快捷键先处理，普通输入与中文
@@ -49,20 +49,20 @@ composition 提交转发给离屏页面。原生内容的焦点交接已取消�
 ## 开发
 
 ```bash
-# 1. 编译 Go 后端（desktop/bin/aic-backend）
+# 1. 编译 Go 后端及内建 provider（desktop/bin/aic-backend）
 make backend-bin
-# 2. 安装依赖 + 启动（需独立 Chrome，或配置 browser_path）
+# 2. 安装依赖 + 启动（需独立 Chrome，或设置 AIC_BROWSER_PATH）
 cd desktop && npm install && npm start
 ```
 
 平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/settings.html 单文件静态页，
 无框架/无构建、数据全走 IPC 桥）与 main.js/preload.js 改动需重启 electron。
-browser 代码位于 libs/browser/，修改后重新编译 Go 后端；协议与测试见 [设备工具实现](../docs/hosts-tools.md)。Electron 不再包含 browser CDP 引擎。
+browser/cua 代码位于 `../aic-skills/browser/provider/` 与 `../aic-skills/cua/provider/`（相对 aic-pod 根目录），修改后重新运行 `make backend-bin`。直接 `go build` 不会嵌入这两个 provider；构建入口见 [aic-skills README](../../aic-skills/README.md)。协议与测试见 [设备工具实现](../docs/hosts-tools.md)。Electron 不包含 browser CDP 引擎。
 内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
 `npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。
 
 独立 Chrome 开发时可用 `npm run browser-sync` 同步到 `vendor/browser/<platform>-<arch>`，
-或者继续使用系统 Chrome / `browser_path`。同步清单在 `browser.json`。
+或者继续使用系统 Chrome / `AIC_BROWSER_PATH`。同步清单在 `browser.json`。
 
 ## 打包（electron-builder，须在目标平台执行）
 

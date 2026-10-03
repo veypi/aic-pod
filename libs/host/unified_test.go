@@ -5,23 +5,61 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
-	vshglue "github.com/veypi/aic-pod/libs/vsh"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
+func TestExecNativeEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh as an external probe")
+	}
+	saved := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	t.Cleanup(func() { cfg.Global = saved })
+	t.Setenv("AIC_TEST_ENV_DEMO", "inherited")
+	c, _ := testClient(t)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "aic-env-probe"), []byte("#!/bin/sh\nprintf '%s' \"$AIC_TEST_ENV_DEMO\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, script, want string }{
+		{"export", `export AIC_TEST_ENV_DEMO=exported; /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, "exported"},
+		{"inline", `AIC_TEST_ENV_DEMO=inline /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, "inline"},
+		{"inherited-reassignment", `AIC_TEST_ENV_DEMO=local; /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, "local"},
+		{"unexport", `export -n AIC_TEST_ENV_DEMO; AIC_TEST_ENV_DEMO=local; /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, ""},
+		{"unset", `unset AIC_TEST_ENV_DEMO; /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, ""},
+		{"clear-env", `env -i /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, ""},
+		{"empty", `AIC_TEST_ENV_DEMO= /bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, ""},
+		{"child-path", `/bin/sh -c 'ls /dev/null'`, "/dev/null\n"},
+		{"inline-path", "PATH='" + hostCanonical(bin) + "' AIC_TEST_ENV_DEMO=custom aic-env-probe", "custom"},
+		{"request-isolation", `/bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, "inherited"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := c.HandleTool(context.Background(), testCaller(), execRequest(tc.script, 30000))
+			attrs := execAttrs(t, r)
+			if attrs["exit_code"] != "0" {
+				t.Fatalf("exec: %+v", r)
+			}
+			data, err := os.ReadFile(attrs["output"])
+			if err != nil || string(data) != tc.want {
+				t.Fatalf("stdout=%q, err=%v; want %q", data, err, tc.want)
+			}
+		})
+	}
+}
+
 func testClient(t *testing.T) (*Client, string) {
 	t.Helper()
-	// HOME 隔离：vsh 布局根 = $HOME/.aic/vsh（buildVSHEngine 真实 MkdirAll），
-	// 测试进程不许写真实 $HOME（沙箱化执行环境下会被规则门拒）。
+	// 隔离设备状态目录，测试不得写开发者的真实 HOME。
 	t.Setenv("HOME", t.TempDir())
 	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true})
 	c.hostID = "host_1"
@@ -49,8 +87,8 @@ func signedCall(t *testing.T, c *Client, req wire.Request, grantApproved bool, o
 	raw, _ := json.Marshal(r)
 	return c.HandleNATS(context.Background(), route, raw)
 }
-func testCaller() tool.Caller {
-	return tool.Caller{Subject: "owner", ConnectionID: "rtc1", Origin: "s1", ExpiresAt: time.Now().Add(time.Minute)}
+func testCaller() wire.Caller {
+	return wire.Caller{Subject: "owner", ConnectionID: "rtc1", Origin: "s1", ExpiresAt: time.Now().Add(time.Minute)}
 }
 func decoded[T any](t *testing.T, v any) T {
 	t.Helper()
@@ -266,7 +304,7 @@ func execResultLoose(t *testing.T, r wire.Response) wire.ExecResult {
 }
 
 // trackedExec 取前台执行的登记句柄（测试等待执行实际结束用——取消/断连
-// 是异步的，测试返回前必须等执行 goroutine 写完 stub/日志，否则与
+// 是异步的，测试返回前必须等执行 goroutine 写完日志，否则与
 // TempDir 清理竞争）。
 func trackedExec(t *testing.T, c *Client, requestID string) *execHandleEntry {
 	t.Helper()
@@ -275,7 +313,7 @@ func trackedExec(t *testing.T, c *Client, requestID string) *execHandleEntry {
 	return c.execHandles[requestID]
 }
 
-func waitHandleDone(t *testing.T, h *vshglue.ExecHandle) {
+func waitHandleDone(t *testing.T, h *execution.ExecHandle) {
 	t.Helper()
 	select {
 	case <-h.Done():
@@ -327,7 +365,7 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.Tasks = vshglue.NewTaskTableWithCaps(1, 1)
+	engine.Tasks = execution.NewTaskTableWithCaps(1, 1)
 	caller := testCaller()
 	// 第一次执行等待超时转后台，占满唯一名额。
 	first := execRequest("sleep 30", 50)

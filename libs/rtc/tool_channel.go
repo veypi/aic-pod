@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/pion/webrtc/v4"
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
 	"io"
@@ -22,7 +21,7 @@ type toolChannel struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	mu       sync.Mutex
-	source   tool.Stream
+	source   wire.Stream
 	bound    bool
 	incoming chan []byte
 	once     sync.Once
@@ -85,8 +84,8 @@ func (p *peer) toolChannel(dc *webrtc.DataChannel) {
 		}
 	}()
 }
-func (p *peer) openToolChannel(c tool.Caller, r rtcwire.Request) (any, error) {
-	// endpoint 是指令名形（page.frames/page.input 含点号）——用 ValidName 校验；
+func (p *peer) openToolChannel(c wire.Caller, r rtcwire.Request) (any, error) {
+	// endpoint 是指令名形（browser.page.frames/browser.page.input 含点号）——用 ValidName 校验；
 	// ValidID 无点号会把两个真实端点全部拒之门外。
 	if r.Stream == nil || !wire.ValidName(r.Stream.Endpoint) {
 		return nil, wire.Fail("invalid_argument", "Expected stream endpoint and opening args")
@@ -128,7 +127,7 @@ func (p *peer) openToolChannel(c tool.Caller, r rtcwire.Request) (any, error) {
 	go s.transmit(source)
 	return map[string]any{"channel": r.Channel, "max_message_bytes": rtcwire.MaxDatagramBytes}, nil
 }
-func (s *toolChannel) receive(source tool.Stream) {
+func (s *toolChannel) receive(source wire.Stream) {
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -141,7 +140,7 @@ func (s *toolChannel) receive(source tool.Stream) {
 		}
 	}
 }
-func (s *toolChannel) transmit(source tool.Stream) {
+func (s *toolChannel) transmit(source wire.Stream) {
 	for {
 		b, err := source.Recv(s.ctx)
 		if err != nil {

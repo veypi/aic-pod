@@ -7,24 +7,15 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/policy"
 	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/vbox"
 )
 
-// grant（统一授权申请，四域同形）：引擎内 `grant` 命令的执行体（vshGrant
-// 按域分派到 grantFS/grantTarget；cmd 域走 native 白名单；ssh 域 M3c 归拢）。
-// 审批已在服务端完成（脚本含字面 grant → 恒 4 级），到达本包即已授权。
-//   - temp（默认）：域 Policy 会话内存授权（重启失效、跨 session 失效）；
-//     不追溯已启动的 bg 任务（沙箱白名单在 Start 时固化）。
-//     temp 行插 vbox 表头、首命中生效，可覆盖 deny 行（「用户点就点了」，
-//     2026-09-23 拍板——permission_rules.md §3 session 硬底线作废，DenyHit
-//     拒批随之删除）。
-//   - --permanent：把规则行追加到 <域>_rules 表尾（fs 为 rw: 行、net/ssh 为
-//     allow: 行，基于文件配置修改 + Save 落盘，与 set_config 同路径）——重启/跨
-//     session 生效；覆盖 deny 行合法（机器是用户的），响应注明覆盖行号。
-//   - 两档目标均过 §1 全域校验（fs 全域/家根/盘根不可授；net/ssh 通配 host 本身不可表达）。
+// grant 由引擎验证可信审批上下文后按 fs/net/ssh/cmd 分派。
+// 临时授权写入会话内存，永久授权写入对应配置规则表；两者均将允许行
+// 放在表头，首命中生效。已启动进程继续使用启动时的沙箱快照。
 
 // grantFS 处理 fs 域：路径写白名单申请（原 grant_apply 语义）。
 func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolResponse {
@@ -42,12 +33,6 @@ func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolRes
 	if err := policy.ValidateFSGrantTarget(abs); err != nil {
 		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: "exec grant fs: " + err.Error()}
 	}
-	note := ""
-	if permanent {
-		if row, raw, ok := c.policy.LastDenyRow(abs); ok && c.policy.DenyHit(abs) {
-			note = fmt.Sprintf("\nnote: this rule overrides the deny outcome from rule #%d (%s)", row, raw)
-		}
-	}
 	scope := "session"
 	if permanent {
 		if err := c.persistGrant("fs", abs); err != nil {
@@ -58,12 +43,11 @@ func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolRes
 	} else {
 		c.policy.Grant(sid, abs)
 	}
-	roots := c.policy.WriteRootsFor(sid)
+
 	return &proto.ToolResponse{
 		MsgID: msgID, State: proto.StateCompleted,
-		Content: fmt.Sprintf("granted fs write access: %s (scope=%s, applies to fs writes and sandbox write binds)%s\ncurrent writable roots (%d):\n%s",
-			abs, scope, note, len(roots), strings.Join(roots, "\n")),
-		Attrs: map[string]string{"action": "grant", "domain": "fs", "target": abs, "scope": scope},
+		Content: fmt.Sprintf("granted fs write access: %s (scope=%s)", abs, scope),
+		Attrs:   map[string]string{"action": "grant", "domain": "fs", "target": abs, "scope": scope},
 	}
 }
 
@@ -78,12 +62,6 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 	if domain == "ssh" {
 		pol = c.sshPol
 	}
-	note := ""
-	if permanent {
-		if row, raw, ok := pol.LastDenyRow(e); ok && pol.DenyHit(e) {
-			note = fmt.Sprintf("\nnote: this rule overrides the deny outcome from rule #%d (%s)", row, raw)
-		}
-	}
 	scope := "session"
 	if permanent {
 		if err := c.persistGrant(domain, e.String()); err != nil {
@@ -94,19 +72,16 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 	} else {
 		pol.Grant(sid, e)
 	}
-	list := pol.List(sid)
+
 	return &proto.ToolResponse{
 		MsgID: msgID, State: proto.StateCompleted,
-		Content: fmt.Sprintf("granted %s access: %s (scope=%s)%s\ncurrent %s allow list (%d):\n%s",
-			domain, e.String(), scope, note, domain, len(list), strings.Join(list, "\n")),
-		Attrs: map[string]string{"action": "grant", "domain": domain, "target": e.String(), "scope": scope},
+		Content: fmt.Sprintf("granted %s access: %s (scope=%s)", domain, e.String(), scope),
+		Attrs:   map[string]string{"action": "grant", "domain": domain, "target": e.String(), "scope": scope},
 	}
 }
 
-// persistGrant 把目标作为规则行追加到 <域>_rules 表尾并落盘（fs 为 rw: 行、
-// net/ssh 为 allow: 行；基于文件配置修改——flag/env 启动覆盖不落盘，与 settings
-// 同语义）；幂等（归一化口径下已存在跳过——macOS /var → /private/var 类 symlink、
-// 端口零填充不再产生重复条目）。
+// persistGrant 将归一化后的允许行放到 <域>_rules 表头并去重、落盘。
+// 只修改文件配置，不把 flag/env 启动覆盖持久化。
 func (c *Client) persistGrant(domain, value string) error {
 	unlock := cfg.LockUpdate()
 	defer unlock()
@@ -114,81 +89,61 @@ func (c *Client) persistGrant(domain, value string) error {
 	if err != nil {
 		return err
 	}
-	contains := func(list []string, norm func(string) string) bool {
-		for _, p := range list {
-			if norm(p) == norm(value) {
-				return true
-			}
-		}
-		return false
-	}
-	normEntry := func(s string) string {
-		_, e, err := policy.ParseTargetRule(s)
-		if err != nil {
-			if e2, err2 := netauth.ParseEntry(s); err2 == nil {
-				return e2.String()
-			}
-			return s
-		}
-		return e.String()
-	}
+	var rows *[]string
+	var rule string
 	switch domain {
 	case "exec":
-		if contains(fileCfg.ExecAllow, func(s string) string { return s }) {
-			return nil
+		if err := policy.ValidateCommandName(value); err != nil {
+			return err
 		}
-		fileCfg.ExecAllow = append(fileCfg.ExecAllow, value)
+		rows, rule = &fileCfg.ExecRules, "allow:"+value
 	case "fs":
-		// 落盘统一 canonical 形（win = /c/ 规范形；posix = 解析后 posix 形）——
-		// 配置跨平台可读，且与规则表编译产物同形。
-		value = fsauth.Canonical(value)
-		norm := func(s string) string {
-			_, pat, err := policy.ParseFSRule(s)
-			if err != nil {
-				pat = s
-			}
-			return fsauth.Canonical(expandHomeDir(pat))
+		value = vbox.Canonical(value)
+		rows, rule = &fileCfg.FsRules, "rw:"+value
+	case "net", "ssh":
+		e, err := policy.ParseEntry(value)
+		if err != nil {
+			return err
 		}
-		if contains(fileCfg.FsRules, norm) {
-			c.syncAuth()
-			return nil
+		rule = "allow:" + e.String()
+		if domain == "net" {
+			rows = &fileCfg.NetRules
+		} else {
+			rows = &fileCfg.SshRules
 		}
-		fileCfg.FsRules = append(fileCfg.FsRules, "rw:"+value)
-	case "net":
-		if contains(fileCfg.NetRules, normEntry) {
-			c.syncAuth()
-			return nil
-		}
-		fileCfg.NetRules = append(fileCfg.NetRules, "allow:"+value)
-	case "ssh":
-		if contains(fileCfg.SshRules, normEntry) {
-			c.syncAuth()
-			return nil
-		}
-		fileCfg.SshRules = append(fileCfg.SshRules, "allow:"+value)
 	default:
 		return fmt.Errorf("unknown domain %q", domain)
+	}
+	// Move an identical grant to the front; an older deny may have preceded it.
+	next := []string{rule}
+	for _, row := range *rows {
+		if row != rule {
+			next = append(next, row)
+		}
+	}
+	*rows = next
+	if err := fileCfg.ValidateAuth(); err != nil {
+		return err
 	}
 	if err := cfg.Save(fileCfg); err != nil {
 		return err
 	}
 	cfg.SetAuth(cfg.AuthFrom(fileCfg))
-	c.syncAuth()
-	return nil
+	return c.syncAuth()
 }
 
 // syncAuth 重载三个域的 Policy（cfg.Global 已由调用方更新）。
-func (c *Client) syncAuth() {
-	c.policy.Reconcile()
-	c.netPol.Reconcile()
-	c.sshPol.Reconcile()
-	// exec 域：引擎已建则同步 native 策略/种子（未建时由 buildVSHEngine 从
-	// 当次 cfg 快照初始化，不抢建）。
-	if c.vsh.native != nil {
-		a := cfg.AuthSnapshot()
-		c.vsh.native.SetPolicy(a.ExecPolicy == cfg.PolicyOpen, a.ExecDeny)
-		c.vsh.native.Seed(a.ExecAllow...)
+func (c *Client) syncAuth() error {
+	if err := cfg.CheckAuth(); err != nil {
+		return err
 	}
+	if err := c.policy.Reconcile(); err != nil {
+		return err
+	}
+	if err := c.netPol.Reconcile(); err != nil {
+		return err
+	}
+	return c.sshPol.Reconcile()
 }
 
 // expandHomeDir 展开路径的 ~ 前缀（与 api 包 expandHome 同语义；grant fs
@@ -214,7 +169,11 @@ func (c *Client) execAllowed(sid, name string) bool {
 	}
 	a := cfg.AuthSnapshot()
 	c.execGrantMu.RLock()
-	allow := append(append([]string{"exec"}, a.ExecAllow...), c.execGrants[sid]...)
+	rows := make([]string, 0, len(c.execGrants[sid])+len(a.ExecRules))
+	for _, granted := range c.execGrants[sid] {
+		rows = append(rows, "allow:"+granted)
+	}
 	c.execGrantMu.RUnlock()
-	return policy.CommandAllowed(a.ExecPolicy, a.ExecDeny, allow, name)
+	rows = append(rows, a.ExecRules...)
+	return policy.CommandAllowed(a.ExecPolicy, rows, name)
 }

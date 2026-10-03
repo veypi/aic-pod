@@ -4,7 +4,7 @@
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
 // 内建 90 + jq + 平台命令（commands/bg/grant）由引擎 Registry
 // 收口，browser 自 v6 P5 起是已装 skill 包（aic-skills/browser）不再是
-// 内建；原生命令走 native 白名单（cfg exec_allow 种子 + grant cmd 扩充）；
+// 内建；原生命令按 exec_rules 首命中判定；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
 // 且全在发送前；pod 不重新分类审批，只在执行点看 rules。
 package host
@@ -38,17 +38,17 @@ import (
 
 // Options 客户端配置。
 type Options struct {
-	Transfers                    hostfs.TransferConfig
-	Host                         string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
-	Key                          string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
-	WorkDir                      string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
-	DeviceName                   string        // 展示名称，默认 hostname
-	DeviceType                   string        // 客户端类型（cli/desktop/...），默认 cli
-	Version                      string        // 客户端版本号（va.b.c，§6.3 版本门禁）
-	ExecTimeout                  time.Duration // 程序后台自有超时，默认 30m（§5.9）
-	NoSandbox                    bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
-	RTC                          bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
-	OnLog                        func(format string, args ...any)
+	Transfers   hostfs.TransferConfig
+	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
+	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
+	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
+	DeviceName  string        // 展示名称，默认 hostname
+	DeviceType  string        // 客户端类型（cli/desktop/...），默认 cli
+	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
+	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
+	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
+	RTC         bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
+	OnLog       func(format string, args ...any)
 }
 
 // Client 是 host agent 客户端。
@@ -120,22 +120,21 @@ func New(opts Options) *Client {
 			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 		}
 	}
-	procs := vbox.NewManager(opts.ExecTimeout)
+	procs := vbox.NewManager()
 	procs.SetNoSandbox(opts.NoSandbox)
 	procs.SetLogf(logf)
-	// vbox 沙箱可写根注入（vbox 不自持配置）：依赖缓存目录。设备状态根
-	// （$HOME/.aic）不是公共可写区，不注入 PublicRootsFn——沙箱可写面 =
-	// workDir + 系统临时目录 + 本会话便利根（fsauth 派生）。
-	vbox.CacheRootsFn = fsauth.CacheRoots
-	policy := fsauth.New()
+	// 配置与便利根由 fsauth 组合，启动进程时只下发权限快照。
+	policy, fsErr := fsauth.New()
+	netPolicy, netErr := netauth.New(netauth.NetKeys, "localhost:*")
+	sshPolicy, sshErr := netauth.New(netauth.SshKeys)
 	policy.SetWorkDir(opts.WorkDir)
 	c := &Client{
 		opts:        opts,
 		replay:      &replayCache{store: map[string]time.Time{}},
 		procs:       procs,
 		policy:      policy,
-		netPol:      netauth.New(netauth.NetKeys, "localhost:*"),
-		sshPol:      netauth.New(netauth.SshKeys),
+		netPol:      netPolicy,
+		sshPol:      sshPolicy,
 		execGrants:  map[string][]string{},
 		execHandles: map[string]*execHandleEntry{},
 		logf:        logf,
@@ -147,14 +146,23 @@ func New(opts Options) *Client {
 		_, _, c.kTool, _ = proto.DeriveKeys(parts[2], parts[0])
 		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
 	}
-	// 会话区根 = {StateDir}/sessions：与 fsauth 会话便利根、vshStubRoot 兜底
+	// 会话区根 = {StateDir}/sessions：与 fsauth 会话便利根
 	// 同路径（生产此前从不赋值 → sessionWorkDir 退 Temp 兜底，「会话区」分裂
 	// 为两个概念；win 沙箱对 fsauth 会话根行 grantDirWrite 因目录从未存在而
 	// fail-closed）。ensureSessionWorkDir 自此创建真实目录，两侧归一。
 	if dir, err := cfg.StateDir(); err == nil {
 		c.sessionRoot = filepath.Join(dir, "sessions")
 	}
-	c.initTools()
+	if fsErr != nil {
+		c.initErr = fsErr
+	} else if netErr != nil {
+		c.initErr = netErr
+	} else if sshErr != nil {
+		c.initErr = sshErr
+	}
+	if c.initErr == nil {
+		c.initTools()
+	}
 	return c
 }
 
@@ -285,6 +293,9 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.closeConnection()
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
+	if c.skills != nil {
+		c.skills.Close()
+	}
 	_ = c.procs.Close(shutdown)
 	cancelRuns()
 	if c.files != nil {
@@ -325,12 +336,13 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	if restartRTC {
 		c.stopRTC()
 	}
-	c.procs.SetExecTimeout(opts.ExecTimeout)
 	c.procs.SetNoSandbox(opts.NoSandbox)
 	// 授权模型同步（三域）：work_dir 变更 + 配置重载
 	//（九键经 cfg.Global 由 api.SetConfig 先行更新）。
 	c.policy.SetWorkDir(opts.WorkDir)
-	c.syncAuth()
+	if err := c.syncAuth(); err != nil {
+		return err
+	}
 	c.optsMu.Lock()
 	c.opts = opts
 	c.optsMu.Unlock()

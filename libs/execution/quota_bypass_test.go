@@ -1,4 +1,4 @@
-package vsh
+package execution
 
 // quota_bypass_test.go 是 todo 4.2.5/4.1.11 的配额绕过实测（引擎集成层）：
 // backing 换成「超限即拒写」的配额闸门测试件（语义对齐 QuotaFS：跨过配额的
@@ -100,7 +100,7 @@ func newQuotaTestEngine(t *testing.T, q *quotaTestFS) *Engine {
 	t.Helper()
 	e, err := NewEngine(EngineConfig{
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
+		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
 			fsys, err := NewCloudFS(CloudFSConfig{
 				UserRoot: "/u/u1",
 				Backing:  q,

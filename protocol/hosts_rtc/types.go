@@ -16,11 +16,11 @@ type Request struct {
 	Channel       string `json:"channel,omitempty"`
 	Ticket        string `json:"ticket,omitempty"`
 	GrantApproved bool   `json:"grant_approved,omitempty"`
-	// Stream 是 action=stream.open 的载荷（RTC 私有端点表，不进 vsh/caps）。
+	// Stream 是 action=stream.open 的载荷（RTC 包限定端点，不进 vsh/caps）。
 	Stream *StreamOpen `json:"stream,omitempty"`
 }
 
-// StreamOpen 是 stream.open 的载荷：page.frames / page.input 等 RTC 私有
+// StreamOpen 是 stream.open 的载荷：browser.page.frames / browser.page.input 等 RTC 私有
 // 端点直接连接业务服务，不注册为 vsh 指令，不进入 commands/caps。
 type StreamOpen struct {
 	Endpoint string `json:"endpoint"`

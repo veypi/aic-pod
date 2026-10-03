@@ -16,7 +16,7 @@ import (
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 
-	vshglue "github.com/veypi/aic-pod/libs/vsh"
+	"github.com/veypi/aic-pod/libs/execution"
 )
 
 // buildHelloPkg 装配 hello 源包到临时目录并构建真实 provider 二进制
@@ -42,7 +42,7 @@ func buildHelloPkg(t *testing.T) string {
 		t.Fatalf("build hello-process: %v\n%s", err, b)
 	}
 	outSvc := filepath.Join(binDir, "hello-service")
-	buildSvc := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "..", "aic-skills", "hello", "provider", "service"))
+	buildSvc := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "..", "aic-skills", "hello-service", "provider", "service"))
 	if b, err := buildSvc.CombinedOutput(); err != nil {
 		t.Fatalf("build hello-service: %v\n%s", err, b)
 	}
@@ -59,28 +59,29 @@ func newTestRegistry(t *testing.T, noSandbox bool) (*Registry, *commands.Registr
 }
 
 // newTestRegistryTasks 同 newTestRegistry，额外返回 bg 任务表（service 登记断言）。
-func newTestRegistryTasks(t *testing.T, noSandbox bool) (*Registry, *commands.Registry, *vshglue.TaskTable) {
+func newTestRegistryTasks(t *testing.T, noSandbox bool) (*Registry, *commands.Registry, *execution.TaskTable) {
 	t.Helper()
 	reg := commands.NewRegistry()
-	m := vbox.NewManager(5 * time.Minute)
+	m := vbox.NewManager()
 	m.SetNoSandbox(noSandbox)
-	tasks := vshglue.NewTaskTableWithCaps(8, 4)
+	t.Cleanup(func() { m.Close(context.Background()) })
+	tasks := execution.NewTaskTableWithCaps(8, 4)
 	r, err := New(Deps{
 		SkillsDir: filepath.Join(t.TempDir(), "skills"),
 		RunDir:    shortRunDir(t),
 		Manager:   m,
-		Policy: func(ctx context.Context, workdir, name string) vshglue.NativePolicy {
+		Policy: func(ctx context.Context, workdir, name string) vbox.Policy {
 			// 只授当次工作区——边界测试的包目录（t.TempDir 树下）必须留在白
 			// 名单外；os.TempDir() 若同授会把 t.TempDir 全部覆盖，断言失效。
-			return vshglue.NativePolicy{WriteRoots: canonicalRoots(workdir)}
+			return testWorkdirPolicy(workdir)
 		},
 		Workdir:  func(invCwd string) string { return invCwd },
-		Registry: func() (*commands.Registry, error) { return reg, nil },
-		Tasks:    func() (*vshglue.TaskTable, error) { return tasks, nil },
+		Registry: reg,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(r.Close)
 	return r, reg, tasks
 }
 
@@ -97,7 +98,7 @@ func shortRunDir(t *testing.T) string {
 }
 
 // canonicalRoots 展开符号链接前缀（darwin /var→/private/var）——seatbelt
-// 规则匹配内核解析后的真实路径，与生产 fsauth.WriteRootsFor 的 canonical
+// 规则匹配内核解析后的真实路径，与生产 fsauth.Snapshot 的 canonical
 // 根同口径；不展开则白名单形同虚设（写 EPERM）。
 func canonicalRoots(roots ...string) []string {
 	out := make([]string, 0, len(roots))
@@ -113,7 +114,7 @@ func canonicalRoots(roots ...string) []string {
 // sandboxUsable 预探沙箱后端（agent 沙箱内跑 go test 时嵌套沙箱不可用——
 // 真机直跑测全套，嵌套环境边界测试跳过）。
 func sandboxUsable() bool {
-	m := vbox.NewManager(time.Minute)
+	m := vbox.NewManager()
 	_, err := m.RunProcess(context.Background(), vbox.StartOptions{Exec: []string{"/usr/bin/true"}}, nil, io.Discard, io.Discard)
 	return err == nil || !strings.Contains(err.Error(), "no sandbox backend")
 }
@@ -143,7 +144,7 @@ func invokeAt(t *testing.T, reg *commands.Registry, cwd, name string, args []str
 
 func TestInstallRegisterRun(t *testing.T) {
 	r, reg := newTestRegistry(t, true)
-	pkg, err := r.Install(buildHelloPkg(t))
+	pkg, err := installTestPackage(t, r, buildHelloPkg(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestInstallConflictRejected(t *testing.T) {
 	if err := reg.Register(commands.DefineCommand("hello", nil)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Install(buildHelloPkg(t)); err == nil {
+	if _, err := installTestPackage(t, r, buildHelloPkg(t)); err == nil {
 		t.Fatal("install over registered name must be rejected")
 	}
 	// 异源同名 → 显式拒绝不覆盖（public 包 vs local 目录）
@@ -198,7 +199,7 @@ func TestInstallConflictRejected(t *testing.T) {
 	if _, err := r2.Download(context.Background(), "uuid-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r2.Install(buildHelloPkg(t)); err == nil {
+	if _, err := installTestPackage(t, r2, buildHelloPkg(t)); err == nil {
 		t.Fatal("local install over public package must be rejected")
 	}
 }
@@ -208,7 +209,7 @@ func TestInstallConflictRejected(t *testing.T) {
 func TestInstallSameSourceUpdate(t *testing.T) {
 	r, reg := newTestRegistry(t, true)
 	src := buildHelloPkg(t)
-	pkg, err := r.Install(src)
+	pkg, err := installTestPackage(t, r, src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +220,7 @@ func TestInstallSameSourceUpdate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "v2.marker"), []byte("v2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pkg2, err := r.Install(src)
+	pkg2, err := installTestPackage(t, r, src)
 	if err != nil {
 		t.Fatalf("same-source reinstall must be an update: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestInstallSameSourceUpdate(t *testing.T) {
 
 func TestDisabledFailsExplicitly(t *testing.T) {
 	r, reg := newTestRegistry(t, true)
-	if _, err := r.Install(buildHelloPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildHelloPkg(t)); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.SetDisabled("hello", true); err != nil {
@@ -267,7 +268,7 @@ func TestDisabledFailsExplicitly(t *testing.T) {
 
 func TestUninstall(t *testing.T) {
 	r, reg := newTestRegistry(t, true)
-	pkg, err := r.Install(buildHelloPkg(t))
+	pkg, err := installTestPackage(t, r, buildHelloPkg(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +294,7 @@ func TestSandboxFileBoundary(t *testing.T) {
 		t.Skip("sandbox backend unavailable（嵌套沙箱环境；真机直跑覆盖本测试）")
 	}
 	r, reg := newTestRegistry(t, false)
-	pkg, err := r.Install(buildHelloPkg(t))
+	pkg, err := installTestPackage(t, r, buildHelloPkg(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,22 +374,24 @@ func fakeFetch(t *testing.T, id, version string, mutate func(pkgDir string)) fun
 func newTestRegistryFetch(t *testing.T, noSandbox bool, fetch func(context.Context, string, string) ([]byte, *FetchMeta, error)) (*Registry, *commands.Registry) {
 	t.Helper()
 	reg := commands.NewRegistry()
-	m := vbox.NewManager(5 * time.Minute)
+	m := vbox.NewManager()
 	m.SetNoSandbox(noSandbox)
+	t.Cleanup(func() { m.Close(context.Background()) })
 	r, err := New(Deps{
 		SkillsDir: filepath.Join(t.TempDir(), "skills"),
 		RunDir:    shortRunDir(t),
 		Manager:   m,
-		Policy: func(ctx context.Context, workdir, name string) vshglue.NativePolicy {
-			return vshglue.NativePolicy{WriteRoots: canonicalRoots(workdir)}
+		Policy: func(ctx context.Context, workdir, name string) vbox.Policy {
+			return testWorkdirPolicy(workdir)
 		},
 		Workdir:  func(invCwd string) string { return invCwd },
-		Registry: func() (*commands.Registry, error) { return reg, nil },
+		Registry: reg,
 		Fetch:    fetch,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(r.Close)
 	return r, reg
 }
 
@@ -500,14 +503,14 @@ func TestRescan(t *testing.T) {
 	skillsDir := filepath.Join(t.TempDir(), "skills")
 	fetch := fakeFetch(t, "uuid-1", "1.0.0", nil)
 	reg1 := commands.NewRegistry()
-	m1 := vbox.NewManager(5 * time.Minute)
+	m1 := vbox.NewManager()
 	m1.SetNoSandbox(true)
 	r1, err := New(Deps{
 		SkillsDir: skillsDir,
 		RunDir:    shortRunDir(t),
 		Manager:   m1,
 		Workdir:   func(s string) string { return s },
-		Registry:  func() (*commands.Registry, error) { return reg1, nil },
+		Registry:  reg1,
 		Fetch:     fetch,
 	})
 	if err != nil {
@@ -534,17 +537,17 @@ func TestRescan(t *testing.T) {
 	}
 	// 新 Registry + 新命令表（= 重启）
 	reg2 := commands.NewRegistry()
-	m2 := vbox.NewManager(5 * time.Minute)
+	m2 := vbox.NewManager()
 	m2.SetNoSandbox(true)
 	r2, err := New(Deps{
 		SkillsDir: skillsDir,
 		RunDir:    shortRunDir(t),
 		Manager:   m2,
-		Policy: func(ctx context.Context, workdir, name string) vshglue.NativePolicy {
-			return vshglue.NativePolicy{WriteRoots: canonicalRoots(workdir)}
+		Policy: func(ctx context.Context, workdir, name string) vbox.Policy {
+			return testWorkdirPolicy(workdir)
 		},
 		Workdir:  func(s string) string { return s },
-		Registry: func() (*commands.Registry, error) { return reg2, nil },
+		Registry: reg2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -593,7 +596,7 @@ func TestRecordsJSON(t *testing.T) {
 
 func TestCancelKillsProcess(t *testing.T) {
 	r, reg := newTestRegistry(t, true)
-	if _, err := r.Install(buildHelloPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildHelloPkg(t)); err != nil {
 		t.Fatal(err)
 	}
 	cmd, _ := reg.Lookup("hello")
@@ -621,4 +624,27 @@ func TestCancelKillsProcess(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("cancel did not terminate provider process")
 	}
+}
+
+func testWorkdirPolicy(workdir string) vbox.Policy {
+	var rules []vbox.Rule
+	for _, root := range canonicalRoots(workdir) {
+		rules = append(rules, vbox.Rule{Pattern: root, Effect: vbox.EffRW})
+	}
+	return vbox.Policy{FS: vbox.FSRuleSet{Rules: rules}, Net: vbox.NetRuleSet{Default: true}}
+}
+
+func installTestPackage(t *testing.T, r *Registry, dir string) (*Package, error) {
+	t.Helper()
+	name := filepath.Base(dir)
+	return r.InstallZip(context.Background(), zipDir(t, dir), &FetchMeta{Name: name, Kind: "private", ID: name})
+}
+func packageService(r *Registry, name string) *serviceInst {
+	p := r.Get(name)
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.service
 }

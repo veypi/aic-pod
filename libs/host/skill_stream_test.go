@@ -1,9 +1,11 @@
 package host
 
-// skillToolStream 桥接测试：真实 hello 包（service provider + echo stream）
-// 经 skillrun.OpenStream → tool.Stream 消息语义验证（v6 P3）。
+// skillToolStream 桥接测试：真实 hello-service 包经
+// skillrun.OpenStream → tool.Stream 验证消息语义。
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -16,9 +18,8 @@ import (
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 
-	tool "github.com/veypi/aic-pod/libs/hosts_tool"
 	"github.com/veypi/aic-pod/libs/skillrun"
-	vshglue "github.com/veypi/aic-pod/libs/vsh"
+	tool "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 // newStreamTestRegistry 构造隔离 skillrun Registry（无沙箱；hello 包真实构建）。
@@ -30,7 +31,7 @@ func newStreamTestRegistry(t *testing.T) *skillrun.Registry {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "aic-skills", "hello", "cli", "manifest.json"))
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "aic-skills", "hello-service", "cli", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func newStreamTestRegistry(t *testing.T) *skillrun.Registry {
 		t.Fatalf("build hello-process: %v\n%s", err, b)
 	}
 	outSvc := filepath.Join(binDir, "hello-service")
-	if b, err := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "..", "aic-skills", "hello", "provider", "service")).CombinedOutput(); err != nil {
+	if b, err := exec.Command("go", "build", "-o", outSvc, filepath.Join("..", "..", "..", "aic-skills", "hello-service", "provider", "service")).CombinedOutput(); err != nil {
 		t.Fatalf("build hello-service: %v\n%s", err, b)
 	}
 	// macOS unix socket 104 字符上限：run 目录用短路径。
@@ -52,20 +53,21 @@ func newStreamTestRegistry(t *testing.T) *skillrun.Registry {
 	}
 	t.Cleanup(func() { os.RemoveAll(runDir) })
 	reg := commands.NewRegistry()
-	m := vbox.NewManager(5 * time.Minute)
+	m := vbox.NewManager()
 	m.SetNoSandbox(true)
+	t.Cleanup(func() { _ = m.Close(context.Background()) })
 	r, err := skillrun.New(skillrun.Deps{
 		SkillsDir: filepath.Join(root, "skills"),
 		RunDir:    runDir,
 		Manager:   m,
 		Workdir:   func(s string) string { return s },
-		Registry:  func() (*commands.Registry, error) { return reg, nil },
-		Tasks:     func() (*vshglue.TaskTable, error) { return vshglue.NewTaskTableWithCaps(8, 4), nil },
+		Registry:  reg,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Install(pkgDir); err != nil {
+	t.Cleanup(r.Close)
+	if _, err := installTestPackage(t, r, pkgDir); err != nil {
 		t.Fatal(err)
 	}
 	return r
@@ -151,7 +153,7 @@ func TestSkillToolStreamRecvCtxCancel(t *testing.T) {
 	}
 }
 
-// buildBrowserPkg 装配 browser 源包（v6 P5：真实两个 provider 二进制）。
+// buildBrowserPkg 装配 browser 源包并编译真实 service provider。
 func buildBrowserPkg(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -168,7 +170,7 @@ func buildBrowserPkg(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(pkgDir, "cli", "manifest.json"), manifest, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for name, dir := range map[string]string{"browser": "process", "browser-service": "service"} {
+	for name, dir := range map[string]string{"browser-service": "service"} {
 		out := filepath.Join(binDir, name)
 		if b, err := exec.Command("go", "build", "-o", out, filepath.Join(src, "provider", dir)).CombinedOutput(); err != nil {
 			t.Fatalf("build %s: %v\n%s", name, err, b)
@@ -177,21 +179,23 @@ func buildBrowserPkg(t *testing.T) string {
 	return pkgDir
 }
 
-// TestOpenToolStreamFullNameEndpoint OpenToolStream 端点泛化解析（v6 P5）：
-// page.frames → browser 包全名流（端点名保留 v5 前端契约），stream.open 负载
+// TestOpenToolStreamFullNameEndpoint 验证 <package>.<stream> 解析：
+// browser.page.frames → browser 包的 page.frames 流，stream.open 负载
 // 原样透传到 svc（不存在的页面 → svc not_found 错误经桥接回来）；未知端点
 // 显式失败。
 func TestOpenToolStreamFullNameEndpoint(t *testing.T) {
-	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true})
-	defer c.Close()
+	// 编译夹具使用开发者的工具链环境；只有应用运行隔离 HOME。
 	r := newStreamTestRegistry(t)
-	if _, err := r.Install(buildBrowserPkg(t)); err != nil {
+	if _, err := installTestPackage(t, r, buildBrowserPkg(t)); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true})
+	defer c.Close()
 	c.skills = r
 	caller := tool.Caller{Subject: "owner", ConnectionID: "rtc:test", Origin: "sess", AllowStreams: true, ExpiresAt: time.Now().Add(time.Minute)}
 	ctx := context.Background()
-	st, err := c.OpenToolStream(ctx, caller, "page.frames", json.RawMessage(`{"page_id":"p_nope"}`))
+	st, err := c.OpenToolStream(ctx, caller, "browser.page.frames", json.RawMessage(`{"page_id":"p_nope"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,4 +206,40 @@ func TestOpenToolStreamFullNameEndpoint(t *testing.T) {
 	if _, err := c.OpenToolStream(ctx, caller, "page.bogus", nil); err == nil || !strings.Contains(err.Error(), "Unknown stream endpoint") {
 		t.Fatalf("unknown endpoint: %v", err)
 	}
+}
+
+func installTestPackage(t *testing.T, r *skillrun.Registry, dir string) (*skillrun.Package, error) {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		w, err := zw.Create(filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Base(dir)
+	return r.InstallZip(context.Background(), b.Bytes(), &skillrun.FetchMeta{Name: name, Kind: "private", ID: name})
 }

@@ -10,7 +10,7 @@
 |---|---|
 | aic 工具层 | 工具开关、目标检查、必要的用户审批；通过后发送请求 |
 | NATS / RTC | 身份认证、请求传输和响应关联 |
-| exec 接入层 | 前台等待、超时转后台（仅 NATS/AI）；统一保存脚本输出日志、生成返回预览和 attrs（预览截断仅 NATS；RTC 全量返回）——编排机制共享自 libs/execwait |
+| exec 接入层 | 前台等待、超时转后台（仅 NATS/AI）；统一保存脚本输出日志、生成返回预览和 attrs（预览截断仅 NATS；RTC 全量返回）——编排机制共享自 libs/execution |
 | vsh | 业务无关的 bash：可注册指令，执行 script，返回 stdout/stderr/exit_code；不管日志文件、预览截断、attrs 或转后台决策 |
 | bg | 查询、等待、取消已转入后台的执行，不负责启动或保存输出 |
 | rules 与沙箱 | 判断实际资源访问是否允许，拒绝时返回权限错误 |
@@ -36,6 +36,8 @@ vsh 按 shell 语义执行整个脚本；执行到其中一条指令时，按以
 命中指令但被 rules 拒绝时，直接返回权限错误，不能继续 fallback 绕过拒绝。原生 fallback 同样受命令规则和进程沙箱约束；它不是一条免检查通道。
 
 原生能力由 aic-pod 的宿主适配提供，不让 vsh 核心默认直接调用宿主 OS。page 没有原生执行能力，只运行已注册的虚拟指令。
+
+目录初始化由 FS factory 负责，vsh 不生成命令文件，不根据 HOME/PATH/cwd 写布局。host 脚本 PATH 来自真实宿主，原生查找与子进程都使用当次 PATH；export 与命令前置赋值经 Invocation.Env 传给原生及 process provider，未导出的 shell 变量不传递。标准路径变量在 OS 边界统一转换，vbox 在两个进程入口统一清洗继承环境，再应用平台参数和显式覆盖。service 的驻留环境由启动决定，每次调用的 env 随 invoke 传输，不能用全局 os.Setenv 修改共享服务。
 
 ### 2.2 commands 只展示需要发现的能力
 
@@ -189,7 +191,7 @@ grant_approved 是既有可信请求上下文中的审批结果，不是新签�
 
 保留现有连接认证、续期、撤销和数据通道机制；普通请求使用与 NATS 相同的载荷和分发实现。
 
-`page.frames / page.input` 留在 RTC 私有端点表，直接连接 Browser 服务；不注册为 vsh 指令，不进入 commands/caps。该表只管理 RTC 流，不变成通用工具注册表。
+`browser.page.frames / browser.page.input` 留在 RTC 私有端点表，直接连接 Browser 服务；不注册为 vsh 指令，不进入 commands/caps。该表只管理 RTC 流，不变成通用工具注册表。
 
 stream 继续检查调用者、页面归属、对应能力规则、租期和人工控制状态。连接失效关闭流；不因 stream 移出命令目录而取消这些检查。
 
@@ -235,3 +237,11 @@ viewer 只在整段脚本完成且成功后解析 stdout；若 attrs.truncated=t
 文档与工具说明同步：aic-pod 的 design.md、host_sandbox.md 更新为本目标的概览；aic 的 instruction_sets_v2.md 标明旧契约已被本提案替代的范围。实际迁移时必须同时更新 `aic/tools/exec/exec.go` 的工具描述、注入给 Agent 的指令说明和前端帮助，删除 bg run/output、等级与单指令调用示例；本轮不先修改运行中工具说明冒充功能已经上线。
 
 不在本次改造中引入：单指令 argv 调用协议、第二个 Registry、强制 native 指令、通用权限框架、执行计划、审批凭据、运行时审批、暂停续跑、新任务服务，以及新的应用/站点权限模型。
+
+
+### 当前执行实现边界
+
+- `vsh` 负责 shell 语义；`aic-pod/libs/execution` 只装配共享引擎、文件/网络适配器和平台命令。设备原生程序适配器在 `libs/host/native.go`，云端无设备进程管理依赖。
+- host 组合配置与会话授权，输出一个 `vbox.Policy{FS, Net}`。`StartOptions` 只带该快照；平台参数由 vbox 派生，cwd 本身不授予写权限。
+- Analyze 只检查语法与收集字面 grant。文件权限在实际操作时检查，不猜测未执行分支或动态路径的写目标。同一脚本里的 grant 可影响后续操作；后续权限失败不会回滚先前副作用。
+- execwait 持有执行期限与唯一完成回调。前台超时/调用方断开只结束等待，日志在实际执行结束后关闭；设备 exec_timeout 决定执行期限。云端 session/backing 随执行 context 传递，后台执行保留所需上下文，完成后无需全局路由表注销。

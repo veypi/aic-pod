@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	vshglue "github.com/veypi/aic-pod/libs/vsh"
+	"github.com/veypi/aic-pod/libs/execution"
 )
 
 func TestExecResultResponsePolicy(t *testing.T) {
@@ -25,7 +25,7 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	}
 
 	// NATS：超 1000 行 → 行截断 + truncated 标记。
-	r := execResultResponse(&vshglue.ExecResult{ExitCode: 0, Stdout: mkLines(1001)}, attrs(), false)
+	r := execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: mkLines(1001)}, attrs(), false)
 	if r.Attrs["truncated"] != "true" {
 		t.Fatal("NATS line truncation must set truncated")
 	}
@@ -34,11 +34,11 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	}
 
 	// NATS：stderr 超 100 行 → 预览截断 + truncated；引擎采集截断也置标记。
-	r = execResultResponse(&vshglue.ExecResult{ExitCode: 0, Stdout: "ok", Stderr: mkLines(101)}, attrs(), false)
+	r = execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: "ok", Stderr: mkLines(101)}, attrs(), false)
 	if r.Attrs["truncated"] != "true" || strings.Count(r.Attrs["stderr"], "\n") != 100 {
 		t.Fatalf("NATS stderr preview: %+v", r.Attrs)
 	}
-	r = execResultResponse(&vshglue.ExecResult{ExitCode: 0, Stdout: "ok", StdoutTruncated: true}, attrs(), false)
+	r = execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: "ok", StdoutTruncated: true}, attrs(), false)
 	if r.Attrs["truncated"] != "true" {
 		t.Fatal("NATS engine capture truncation must set truncated")
 	}
@@ -46,7 +46,7 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	// RTC：全量返回——不截断、没有 truncated 标记（即使引擎采集截断也一样：
 	// 更多数据经 fs 读日志，exec 响应不表达截断概念）。
 	big := mkLines(5000)
-	r = execResultResponse(&vshglue.ExecResult{ExitCode: 0, Stdout: big, Stderr: "diag", StdoutTruncated: true}, attrs(), true)
+	r = execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: big, Stderr: "diag", StdoutTruncated: true}, attrs(), true)
 	if r.Content != big {
 		t.Fatalf("RTC content must be full (got %d bytes, want %d)", len(r.Content), len(big))
 	}
@@ -55,7 +55,7 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	}
 
 	// exit_code 逐码透出（两通道同）。
-	r = execResultResponse(&vshglue.ExecResult{ExitCode: 42, Stdout: ""}, attrs(), true)
+	r = execResultResponse(&execution.ExecResult{ExitCode: 42, Stdout: ""}, attrs(), true)
 	if r.Attrs["exit_code"] != "42" {
 		t.Fatalf("exit_code: %+v", r.Attrs)
 	}

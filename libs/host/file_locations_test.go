@@ -8,6 +8,7 @@ import (
 )
 
 func TestAIFileReferencesKeepFullNativePaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c := New(Options{WorkDir: t.TempDir()})
 	c.hostID = "device"
 	outside := t.TempDir()

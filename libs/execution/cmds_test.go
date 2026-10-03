@@ -1,4 +1,4 @@
-package vsh
+package execution
 
 import (
 	"bytes"
@@ -51,9 +51,14 @@ func TestPlatformCommandsRegistered(t *testing.T) {
 	if err := RegisterPlatformCommands(reg, PlatformDeps{Tasks: NewTaskTable()}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"commands", "bg", "grant", "list_hosts", "send_user"} {
+	for _, name := range []string{"commands", "bg"} {
 		if _, ok := reg.Lookup(name); !ok {
 			t.Fatalf("missing %q", name)
+		}
+	}
+	for _, name := range []string{"grant", "list_hosts", "send_user", "skill"} {
+		if _, ok := reg.Lookup(name); ok {
+			t.Fatalf("unsupported command %q registered", name)
 		}
 	}
 }
@@ -66,7 +71,7 @@ func TestCmdCommandsListsRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "grant") || !strings.Contains(out, "bg") {
+	if !strings.Contains(out, "commands") || !strings.Contains(out, "bg") {
 		t.Fatalf("commands out = %q", out)
 	}
 }
@@ -80,6 +85,7 @@ func TestCmdCommandsDisplayFilter(t *testing.T) {
 	_ = RegisterPlatformCommands(reg, PlatformDeps{
 		Tasks:        NewTaskTable(),
 		Discoverable: func(name string) bool { return core[name] },
+		SendUser:     func(context.Context, string, string) error { return nil },
 	})
 	out, _, err := runCmd(t, reg, "commands")
 	if err != nil {
@@ -88,12 +94,12 @@ func TestCmdCommandsDisplayFilter(t *testing.T) {
 	if strings.Contains(out, "list_hosts") || strings.Contains(out, "send_user") {
 		t.Fatalf("filtered out = %q", out)
 	}
-	if !strings.Contains(out, "grant") {
+	if !strings.Contains(out, "commands") {
 		t.Fatalf("commands out = %q", out)
 	}
 	// 未列出照常可执行
-	if _, _, err := runCmd(t, reg, "send_user"); err == nil {
-		t.Fatal("send_user without deps must still execute (readable error)")
+	if _, _, err := runCmd(t, reg, "send_user", "hello"); err != nil {
+		t.Fatal(err)
 	}
 }
 

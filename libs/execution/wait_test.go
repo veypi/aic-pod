@@ -1,28 +1,28 @@
-package execwait
+package execution
 
 import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	vshglue "github.com/veypi/aic-pod/libs/vsh"
 	"github.com/veypi/vigo/contrib/ufs"
 	gbfs "github.com/veypi/vsh/fs"
 )
 
-// newTestEngine cloud 形态 Engine：UFS localFS backing + jail /u/u1，无规则表。
-func newTestEngine(t *testing.T) *vshglue.Engine {
+// newWaitTestEngine cloud 形态 Engine：UFS localFS backing + jail /u/u1，无规则表。
+func newWaitTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	backing, err := ufs.NewLocalFS(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := vshglue.NewEngine(vshglue.EngineConfig{
+	e, err := NewEngine(EngineConfig{
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
-			fsys, err := vshglue.NewCloudFS(vshglue.CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
+		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
+			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
 			return fsys, "/u/u1", err
 		},
 	})
@@ -32,21 +32,21 @@ func newTestEngine(t *testing.T) *vshglue.Engine {
 	return e
 }
 
-// blockHandle 构造阻塞中的执行句柄（Adopt 测试件）。
-func blockHandle() (*vshglue.ExecHandle, chan struct{}) {
+// waitBlockHandle 构造阻塞中的执行句柄（Adopt 测试件）。
+func waitBlockHandle() (*ExecHandle, chan struct{}) {
 	release := make(chan struct{})
-	h := vshglue.NewExecHandle(func() {})
-	go func() { <-release; h.Finish(&vshglue.ExecResult{ExitCode: 0}, nil) }()
+	h := NewExecHandle(func() {})
+	go func() { <-release; h.Finish(&ExecResult{ExitCode: 0}, nil) }()
 	return h, release
 }
 
 // TestForegroundNoBGRecord 前台完成不产生 bg 记录（§2.4）。
 func TestForegroundNoBGRecord(t *testing.T) {
 	t.Parallel()
-	e := newTestEngine(t)
-	out := Execute(context.Background(), e, vshglue.ExecRequest{
+	e := newWaitTestEngine(t)
+	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "echo hi",
-	}, 5*time.Second, vshglue.TaskMeta{Owner: "u:t1", Session: "s1"}, true)
+	}, 5*time.Second, TaskMeta{Owner: "u:t1", Session: "s1"}, true, nil)
 	if out.Err != nil || out.Background || out.Result.ExitCode != 0 {
 		t.Fatalf("out = %+v", out)
 	}
@@ -62,11 +62,11 @@ func TestForegroundNoBGRecord(t *testing.T) {
 // ErrWaitElapsed，不产生 bg 记录；执行继续并正常完成（bg 机制只服务 AI 通道）。
 func TestNoAdoptRTC(t *testing.T) {
 	t.Parallel()
-	e := newTestEngine(t)
-	h := vshglue.NewExecHandle(nil)
-	out := Execute(context.Background(), e, vshglue.ExecRequest{
+	e := newWaitTestEngine(t)
+	h := NewExecHandle(nil)
+	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late", Handle: h,
-	}, 50*time.Millisecond, vshglue.TaskMeta{Owner: "u:t1", Session: "s1"}, false)
+	}, 50*time.Millisecond, TaskMeta{Owner: "u:t1", Session: "s1"}, false, nil)
 	if !errors.Is(out.Err, ErrWaitElapsed) || out.Background || out.Result != nil {
 		t.Fatalf("out = %+v", out)
 	}
@@ -92,10 +92,10 @@ func TestNoAdoptRTC(t *testing.T) {
 // bg wait 可等到完成；退出码透传。
 func TestTimeoutAdoptsOnce(t *testing.T) {
 	t.Parallel()
-	e := newTestEngine(t)
-	out := Execute(context.Background(), e, vshglue.ExecRequest{
+	e := newWaitTestEngine(t)
+	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late",
-	}, 50*time.Millisecond, vshglue.TaskMeta{Owner: "u:t1", Session: "s1", LogOut: "/log/o", LogErr: "/log/e"}, true)
+	}, 50*time.Millisecond, TaskMeta{Owner: "u:t1", Session: "s1", LogOut: "/log/o", LogErr: "/log/e"}, true, nil)
 	if out.Err != nil || !out.Background {
 		t.Fatalf("out = %+v", out)
 	}
@@ -123,14 +123,14 @@ func TestTimeoutAdoptsOnce(t *testing.T) {
 // goroutine 继续跑完写结果，返回上下文取消类错误。
 func TestContextCancelStopsWaitingOnly(t *testing.T) {
 	t.Parallel()
-	e := newTestEngine(t)
-	h := vshglue.NewExecHandle(nil)
+	e := newWaitTestEngine(t)
+	h := NewExecHandle(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan *Outcome, 1)
 	go func() {
-		done <- Execute(ctx, e, vshglue.ExecRequest{
+		done <- Execute(ctx, e, ExecRequest{
 			SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late", Handle: h,
-		}, 30*time.Second, vshglue.TaskMeta{Owner: "u:t1", Session: "s1"}, true)
+		}, 30*time.Second, TaskMeta{Owner: "u:t1", Session: "s1"}, true, nil)
 	}()
 	time.Sleep(100 * time.Millisecond)
 	cancel()
@@ -164,18 +164,18 @@ func TestContextCancelStopsWaitingOnly(t *testing.T) {
 // 不让未登记的执行继续运行（§2.4）。
 func TestCapacityCancel(t *testing.T) {
 	t.Parallel()
-	e := newTestEngine(t)
-	e.Tasks = vshglue.NewTaskTableWithCaps(1, 1)
+	e := newWaitTestEngine(t)
+	e.Tasks = NewTaskTableWithCaps(1, 1)
 	// 占满唯一名额
-	h, release := blockHandle()
+	h, release := waitBlockHandle()
 	defer close(release)
-	if _, err := e.Tasks.Adopt(h, "occupant", vshglue.TaskMeta{Owner: "u:t1", Session: "s1"}); err != nil {
+	if _, err := e.Tasks.Adopt(h, "occupant", TaskMeta{Owner: "u:t1", Session: "s1"}); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	out := Execute(context.Background(), e, vshglue.ExecRequest{
+	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "sleep 30",
-	}, 50*time.Millisecond, vshglue.TaskMeta{Owner: "u:t1", Session: "s1"}, true)
+	}, 50*time.Millisecond, TaskMeta{Owner: "u:t1", Session: "s1"}, true, nil)
 	if out.Err == nil || !strings.Contains(out.Err.Error(), "task table full") {
 		t.Fatalf("out.Err = %v", out.Err)
 	}
@@ -187,5 +187,41 @@ func TestCapacityCancel(t *testing.T) {
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Fatal("未登记的执行未被取消（sleep 30 跑满）")
+	}
+}
+
+// A wait timeout must not close execution resources; completion owns cleanup.
+func TestCompletionAfterWait(t *testing.T) {
+	e := newWaitTestEngine(t)
+	h := NewExecHandle(nil)
+	var completed atomic.Int32
+	out := Execute(context.Background(), e, ExecRequest{
+		SessionKey: "cleanup", Script: "sleep 0.2; echo late", Handle: h,
+	}, 10*time.Millisecond, TaskMeta{}, false, func(res *ExecResult) {
+		if res == nil || strings.TrimSpace(res.Stdout) != "late" {
+			t.Errorf("completion result: %+v", res)
+		}
+		completed.Add(1)
+	})
+	if !errors.Is(out.Err, ErrWaitElapsed) || completed.Load() != 0 {
+		t.Fatalf("premature completion: %+v", out)
+	}
+	select {
+	case <-h.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("execution did not finish")
+	}
+	if completed.Load() != 1 {
+		t.Fatal("cleanup must finish exactly once before handle completion")
+	}
+}
+
+func TestConfiguredExecutionTimeout(t *testing.T) {
+	e := newWaitTestEngine(t)
+	out := Execute(context.Background(), e, ExecRequest{
+		SessionKey: "timeout", Script: "sleep 30", Timeout: 50 * time.Millisecond,
+	}, 5*time.Second, TaskMeta{}, false, nil)
+	if out.Background || out.Result == nil || out.Result.ExitCode != 124 {
+		t.Fatalf("timeout not enforced: %+v", out)
 	}
 }

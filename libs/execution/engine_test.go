@@ -1,18 +1,11 @@
-package vsh
+package execution
 
 import (
 	"context"
-	"io"
-	stdfs "io/fs"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/contrib/ufs"
 	gbfs "github.com/veypi/vsh/fs"
 )
@@ -27,7 +20,7 @@ func newTestEngine(t *testing.T) *Engine {
 	e, err := NewEngine(EngineConfig{
 		// HOME=/u/{uid}、PATH 钉死（env 由平台每次注入）。
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
+		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
 			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
 			return fsys, "/u/u1", err
 		},
@@ -46,7 +39,7 @@ func blockHandle() (*ExecHandle, chan struct{}) {
 	return h, release
 }
 
-// Cancel 先于 BindCancel：取消请求不得丢失（接入层预建句柄与 execwait
+// Cancel 先于 BindCancel：取消请求不得丢失（接入层预建句柄与 execution 等待编排
 // 编排层绑定墙钟 cancel 之间存在竞态窗）——绑定时补触发。
 func TestExecHandleCancelBeforeBind(t *testing.T) {
 	t.Parallel()
@@ -242,7 +235,7 @@ func TestEngineTrustedContext(t *testing.T) {
 	var gotSid string
 	e, err := NewEngine(EngineConfig{
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
+		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
 			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
 			return fsys, "/u/u1", err
 		},
@@ -388,13 +381,13 @@ func TestEngineSessionPersistsFS(t *testing.T) {
 func TestEngineRegistryHasPlatformCommands(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)
-	for _, name := range []string{"commands", "bg", "grant", "list_hosts", "send_user", "jq", "ls", "rg", "cp", "mv", "rm"} {
+	for _, name := range []string{"commands", "bg", "jq", "ls", "rg", "cp", "mv", "rm"} {
 		if _, ok := e.Registry().Lookup(name); !ok {
 			t.Fatalf("registry missing %q", name)
 		}
 	}
 	// 内建 --help 冒烟（回归保险丝）。
-	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "ls --help >/dev/null && jq --help >/dev/null && commands | grep -q '^grant$'"})
+	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "ls --help >/dev/null && jq --help >/dev/null && commands | grep -q '^commands$'"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,70 +455,6 @@ func TestEngineWriteAudit(t *testing.T) {
 	}
 }
 
-// chmodBacking 给 localFS 补 Chmod（对齐 host OSVFS 的执行位能力；vigo ufs
-// localFS 无 Chmod，P2 回归需要带执行位语义的 backing）。
-type chmodBacking struct {
-	ufs.FS
-	root string
-}
-
-func (b chmodBacking) Chmod(name string, mode stdfs.FileMode) error {
-	return os.Chmod(filepath.Join(b.root, filepath.FromSlash(strings.TrimPrefix(name, "/"))), mode)
-}
-
-// TestHostBuiltinEchoViaStubDir 无内存层的 host 形态引擎（OS backing + 规则表
-// 门）上，shell 内置名 echo 经 BuiltinCommandDir 指向真实 stub 目录后可解析
-// 执行（修复前默认 /bin 在 host 上不存在 → /bin/echo ENOENT）；且布局初始化
-// 写出的 stub 带执行位（0644 stub 会被 PATH/type -P 解析跳过）。
-func TestHostBuiltinEchoViaStubDir(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	local, err := ufs.NewLocalFS(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backing := chmodBacking{FS: local, root: root}
-	const stubDir = "/stub/bin"
-	env := map[string]string{"HOME": "/stub/home", "PATH": stubDir, "USER": "agent"}
-	e, err := NewEngine(EngineConfig{
-		BaseEnv: env,
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewHostFS(HostFSConfig{
-				Backing: backing,
-				Rules:   func() vbox.FSRuleSet { return vbox.FSRuleSet{DefaultWrite: vbox.EffRW} },
-			})
-			return fsys, "/stub", err
-		},
-		LayoutEnv:         env,
-		BuiltinCommandDir: stubDir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "echo hi"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(res.Stdout) != "hi" {
-		t.Fatalf("echo stdout = %q (stderr %q, exit %d)", res.Stdout, res.Stderr, res.ExitCode)
-	}
-	info, err := backing.Stat(stubDir + "/echo")
-	if err != nil {
-		t.Fatalf("stub echo not pinned: %v", err)
-	}
-	if info.Mode()&0o111 == 0 {
-		t.Fatalf("stub echo mode = %v, want executable", info.Mode())
-	}
-}
-
-// 确保 io 引用保留（blockHandle 签名）。
-var _ = io.Discard
-
-// TestShellQuoteRoundtrip 用 aic ui/assets/libs/shell_quote.js 的输出形状
-// （POSIX 单引号语义：'...' 内无转义；单引号用 '"'"' 闭合替换；良名直通）
-// 作为测试向量，断言 vsh 解析后参数原样还原、没有额外指令被执行——
-// 与 JS 侧 shell_quote.test.js 的输出形状断言互为两端（hosts-vsh-redesign
-// §5「在 vsh 中验证参数原样还原且无额外执行」）。
 func TestShellQuoteRoundtrip(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)
@@ -563,117 +492,5 @@ func TestShellQuoteRoundtrip(t *testing.T) {
 	}
 	if strings.Contains(res.Stdout, "pwned") {
 		t.Fatalf("quoted vectors executed side effects: %q", res.Stdout)
-	}
-}
-
-// TestHostBuiltinExitDispatch A 缺陷回归：无 stub 标记文件的内置名（exit）
-// 在 host 形态引擎（NativeFallback 对任意良名合成）上不被重写成 stub 路径，
-// 保持解释器派发。修复前 exit 被重写为 <stubDir>/exit → 127 "No such file"。
-func TestHostBuiltinExitDispatch(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	local, err := ufs.NewLocalFS(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backing := chmodBacking{FS: local, root: root}
-	const stubDir = "/stub/bin"
-	env := map[string]string{"HOME": "/stub/home", "PATH": stubDir, "USER": "agent"}
-	native := NewNativeRegistry(NativeDeps{})
-	native.SetPolicy(true, nil)
-	e, err := NewEngine(EngineConfig{
-		BaseEnv: env,
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewHostFS(HostFSConfig{
-				Backing: backing,
-				Rules:   func() vbox.FSRuleSet { return vbox.FSRuleSet{DefaultWrite: vbox.EffRW} },
-			})
-			return fsys, "/stub", err
-		},
-		LayoutEnv:         env,
-		BuiltinCommandDir: stubDir,
-		NativeFallback:    native.OpenLookup,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "exit 3"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backing.Stat(stubDir + "/exit"); err == nil {
-		t.Fatal("precondition: exit stub must not exist")
-	}
-	if res.ExitCode != 3 {
-		t.Fatalf("exit 3 → code=%d stderr=%q", res.ExitCode, res.Stderr)
-	}
-	if strings.Contains(res.Stderr, "No such file") {
-		t.Fatalf("stderr leaked rewrite failure: %q", res.Stderr)
-	}
-}
-
-// TestHostExplicitBinaryPath B 缺陷回归：显式程序路径的二进制文件（/bin/ls
-// 形态，首行含 NUL）经 NativeFallback 按路径原生执行——旧行为把二进制当脚本
-// 交默认解释器（126）。引擎路径里的 /bin/ls 只是触发解析的标记文件；原生层
-// 按同一路径取真实二进制执行（参数透传，输出可验证）。
-func TestHostExplicitBinaryPath(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("unix explicit path semantics")
-	}
-	lsPath, err := exec.LookPath("ls")
-	if err != nil || !filepath.IsAbs(lsPath) {
-		t.Skipf("no absolute ls on PATH: %q %v", lsPath, err)
-	}
-	root := t.TempDir()
-	local, err := ufs.NewLocalFS(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backing := chmodBacking{FS: local, root: root}
-	const stubDir = "/stub/bin"
-	env := map[string]string{"HOME": "/stub/home", "PATH": stubDir, "USER": "agent"}
-	m := vbox.NewManager(0)
-	m.SetNoSandbox(true)
-	native := NewNativeRegistry(NativeDeps{
-		Manager: m,
-		Workdir: func(string) string { return "" },
-	})
-	native.SetPolicy(true, nil)
-	e, err := NewEngine(EngineConfig{
-		BaseEnv: env,
-		NewSessionFS: func(key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewHostFS(HostFSConfig{
-				Backing: backing,
-				Rules:   func() vbox.FSRuleSet { return vbox.FSRuleSet{DefaultWrite: vbox.EffRW} },
-			})
-			return fsys, "/stub", err
-		},
-		LayoutEnv:         env,
-		BuiltinCommandDir: stubDir,
-		NativeFallback:    native.OpenLookup,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "bin", "ls"), []byte("\x7fELF\x00\x01binary\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	markerDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(markerDir, "marker-ivec"), []byte("x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: lsPath + " " + markerDir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ExitCode != 0 {
-		t.Fatalf("explicit binary path → code=%d stderr=%q", res.ExitCode, res.Stderr)
-	}
-	if !strings.Contains(res.Stdout, "marker-ivec") {
-		t.Fatalf("stdout = %q, want real ls output (stderr=%q)", res.Stdout, res.Stderr)
 	}
 }
