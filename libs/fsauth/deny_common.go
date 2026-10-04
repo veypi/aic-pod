@@ -12,6 +12,8 @@ package fsauth
 func denyCommon() []string {
 	return []string{
 		"**/.ssh/**",
+		// OrbStack's external SSH config and credentials are also device state.
+		"~/.orbstack/ssh/**",
 		"**/id_rsa*", "**/id_ed25519*", "**/id_ecdsa*", "**/id_dsa*",
 		"~/.aws/**", "~/.config/gcloud/**", "~/.azure/**",
 		"~/.netrc", "~/.npmrc", "~/.docker/config.json",
@@ -28,7 +30,11 @@ func denyCommon() []string {
 		"/var/run/docker.sock",
 		// browser state 目录级拒绝：全量 cookie 库 browser.json 及其
 		// 保存流程临时文件（.cli-tmp/.merge-tmp，含同等全量状态）一并覆盖。
-		"$HOME/.aic/browser/**",
-		"$HOME/.aic/config.yaml",
+		// 用 ~ 而非 $HOME：~ 走 os.UserHomeDir()（Windows 回退 USERPROFILE），
+		// $HOME 是 unix 惯例变量——Windows GUI/schtasks 进程没有它，会让本表
+		// 整表编译失败（2026-10-04 win 实机：rule 30: cannot expand）。
+		"~/.aic/browser/**",
+		"~/.aic/config.yaml",
+		"~/.aic/ssh_config", "~/.aic/ssh/**",
 	}
 }
