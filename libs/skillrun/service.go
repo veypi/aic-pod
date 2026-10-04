@@ -67,7 +67,12 @@ func (r *Registry) ensureService(ctx context.Context, pkg *Package) (*serviceIns
 		inst = &serviceInst{socket: socket, cancel: cancel, done: make(chan struct{}), ready: make(chan struct{})}
 		pkg.service = inst
 		manifest := pkg.Manifest
-		argv := append([]string{filepath.Join(pkg.Dir, filepath.FromSlash(manifest.Entry))}, manifest.Args...)
+		entry, err := resolveEntry(pkg.Dir, manifest.Entry)
+		if err != nil {
+			pkg.mu.Unlock()
+			return nil, err
+		}
+		argv := append([]string{entry}, manifest.Args...)
 		go func(inst *serviceInst) {
 			defer close(inst.done)
 			logw := &logfWriter{prefix: "skill " + pkg.Name + ": ", logf: r.logf}

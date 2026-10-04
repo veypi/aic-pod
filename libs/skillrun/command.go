@@ -2,7 +2,6 @@ package skillrun
 
 import (
 	"context"
-	"path/filepath"
 
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/proto"
@@ -30,7 +29,10 @@ func (r *Registry) rootCommand(name string) commands.Command {
 
 func (r *Registry) runProcess(ctx context.Context, inv *commands.Invocation, pkg *Package) error {
 	p := pkg.Manifest
-	entry := filepath.Join(pkg.Dir, filepath.FromSlash(p.Entry))
+	entry, err := resolveEntry(pkg.Dir, p.Entry)
+	if err != nil {
+		return err
+	}
 	workdir := inv.Cwd
 	if r.deps.Workdir != nil {
 		workdir = r.deps.Workdir(inv.Cwd)

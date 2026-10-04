@@ -110,7 +110,10 @@ func (r *Registry) InstallZip(ctx context.Context, data []byte, meta *FetchMeta)
 		}
 	}
 	if manifest != nil {
-		entry := filepath.Join(next, filepath.FromSlash(manifest.Entry))
+		entry, err := resolveEntry(next, manifest.Entry)
+		if err != nil {
+			return nil, fmt.Errorf("skill entry: %w", err)
+		}
 		info, err := os.Lstat(entry)
 		if err != nil {
 			return nil, fmt.Errorf("skill entry: %w", err)
@@ -292,7 +295,11 @@ func loadInstalled(dir, name string) (*Package, error) {
 		if err != nil {
 			return nil, err
 		}
-		info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(manifest.Entry)))
+		entry, err := resolveEntry(dir, manifest.Entry)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Lstat(entry)
 		if err != nil {
 			return nil, err
 		}
