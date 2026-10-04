@@ -19,6 +19,9 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 			name = strings.TrimSuffix(name, ext)
 		}
 	}
+	if reservedSSHNative(name) {
+		return commands.Exitf(inv, 126, "%s: native SSH command is reserved; use managed ssh/scp/sftp and grant ssh host:port", resolvedPath)
+	}
 	if !c.execAllowed(execution.SessionFromContext(ctx), name) {
 		return commands.Exitf(inv, 126, "%s: command denied by exec rules (grant cmd %s)", resolvedPath, name)
 	}
@@ -36,4 +39,12 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 		return &commands.ExitError{Code: code}
 	}
 	return nil
+}
+
+func reservedSSHNative(name string) bool {
+	switch name {
+	case "ssh", "scp", "sftp", "slogin", "ssh-copy-id", "ssh-keyscan":
+		return true
+	}
+	return false
 }

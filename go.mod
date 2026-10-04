@@ -7,7 +7,9 @@ require (
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pion/ice/v4 v4.4.2
 	github.com/pion/webrtc/v4 v4.2.20
+	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
+	github.com/veypi/aic-skills v0.0.0
 	github.com/veypi/vbox v0.0.0
 	github.com/veypi/vigo v0.7.6
 	github.com/veypi/vsh v0.0.38
@@ -42,6 +44,7 @@ require (
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
@@ -62,7 +65,6 @@ require (
 	github.com/pion/turn/v5 v5.1.0 // indirect
 	github.com/redis/go-redis/v9 v9.18.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/veypi/aic-skills v0.0.0
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect

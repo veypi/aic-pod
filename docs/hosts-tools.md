@@ -6,12 +6,14 @@
 
 AI 只有内建 `fs` 和 `exec` 两个工具。exec 是唯一执行动作：一段 vsh 脚本。命令发现走脚本内 `commands` + `<cmd> --help`；后台走脚本内 `bg`；授权走脚本内 `grant`。browser/cua 是 vsh 指令（注册进引擎 Registry），不再是独立的 wire 命令；原生程序不逐个注册——Registry 未命中时按命令规则合成执行，实际进程由 OS 沙箱约束。
 
+host 另提供托管 `ssh/scp/sftp` 平台命令：ssh 域判最终目标，文件传输的本地访问走 fs 域；系统 SSH 仅承担连接与认证。配置、命令子集和名称门边界见 [托管 SSH](managed-ssh.md)。
+
 - `protocol/hosts_tools`（hosts_tools/2）定义三个动作（exec/fs/cancel）、统一调用体、调用者身份（含 grant_approved）与错误。
 - `protocol/hosts_nats`（hosts_nats/2）是服务端可信转发信封：HMAC 签名携带 caller、归属会话与 grant_approved 审批事实；Verify 强制 caller 与路由 subject 中的 uid 一致（执行/任务/取消归属统一从 caller 派生，信封身份不能与路由归属脱节）。
 - `protocol/hosts_rtc`（hosts_rtc/2）是 owner 前端直连：票据绑定 DTLS 指纹与归属会话，grant_approved 是逐请求的确认元信息。
 - `libs/execution` 是 vsh 引擎装配层：可信执行上下文（归属/grant_approved/nosandbox 经 context 注入，不从脚本可修改的 argv/env 读取）、统一外层 Execute（前台等待 + 超时登记后台）、平台命令（commands/bg/grant/list_hosts/send_user）。
 - `libs/hostauth` 负责 RTC 票据、DTLS 身份绑定和续期。
-- `vbox`（外部依赖 ivec/vbox）托管原生进程：OS 沙箱 profile 一律由规则表派生（数字等级已删除），免沙箱只来自可信上下文的 nosandbox。
+- `vbox`（外部依赖 ivec/vbox）托管原生进程：OS 沙箱 profile 一律由规则表派生（数字等级已删除），免沙箱来自可信 nosandbox 或已完成入口授权的内部管控调用（如托管 SSH）。
 - `libs/hostfs` 拥有路径、版本、上传和字节源；AI 文本操作与前端二进制文件操作使用同一 FS 实现。
 - `browser` / `cua` 包（aic-skills 仓，v6 P5/P6 起）拥有 Chrome/窗口/快照：包根命令经 skillrun 注册进 vsh（与包命令同门径）；`browser.page.frames`/`browser.page.input` 是 RTC 私有 stream 端点，不注册为指令。
 - `ui/1` 保留为 browser/cua 包内部操作与结果词汇（target/snapshot/ref 等，sdk/go/ui 共享），不是独立的协议入口；对外统一经 hosts_tools/2 与 vsh 指令。

@@ -308,6 +308,9 @@ func (a *ufsAdapter) Open(ctx context.Context, name string) (gbfs.File, error) {
 	if err := a.gate(abs, vbox.OpRead, false); err != nil {
 		return nil, err
 	}
+	if native, ok := a.backing.(checkedOpener); ok {
+		return native.OpenChecked(abs, os.O_RDONLY, 0, a.gateResolved)
+	}
 	f, err := a.backing.Open(abs)
 	if err != nil {
 		return nil, err
@@ -328,6 +331,9 @@ func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm s
 	}
 	if err := a.gate(abs, op, false); err != nil {
 		return nil, err
+	}
+	if native, ok := a.backing.(checkedOpener); ok {
+		return native.OpenChecked(abs, flag, perm, a.gateResolved)
 	}
 	if !writeIntent {
 		f, err := a.backing.Open(abs)
@@ -383,9 +389,14 @@ func (a *ufsAdapter) Lstat(ctx context.Context, name string) (stdfs.FileInfo, er
 	if a.isMem(abs) {
 		return a.mem.Lstat(ctx, abs)
 	}
-	// UFS 无符号链接：Lstat = Stat（但门控用 NoFollow 口径——查的是路径本身）。
+	// Native backends can expose real Lstat; logical UFS backends fall back to Stat.
 	if err := a.gateMeta(abs); err != nil {
 		return nil, err
+	}
+	if native, ok := a.backing.(interface {
+		Lstat(string) (stdfs.FileInfo, error)
+	}); ok {
+		return native.Lstat(abs)
 	}
 	return a.backing.Stat(abs)
 }
@@ -398,6 +409,11 @@ func (a *ufsAdapter) ReadDir(ctx context.Context, name string) ([]stdfs.DirEntry
 	}
 	if err := a.gate(abs, vbox.OpRead, false); err != nil {
 		return nil, err
+	}
+	if native, ok := a.backing.(interface {
+		ReadDirChecked(string, func(string, vbox.FileOp) error) ([]stdfs.DirEntry, error)
+	}); ok {
+		return native.ReadDirChecked(abs, a.gateResolved)
 	}
 	return a.backing.ReadDir(abs)
 }
@@ -514,6 +530,11 @@ func (a *ufsAdapter) MkdirAll(ctx context.Context, name string, perm stdfs.FileM
 	if err := a.gate(abs, vbox.OpWrite, false); err != nil {
 		return err
 	}
+	if native, ok := a.backing.(interface {
+		MkdirAllChecked(string, stdfs.FileMode, func(string, vbox.FileOp) error) error
+	}); ok {
+		return native.MkdirAllChecked(abs, perm, a.gateResolved)
+	}
 	return a.backing.MkdirAll(abs, perm)
 }
 
@@ -535,6 +556,13 @@ func (a *ufsAdapter) Remove(ctx context.Context, name string, recursive bool) er
 	// unlink 语义：删的是路径本身（NoFollow，2026-09-22 .venv 修复同口径）。
 	if err := a.gate(abs, vbox.OpWrite, true); err != nil {
 		return err
+	}
+	if !recursive {
+		if native, ok := a.backing.(interface {
+			RemoveChecked(string, func(string, vbox.FileOp) error) error
+		}); ok {
+			return native.RemoveChecked(abs, a.gateResolved)
+		}
 	}
 	if !recursive {
 		// rmdir 语义：非空目录不删（RemoveAll 无此区分，在此补齐）。
@@ -565,7 +593,28 @@ func (a *ufsAdapter) Rename(ctx context.Context, oldName, newName string) error 
 	if err := a.gate(newAbs, vbox.OpWrite, true); err != nil {
 		return err
 	}
+	if native, ok := a.backing.(interface {
+		RenameChecked(string, string, func(string, vbox.FileOp) error) error
+	}); ok {
+		return native.RenameChecked(oldAbs, newAbs, a.gateResolved)
+	}
 	return a.backing.Rename(oldAbs, newAbs)
+}
+
+type checkedOpener interface {
+	OpenChecked(string, int, stdfs.FileMode, func(string, vbox.FileOp) error) (*os.File, error)
+}
+
+// The host backend has already resolved and pinned this path. Do not resolve
+// it a second time through a concurrently changed pathname before evaluating.
+func (a *ufsAdapter) gateResolved(abs string, op vbox.FileOp) error {
+	if !a.inJail(abs) {
+		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: ErrOutsideJail}
+	}
+	if a.rules != nil && !a.rules().MatchPath(abs, op).Allow {
+		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: grant fs %s", ErrRuleDenied, abs)}
+	}
+	return nil
 }
 
 func (a *ufsAdapter) Getwd() string {

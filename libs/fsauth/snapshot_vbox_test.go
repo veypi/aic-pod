@@ -19,12 +19,9 @@ func TestSnapshotCfgOverridesBuiltinDeny(t *testing.T) {
 	t.Cleanup(func() { cfg.SetAuth(old) })
 	a := old
 	a.FsPolicy = cfg.PolicyDeny
-	// builtin deny 含 SSH 私钥类（默认表）；选一条确定在内建表里的目标验证。
-	denied := defaultDenyPaths()
-	if len(denied) == 0 {
-		t.Skip("no builtin deny on this platform")
-	}
-	target := denied[0]
+	// Use actual expanded file paths, not raw patterns or table indexes: Match
+	// receives filesystem paths and does not expand a caller's tilde/globs.
+	target := mustExpand(t, "~/.ssh/config")
 	a.FsRules = []string{"rw:" + target}
 	cfg.SetAuth(a)
 
@@ -35,12 +32,13 @@ func TestSnapshotCfgOverridesBuiltinDeny(t *testing.T) {
 		t.Fatalf("cfg rw should override builtin deny under first-wins: %+v", d)
 	}
 	// 未覆盖的 deny 目标仍拒。
-	if len(denied) > 1 {
-		if d2 := snap.Match(denied[1], vbox.OpWrite); d2.Allow {
-			t.Fatalf("uncovered builtin deny should hold: %s %+v", denied[1], d2)
+	for _, raw := range []string{"~/.ssh/known_hosts", "~/.orbstack/ssh/config", "~/.orbstack/ssh/known_hosts", "~/.aic/ssh_config", "~/.aic/ssh/profile"} {
+		path := mustExpand(t, raw)
+		if d2 := snap.Match(path, vbox.OpWrite); d2.Allow {
+			t.Fatalf("uncovered builtin deny should hold: %s %+v", path, d2)
 		}
-		if d3 := snap.Match(denied[1], vbox.OpRead); d3.Allow {
-			t.Fatalf("deny row should block read too: %s", denied[1])
+		if d3 := snap.Match(path, vbox.OpRead); d3.Allow {
+			t.Fatalf("deny row should block read too: %s", path)
 		}
 	}
 }

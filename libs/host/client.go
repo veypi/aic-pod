@@ -74,11 +74,12 @@ type Client struct {
 	uid             string
 	credVer         uint64
 	replay          *replayCache
-	procs           *vbox.Manager   // exec 子进程统一托管（§5.8/§5.9）
-	policy          *fsauth.Policy  // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
-	vsh             vshState        // vsh 引擎装配态（script 执行，惰性构建）
-	netPol          *netauth.Policy // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol          *netauth.Policy // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
+	policy          *fsauth.Policy   // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
+	netPol          *netauth.Policy  // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
+	sshPol          *netauth.Policy  // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
+	sshRun          sshProcessRunner // nil uses the managed native process runner
 	rtcMu           sync.RWMutex
 	access          *hostauth.Access
 	files           *hostfs.FS

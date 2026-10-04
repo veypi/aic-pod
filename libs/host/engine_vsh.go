@@ -66,6 +66,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		Platform: execution.PlatformDeps{
 			Grant:       c.vshGrant,
 			GrantStatus: c.vshGrantStatus,
+			SSH:         execution.SSHDeps{SSH: c.managedSSH, SCP: c.managedSCP, SFTP: c.managedSFTP},
 			// Host 不提供 ListHosts/SendUser，因此不注册这两个命令。
 			// Skill host = 设备包管理（download 安装 / list 安装记录 / disable·enable
 			// 启停 / remove 卸载）。
@@ -84,7 +85,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令与已装包命令。
 			Discoverable: func(name string) bool {
 				switch name {
-				case "commands", "bg", "grant", "skill":
+				case "commands", "bg", "grant", "skill", "ssh", "scp", "sftp":
 					return true
 				}
 				return c.skills.IsPackageCommand(name)
@@ -176,6 +177,9 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		return resp.Content, nil
 	case "cmd":
 		name := strings.TrimSpace(target)
+		if reservedSSHNative(name) {
+			return "", fmt.Errorf("grant cmd %s: reserved SSH command; use grant ssh host:port", name)
+		}
 		if err := policy.ValidateCommandName(name); err != nil {
 			return "", fmt.Errorf("grant cmd: invalid command name %q", target)
 		}

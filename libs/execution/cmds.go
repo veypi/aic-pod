@@ -36,6 +36,12 @@ type PlatformDeps struct {
 	SendUser func(ctx context.Context, sessionKey, message string) error
 	// Skill 注册中心与设备包操作（v6；nil 子命令降级报错）。
 	Skill SkillDeps
+	// SSH is host-only. Nil implementations are never registered on cloud/page.
+	SSH SSHDeps
+}
+
+type SSHDeps struct {
+	SSH, SCP, SFTP commands.CommandFunc
 }
 
 // SkillDeps skill 命令的端侧实现（docs/skill.md §4，v6）。
@@ -75,6 +81,16 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	}
 	if deps.SendUser != nil {
 		add("send_user", deps.cmdSendUser)
+	}
+	for _, c := range []struct {
+		name string
+		run  commands.CommandFunc
+	}{
+		{"ssh", deps.SSH.SSH}, {"scp", deps.SSH.SCP}, {"sftp", deps.SSH.SFTP},
+	} {
+		if c.run != nil {
+			add(c.name, c.run)
+		}
 	}
 	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Download != nil || deps.Skill.List != nil {
 		add("skill", deps.cmdSkill)
