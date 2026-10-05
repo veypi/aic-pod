@@ -65,12 +65,13 @@ func (p *peer) admit(ticket, fingerprint string) (map[string]any, error) {
 	if t.ConnectionID != "" {
 		return nil, protocol.Fail("unauthorized", "A renewal ticket cannot open a connection")
 	}
+	// 检查 + 一次性消费 + 租约建立在同一把锁内完成：并发 hello 的后到者
+	// 在检查阶段被拒，不白消费其票据（锁序 p.mu→s.mu，全仓唯一嵌套点）。
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed || p.lease != nil {
-		p.mu.Unlock()
 		return nil, protocol.Fail("unauthorized", "Peer already authenticated or closed")
 	}
-	p.mu.Unlock()
 	if err := p.s.consumeTicket(t); err != nil {
 		return nil, err
 	}
@@ -79,13 +80,7 @@ func (p *peer) admit(ticket, fingerprint string) (map[string]any, error) {
 		sessionID: t.SessionID, fingerprint: t.Fingerprint,
 		until: time.Unix(t.LeaseUntil, 0),
 	}
-	p.mu.Lock()
-	if p.closed || p.lease != nil {
-		p.mu.Unlock()
-		return nil, protocol.Fail("unauthorized", "Peer already authenticated or closed")
-	}
 	p.lease = lease
-	p.mu.Unlock()
 	return map[string]any{"host_id": p.s.cfg.HostID, "connection_id": lease.connectionID, "expires_at": lease.until.UnixMilli()}, nil
 }
 
@@ -107,7 +102,6 @@ func (p *peer) renew(ticket, fingerprint string) (map[string]bool, error) {
 	p.mu.Lock()
 	if until.After(p.lease.until) {
 		p.lease.until = until
-		lease.until = until
 	}
 	p.mu.Unlock()
 	return map[string]bool{"renewed": true}, nil

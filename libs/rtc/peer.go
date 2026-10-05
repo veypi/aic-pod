@@ -48,6 +48,10 @@ func (p *peer) expire(now time.Time) {
 	p.mu.Lock()
 	lease := p.lease
 	created := p.created
+	var until time.Time // lease 字段全锁内拷贝（renew 续租会写 until）
+	if lease != nil {
+		until = lease.until
+	}
 	p.mu.Unlock()
 	if lease == nil {
 		// 未认证 peer：30 秒认证窗口。
@@ -56,7 +60,7 @@ func (p *peer) expire(now time.Time) {
 		}
 		return
 	}
-	if !lease.until.After(now) {
+	if !until.After(now) {
 		p.s.drop(p)
 	}
 }

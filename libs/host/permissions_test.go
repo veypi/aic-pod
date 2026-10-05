@@ -141,10 +141,29 @@ func TestPermsInvalidStartupFailsClosed(t *testing.T) {
 	if p.sshAllowed("s1", "example.com:22") {
 		t.Fatal("invalid config admitted ssh")
 	}
+	// 快照自身 fail-closed：便利根也不放行（不依赖入口各自查 err）。
+	rs := p.fsSnapshot("s1")
+	if len(rs.Rules) != 0 || rs.DefaultWrite != vbox.EffDeny {
+		t.Fatalf("invalid config snapshot not empty-deny: %d rules, default %v", len(rs.Rules), rs.DefaultWrite)
+	}
+	if d := rs.Match(filepath.ToSlash(os.TempDir())+"/x", vbox.OpWrite); d.Allow {
+		t.Fatal("invalid config snapshot admitted temp-root write")
+	}
 	withGlobal(t, nil)
 	publishGlobal(t, p)
 	if p.err() != nil {
 		t.Fatal("valid publish did not clear invalid state")
+	}
+}
+
+// cmd 域会话授权去重（fs/net 同口径）。
+func TestPermsGrantCmdDedup(t *testing.T) {
+	p := newTestPerms(t, "")
+	p.grantCmd("s1", "python3")
+	p.grantCmd("s1", "python3")
+	p.grantCmd("s1", "git")
+	if n := len(p.grants["s1"].cmd); n != 2 {
+		t.Fatalf("dup cmd grants recorded: %d", n)
 	}
 }
 

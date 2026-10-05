@@ -221,6 +221,11 @@ func (p *permissionState) grantCmd(sid, name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	g := p.session(sid)
+	for _, old := range g.cmd {
+		if old == name {
+			return
+		}
+	}
 	g.cmd = append(g.cmd, name)
 }
 
@@ -255,6 +260,11 @@ func (p *permissionState) fsSnapshotWith(sid string, protected []vbox.Rule) vbox
 }
 
 func (p *permissionState) fsSnapshotLocked(sid string, protected []vbox.Rule) vbox.FSRuleSet {
+	// 快照自身 fail-closed：启动配置无效时连便利根也不放行——入口各自
+	// 查 err() 是现状双保险，未来新调用点不再依赖该分散不变量。
+	if p.invalid != nil {
+		return vbox.FSRuleSet{DefaultWrite: vbox.EffDeny}
+	}
 	var rules []vbox.Rule
 	if g := p.grants[sid]; g != nil {
 		for _, target := range g.fs {
