@@ -1,7 +1,7 @@
 package fs
 
 import (
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type ResourceRef struct {

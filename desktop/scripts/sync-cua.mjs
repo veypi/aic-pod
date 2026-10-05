@@ -3,17 +3,15 @@
  * sync-cua.mjs — 把固定版本的 cua-driver 发行物同步到 desktop/vendor/cua/<platform>/
  *
  * 用途：内置进安装包（electron-builder extraResources → resources/cua/），运行时由
- * main.js 注入 AIC_CUA_BUNDLE_DIR 目录提示；平台二进制/app 派生与系统探测全在
- * cua skill 包 Go provider（aic-skills/cua，v6 P6）。
+ * main.js 注入 AIC_CUA_BUNDLE_DIR，Pod 直接启动官方 cua-driver mcp。
  *
  * 版本固定 + sha256 校验：desktop/cua.json（升级 = 改 tag/sha256 后重跑；--force 强制重下）。
  * 布局（vendor/ 已 gitignore，不进仓库）：
- *   vendor/cua/darwin/CuaDriver.app + LICENSE.md  ← darwin-universal.tar.gz
+ *   vendor/cua/darwin/CuaDriver.app + LICENSE  ← darwin-universal.tar.gz
  *     （Developer ID 签名 + 公证，ditto 原样拷贝保持签名；TCC 授权归 com.trycua.driver）
- *   vendor/cua/win32/cua-driver.exe + LICENSE.md  ← windows-x86_64.zip
- *   vendor/cua/linux/cua-driver + LICENSE.md      ← linux-x86_64.tar.gz
- *   （发行包根目录还带 SDK dylib/dll/头文件/node runtime，只取 cua.json 的 keep
- *     集合；许可证文本上游包内不含，从仓库固定副本 desktop/cua-LICENSE.md 复制）
+ *   vendor/cua/win32/cua-driver.exe + LICENSE  ← windows-x86_64.zip
+ *   vendor/cua/linux/cua-driver + LICENSE      ← linux-x86_64.tar.gz
+ *   仅复制 keep 集合与上游许可证、第三方声明。
  *
  * 幂等：vendor/cua/.stamp-<platform> 记录 tag+file+sha256，命中即跳过
  * （stamp 放平台目录外，不随安装包分发）。
@@ -41,7 +39,8 @@ const stampPath = path.join(desktopDir, "vendor", "cua", `.stamp-${platformKey}`
 const stamp = `${cfg.tag} ${asset.file} ${asset.sha256}`;
 const force = process.argv.includes("--force");
 
-if (!force && fs.existsSync(stampPath) && fs.readFileSync(stampPath, "utf8").trim() === stamp) {
+if (!force && fs.existsSync(stampPath) && fs.readFileSync(stampPath, "utf8").trim() === stamp &&
+    [...asset.keep, "LICENSE", "THIRD_PARTY_NOTICES.md"].every(name => fs.existsSync(path.join(destDir, name)))) {
   console.log(`[sync-cua] up to date: cua-driver ${cfg.version} (${platformKey})`);
   process.exit(0);
 }
@@ -101,13 +100,10 @@ try {
     process.exit(1);
   }
   for (const name of fs.readdirSync(payloadRoot)) {
-    if (keep.has(name) || /^LICENSE(\.|$)/i.test(name)) {
+    if (keep.has(name) || /^(LICENSE|THIRD_PARTY_NOTICES)(\.|$)/i.test(name)) {
       copyEntry(path.join(payloadRoot, name), path.join(destDir, name));
     }
   }
-  // MIT 许可证文本：上游发行包内不含（2026-09 实测 0.25.0），从仓库固定副本
-  // desktop/cua-LICENSE.md 复制（MIT 要求随分发携带版权与许可声明）。
-  fs.copyFileSync(path.join(desktopDir, cfg.licenseFile), path.join(destDir, "LICENSE.md"));
   fs.writeFileSync(stampPath, `${stamp}\n`);
   console.log(`[sync-cua] → ${path.relative(desktopDir, destDir)} (${asset.payload})`);
 } finally {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	fsxsdk "github.com/veypi/aic-skills/sdk/go/fsx"
+	fsxsdk "github.com/veypi/aic-pod/libs/imageutil"
 )
 
 // readTailLines 是 read 越界回退窗口的行数（§4.2）：offset 越过文件头/尾时

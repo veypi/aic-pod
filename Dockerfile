@@ -3,8 +3,8 @@
 # 基础镜像用 node:22-slim（debian bookworm）而非 alpine：
 #   - glibc/debian 生态依赖兼容性好（alpine/musl 差）
 #   - node:22-slim 为 multi-arch，配合 TARGETARCH 支持 amd64/arm64
-#   - Node 保留给镜像内可能的 JS 工具链；browser 能力已由插件/desktop 原生
-#     实现（agent-browser + Chromium 依赖已移除）
+#   - browser/CUA 的默认别名使用官方 MCP 程序；此基础镜像未附带 Chrome
+#     或桌面驱动，按技能说明安装所需运行依赖后调用。
 #
 # 构建：
 #   make docker-build          # linux/amd64

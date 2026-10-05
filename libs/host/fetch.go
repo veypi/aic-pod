@@ -1,11 +1,11 @@
 package host
 
-// skill 包 fetch 的 pod 侧（v6 P2，docs/skill.md §9.2）：经 host 到 cloud 的
+// 静态技能资料下载：经 host 到 cloud 的
 // 已认证 NATS 连接拉包 zip——pod 不持有平台 HTTP 凭据，包获取走 NATS。
 // 请求 = proto.FetchReqSubject（payload FetchRequest，Reply = fetch.{reqID}
 // 临时地址）；应答分块帧首字节 0x00=zip 分块（同 subject 顺序保证）、
 // 0x01=FetchResult JSON 终结帧（Error 非空 = 失败无分块）。接收侧校验
-// bytes/sha256 后才交给 skillrun 安装。
+// bytes/sha256 后返回 ZIP；调用方保存到显式路径，不执行或注册。
 
 import (
 	"bytes"
@@ -18,7 +18,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/libs/proto"
-	"github.com/veypi/aic-pod/libs/skillrun"
 )
 
 // 分块帧首字节类别（与 aic libs/host/fetch.go 同一协议）。
@@ -30,8 +29,8 @@ const (
 // fetchTimeout 单次拉包上限（大包分块传输 + 云端本地目录即时打包）。
 const fetchTimeout = 10 * time.Minute
 
-// fetchSkillZip 是 skillrun Deps.Fetch 的生产实现。
-func (c *Client) fetchSkillZip(ctx context.Context, ref, version string) ([]byte, *skillrun.FetchMeta, error) {
+// fetchSkillZip 验证已认证传输返回的静态 ZIP。
+func (c *Client) fetchSkillZip(ctx context.Context, ref, version string) ([]byte, *proto.FetchResult, error) {
 	c.ncMu.RLock()
 	nc := c.nc
 	c.ncMu.RUnlock()
@@ -73,6 +72,9 @@ func (c *Client) fetchSkillZip(ctx context.Context, ref, version string) ([]byte
 		}
 		switch msg.Data[0] {
 		case fetchFrameChunk:
+			if buf.Len()+len(msg.Data)-1 > 16<<20 {
+				return nil, nil, fmt.Errorf("skill download exceeds 16 MiB")
+			}
 			buf.Write(msg.Data[1:])
 		case fetchFrameDone:
 			var res proto.FetchResult
@@ -90,24 +92,14 @@ func (c *Client) fetchSkillZip(ctx context.Context, ref, version string) ([]byte
 			if got := hex.EncodeToString(sum[:]); got != res.SHA256 {
 				return nil, nil, fmt.Errorf("skill download: sha256 mismatch（got %s）", got)
 			}
-			return zipData, &skillrun.FetchMeta{Name: res.Name, Kind: res.Kind, ID: res.ID, Version: res.Version}, nil
+			return zipData, &res, nil
 		default:
 			return nil, nil, fmt.Errorf("skill download: unknown frame type 0x%02x", msg.Data[0])
 		}
 	}
 }
 
-// skillDownload 是 vsh `skill download` 的 host 端实现（PlatformDeps.Skill）：
-// NATS fetch 拉包 + 原子安装，返回可读摘要。sessionKey 不用（安装是设备级，
-// 执行门在 CommandAllow 的 exec 域检查）。
-func (c *Client) skillDownload(ctx context.Context, sessionKey, ref, version string) (string, error) {
-	pkg, err := c.skills.Download(ctx, ref, version)
-	if err != nil {
-		return "", err
-	}
-	rec := pkg.Record()
-	if rec.Version != "" {
-		return fmt.Sprintf("installed %s (%s:%s@%s) -> %s", rec.Name, rec.Kind, rec.ID, rec.Version, pkg.Dir), nil
-	}
-	return fmt.Sprintf("installed %s (%s:%s) -> %s", rec.Name, rec.Kind, rec.ID, pkg.Dir), nil
+func (c *Client) skillFetch(ctx context.Context, _ string, ref, version string) ([]byte, error) {
+	data, _, err := c.fetchSkillZip(ctx, ref, version)
+	return data, err
 }

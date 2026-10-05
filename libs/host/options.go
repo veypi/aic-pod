@@ -15,6 +15,11 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 	if o.HostsUploadBytes < 0 || o.HostsProxyUploadBytes < 0 || o.HostsSources < 0 {
 		return Options{}, fmt.Errorf("hosts transfer budgets must be nonnegative")
 	}
+	for name, config := range o.MCP.Servers {
+		if err := config.Validate(name); err != nil {
+			return Options{}, err
+		}
+	}
 	timeout := 30 * time.Minute
 	if s := strings.TrimSpace(o.ExecTimeout); s != "" {
 		d, err := time.ParseDuration(s)
@@ -24,6 +29,7 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 		timeout = d
 	}
 	return Options{
+		MCP:         o.MCP,
 		Transfers:   hostfs.TransferConfig{MaxUploadBytes: o.HostsUploadBytes, ProxyUploadBytes: o.HostsProxyUploadBytes, MaxSources: o.HostsSources},
 		Host:        o.Host,
 		Key:         o.Key,

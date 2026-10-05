@@ -17,46 +17,31 @@ import (
 // 临时授权写入会话内存，永久授权写入对应配置规则表；两者均将允许行
 // 放在表头，首命中生效。已启动进程继续使用启动时的沙箱快照。
 
-// grantFS 处理 fs 域：路径写白名单申请（原 grant_apply 语义）。
-func (c *Client) grantFS(sid, msgID, path string, permanent bool) *proto.ToolResponse {
-	// 路径解析走 proto 可解析层（与规则匹配/执行层同口径：/c/ 规范形、/tmp
-	// 虚拟别名、旧盘符形态容错归一；相对路径按 pod 进程 cwd 展开，同历史
-	// filepath.Abs 行为），出口转原生 OS 路径供护栏校验与授权落盘——win 上
-	// filepath.Abs("/c/…") 会错拼成 <当前盘>:\c\…（2026-09-28 验收报告）。
+func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 	wd, _ := os.Getwd()
 	abs, err := proto.ResolvePath(expandHomeDir(path), wd, nil)
 	if err != nil {
-		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-			Error: fmt.Sprintf("exec grant fs: invalid path %q: %v", path, err)}
+		return "", fmt.Errorf("exec grant fs: invalid path %q: %w", path, err)
 	}
 	abs = proto.HostPathToOS(abs)
-	if err := policy.ValidateFSGrantTarget(abs); err != nil {
-		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError, Error: "exec grant fs: " + err.Error()}
+	if err = policy.ValidateFSGrantTarget(abs); err != nil {
+		return "", fmt.Errorf("exec grant fs: %w", err)
 	}
 	scope := "session"
 	if permanent {
-		if err := c.persistGrant("fs", abs); err != nil {
-			return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-				Error: "exec grant fs: persist: " + err.Error()}
+		if err = c.persistGrant("fs", abs); err != nil {
+			return "", err
 		}
 		scope = "permanent"
 	} else {
 		c.policy.Grant(sid, abs)
 	}
-
-	return &proto.ToolResponse{
-		MsgID: msgID, State: proto.StateCompleted,
-		Content: fmt.Sprintf("granted fs write access: %s (scope=%s)", abs, scope),
-		Attrs:   map[string]string{"action": "grant", "domain": "fs", "target": abs, "scope": scope},
-	}
+	return fmt.Sprintf("granted fs write access: %s (scope=%s)", abs, scope), nil
 }
-
-// grantTarget 处理 net/ssh 域：host:port 目标白名单申请。
-func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) *proto.ToolResponse {
-	e, err := netauth.ParseEntry(target)
+func (c *Client) grantTarget(sid, domain, target string, permanent bool) (string, error) {
+	entry, err := netauth.ParseEntry(target)
 	if err != nil {
-		return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-			Error: fmt.Sprintf("exec grant %s: %v", domain, err)}
+		return "", fmt.Errorf("exec grant %s: %w", domain, err)
 	}
 	pol := c.netPol
 	if domain == "ssh" {
@@ -64,20 +49,14 @@ func (c *Client) grantTarget(sid, msgID, domain, target string, permanent bool) 
 	}
 	scope := "session"
 	if permanent {
-		if err := c.persistGrant(domain, e.String()); err != nil {
-			return &proto.ToolResponse{MsgID: msgID, State: proto.StateError,
-				Error: fmt.Sprintf("exec grant %s: persist: %v", domain, err)}
+		if err = c.persistGrant(domain, entry.String()); err != nil {
+			return "", err
 		}
 		scope = "permanent"
 	} else {
-		pol.Grant(sid, e)
+		pol.Grant(sid, entry)
 	}
-
-	return &proto.ToolResponse{
-		MsgID: msgID, State: proto.StateCompleted,
-		Content: fmt.Sprintf("granted %s access: %s (scope=%s)", domain, e.String(), scope),
-		Attrs:   map[string]string{"action": "grant", "domain": domain, "target": e.String(), "scope": scope},
-	}
+	return fmt.Sprintf("granted %s access: %s (scope=%s)", domain, entry.String(), scope), nil
 }
 
 // persistGrant 将归一化后的允许行放到 <域>_rules 表头并去重、落盘。

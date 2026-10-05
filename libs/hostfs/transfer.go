@@ -41,7 +41,7 @@ type SealArgs struct {
 	SHA256 string          `json:"sha256,omitempty"`
 }
 
-// handleBytes 处理字节源/上传方法（数据面直调，hosts_tools/2 不再有
+// handleBytes 处理字节源/上传方法（数据面直调，MCP 不再有
 // 方法声明层）。ok=false 表示非本组方法（交回 FS.Run）。
 func (f *FS) handleBytes(ctx context.Context, call Call) (value any, ok bool, err error) {
 	switch call.Method {

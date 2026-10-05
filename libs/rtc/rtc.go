@@ -1,4 +1,4 @@
-// Package rtc transports hosts_rtc/2 over authenticated, reliable WebRTC channels.
+// Package rtc transports hosts_rtc/3 over authenticated, reliable WebRTC channels.
 // It has no filesystem or UI command dispatch: all business calls enter Backend.
 package rtc
 
@@ -14,7 +14,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/proto"
-	hosts "github.com/veypi/aic-pod/protocol/hosts_tools"
+	hosts "github.com/veypi/aic-pod/protocol/tool"
 )
 
 const maxPeerConnections = 16
@@ -24,6 +24,7 @@ type Config struct {
 	Send                      func(*proto.RtcSignal)
 	Authorization             *hostauth.Access
 	Tools                     ToolBackend
+	Browser                   BrowserRelay
 	Logf                      func(string, ...any)
 }
 type Service struct {

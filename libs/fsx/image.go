@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"image"
 
-	fsxsdk "github.com/veypi/aic-skills/sdk/go/fsx"
+	"github.com/veypi/aic-pod/libs/imageutil"
 )
 
-// §2.2 图片编解码（阈值/算法/格式判定）实现单一来源 = aic-skills sdk/go/fsx，
+// §2.2 图片编解码（阈值/算法/格式判定）实现单一来源 = libs/imageutil，
 // 本包只保留 read 管线形态（imageResult/imageContent/尺寸读取）。
 
 // imageResult 生成可展示图片的 read 结果（§2.2 图片标准）：
@@ -25,7 +25,7 @@ func imageResult(env *Env, abs string, data []byte, mime string) (*Result, error
 		r.Content = imageContent(abs, mime, w, h, len(data))
 		return r, nil
 	}
-	dataURI, compressedNote, err := fsxsdk.EncodeImageData(data, mime)
+	dataURI, compressedNote, err := imageutil.EncodeImageData(data, mime)
 	if err != nil {
 		return nil, fsErr("read", "image too large even after compression (%d bytes)", len(data))
 	}

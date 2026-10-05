@@ -7,16 +7,12 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
-// ToolBackend 是 RTC 直连的业务入口（hosts_rtc/2）：
-// 普通请求与 NATS 同载荷同分发；stream.open 走包限定端点（browser.page.frames/
-// browser.page.input 直接连接业务服务，不注册为 vsh 指令、不进 commands/caps）。
 type ToolBackend interface {
 	HandleTool(context.Context, wire.Caller, wire.Request) wire.Response
 	DisconnectTools(wire.Caller)
-	OpenToolStream(ctx context.Context, c wire.Caller, endpoint string, args json.RawMessage) (wire.Stream, error)
 }
 
 func (p *peer) toolCaller() (wire.Caller, error) {
@@ -27,7 +23,7 @@ func (p *peer) toolCaller() (wire.Caller, error) {
 	if err != nil {
 		return wire.Caller{}, err
 	}
-	return wire.Caller{AllowStreams: true, Expiry: func() time.Time {
+	return wire.Caller{Direct: true, Expiry: func() time.Time {
 		current, err := p.s.cfg.Authorization.Caller(connection)
 		if err != nil {
 			return time.Time{}
@@ -56,82 +52,82 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 	p.mu.Unlock()
 	dc.OnClose(func() { p.s.drop(p) })
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		var req rtcwire.Request
-		err := wire.Decode(msg.Data, &req)
-		if !msg.IsString || len(msg.Data) > wire.MaxMessageBytes || err != nil || req.Protocol != rtcwire.Protocol || !wire.ValidID(req.ID) {
-			_ = p.sendTool(dc, wire.Reply(rtcwire.Protocol, req.ID, nil, wire.Fail("invalid_argument", "Expected hosts_rtc/2 request")))
+		var r rtcwire.Request
+		if !msg.IsString || len(msg.Data) > wire.MaxMessageBytes || wire.Decode(msg.Data, &r) != nil || r.Validate() != nil {
+			p.s.drop(p)
 			return
 		}
-		// Call cancellation must remain reachable when requests are waiting.
-		if req.Action == wire.ActionCancel {
-			p.toolRequest(dc, req)
+		if r.Auth != "" {
+			go p.authenticate(dc, r)
+			return
+		}
+		send := func(raw []byte) error { return p.sendRaw(p.ctx, dc, raw, true) }
+		fail := func(err error) {
+			raw, _ := json.Marshal(wire.Reply(rtcwire.Protocol, r.Tool.ID, nil, err))
+			_ = send(raw)
+		}
+		caller, err := p.toolCaller()
+		if err != nil {
+			fail(err)
+			return
+		}
+		caller.GrantApproved = r.GrantApproved
+		invoke := func() {
+			raw, err := json.Marshal(p.s.cfg.Tools.HandleTool(p.ctx, caller, *r.Tool))
+			if err != nil {
+				fail(err)
+				return
+			}
+			_ = send(raw)
+		}
+		// Cancellation must not queue behind the work it cancels.
+		if r.Tool.Action == wire.ActionCancel {
+			invoke()
 			return
 		}
 		select {
 		case p.requests <- struct{}{}:
-			go func() { defer func() { <-p.requests }(); p.toolRequest(dc, req) }()
+			go func() { defer func() { <-p.requests }(); invoke() }()
 		default:
-			_ = p.sendTool(dc, wire.Reply(rtcwire.Protocol, req.ID, nil, wire.Fail("overloaded", "Too many pending requests")))
+			fail(wire.Fail("overloaded", "Too many pending requests"))
 		}
 	})
 }
-func (p *peer) sendTool(dc *webrtc.DataChannel, r wire.Response) error {
-	raw, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	limit := wire.MaxMessageBytes
-	if transport := dc.Transport(); transport != nil {
-		if peerLimit := int(transport.GetCapabilities().MaxMessageSize); peerLimit > 0 && peerLimit < limit {
-			limit = peerLimit
-		}
-	}
-	if len(raw) > limit {
-		raw, _ = json.Marshal(wire.Reply(rtcwire.Protocol, r.ID, nil, wire.Fail("output_limit", "Response too large; reduce observation limit or result page size")))
-	}
-	return p.sendRaw(p.ctx, dc, raw, true)
-}
-func (p *peer) toolRequest(dc *webrtc.DataChannel, r rtcwire.Request) {
-	var response wire.Response
-	if r.Action == "hello" {
-		fp, err := p.fingerprint()
-		var value any
-		if err == nil {
+func (p *peer) authenticate(dc *webrtc.DataChannel, r rtcwire.Request) {
+	var value any
+	fp, err := p.fingerprint()
+	if err == nil {
+		switch r.Auth {
+		case "open":
 			p.mu.Lock()
 			if p.closed || p.connection != "" {
 				err = wire.Fail("unauthorized", "Peer already authenticated or closed")
 			} else {
 				admission, e := p.s.cfg.Authorization.Admit(r.Ticket, p.id, fp)
 				err = e
-				if err == nil {
+				if e == nil {
 					p.connection = admission.Caller.ConnectionID
-					value = map[string]any{"host_id": p.s.cfg.HostID, "protocol": rtcwire.Protocol, "tools_protocol": wire.Protocol, "connection_id": p.connection, "expires_at": admission.Caller.ExpiresAt.UnixMilli()}
+					value = map[string]any{"host_id": p.s.cfg.HostID, "connection_id": p.connection, "expires_at": admission.Caller.ExpiresAt.UnixMilli()}
 				}
 			}
 			p.mu.Unlock()
-		}
-		response = wire.Reply(rtcwire.Protocol, r.ID, value, err)
-	} else {
-		caller, err := p.toolCaller()
-		if err != nil {
-			response = wire.Reply(rtcwire.Protocol, r.ID, nil, err)
-		} else if r.Action == "auth.renew" {
-			fp, e := p.fingerprint()
+		case "renew":
+			caller, e := p.toolCaller()
+			err = e
 			if e == nil {
-				_, e = p.s.cfg.Authorization.Renew(caller.ConnectionID, r.Ticket, p.id, fp)
+				_, err = p.s.cfg.Authorization.Renew(caller.ConnectionID, r.Ticket, p.id, fp)
+				value = map[string]bool{"renewed": err == nil}
 			}
-			response = wire.Reply(rtcwire.Protocol, r.ID, map[string]bool{"renewed": e == nil}, e)
-		} else if r.Action == "stream.open" {
-			value, err := p.openToolChannel(caller, r)
-			response = wire.Reply(rtcwire.Protocol, r.ID, value, err)
-		} else {
-			// owner 前端的确认元信息只作用于本次请求（默认不批准；
-			// 不因连接已认证而一概设为 true——§3.1 RTC 入口）。
-			caller.GrantApproved = r.GrantApproved
-			response = p.s.cfg.Tools.HandleTool(p.ctx, caller, r.Request)
+		default:
+			err = wire.Fail("invalid_argument", "Unknown authentication operation")
 		}
 	}
-	if err := p.sendTool(dc, response); err != nil {
+	result := rtcwire.AuthResult{ID: r.ID, Result: value}
+	if err != nil {
+		result.Error = wire.AsFault(err)
+	}
+	raw, _ := json.Marshal(result)
+	if err = p.sendRaw(p.ctx, dc, raw, true); err != nil {
 		p.s.drop(p)
 	}
 }

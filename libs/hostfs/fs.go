@@ -24,7 +24,7 @@ import (
 
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	hosts "github.com/veypi/aic-pod/protocol/fs"
-	tool "github.com/veypi/aic-pod/protocol/hosts_tools"
+	tool "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type Root struct {
@@ -153,7 +153,7 @@ type removeArgs struct {
 	MissingOK bool     `json:"missing_ok,omitempty"`
 }
 
-// Handle 是 FS 数据面直调入口（hosts_tools/2 §4.1：fs 载荷 {method, args}
+// Handle 是 FS 数据面直调入口（MCP §4.1：fs 载荷 {method, args}
 // 直达现有 FS 服务；不再有方法声明/schema 目录层——方法集为协议固定集，
 // 参数校验在 validate/Authorize 内）。
 func (f *FS) Handle(ctx context.Context, caller tool.Caller, method string, args json.RawMessage) (any, error) {

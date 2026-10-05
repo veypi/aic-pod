@@ -16,9 +16,10 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/policy"
 	"github.com/veypi/aic-pod/libs/proto"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 	gbfs "github.com/veypi/vsh/fs"
@@ -68,27 +69,16 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			GrantStatus: c.vshGrantStatus,
 			SSH:         execution.SSHDeps{SSH: c.managedSSH, SCP: c.managedSCP, SFTP: c.managedSFTP},
 			// Host 不提供 ListHosts/SendUser，因此不注册这两个命令。
-			// Skill host = 设备包管理（download 安装 / list 安装记录 / disable·enable
-			// 启停 / remove 卸载）。
-			Skill: execution.SkillDeps{
-				Download: c.skillDownload,
-				List: func(ctx context.Context, sessionKey string) (string, error) {
-					return c.skills.RecordsJSON()
-				},
-				SetDisabled: func(ctx context.Context, sessionKey, name string, disabled bool) error {
-					return c.skills.SetDisabled(name, disabled)
-				},
-				Remove: func(ctx context.Context, sessionKey, name string) error {
-					return c.skills.Uninstall(name)
-				},
-			},
+			MCP:   mcpx.Command(c.mcpSession),
+			Skill: execution.SkillDeps{Fetch: c.skillFetch},
+
 			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令与已装包命令。
 			Discoverable: func(name string) bool {
 				switch name {
-				case "commands", "bg", "grant", "skill", "ssh", "scp", "sftp":
+				case "commands", "bg", "grant", "mcp", "skill", "ssh", "scp", "sftp":
 					return true
 				}
-				return c.skills.IsPackageCommand(name)
+				return false
 			},
 		},
 		// 虚拟指令执行规则门：skill 与已装 skill 包根命令（browser/cua 等）
@@ -96,7 +86,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		// 内建与平台基础设施指令放行（它们是 shell 本身，旧模型同样不受
 		// exec 域约束）。
 		CommandAllow: func(ctx context.Context, name string) bool {
-			if name == "skill" || c.skills.IsPackageCommand(name) {
+			if name == "skill" {
 				return c.execAllowed(execution.SessionFromContext(ctx), name)
 			}
 			return true
@@ -106,8 +96,6 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 	if err != nil {
 		return nil, err
 	}
-	// browser（v6 P5）与 cua（v6 P6）都是已装 skill 包（aic-skills 仓），
-	// 不再内建注册——包根命令在初始化/安装时直接注册。
 	return engine, nil
 }
 
@@ -158,23 +146,9 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 	sid := sessionKey
 	switch domain {
 	case "fs":
-		resp := c.grantFS(sid, "", target, permanent)
-		if resp.Error != "" {
-			return "", fmt.Errorf("%s", resp.Error)
-		}
-		return resp.Content, nil
-	case "net":
-		resp := c.grantTarget(sid, "", "net", target, permanent)
-		if resp.Error != "" {
-			return "", fmt.Errorf("%s", resp.Error)
-		}
-		return resp.Content, nil
-	case "ssh":
-		resp := c.grantTarget(sid, "", "ssh", target, permanent)
-		if resp.Error != "" {
-			return "", fmt.Errorf("%s", resp.Error)
-		}
-		return resp.Content, nil
+		return c.grantFS(sid, target, permanent)
+	case "net", "ssh":
+		return c.grantTarget(sid, domain, target, permanent)
 	case "cmd":
 		name := strings.TrimSpace(target)
 		if reservedSSHNative(name) {
@@ -287,7 +261,7 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 		LogOut: logOut, LogErr: logErr,
 		// 转后台（bg）只服务 NATS/AI 通道；RTC 直连等待超时返回
 		// ErrWaitElapsed——执行继续、不产生 bg 记录。
-	}, !caller.AllowStreams, func(res *execution.ExecResult) {
+	}, !caller.Direct, func(res *execution.ExecResult) {
 		auditWrites(errFile, res)
 		_ = outFile.Close()
 		_ = errFile.Close()
@@ -323,7 +297,7 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 		if outcome.Result == nil {
 			return &wire.ExecResult{Attrs: attrs}, err
 		}
-		return execResultResponse(outcome.Result, attrs, caller.AllowStreams), err
+		return execResultResponse(outcome.Result, attrs, caller.Direct), err
 	}
 	// 调用方 ctx 结束（传输断连/前台预算到期，§2.6）：断线不是取消——
 	// 停止等待但执行继续（取消登记保留），日志在实际执行结束时关闭。
@@ -331,7 +305,7 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 		if outcome.Result == nil {
 			return &wire.ExecResult{Attrs: attrs}, outcome.Err
 		}
-		return execResultResponse(outcome.Result, attrs, caller.AllowStreams), outcome.Err
+		return execResultResponse(outcome.Result, attrs, caller.Direct), outcome.Err
 	}
 	// 前台完成（审计与日志关闭已由完成回调处理）。
 	if outcome.Err != nil {
@@ -339,14 +313,14 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 			return &wire.ExecResult{Attrs: attrs}, wire.Fail("internal", "exec: "+outcome.Err.Error())
 		}
 		// 执行完成但引擎层报错：结果与错误一并带出（Reply 保留 Result）。
-		res := execResultResponse(outcome.Result, attrs, caller.AllowStreams)
+		res := execResultResponse(outcome.Result, attrs, caller.Direct)
 		return res, wire.Fail("internal", "exec: "+outcome.Err.Error())
 	}
 	res := outcome.Result
 	if res == nil {
 		return nil, wire.Fail("internal", "exec: no result")
 	}
-	return execResultResponse(res, attrs, caller.AllowStreams), nil
+	return execResultResponse(res, attrs, caller.Direct), nil
 }
 
 // execResultResponse 构造完成响应（§3.1 统一输出形状）：attrs 恒含

@@ -65,36 +65,6 @@ func hostSeg(host string) string {
 	return HostIDPrefix + host
 }
 
-// ToolReqSubject 工具请求（§6.1 v4）：u.{uid}.h.{host}.{tool}.req.{sid}
-// sid 段定向投递——page 端按会话订阅（subject 即白名单），物理 host 端
-// 通配 inbox（HostInboxSubject）覆盖；信封 SessionID 与 sid 段一致。
-// 无会话直发（run_tool 只读白名单）sid 段用 ManualSessionID 占位。
-// host 段：物理 host = host_{host_id}（HostIDPrefix，构造时自动添加）；
-// page/cloud 保留字原样（1host 寻址同构）。cloud 服务端本地执行，不过 NATS。
-func ToolReqSubject(uid, host, tool, sid string) (string, error) {
-	if !validSeg(uid) || !validSeg(host) || !validSeg(sid) {
-		return "", fmt.Errorf("proto: invalid uid/host/sid segment")
-	}
-	if tool != ToolFS && tool != ToolExec {
-		return "", fmt.Errorf("proto: invalid tool %q (must be fs|exec)", tool)
-	}
-	return fmt.Sprintf("u.%s.h.%s.%s.req.%s", uid, hostSeg(host), tool, sid), nil
-}
-
-// ManualSessionID 是无会话工具请求（run_tool 直发）的 sid 段占位符：
-// subject 统一 7 段形态，信封 SessionID 仍为空串。
-const ManualSessionID = "manual"
-
-// FSReqSubject 是 ToolReqSubject 的 fs 简写。
-func FSReqSubject(uid, host, sid string) (string, error) {
-	return ToolReqSubject(uid, host, ToolFS, sid)
-}
-
-// ExecReqSubject 是 ToolReqSubject 的 exec 简写。
-func ExecReqSubject(uid, host, sid string) (string, error) {
-	return ToolReqSubject(uid, host, ToolExec, sid)
-}
-
 // HostInboxSubject 是物理 host 端连接时的单订阅：u.{uid}.h.host_{host_id}.>
 // 覆盖该 host 全部工具请求（fs/exec，7 段含 sid 段），无 per-session 订阅 churn。
 // host 段自动加 HostIDPrefix（与 ToolReqSubject 同源）。
@@ -104,20 +74,6 @@ func HostInboxSubject(uid, hostID string) (string, error) {
 		return "", fmt.Errorf("proto: invalid uid/hostID segment")
 	}
 	return fmt.Sprintf("u.%s.h.%s.>", uid, hostSeg(hostID)), nil
-}
-
-// ParseToolReqSubject 解析工具请求 subject（7 段，§6.1 v4）：
-// u.{uid}.h.{host}.{tool}.req.{sid} → uid, host(还原裸 id / page 原样), tool, sid。
-func ParseToolReqSubject(subject string) (uid, host, tool, sid string, err error) {
-	parts := strings.Split(subject, ".")
-	// u.{uid}.h.{host}.{tool}.req.{sid} 恰好 7 段
-	if len(parts) != 7 || parts[0] != "u" || parts[2] != "h" || parts[5] != "req" {
-		return "", "", "", "", fmt.Errorf("proto: not a tool request subject: %s", subject)
-	}
-	if parts[4] != ToolFS && parts[4] != ToolExec {
-		return "", "", "", "", fmt.Errorf("proto: invalid tool segment in subject: %s", subject)
-	}
-	return parts[1], strings.TrimPrefix(parts[3], HostIDPrefix), parts[4], parts[6], nil
 }
 
 // ---- RTC 信令 subject（2026-09-10，WebRTC 直连，§6.1 扩展） ----
@@ -138,12 +94,6 @@ func RtcInSubject(uid, hostID string) (string, error) {
 func RtcOutSubject(uid, hostID string, credVer uint64) (string, error) {
 	return connSubject(uid, hostID, credVer, "rtc")
 }
-
-// PageQueueGroup 是 page 端同会话多 tab 的 queue group（§6.1 v4）：page-{sid}。
-// subject 已按 sid 定向（只有注册了该会话的 tab 订阅）；同 sid 多 tab 时
-// 同组 NATS 恰好投递一个成员——防多 tab 重复执行（Request 只取第一个响应，
-// 无 queue 时同 subject 多订阅者全量 fan-out 双执行）。
-func PageQueueGroup(sid string) string { return "page-" + sid }
 
 // ---- skill 包 fetch subject（v6 P2，docs/skill.md §9.2） ----
 

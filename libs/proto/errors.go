@@ -43,23 +43,9 @@ type ApprovalError struct {
 
 func (e *ApprovalError) Error() string { return e.Reason }
 
-// StateOf 将错误映射为协议层状态：DeniedError → rejected，
-// ApprovalError → waiting（审批中转到服务端处理），其余一律执行错误 error。
-func StateOf(err error) State {
-	var de *DeniedError
-	if errors.As(err, &de) {
-		return StateRejected
-	}
-	var ae *ApprovalError
-	if errors.As(err, &ae) {
-		return StateWaiting
-	}
-	return StateError
-}
-
 // StrategyError 返回错误链中的策略类错误（*ApprovalError / *DeniedError），
 // 非策略错误返回 nil。执行链在包装错误（%s 拍平、拼文案）之前必须先调用——
-// 策略错误必须保型上抛：审批/拒绝语义靠类型判定（StateOf / 信封 / 审批流），
+// 策略错误必须保型上抛：审批/拒绝语义靠类型判定（可信上下文 / 审批流），
 // 拍平成执行错误即丢失（cloud 内联 vcore 的 GatedFS 写分级兜底曾因此不弹审批）。
 func StrategyError(err error) error {
 	var ae *ApprovalError

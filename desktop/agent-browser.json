@@ -1,0 +1,29 @@
+{
+  "product": "agent-browser",
+  "repo": "vercel-labs/agent-browser",
+  "version": "0.38.2",
+  "tag": "v0.38.2",
+  "license": "Apache-2.0",
+  "assets": {
+    "darwin-arm64": {
+      "file": "agent-browser-darwin-arm64",
+      "sha256": "8168b86ab5d94be8f670992dfe4fe1445016518a864b48bda105e64142e7cbf9"
+    },
+    "darwin-x64": {
+      "file": "agent-browser-darwin-x64",
+      "sha256": "787cb40e086a188d0bb13ff29a99a0b2380aff3aa5e8600b8f8131a0b98ca69c"
+    },
+    "linux-arm64": {
+      "file": "agent-browser-linux-arm64",
+      "sha256": "690c02d952de8497bba4f8cc58b59acbf27dc27b346755869b518f4b411c7f40"
+    },
+    "linux-x64": {
+      "file": "agent-browser-linux-x64",
+      "sha256": "a54b765192db774666f0513fa8b545a298753b6f29e73bcdf4a1e78f18e7c0e1"
+    },
+    "win32-x64": {
+      "file": "agent-browser-win32-x64.exe",
+      "sha256": "a6a9a3654c41ee19c05961b73489db98cff9eae88a77436986df08a7a7a73786"
+    }
+  }
+}

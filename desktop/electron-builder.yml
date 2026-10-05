@@ -21,9 +21,8 @@ files:
   - "!scripts/test-*.mjs"
 # Go 后端二进制（make desktop-backend 产出 desktop/bin/aic-backend）→ resources/backend/
 # cua-driver 发行物（scripts/sync-cua.mjs 同步，固定版本 + sha256 校验）→ resources/cua/
-# 运行时 main.js 注入 CUA_DRIVER_PATH / CUA_DRIVER_APP；vendor 未同步时该平台不带 cua
-# （后端回落系统探测，用户自装 cua-driver 仍可用）
-# Chrome for Testing → resources/browser；skill provider 已内嵌于后端。
+# 运行时 main.js 注入 AIC_CUA_BUNDLE_DIR；打包须先同步官方驱动。
+# 官方 agent-browser 原生 CLI/MCP → resources/agent-browser；CuaDriver 自带 MCP。
 extraResources:
   - from: bin
     to: backend
@@ -33,6 +32,8 @@ extraResources:
     to: cua
   - from: vendor/browser/${platform}-${arch}
     to: browser/${platform}-${arch}
+  - from: vendor/agent-browser/${platform}-${arch}
+    to: agent-browser
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg

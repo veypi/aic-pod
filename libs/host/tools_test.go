@@ -7,7 +7,7 @@ import (
 	"time"
 
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // TestNatsToolsAuthentication 锁定 NATS 可信转发边界（hosts_nats/2）：
@@ -20,13 +20,13 @@ func TestNatsToolsAuthentication(t *testing.T) {
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
 	route, _ := natswire.Subject(c.uid, c.hostID)
 	makeReq := func() natswire.Request {
-		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionFS, FS: &wire.FSInvocation{Method: "roots", Args: json.RawMessage(`{}`)}}}
+		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: fsRequest("roots", map[string]any{})}
 		natswire.Sign(c.kTool, &r)
 		return r
 	}
 	send := func(r natswire.Request, subject string) wire.Response {
 		b, _ := json.Marshal(r)
-		return c.HandleNATS(context.Background(), subject, b)
+		return callNATS(t, c, subject, b)
 	}
 	r := makeReq()
 	if got := send(r, route); got.Error != nil {
@@ -56,7 +56,7 @@ func TestNatsToolsAuthentication(t *testing.T) {
 		t.Fatal("foreign owner admitted")
 	}
 	// RTC 与 NATS 同一分发实现（普通请求同载荷同语义）。
-	got := c.HandleTool(context.Background(), wire.Caller{Subject: c.uid, ConnectionID: "rtc", ExpiresAt: time.Now().Add(time.Minute)}, wire.Request{Protocol: "hosts_rtc/2", ID: "r_rtc", Action: wire.ActionFS, FS: &wire.FSInvocation{Method: "roots", Args: json.RawMessage(`{}`)}})
+	got := callTool(t, c, context.Background(), testCaller(), fsRequest("roots", map[string]any{}))
 	if got.Error != nil {
 		t.Fatalf("transports didn't share dispatch: %+v", got)
 	}

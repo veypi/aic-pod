@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
 const { assertBrowserBundle, manifest } = await import("./sync-browser.mjs");
+const { assertAgentBrowserBundle } = await import("./sync-agent-browser.mjs");
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.resolve(desktopDir, "..", "dist");
@@ -95,7 +96,7 @@ if ([...entries].some(x=>x.startsWith("/vendor/browser/"))) missing.push("Chrome
 // ---- 设置页（app://aic → desktop/settings-ui，单文件静态页）随包 ----
 if (!entries.has("/settings-ui/settings.html")) missing.push("设置页缺失: /settings-ui/settings.html");
 
-// ---- resources/backend 后端二进制（内嵌 builtin skills） ----
+// ---- resources/backend 后端二进制（原生 exec/fs 与 MCP manager） ----
 const resDir = path.dirname(asarPath); // mac: Contents/Resources；win/linux: resources
 const backendCandidates = [
   path.join(resDir, "backend", "aic-backend"),
@@ -112,7 +113,11 @@ try {
   if (targets.length !== 1 || !manifest.assets[targets[0]]) throw new Error("expected exactly one supported browser target");
   const [platform, arch] = targets[0].split("-");
   assertBrowserBundle(root, platform, arch);
-} catch (error) { missing.push(`resources/browser: ${error.message}`); }
+  assertAgentBrowserBundle(path.join(resDir, "agent-browser"), platform, arch);
+  const cua = JSON.parse(fs.readFileSync(path.join(desktopDir, "cua.json")));
+  for (const name of [...cua.assets[platform].keep, "LICENSE", "THIRD_PARTY_NOTICES.md"])
+    if (!fs.existsSync(path.join(resDir, "cua", platform, name))) throw new Error(`CuaDriver resource missing: ${name}`);
+} catch (error) { missing.push(`runtime resources: ${error.message}`); }
 
 // ---- 结果 ----
 if (missing.length) {

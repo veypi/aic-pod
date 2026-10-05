@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 // 报错（命令存在、help 自答、执行提示该端不可用）。Tasks 由 NewEngine 自动
 // 接线，调用方无需填。
 type PlatformDeps struct {
+	MCP commands.CommandFunc
 	// Tasks 后台任务登记表（引擎注入）。
 	Tasks *TaskTable
 	// Discoverable 命令发现展示过滤（§2.2 展示过滤，不是执行白名单）：
@@ -44,25 +46,12 @@ type SSHDeps struct {
 	SSH, SCP, SFTP commands.CommandFunc
 }
 
-// SkillDeps skill 命令的端侧实现（docs/skill.md §4，v6）。
-// cloud = 注册中心直查（search/load/download 转存用户空间）；
-// host = 设备包管理（download 安装、list 安装记录，P2 接线）。
+// SkillDeps operates on static content; downloads never execute or register it.
 type SkillDeps struct {
-	// Search 可见 skill 清单（本地在前；query 空 = 全部；limit≤0 = 默认 20）。
-	Search func(ctx context.Context, sessionKey, query string, limit int) (string, error)
-	// Load 按裸寻址 ref 读取 SKILL.md 正文 + 能力清单（公开条目使用即关联/
-	// 计数语义由端侧实现保持）。
-	Load func(ctx context.Context, sessionKey, ref string) (string, error)
-	// Download 获取包（cloud = 转存用户空间；host = 安装到设备）。version 空
-	// = 当前发布版。
-	Download func(ctx context.Context, sessionKey, ref, version string) (string, error)
-	// List 已安装包记录（host；--json 由端侧定输出形态）。
-	List func(ctx context.Context, sessionKey string) (string, error)
-	// SetDisabled 禁用/启用已装包（host；禁用 = 根命令保留但调用显式失败，
-	// 状态落 .install.json 持久）。
-	SetDisabled func(ctx context.Context, sessionKey, name string, disabled bool) error
-	// Remove 卸载已装包（host；停 provider + 删目录 + 解注册）。
-	Remove func(ctx context.Context, sessionKey, name string) error
+	Search func(context.Context, string, string, int) (string, error)
+	Load   func(context.Context, string, string) (string, error)
+	Fetch  func(context.Context, string, string, string) ([]byte, error)
+	Fork   func(context.Context, string, string) (string, error)
 }
 
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
@@ -70,6 +59,9 @@ type SkillDeps struct {
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	list := []commands.Command{commands.DefineCommand("commands", deps.cmdCommands)}
 	add := func(name string, fn commands.CommandFunc) { list = append(list, commands.DefineCommand(name, fn)) }
+	if deps.MCP != nil {
+		add("mcp", deps.MCP)
+	}
 	if deps.Tasks != nil {
 		add("bg", deps.cmdBG)
 	}
@@ -92,7 +84,7 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 			add(c.name, c.run)
 		}
 	}
-	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Download != nil || deps.Skill.List != nil {
+	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Fetch != nil || deps.Skill.Fork != nil {
 		add("skill", deps.cmdSkill)
 	}
 	for _, cmd := range list {
@@ -362,14 +354,14 @@ func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation
 
 const sendUserHelp = `usage: send_user <消息...> — 给用户发一条通知消息`
 
-const skillHelp = `usage: skill <search|load|download|list|disable|enable|remove> — skill 注册中心与设备包管理
-  skill search [关键词...] [--limit N]   列出可见 skill（本地在前）
-  skill load <ref>                       读取 SKILL.md 正文 + 能力清单
-  skill download <ref> [--version v]     获取包（cloud = 转存用户空间；host = 安装到设备）
-  skill list                             已安装包记录（host）
-  skill disable <name>                   禁用已装包（host；根命令保留但调用显式失败）
-  skill enable <name>                    启用已装包（host）
-  skill remove <name>                    卸载已装包（host；删目录 + 解注册）`
+const skillHelp = `usage:
+ skill search [query] [--limit N]
+ skill load <ref>
+ skill download <ref> --output <archive.zip> [--version v]
+ skill fork <ref>
+
+Download saves static content to an explicit new file. Follow SKILL.md to install
+software separately. Fork creates an editable cloud copy.`
 
 // cmdSkill skill 注册中心与设备包管理（v6：skills 独立工具废除，动词归 vsh）。
 func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) error {
@@ -378,7 +370,7 @@ func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) er
 		return nil
 	}
 	if len(inv.Args) == 0 {
-		return commands.Exitf(inv, 2, "usage: skill <search|load|download|list|disable|enable|remove>（--help 查看详情）")
+		return commands.Exitf(inv, 2, "usage: skill <search|load|download|fork>（--help 查看详情）")
 	}
 	sub, rest := inv.Args[0], inv.Args[1:]
 	sid := SessionFromContext(ctx)
@@ -423,69 +415,70 @@ func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) er
 		fmt.Fprintln(inv.Stdout, text)
 		return nil
 	case "download":
-		if d.Skill.Download == nil {
-			return commands.Exitf(inv, 1, "skill download: 此端未接包获取通道")
+		if d.Skill.Fetch == nil {
+			return commands.Exitf(inv, 1, "skill download: unavailable")
 		}
-		version := ""
-		var words []string
-		for i := 0; i < len(rest); i++ {
-			if rest[i] == "--version" && i+1 < len(rest) {
-				version = rest[i+1]
-				i++
-				continue
+		version, dest, ref := "", "", ""
+		for n := 0; n < len(rest); n++ {
+			switch rest[n] {
+			case "--version", "--output":
+				if n+1 >= len(rest) {
+					return commands.Exitf(inv, 2, "skill download: missing option value")
+				}
+				if rest[n] == "--version" {
+					version = rest[n+1]
+				} else {
+					dest = rest[n+1]
+				}
+				n++
+			default:
+				if ref != "" {
+					return commands.Exitf(inv, 2, "skill download: expected one reference")
+				}
+				ref = rest[n]
 			}
-			words = append(words, rest[i])
 		}
-		if len(words) == 0 {
-			return commands.Exitf(inv, 2, "usage: skill download <ref> [--version v]")
+		if ref == "" || dest == "" {
+			return commands.Exitf(inv, 2, "skill download <ref> --output <archive.zip> [--version v]")
 		}
-		text, err := d.Skill.Download(ctx, sid, strings.Join(words, " "), version)
+		data, err := d.Skill.Fetch(ctx, sid, ref, version)
 		if err != nil {
-			// 实现层错误已自带 skill download: 前缀（skillrun/fetch 同一口径），不再重包。
-			return commands.Exitf(inv, 1, "%s", err)
+			return commands.Exitf(inv, 1, "skill download: %s", err)
 		}
-		if text != "" {
-			fmt.Fprintln(inv.Stdout, text)
+		if inv.FS == nil {
+			return commands.Exitf(inv, 1, "skill download: filesystem unavailable")
 		}
-		return nil
-	case "list":
-		if d.Skill.List == nil {
-			return commands.Exitf(inv, 1, "skill list: 此端无设备安装记录（host 端命令）")
-		}
-		text, err := d.Skill.List(ctx, sid)
+		f, err := inv.FS.OpenFile(ctx, dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
-			return commands.Exitf(inv, 1, "skill list: %s", err)
+			return commands.Exitf(inv, 1, "skill download: %s", err)
 		}
-		if text != "" {
-			fmt.Fprintln(inv.Stdout, text)
+		_, err = f.Write(data)
+		closeErr := f.Close()
+		if err == nil {
+			err = closeErr
 		}
+		if err != nil {
+			_ = inv.FS.Remove(ctx, dest, false)
+			return commands.Exitf(inv, 1, "skill download: %s", err)
+		}
+		fmt.Fprintln(inv.Stdout, dest)
 		return nil
-	case "disable", "enable":
-		if d.Skill.SetDisabled == nil {
-			return commands.Exitf(inv, 1, "skill %s: 此端无设备包管理（host 端命令）", sub)
+	case "fork":
+		if d.Skill.Fork == nil {
+			return commands.Exitf(inv, 1, "skill fork: only available in cloud")
 		}
 		if len(rest) != 1 {
-			return commands.Exitf(inv, 2, "usage: skill %s <name>", sub)
+			return commands.Exitf(inv, 2, "skill fork <ref>")
 		}
-		if err := d.Skill.SetDisabled(ctx, sid, rest[0], sub == "disable"); err != nil {
-			return commands.Exitf(inv, 1, "skill %s: %s", sub, err)
+		result, err := d.Skill.Fork(ctx, sid, rest[0])
+		if err != nil {
+			return commands.Exitf(inv, 1, "skill fork: %s", err)
 		}
-		fmt.Fprintf(inv.Stdout, "%s %s\n", rest[0], map[bool]string{true: "disabled", false: "enabled"}[sub == "disable"])
+		fmt.Fprintln(inv.Stdout, result)
 		return nil
-	case "remove":
-		if d.Skill.Remove == nil {
-			return commands.Exitf(inv, 1, "skill remove: 此端无设备包管理（host 端命令）")
-		}
-		if len(rest) != 1 {
-			return commands.Exitf(inv, 2, "usage: skill remove <name>")
-		}
-		if err := d.Skill.Remove(ctx, sid, rest[0]); err != nil {
-			return commands.Exitf(inv, 1, "skill remove: %s", err)
-		}
-		fmt.Fprintf(inv.Stdout, "%s removed\n", rest[0])
-		return nil
+
 	default:
-		return commands.Exitf(inv, 2, "skill: 未知子命令 %q（search|load|download|list|disable|enable|remove）", sub)
+		return commands.Exitf(inv, 2, "skill: 未知子命令 %q（search|load|download|fork）", sub)
 	}
 }
 

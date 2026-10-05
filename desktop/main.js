@@ -6,7 +6,7 @@
 //   ├─ spawn Go 后端；设置/凭证经 `aic-backend config|bind` 子命令读写 config.yaml
 //   ├─ browser 默认路径：独立 Chrome，生命周期与执行由 Go 管理
 //   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
-//   ├─ hosts_rtc/1 与 hosts_nats/1：后端统一 browser 工具
+//   ├─ 原生 exec 经 RTC/NATS 调用官方 MCP；RTC 转发上游 Browser 帧流
 //   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
 //	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload + app://aic 单文件静态页）：托盘
 //	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
@@ -207,9 +207,7 @@ async function start() {
 
 // ---- 内置 cua-driver 目录提示（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----
 // 固定版本随包分发（签名/公证原样，TCC 授权归 com.trycua.driver）。cjs 只看
-// 目录存在性；平台二进制/app 派生与系统探测全在 Go provider（cua 包
-// findCuaDriver 候选链：AIC_CUA_DRIVER_PATH > AIC_CUA_BUNDLE_DIR > PATH >
-// 系统候选——v6 P6 起 cua 是 skill 包，desktop 不再注入具体二进制路径）。
+// 目录存在性；Pod 默认配置直接启动其中的官方 cua-driver mcp。
 function cuaBundleEnv() {
   const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
   const dir = app.isPackaged
@@ -219,8 +217,7 @@ function cuaBundleEnv() {
 }
 
 // ---- 内置 Chrome 目录提示（vendor/browser → resources/browser） ----
-// cjs 只看目录存在性；平台/架构可执行文件解析与系统探测全在 Go provider
-// （chrome.Resolve 候选链：AIC_BROWSER_PATH > AIC_BROWSER_BUNDLE_DIR > 系统候选）。
+// Pod 把随包 Chrome 的路径作为官方 MCP 的 executable-path 参数。
 function browserBundleEnv() {
   const dir = app.isPackaged
     ? path.join(process.resourcesPath, 'browser')
@@ -228,12 +225,17 @@ function browserBundleEnv() {
   return fs.existsSync(dir) ? { AIC_BROWSER_BUNDLE_DIR: dir } : {}
 }
 
+function agentBrowserBundleEnv() {
+  const dir = app.isPackaged
+    ? path.join(process.resourcesPath, 'agent-browser')
+    : path.join(__dirname, 'vendor', 'agent-browser', `${process.platform}-${process.arch}`)
+  return { AIC_AGENT_BROWSER_BUNDLE_DIR: dir }
+}
+
 // ---- 后端子进程：启动 / 停止 / 重启（无端口握手，2026-09-22） ----
 async function spawnBackend() {
   backend = spawn(backendBin, [], {
-    // Browser automation runs in Go with a separate Chrome executable.
-    // cuaBundleEnv()/browserBundleEnv()：内置驱动目录提示注入（缺失时空对象，包内回落系统探测）。
-    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...cuaBundleEnv() },
+    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...cuaBundleEnv(), ...agentBrowserBundleEnv() },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))

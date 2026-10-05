@@ -3,13 +3,13 @@ module github.com/veypi/aic-pod
 go 1.27.0
 
 require (
-	github.com/dop251/goja v0.0.0-20260917113740-793a2a65c13b
+	github.com/coder/websocket v1.8.14
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pion/ice/v4 v4.4.2
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/aic-skills v0.0.0
 	github.com/veypi/vbox v0.0.0
 	github.com/veypi/vigo v0.7.6
 	github.com/veypi/vsh v0.0.38
@@ -17,7 +17,6 @@ require (
 	golang.org/x/crypto v0.54.0
 	golang.org/x/image v0.44.0
 	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.40.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
@@ -26,12 +25,11 @@ require (
 	github.com/alicebob/miniredis/v2 v2.36.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
 	github.com/glebarez/sqlite v1.11.0 // indirect
-	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/go-sql-driver/mysql v1.9.3 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/itchyny/gojq v0.12.18 // indirect
@@ -65,13 +63,18 @@ require (
 	github.com/pion/turn/v5 v5.1.0 // indirect
 	github.com/redis/go-redis/v9 v9.18.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/segmentio/asm v1.1.3 // indirect
+	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/time v0.14.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/mysql v1.6.0 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
@@ -84,9 +87,7 @@ require (
 
 // vsh/vbox 为本地姊妹仓（go.work 接线；replace 供非 workspace 构建——
 // Docker/CI 构建前需先发布或拷贝两仓）。
-// aic-skills 同：官方 skill 专仓（内建包嵌入源 + Go SDK），单向依赖。
 replace (
-	github.com/veypi/aic-skills => ../aic-skills
 	github.com/veypi/vbox => ../vbox
 	github.com/veypi/vsh => ../vsh
 	github.com/veypi/vsh/contrib/jq => ../vsh/contrib/jq

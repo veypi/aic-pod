@@ -14,7 +14,7 @@ import (
 
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	hosts "github.com/veypi/aic-pod/protocol/fs"
-	tool "github.com/veypi/aic-pod/protocol/hosts_tools"
+	tool "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type fixture struct {

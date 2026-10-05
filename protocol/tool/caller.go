@@ -1,4 +1,4 @@
-package hosts_tools
+package tool
 
 import (
 	"context"
@@ -16,7 +16,7 @@ type Caller struct {
 	Output        io.Writer // Per-execution output; never process-global stdout.
 	Scope         string    // Empty = device capabilities; fs = owner file proxy.
 	RequestID     string
-	AllowStreams  bool // Set only by the authenticated RTC adapter.
+	Direct        bool // Set only by the authenticated RTC adapter.
 	Subject       string
 	ConnectionID  string
 	Origin        string
@@ -45,14 +45,4 @@ func (c Caller) Deadline() time.Time {
 		return c.Expiry()
 	}
 	return c.ExpiresAt
-}
-
-// Stream is an opaque, duplex message endpoint. The RTC adapter pumps bytes in
-// both directions; tool code owns all message framing and application semantics.
-// Send and Recv run independently and concurrently. Implementations must honor
-// cancellation, and Close must unblock both. Send acceptance is not a remote ACK.
-type Stream interface {
-	Recv(context.Context) ([]byte, error)
-	Send(context.Context, []byte) error
-	Close() error
 }

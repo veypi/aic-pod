@@ -3,6 +3,7 @@ package rtc_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"github.com/pion/webrtc/v4"
 	"github.com/veypi/aic-pod/libs/hostauth"
@@ -10,38 +11,22 @@ import (
 	"github.com/veypi/aic-pod/libs/rtc"
 	hosts "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// rtcTools 是测试用 ToolBackend（hosts_tools/2：普通请求 + 私有 stream 端点）。
 type rtcTools struct {
-	calls  int
-	source *duplexFixture
+	calls atomic.Int32
 }
 
 func (b *rtcTools) HandleTool(ctx context.Context, c wire.Caller, r wire.Request) wire.Response {
-	if err := r.Validate(); err != nil {
-		return wire.Reply(r.Protocol, r.ID, nil, err)
-	}
-	switch r.Action {
-	case wire.ActionExec:
-		b.calls++
-		return wire.Reply(r.Protocol, r.ID, b.calls, nil)
-	default:
-		return wire.Reply(r.Protocol, r.ID, nil, wire.Fail("unsupported", "test backend: exec only"))
-	}
+	return wire.Reply(r.Protocol, r.ID, map[string]any{"native": r.Action, "approved": c.GrantApproved, "script": r.Exec.Script, "calls": b.calls.Add(1)}, nil)
 }
-func (b *rtcTools) OpenToolStream(ctx context.Context, c wire.Caller, endpoint string, args json.RawMessage) (wire.Stream, error) {
-	if endpoint != "duplex" {
-		return nil, wire.Fail("unsupported", "Unknown stream endpoint")
-	}
-	return b.source, nil
-}
-func (b *rtcTools) DisconnectTools(c wire.Caller) {}
+func (b *rtcTools) DisconnectTools(wire.Caller) {}
 func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	key, _ := hosts.DirectKey("secret", "host_1")
 	auth, err := hostauth.NewAccess(hostauth.AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key})
@@ -49,8 +34,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer auth.RevokeAll()
-	source := &duplexFixture{out: make(chan []byte, 16), gate: make(chan struct{}), closed: make(chan struct{})}
-	backend := &rtcTools{source: source}
+	backend := &rtcTools{}
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
@@ -62,17 +46,36 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	}
 	opened := make(chan struct{})
 	dc.OnOpen(func() { close(opened) })
-	responses := make(chan wire.Response, 8)
+	responses := make(chan json.RawMessage, 8)
 	dc.OnMessage(func(m webrtc.DataChannelMessage) {
-		var r wire.Response
-		if json.Unmarshal(m.Data, &r) == nil {
-			responses <- r
-		}
+		responses <- append(json.RawMessage(nil), m.Data...)
 	})
 	var signalMu sync.Mutex
 	var candidates []webrtc.ICECandidateInit
 	remote := false
-	service, err := rtc.New(rtc.Config{HostID: "host_1", Authorization: auth, Tools: backend, Send: func(sig *proto.RtcSignal) {
+	browserStarted := make(chan struct{}, 2)
+	browserInput := make(chan []byte, 2)
+	browserStopped := make(chan struct{}, 2)
+	frame := []byte(`{"type":"frame","seq":73,"data":"` + string(bytes.Repeat([]byte("a"), 220000)) + `"}`)
+	relay := func(ctx context.Context, caller wire.Caller, input <-chan []byte, send func([]byte) error) error {
+		browserStarted <- struct{}{}
+		defer func() { browserStopped <- struct{}{} }()
+		if err := send(frame); err != nil {
+			return err
+		}
+		for {
+			select {
+			case raw := <-input:
+				if err := caller.Validate(ctx); err != nil {
+					return err
+				}
+				browserInput <- raw
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	service, err := rtc.New(rtc.Config{Browser: relay, HostID: "host_1", Authorization: auth, Tools: backend, Send: func(sig *proto.RtcSignal) {
 		signalMu.Lock()
 		defer signalMu.Unlock()
 		if sig.Kind == proto.RtcAnswer {
@@ -119,179 +122,133 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("channel timeout")
 	}
-	var helloTicket string
-	var streamOpen *rtcwire.StreamOpen
-	request := func(r wire.Request, channels ...string) wire.Response {
+
+	exchange := func(value any) map[string]any {
 		t.Helper()
-		r.Protocol = rtcwire.Protocol
-		r.ID = wire.NewID("r_")
-		envelope := rtcwire.Request{Request: r}
-		if r.Action == "hello" {
-			envelope.Ticket = helloTicket
-		}
-		if r.Action == "stream.open" {
-			envelope.Stream = streamOpen
-		}
-		if len(channels) > 0 {
-			envelope.Channel = channels[0]
-		}
-		raw, _ := json.Marshal(envelope)
+		raw, _ := json.Marshal(value)
 		if err := dc.SendText(string(raw)); err != nil {
 			t.Fatal(err)
 		}
 		select {
-		case v := <-responses:
-			if v.ID != r.ID || v.Protocol != rtcwire.Protocol {
-				t.Fatal("response identity")
+		case data := <-responses:
+			var r map[string]any
+			if err := json.Unmarshal(data, &r); err != nil {
+				t.Fatal(err)
 			}
-			return v
+			return r
 		case <-time.After(5 * time.Second):
-			t.Fatal("request timeout")
-			return wire.Response{}
+			t.Fatal("response timeout")
+			return nil
 		}
 	}
-	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error == nil {
-		t.Fatal("unauthenticated tools admitted")
+	call := func(script string) map[string]any {
+		return exchange(rtcwire.Request{Tool: &wire.Request{Protocol: rtcwire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: script}}})
 	}
-	key, _ = hosts.DirectKey("secret", "host_1")
+	if r := call("mcp call fixture next --json"); r["error"] == nil {
+		t.Fatal("unauthenticated call admitted")
+	}
+	denied, err := pc.CreateDataChannel(rtcwire.BrowserChannel, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deniedClosed := make(chan struct{})
+	denied.OnClose(func() { close(deniedClosed) })
+	select {
+	case <-deniedClosed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("unauthenticated browser stream stayed open")
+	}
+	select {
+	case <-browserStarted:
+		t.Fatal("unauthenticated browser relay started")
+	default:
+	}
 	ticket, err := hosts.SignTicket(key, hosts.Ticket{HostID: "host_1", UserID: "owner", CredentialVersion: 1, PCID: "pc_tools", Fingerprint: fp}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	helloTicket = ticket
-	if r := request(wire.Request{Action: "hello"}); r.Error != nil {
-		t.Fatal(r.Error)
+	if r := exchange(rtcwire.Request{ID: "auth1", Auth: "open", Ticket: ticket}); r["error"] != nil {
+		t.Fatal(r)
 	}
-	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error != nil || r.Result != float64(1) {
-		t.Fatalf("%+v", r)
-	}
-	if r := request(wire.Request{Action: "session.open"}); r.Error == nil {
-		t.Fatal("legacy business session accepted")
-	}
-	if r := request(wire.Request{Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "true"}}); r.Error != nil || r.Result != float64(2) {
-		t.Fatalf("%+v", r)
-	}
-	// 端点校验：真实端点含点号（browser.page.frames/browser.page.input）必须过 ValidName
-	// 校验（此处无对应 channel → not_found，证明未被 invalid_argument 拒）；
-	// 非法字符才 invalid_argument。
-	streamOpen = &rtcwire.StreamOpen{Endpoint: "browser.page.frames", Args: json.RawMessage(`{}`)}
-	if r := request(wire.Request{Action: "stream.open"}, "hosts-stream/ch_none"); r.Error == nil || r.Error.Code == "invalid_argument" {
-		t.Fatalf("dotted endpoint must pass validation (expect not_found): %+v", r.Error)
-	}
-	streamOpen = &rtcwire.StreamOpen{Endpoint: "bad endpoint!!", Args: json.RawMessage(`{}`)}
-	if r := request(wire.Request{Action: "stream.open"}, "hosts-stream/ch_none"); r.Error == nil || r.Error.Code != "invalid_argument" {
-		t.Fatalf("invalid endpoint must be invalid_argument: %+v", r.Error)
-	}
-	streamOpen = nil
-	// Channel setup is the only request. Neither duplex payloads nor local
-	// consumers exchange per-message RPCs, even while tool input is blocked.
-	label := rtcwire.StreamPrefix + "duplex"
-	channel, err := pc.CreateDataChannel(label, nil)
+	stream, err := pc.CreateDataChannel(rtcwire.BrowserChannel, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ready := make(chan struct{})
-	channel.OnOpen(func() { close(ready) })
-	packets := make(chan []byte, 16)
-	channel.OnMessage(func(m webrtc.DataChannelMessage) {
+	frames := make(chan []byte, 1)
+	var joined []byte
+	stream.OnMessage(func(m webrtc.DataChannelMessage) {
 		if m.IsString {
-			t.Error("text wrapper on opaque channel")
+			return
 		}
-		packets <- m.Data
+		joined = append(joined, m.Data...)
+		if len(joined) >= 4 && len(joined) == 4+int(binary.BigEndian.Uint32(joined[:4])) {
+			frames <- joined[4:]
+			joined = nil
+		}
 	})
 	select {
-	case <-ready:
+	case got := <-frames:
+		if !bytes.Equal(got, frame) {
+			t.Fatal("fragmented upstream frame changed")
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("stream channel did not open")
+		t.Fatal("fragmented browser frame timeout")
 	}
-	streamOpen = &rtcwire.StreamOpen{Endpoint: "duplex", Args: json.RawMessage(`{}`)}
-	// 服务端 OnDataChannel 注册与客户端 OnOpen 存在竞态——not_found 时短重试。
-	var openResp wire.Response
-	for end := time.Now().Add(3 * time.Second); ; {
-		openResp = request(wire.Request{Action: "stream.open"}, label)
-		if openResp.Error == nil {
-			break
-		}
-		if openResp.Error.Code != "not_found" || time.Now().After(end) {
-			t.Fatal(openResp.Error)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if r := request(wire.Request{Action: "stream.send"}); r.Error == nil {
-		t.Fatal("RPC stream send retained")
-	}
-	input := []byte{0, 255, 123, 0, 1}
-	for range 3 {
-		if err := channel.Send(input); err != nil {
-			t.Fatal(err)
-		}
-	}
-	output := []byte{9, 0, 255}
-	source.out <- output
-	select {
-	case packet := <-packets:
-		if !bytes.Equal(packet, output) {
-			t.Fatalf("payload changed: %v", packet)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("output blocked behind input")
-	}
-	close(source.gate)
-	for range 3 {
-		select {
-		case packet := <-packets:
-			if !bytes.Equal(packet, input) {
-				t.Fatal(packet)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("input waited for a per-message request")
-		}
-	}
-	_ = channel.Close()
-	select {
-	case <-source.closed:
-	case <-time.After(3 * time.Second):
-		t.Fatal("tool endpoint leaked after channel close")
-	}
-
-}
-
-type duplexFixture struct {
-	out    chan []byte
-	gate   chan struct{}
-	closed chan struct{}
-	once   sync.Once
-}
-
-func (s *duplexFixture) Send(ctx context.Context, b []byte) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.gate:
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case s.out <- b:
-		return nil
-	}
-}
-func (s *duplexFixture) Recv(ctx context.Context) ([]byte, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case b := <-s.out:
-		return b, nil
-	}
-}
-func (s *duplexFixture) Close() error { s.once.Do(func() { close(s.closed) }); return nil }
-
-func decode[T any](t *testing.T, v any) T {
-	t.Helper()
-	raw, _ := json.Marshal(v)
-	var out T
-	if err := json.Unmarshal(raw, &out); err != nil {
+	<-browserStarted
+	ack := `{"type":"ack","seq":73}`
+	if err := stream.SendText(ack); err != nil {
 		t.Fatal(err)
 	}
-	return out
+	select {
+	case got := <-browserInput:
+		if string(got) != ack {
+			t.Fatal("renderer ACK changed")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("renderer ACK not forwarded")
+	}
+	duplicate, _ := pc.CreateDataChannel(rtcwire.BrowserChannel, nil)
+	duplicateClosed := make(chan struct{})
+	duplicate.OnClose(func() { close(duplicateClosed) })
+	select {
+	case <-duplicateClosed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("duplicate browser stream accepted")
+	}
+	// Commands continue on the same authenticated peer while the viewer is open.
+	for _, want := range []float64{1, 2} {
+		r := call("mcp call fixture next --json")
+		if r["error"] != nil {
+			t.Fatal(r)
+		}
+		out := r["result"].(map[string]any)
+		if out["calls"] != want || out["approved"] != false || out["script"] != "mcp call fixture next --json" {
+			t.Fatal(out)
+		}
+	}
+	if r := exchange(rtcwire.Request{ID: "auth2", Auth: "open", Ticket: ticket}); r["error"] == nil {
+		t.Fatal("duplicate authentication admitted")
+	}
+	for _, approved := range []bool{true, false} {
+		r := exchange(rtcwire.Request{Tool: &wire.Request{Protocol: rtcwire.Protocol, ID: "native", Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "pwd"}}, GrantApproved: approved})
+		value, ok := r["result"].(map[string]any)
+		if !ok || value["native"] != "exec" || value["approved"] != approved || r["request_id"] != "native" {
+			t.Fatalf("native route failed: %+v", r)
+		}
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-browserStopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("browser relay leaked after viewer close")
+	}
+	if r := call("pwd"); r["error"] != nil {
+		t.Fatal("viewer close terminated command connection", r)
+	}
+	auth.RevokeAll()
+	if r := call("mcp call fixture next --json"); r["error"] == nil {
+		t.Fatal("revoked authorization admitted")
+	}
 }

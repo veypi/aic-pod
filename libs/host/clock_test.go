@@ -1,7 +1,6 @@
 package host
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +8,7 @@ import (
 	"time"
 
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func TestResolveTimeURL(t *testing.T) {
@@ -85,17 +84,18 @@ func TestToolsVerifyUsesCalibratedClock(t *testing.T) {
 	route, _ := natswire.Subject(c.uid, c.hostID)
 	setClockOffset((2 * time.Hour).Milliseconds())
 	makeReq := func(deadlineMS, untilMS int64) []byte {
-		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: deadlineMS, AuthorizationUntil: untilMS, Request: wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionFS, FS: &wire.FSInvocation{Method: "roots", Args: json.RawMessage(`{}`)}}}
+		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: deadlineMS, AuthorizationUntil: untilMS, Request: fsRequest("roots", map[string]any{})}
 		natswire.Sign(c.kTool, &r)
 		b, _ := json.Marshal(r)
 		return b
 	}
-	// 平台时间视角的时限（校准后 now 对应平台时间）。
-	if got := c.HandleNATS(context.Background(), route, makeReq(clockNow().Add(time.Minute).UnixMilli(), clockNow().Add(2*time.Minute).UnixMilli())); got.Error != nil {
-		t.Fatalf("calibrated window rejected: %+v", got)
-	}
-	// 本机系统时间视角的时限（比平台时间早 2 小时）必须判失效。
-	if got := c.HandleNATS(context.Background(), route, makeReq(time.Now().Add(time.Minute).UnixMilli(), time.Now().Add(2*time.Minute).UnixMilli())); got.Error == nil {
-		t.Fatal("system-time based window admitted")
+	for _, offset := range []time.Duration{2 * time.Hour, -2 * time.Hour} {
+		setClockOffset(offset.Milliseconds())
+		if got := callNATS(t, c, route, makeReq(clockNow().Add(time.Minute).UnixMilli(), clockNow().Add(2*time.Minute).UnixMilli())); got.Error != nil {
+			t.Fatalf("offset %v: %+v", offset, got)
+		}
+		if got := callNATS(t, c, route, makeReq(time.Now().Add(time.Minute).UnixMilli(), time.Now().Add(2*time.Minute).UnixMilli())); got.Error == nil {
+			t.Fatal("system-time window admitted")
+		}
 	}
 }

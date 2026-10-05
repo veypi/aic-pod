@@ -11,7 +11,7 @@ import (
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 	"github.com/veypi/vbox"
 )
 

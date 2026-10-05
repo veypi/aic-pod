@@ -5,7 +5,7 @@ import (
 	"time"
 
 	hosts "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type AccessConfig struct {

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 	"golang.org/x/crypto/hkdf"
 )
 

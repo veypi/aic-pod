@@ -5,19 +5,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	hosts "github.com/veypi/aic-pod/protocol/hosts_tools"
+	hosts "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type peer struct {
-	toolStreams map[string]*toolChannel
 	toolsDC     *webrtc.DataChannel
+	browserDC   *webrtc.DataChannel
 	toolsSend   sync.Mutex
+	browserSend sync.Mutex
 	s           *Service
 	id          string
 	pc          *webrtc.PeerConnection
@@ -39,12 +39,7 @@ func (p *peer) close() {
 	p.closed = true
 	p.cancel()
 	connection := p.connection
-	streams := p.toolStreams
-	p.toolStreams = nil
 	p.mu.Unlock()
-	for _, stream := range streams {
-		stream.close(nil)
-	}
 	if connection != "" {
 		if p.s.cfg.Tools != nil {
 			if caller, err := p.toolCaller(); err == nil {
@@ -73,8 +68,8 @@ func (p *peer) expire(now time.Time) {
 
 }
 func (p *peer) channel(dc *webrtc.DataChannel) {
-	if strings.HasPrefix(dc.Label(), rtcwire.StreamPrefix) {
-		p.toolChannel(dc)
+	if dc.Label() == rtcwire.BrowserChannel {
+		p.browserChannel(dc)
 		return
 	}
 	if dc.Label() == rtcwire.Channel {
@@ -88,6 +83,9 @@ func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, 
 		return hosts.Fail("unreachable", "Channel is unavailable")
 	}
 	lock := &p.toolsSend
+	if dc.Label() == rtcwire.BrowserChannel {
+		lock = &p.browserSend
+	}
 	lock.Lock()
 	defer lock.Unlock()
 	timer := time.NewTimer(30 * time.Second)

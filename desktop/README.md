@@ -11,17 +11,13 @@ Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
  │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
  │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
- ├─ browser/cua：aic-skills 技能包与 Go service 经 cmd/build 嵌入后端，
- │    首跑预装到 ~/.aic/skills，pod 经 skillproc 直连 service
- ├─ Chrome：main.js 注入目录级 env：
- │    AIC_BROWSER_BUNDLE_DIR（vendor/browser → resources/browser，Chrome for Testing
- │    探测兜底；可执行文件解析与系统候选全在 Go provider chrome.Resolve）
- ├─ cua-driver：aic-skills/cua provider 管理 MCP 连接、窗口与快照
- │    scripts/sync-cua.mjs 将固定版本发行物同步到 vendor/cua → resources/cua
- │    main.js 注入 AIC_CUA_BUNDLE_DIR，provider 解析平台可执行文件
+ ├─ browser/cua：Go MCP manager 直接启动官方 agent-browser mcp / cua-driver mcp
+ │    MCP 工具与 schema 原样暴露，状态归上游服务
+ ├─ resources/agent-browser：官方原生二进制（AIC_AGENT_BROWSER_BUNDLE_DIR）
+ ├─ resources/browser：Chrome for Testing（AIC_BROWSER_BUNDLE_DIR）
+ ├─ resources/cua：官方 CuaDriver（AIC_CUA_BUNDLE_DIR）
  ├─ BaseWindow 主窗口：平台页 WebContentsView
- │    Browser viewer 通过 RTC 观看 Go 管理的 Chrome，接管后才能输入
- │    固定设备视口，viewer 关闭或缩放不影响页面生命周期
+ │    Browser UI 经 RTC command 调用上游工具，同一 RTC 连接转发上游画面和人工输入
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
  │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
  │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
@@ -39,30 +35,25 @@ Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢�
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
 键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
 
-浏览器分辨率：service 读取 `AIC_BROWSER_WIDTH` / `AIC_BROWSER_HEIGHT`，默认
-1280×720；单次 `browser page.create --width N --height N` 可指定新页面视口。
-修改 desktop 代码后需重启，并更新平台的 Browser 页面与 `os/browser-viewer.js`。
-
-键盘焦点保留在平台 viewer 中，已有 leader/窗口快捷键先处理，普通输入与中文
-composition 提交转发给离屏页面。原生内容的焦点交接已取消。
+浏览器工具、tabId、元素引用 和参数均遵循上游。查看实际 schema 使用
+`mcp tools browser` / `mcp describe browser <tool>`。实时 UI 复用 agent-browser 的原生流，由 Pod 转发；没有另一条 CDP 连接或自研 Browser MCP。
 
 ## 开发
 
 ```bash
-# 1. 编译 Go 后端及内建 provider（desktop/bin/aic-backend）
+# 1. 编译 Go 后端（desktop/bin/aic-backend）
 make backend-bin
-# 2. 安装依赖 + 启动（需独立 Chrome，或设置 AIC_BROWSER_PATH）
-cd desktop && npm install && npm start
+# 2. 安装开发依赖与固定版本的上游运行依赖
+cd desktop && npm install && npm run runtime-sync
+npm start
 ```
 
 平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/settings.html 单文件静态页，
 无框架/无构建、数据全走 IPC 桥）与 main.js/preload.js 改动需重启 electron。
-browser/cua 代码位于 `../aic-skills/browser/provider/` 与 `../aic-skills/cua/provider/`（相对 aic-pod 根目录），修改后重新运行 `make backend-bin`。直接 `go build` 不会嵌入这两个 provider；构建入口见 [aic-skills README](../../aic-skills/README.md)。协议与测试见 [设备工具实现](../docs/hosts-tools.md)。Electron 不包含 browser CDP 引擎。
-内置 cua-driver（固定版本，见 desktop/cua.json）dev 下不自动下载——需要时手动
-`npm run cua-sync`（→ vendor/cua，已 gitignore）；未同步时后端回落系统安装的 cua-driver。
-
-独立 Chrome 开发时可用 `npm run browser-sync` 同步到 `vendor/browser/<platform>-<arch>`，
-或者继续使用系统 Chrome / `AIC_BROWSER_PATH`。同步清单在 `browser.json`。
+browser/CUA 使用上游独立程序，没有自研 server 或工具适配层。
+`mcp.servers` 可完整替换默认配置或添加第三方服务。协议见 [设备 MCP](../docs/hosts-tools.md)。
+开发依赖分别由 `npm run agent-browser-sync`、`npm run browser-sync`、`npm run cua-sync` 同步。
+版本在 `agent-browser.json`、`browser.json`、`cua.json` 固定。
 
 ## 打包（electron-builder，须在目标平台执行）
 
@@ -75,13 +66,15 @@ make desktop-linux-amd64     # Linux → dist/aic-desktop-linux-x64.AppImage
 
 打包前自动同步 cua-driver（`desktop/cua.json` 固定版本 + sha256 校验 →
 `vendor/cua → resources/cua`，三平台：mac `CuaDriver.app`、win/linux 裸二进制），
-安装包自带 cua 能力，用户零安装。macOS 首次使用仍需用户在系统弹窗给 “Cua Driver”
+安装包直接包含上游的驱动与 MCP 模式。macOS 先把 `resources/cua/darwin/CuaDriver.app`
+安装到 `/Applications/CuaDriver.app`，遵循上游按应用名启动 daemon 的布局；升级后执行
+官方 `cua-driver stop` 停止旧 daemon。首次使用仍需用户在系统弹窗给 “Cua Driver”
 授予辅助功能/屏幕录制（TCC 授权归上游 app 身份 com.trycua.driver，跨我们发版保持）。
 升级 cua：改 `desktop/cua.json` 的 tag/sha256 后 `npm run cua-sync -- --force`。
 受限网络（GitHub 直连不稳）：手动下载对应资产后 `npm run cua-sync -- --asset <文件>`
 （仍走 sha256 校验）。
 
-独立 Chrome 由 electron-builder 的 `beforePack` 自动同步（包括直接调用 electron-builder）。
+独立 Chrome 和 agent-browser 由 electron-builder 的 `beforePack` 自动同步（包括直接调用 electron-builder）。
 `browser.json` 固定 [Chrome for Testing](https://github.com/GoogleChromeLabs/chrome-for-testing)
 版本及 macOS arm64/x64、Windows x64、Linux x64 官方归档 SHA-256；校验成功后才替换缓存。
 完整资源和随附声明位于 `resources/browser/<platform>-<arch>`，只复制当前架构，不进入 asar。

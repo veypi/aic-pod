@@ -15,19 +15,6 @@ func TestErrorModel(t *testing.T) {
 		t.Errorf("ExecError(no action) = %q", e2.Error())
 	}
 
-	if s := StateOf(&DeniedError{Reason: "x"}); s != StateRejected {
-		t.Errorf("StateOf(Denied) = %q", s)
-	}
-	if s := StateOf(&ApprovalError{Reason: "x"}); s != StateWaiting {
-		t.Errorf("StateOf(Approval) = %q", s)
-	}
-	if s := StateOf(fmt.Errorf("boom")); s != StateError {
-		t.Errorf("StateOf(generic) = %q", s)
-	}
-	// 包装后仍可识别
-	if s := StateOf(fmt.Errorf("wrap: %w", &DeniedError{Reason: "x"})); s != StateRejected {
-		t.Errorf("StateOf(wrapped Denied) = %q", s)
-	}
 }
 
 // StrategyError：策略类错误提取（保型上抛的前置判定）——包装链可识别、

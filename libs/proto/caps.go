@@ -59,7 +59,7 @@ type DeviceInfo struct {
 
 // FSCaps 声明 fs 能力。Actions 为指针以严格区分三形态（§6.3）：
 // nil（null/未声明）= 全部 8 个 action；空数组 = 不支持 fs。
-// hosts_tools/2 起 FS 方法表为协议固定集，不再随 caps 逐项声明。
+// MCP 起 FS 方法表为协议固定集，不再随 caps 逐项声明。
 type FSCaps struct {
 	Actions *[]string `json:"actions"`
 }

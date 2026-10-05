@@ -1,16 +1,14 @@
 package hosts_nats
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func execReq() wire.Request {
-	return wire.Request{Protocol: Protocol, ID: "req", Action: wire.ActionExec,
-		Exec: &wire.ExecPayload{Script: "browser page.list --json | jq '.'"}}
+	return wire.Request{Protocol: Protocol, ID: "req", Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "echo hello"}}
 }
 
 // hosts_nats/2：签名覆盖完整请求（含 grant_approved 标记与脚本正文）——
@@ -28,14 +26,11 @@ func TestSignatureBindsEveryExecutionField(t *testing.T) {
 		func(r *Request) { r.Caller = "u2" },
 		func(r *Request) { r.Origin = "another" },
 		func(r *Request) { r.GrantApproved = true }, // 篡改审批标记必须验签失败
-		func(r *Request) { r.Request.TimeoutMS = 5000 },
+		func(r *Request) { r.Request.Protocol = "wrong" },
 		func(r *Request) { r.Subject += ".other" },
-		func(r *Request) { r.Request.Exec.Script = "rm -rf /" },
-		func(r *Request) { r.Request.Exec.NoSandbox = true },
+		func(r *Request) { r.Request.Exec = &wire.ExecPayload{Script: "echo altered"} },
 	} {
 		copy := r
-		payload := *r.Request.Exec
-		copy.Request.Exec = &payload
 		change(&copy)
 		if Verify("secret", "h1", subject, copy, time.Now()) == nil {
 			t.Fatal("tampering accepted")
@@ -99,33 +94,12 @@ func TestVerifyCallerMustMatchSubjectUID(t *testing.T) {
 	}
 }
 
-// fs 载荷与 cancel 动作的校验（hosts_tools/2：每 action 只接受对应载荷）。
-func TestRequestValidateV2(t *testing.T) {
+func TestRequestRejectsMCPAction(t *testing.T) {
 	subject, _ := Subject("u1", "h1")
-	mk := func(req wire.Request) Request {
-		r := Request{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "nonce", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: req}
-		Sign("secret", &r)
-		return r
-	}
-	verify := func(r Request) error { return Verify("secret", "h1", subject, r, time.Now()) }
-
-	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r1", Action: wire.ActionFS,
-		FS: &wire.FSInvocation{Method: "text.read", Args: json.RawMessage(`{"path":"/a"}`)}})); err != nil {
-		t.Fatal("fs request rejected:", err)
-	}
-	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r2", Action: wire.ActionCancel, CancelID: "r1"})); err != nil {
-		t.Fatal("cancel request rejected:", err)
-	}
-	// 载荷错配
-	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r3", Action: wire.ActionFS,
-		Exec: &wire.ExecPayload{Script: "ls"}, FS: &wire.FSInvocation{Method: "read", Args: json.RawMessage(`{}`)}})); err == nil {
-		t.Fatal("mismatched payload accepted")
-	}
-	// 旧动作已删除
-	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r4", Action: "call"})); err == nil {
-		t.Fatal("legacy call action accepted")
-	}
-	if err := verify(mk(wire.Request{Protocol: Protocol, ID: "r5", Action: "catalog"})); err == nil {
-		t.Fatal("legacy catalog action accepted")
+	r := Request{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "n", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: execReq()}
+	r.Request.Action = "mcp"
+	Sign("key", &r)
+	if Verify("key", "h1", subject, r, time.Now()) == nil {
+		t.Fatal("MCP entered native tool route")
 	}
 }

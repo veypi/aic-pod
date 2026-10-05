@@ -9,16 +9,14 @@
     "start": "electron .",
     "cua-sync": "node scripts/sync-cua.mjs",
     "browser-sync": "node scripts/sync-browser.mjs",
-    "predist": "node scripts/sync-cua.mjs",
     "dist": "electron-builder",
-    "predist:mac": "node scripts/sync-cua.mjs",
     "dist:mac": "electron-builder --mac",
-    "predist:win": "node scripts/sync-cua.mjs",
     "dist:win": "electron-builder --win",
-    "predist:linux": "node scripts/sync-cua.mjs",
     "dist:linux": "electron-builder --linux",
     "test": "node --test *.test.cjs scripts/*.test.mjs",
-    "test:browser:live": "cd ../../aic-skills && AIC_BROWSER_TEST=1 go test ./browser/provider/browser -run TestChromeLive -count=1"
+    "runtime-sync": "npm run browser-sync && npm run cua-sync && npm run agent-browser-sync",
+    "test:mcp:live": "cd .. && AIC_MCP_TEST=1 go test ./libs/host -run TestUpstreamMCPThroughExec -count=1",
+    "agent-browser-sync": "node scripts/sync-agent-browser.mjs"
   },
   "devDependencies": {
     "electron": "^44.3.0",

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // TestMalformedAuthBlocksRTCAndNATSUntilRepaired 锁定授权配置损坏的
@@ -39,7 +39,7 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 		cfg.Global.Normalize()
 		for _, request := range requests {
 			request.ID = wire.NewID("r_")
-			for _, response := range []wire.Response{c.HandleTool(context.Background(), testCaller(), request), signedCall(t, c, request, false, "s1", "")} {
+			for _, response := range []wire.Response{callTool(t, c, context.Background(), testCaller(), request), signedCall(t, c, request, false, "s1", "")} {
 				if response.Error == nil || response.Error.Code != "permission_denied" {
 					t.Fatalf("damaged authorization admitted call: %+v", response)
 				}
@@ -55,10 +55,10 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 	}
 	cfg.Global = cfg.NewOptions()
 	cfg.Global.FsPolicy = cfg.PolicyOpen
-	if response := c.HandleTool(context.Background(), testCaller(), requests[0]); response.Error != nil {
+	if response := callTool(t, c, context.Background(), testCaller(), requests[0]); response.Error != nil {
 		t.Fatalf("repair did not restore exec: %+v", response)
 	}
-	if response := c.HandleTool(context.Background(), testCaller(), requests[1]); response.Error != nil {
+	if response := callTool(t, c, context.Background(), testCaller(), requests[1]); response.Error != nil {
 		t.Fatalf("repair did not restore file calls: %+v", response)
 	}
 	data, err = os.ReadFile(path)

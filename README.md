@@ -1,6 +1,6 @@
 # aic-pod
 
-设备端 fs、exec、browser/cua 与文件代理已统一采用 [hosts_tools/1 三协议架构](docs/hosts-tools.md)：Go 自管 Chrome，Desktop 仅提供默认可执行文件路径。
+设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/hosts-tools.md)。技能是云端静态内容；browser/CUA 随 Pod 内置，默认注册并按需启动。
 
 Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/hosts-tools.md#browser-运行环境)。
 
@@ -133,26 +133,18 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-browser 与 cua 是 vsh 指令（注册进引擎 Registry，与管道、重定向、控制流自由组合）：
-browser 控制 Go 托管的 Chrome 页面，cua 控制本机原生窗口。两者共用
-`observe / click / fill / type / press / scroll / wait` 等交互原语与统一结果格式
-（cua 内部操作与结果词汇沿用 ui/1）；`--json` 输出稳定结果，诊断走 stderr。
-完整协议与能力边界见 [docs/hosts-tools.md](docs/hosts-tools.md)。
+browser 与 cua 默认直接启动官方 agent-browser 0.38.2 和 cua-driver 0.33.2 的 MCP 模式，首次调用懒启动，后续共享连接。所有工具名称、参数和结果遵循上游。Desktop 附带 Chrome 与两套官方原生程序；独立 CLI 按技能说明安装运行依赖。
 
-```text
-browser page.create https://example.com
-browser page.observe <page_id> --image
-browser page.click <page_id> --ref <snapshot-ref>
-cua window.list
-cua window.observe <window_id> --image
-cua window.click <window_id> --role button --name 确定
+```sh
+mcp tools browser
+mcp call browser new_page --input '{"url":"https://example.com"}'
+mcp call browser take_snapshot --input '{"pageId":1}'
+mcp tools cua
 ```
-
-Chrome 扩展已移除；browser 由 Go 直接驱动真实 Chrome（CDP），不依赖插件代码或同步脚本。
 
 ## 构建
 
-完整应用通过下方 Makefile 构建，统一调用 `aic-skills/cmd/build`，将 browser/cua service 与技能资源嵌入后端。直接 `go build` / `go run` 只带纯资源技能，**不嵌入 browser/cua**，干净设备无法自动预装这两项能力。开发启动可用 `go run ../aic-skills/cmd/build -command run -- ./cli`。
+普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 MCP manager。上游工具作为独立进程运行，Desktop 打包时附带固定版本依赖。云端技能内容位于 aic-skills。
 
 产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
 

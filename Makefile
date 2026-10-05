@@ -47,7 +47,7 @@ LDFLAGS    := -s -w -X github.com/veypi/aic-pod/cfg.Version=$(VERSION)
 
 build:
 	@mkdir -p $(BIN_DIR)
-	go run ../aic-skills/cmd/build -- -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)" $(MAIN_DIR)
+	go build -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$(GOHOSTOS)-$(GOHOSTARCH)"
 
 cli-all: cli-linux-amd64 cli-linux-arm64 cli-darwin-amd64 cli-darwin-arm64 cli-windows-amd64
@@ -57,7 +57,7 @@ cli-%:
 	@mkdir -p $(BIN_DIR)
 	@os=$$(echo $* | cut -d- -f1); arch=$$(echo $* | cut -d- -f2-); \
 	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
-	go run ../aic-skills/cmd/build -goos $$os -goarch $$arch -- -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" $(MAIN_DIR)
+	GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$*"
 
 # windows 资源（icon + version info，go-winres）
@@ -66,7 +66,7 @@ cli-windows-amd64:
 	@echo "→ generating Windows resources (icon + version info)..."
 	cd $(MAIN_DIR) && go-winres make --in ../resources/winres.json --arch amd64 \
 		--product-version $(WIN_VERSION) --file-version $(WIN_VERSION) --out rsrc
-	go run ../aic-skills/cmd/build -goos windows -goarch amd64 -- -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe" $(MAIN_DIR)
+	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-windows-amd64.exe"
 
 # ==============================================================================
@@ -79,11 +79,11 @@ cli-windows-amd64:
 
 # Go 后端二进制：dev 运行（desktop/bin/）与 electron-builder extraResources
 # （resources/backend/）共用。先清掉两侧旧名，避免跨平台残留被打进包。
-# cmd/build 同时构建目标平台的 provider，所有临时产物按调用隔离。
+# MCP manager 直接启动官方服务；上游运行依赖由 Desktop 分发或 CLI 用户安装。
 backend-bin:
 	@mkdir -p $(DESKTOP_DIR)/bin
 	@rm -f $(DESKTOP_DIR)/bin/aic-backend $(DESKTOP_DIR)/bin/aic-backend.exe
-	go run ../aic-skills/cmd/build -- -ldflags "$(LDFLAGS)" -o "$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" $(MAIN_DIR)
+	go build -ldflags "$(LDFLAGS)" -o "$(DESKTOP_DIR)/bin/$(BACKEND_BIN)" $(MAIN_DIR)
 	@echo "→ $(DESKTOP_DIR)/bin/$(BACKEND_BIN)"
 
 # electron-builder 依赖安装（node_modules）
@@ -94,17 +94,20 @@ desktop-deps:
 cua-sync:
 	cd $(DESKTOP_DIR) && node scripts/sync-cua.mjs
 
+runtime-sync:
+	cd $(DESKTOP_DIR) && npm run runtime-sync
+
 # 同步 git 版本到 package.json（electron-builder 产物版本取自 package.json）
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version cua-sync
+.PHONY: backend-bin desktop-deps desktop-version cua-sync runtime-sync
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
 # macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	$(MAKE) desktop-version backend-bin cua-sync
+	$(MAKE) desktop-version backend-bin
 	@arch=$$(echo $* | sed 's/amd64/x64/'); \
 	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
@@ -112,7 +115,7 @@ desktop-darwin-%:
 
 # Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	$(MAKE) desktop-version backend-bin cua-sync
+	$(MAKE) desktop-version backend-bin
 	cd $(DESKTOP_DIR) && npx electron-builder --win
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@test -f $(BIN_DIR)/win-unpacked/resources/backend/aic-backend.exe || { echo "✗ 打包缺 resources/backend/aic-backend.exe（backend-bin 命名回归？）"; exit 1; }
@@ -120,7 +123,7 @@ desktop-windows-%:
 
 # Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	$(MAKE) desktop-version backend-bin cua-sync
+	$(MAKE) desktop-version backend-bin
 	cd $(DESKTOP_DIR) && npx electron-builder --linux
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"

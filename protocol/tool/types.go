@@ -1,11 +1,4 @@
-// Package hosts_tools defines the transport-independent tool contract.
-//
-// hosts_tools/2（hosts-vsh-redesign §4.1）：请求只携带完整脚本或数据面调用，
-// 不再注册业务命令。action 只有三种：
-//   - exec：执行完整 vsh 脚本（ExecPayload）；
-//   - fs：数据面文件调用（FSInvocation，直达 FS 服务）；
-//   - cancel：按 request_id 取消一次执行（与 bg kill 共用取消句柄）。
-package hosts_tools
+package tool
 
 import (
 	"bytes"
@@ -18,7 +11,6 @@ import (
 	"regexp"
 )
 
-const Protocol = "hosts_tools/2"
 const MaxMessageBytes = 1 << 20
 
 // 请求动作（每个 action 只接受对应载荷）。
@@ -155,14 +147,12 @@ func (r Request) Validate() error {
 	if r.FS != nil && r.Action != ActionFS {
 		return Fail("invalid_argument", "fs payload requires action=fs")
 	}
+	if r.CancelID != "" && r.Action != ActionCancel {
+		return Fail("invalid_argument", "cancel_id requires action=cancel")
+	}
 	switch r.Action {
 	case ActionExec:
-		if r.Exec == nil || r.Exec.Script == "" || len(r.Exec.Script) > MaxMessageBytes/2 {
-			return Fail("invalid_argument", "exec requires a bounded script")
-		}
-		if r.Exec.WaitMS < 0 || len(r.Exec.Workdir) > 4096 || len(r.Exec.Stdin) > MaxMessageBytes/2 {
-			return Fail("invalid_argument", "Invalid exec options")
-		}
+		return r.Exec.Validate()
 	case ActionFS:
 		if r.FS == nil || !ValidName(r.FS.Method) {
 			return Fail("invalid_argument", "Invalid fs method")
@@ -180,6 +170,13 @@ func (r Request) Validate() error {
 		}
 	default:
 		return Fail("unsupported", "Unknown transport action")
+	}
+	return nil
+}
+
+func (p *ExecPayload) Validate() error {
+	if p == nil || p.Script == "" || len(p.Script) > MaxMessageBytes/2 || p.WaitMS < 0 || len(p.Workdir) > 4096 || len(p.Stdin) > MaxMessageBytes/2 {
+		return Fail("invalid_argument", "Invalid exec arguments")
 	}
 	return nil
 }

@@ -26,6 +26,13 @@ module.exports = async (context) => {
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
   assertBrowserBundle(path.join(resources, "browser"), context.electronPlatformName, Arch[context.arch]);
+  const { assertAgentBrowserBundle } = await import("./sync-agent-browser.mjs");
+  assertAgentBrowserBundle(path.join(resources, "agent-browser"), context.electronPlatformName, Arch[context.arch]);
+  const cua = JSON.parse(fs.readFileSync(path.join(context.packager.projectDir, "cua.json")));
+  for (const name of [...cua.assets[context.electronPlatformName].keep, "LICENSE", "THIRD_PARTY_NOTICES.md"]) {
+    if (!fs.existsSync(path.join(resources, "cua", context.electronPlatformName, name)))
+      throw new Error(`CuaDriver resource missing: ${name}`);
+  }
   if (context.electronPlatformName !== "darwin") return;
   const appPath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   if (!fs.existsSync(appPath)) {

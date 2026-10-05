@@ -1,5 +1,5 @@
 // Package host 是 AIC host agent 运行时（hosts-vsh-redesign）：
-// NATS 连接与认证、能力上报、心跳、exec/fs/cancel 分发、执行管理器装配。
+// NATS 连接与认证、能力上报、心跳、请求分发、执行管理器装配。
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
 // 内建 90 + jq + 平台命令（commands/bg/grant）由引擎 Registry
@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -25,19 +26,19 @@ import (
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
+	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/aic-pod/libs/rtc"
-	"github.com/veypi/aic-pod/libs/skillrun"
 	"github.com/veypi/vbox"
 
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	toolwire "github.com/veypi/aic-pod/protocol/hosts_tools"
 )
 
 // Options 客户端配置。
 type Options struct {
+	MCP         mcpx.Settings
 	Transfers   hostfs.TransferConfig
 	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
 	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
@@ -53,11 +54,16 @@ type Options struct {
 
 // Client 是 host agent 客户端。
 type Client struct {
-	sessionRoot string
-	skills      *skillrun.Registry // skill 包注册表（v6；包命令生命周期权威）
+	sessionRoot    string
+	mcpMu          sync.RWMutex
+	mcpServices    *mcpx.Manager
+	mcpAuth        cfg.AuthCfg
+	browserConfig  *mcpx.Config
+	browserContext context.Context
+	browserCancel  context.CancelFunc
 
 	execMu      sync.Mutex
-	execHandles map[string]*execHandleEntry // cancel(request_id) 登记表（前台执行）
+	execHandles map[string]*execHandleEntry // 当前执行请求登记表（前台执行）
 
 	execGrantMu     sync.RWMutex
 	execGrants      map[string][]string
@@ -293,10 +299,16 @@ func (c *Client) Close() error {
 	}
 	c.closed = true
 	c.closeConnection()
-	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
-	if c.skills != nil {
-		c.skills.Close()
+	if c.browserCancel != nil {
+		c.browserCancel()
 	}
+	if c.mcpServices != nil {
+		c.mcpServices.Close()
+		if c.mcpServices.Started("browser") {
+			c.closeBrowser(c.browserConfig)
+		}
+	}
+	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = c.procs.Close(shutdown)
 	cancelRuns()
 	if c.files != nil {
@@ -337,6 +349,7 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	if restartRTC {
 		c.stopRTC()
 	}
+	restartMCP := !reflect.DeepEqual(c.options().MCP, opts.MCP) || !reflect.DeepEqual(c.mcpAuth, cfg.AuthSnapshot()) || c.options().NoSandbox != opts.NoSandbox || c.options().WorkDir != opts.WorkDir
 	c.procs.SetNoSandbox(opts.NoSandbox)
 	// 授权模型同步（三域）：work_dir 变更 + 配置重载
 	//（九键经 cfg.Global 由 api.SetConfig 先行更新）。
@@ -347,6 +360,22 @@ func (c *Client) Reconfigure(o cfg.Options) error {
 	c.optsMu.Lock()
 	c.opts = opts
 	c.optsMu.Unlock()
+	if restartMCP {
+		if err := c.configureMCP(opts.MCP); err != nil {
+			return err
+		}
+		c.execGrantMu.Lock()
+		for sid, names := range c.execGrants {
+			keep := names[:0]
+			for _, name := range names {
+				if !strings.HasPrefix(name, "mcp.") {
+					keep = append(keep, name)
+				}
+			}
+			c.execGrants[sid] = keep
+		}
+		c.execGrantMu.Unlock()
+	}
 	if c.files != nil {
 		_, home, osHome, err := deviceFileRoots(opts.WorkDir)
 		if err != nil {
@@ -409,6 +438,7 @@ func (c *Client) startRTC() error {
 	svc, err := rtc.New(rtc.Config{
 		Authorization: commands,
 		Tools:         c,
+		Browser:       c.streamBrowser,
 		HostID:        c.hostID,
 		Hostname:      hostname,
 		Version:       c.options().Version,
@@ -451,9 +481,7 @@ func (c *Client) handleRTCSignal(data []byte) {
 
 // ---- caps v2 上报（§6.3） ----
 
-// buildCaps 构造物理 host 的 caps（hosts_tools/2）：命令目录（ExecCaps）已删
-// 除——指令集由三协议与 vsh `commands` 脚本内查询为准，caps 只声明身份、
-// 传输与 fs 动作集。
+// buildCaps 声明原生执行与文件传输能力；mcp 只是 exec 内的命令。
 func (c *Client) buildCaps() *proto.Caps {
 	hostname, _ := os.Hostname()
 	actions := append([]string(nil), fsx.FSActions...)
@@ -465,7 +493,7 @@ func (c *Client) buildCaps() *proto.Caps {
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
 		Mgmt:          c.buildMgmt(),
-		ToolProtocols: []string{toolwire.Protocol, natswire.Protocol, rtcwire.Protocol},
+		ToolProtocols: []string{natswire.Protocol, rtcwire.Protocol},
 		FS:            proto.FSCaps{Actions: &actions},
 	}
 }

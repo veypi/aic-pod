@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// exec.commands 统一命令声明表已随 hosts_tools/2 删除（发现走脚本内
+// caps 不承载命令目录（发现走脚本内
 // `commands` + `<cmd> --help`，不再随 caps 逐项声明）。
 
 func TestCapsFSActionsForms(t *testing.T) {

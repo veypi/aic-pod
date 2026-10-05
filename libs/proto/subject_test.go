@@ -3,100 +3,28 @@ package proto
 import "testing"
 
 func TestSubjects(t *testing.T) {
-	caps, err := CapsSubject("u1", "host_abc", 2)
-	if err != nil || caps != "u.u1.h.host_abc.2.caps" {
-		t.Errorf("CapsSubject = %q, %v", caps, err)
-	}
-	pres, err := PresenceSubject("u1", "host_abc", 1)
-	if err != nil || pres != "u.u1.h.host_abc.1.presence" {
-		t.Errorf("PresenceSubject = %q, %v", pres, err)
-	}
-	fs, err := FSReqSubject("u1", "host_abc", "s9")
-	if err != nil || fs != "u.u1.h.host_abc.fs.req.s9" {
-		t.Errorf("FSReqSubject = %q, %v", fs, err)
-	}
-	// 裸 host_id（1host 参数形态）自动加 HostIDPrefix；已带前缀输入幂等
-	fs2, err := FSReqSubject("u1", "abc", "s9")
-	if err != nil || fs2 != "u.u1.h.host_abc.fs.req.s9" {
-		t.Errorf("FSReqSubject(raw id) = %q, %v", fs2, err)
-	}
-	ex, err := ExecReqSubject("u1", HostPage, "s9")
-	if err != nil || ex != "u.u1.h.page.exec.req.s9" {
-		t.Errorf("ExecReqSubject(page) = %q, %v", ex, err)
-	}
-	ex2, err := ExecReqSubject("u1", HostCloud, "s9")
-	if err != nil || ex2 != "u.u1.h.cloud.exec.req.s9" {
-		t.Errorf("ExecReqSubject(cloud) = %q, %v", ex2, err)
-	}
-	// run_tool 无会话直发：manual 占位段
-	ex3, err := ExecReqSubject("u1", "abc", ManualSessionID)
-	if err != nil || ex3 != "u.u1.h.host_abc.exec.req.manual" {
-		t.Errorf("ExecReqSubject(manual) = %q, %v", ex3, err)
-	}
-	inbox, err := HostInboxSubject("u1", "host_abc")
-	if err != nil || inbox != "u.u1.h.host_abc.>" {
-		t.Errorf("HostInboxSubject = %q, %v", inbox, err)
-	}
-	inbox2, err := HostInboxSubject("u1", "abc")
-	if err != nil || inbox2 != "u.u1.h.host_abc.>" {
-		t.Errorf("HostInboxSubject(raw id) = %q, %v", inbox2, err)
-	}
-	allow, err := UserAllowPattern("u1")
-	if err != nil || allow != "u.u1.>" {
-		t.Errorf("UserAllowPattern = %q, %v", allow, err)
-	}
-	deny, err := FrontendDenyPattern("u1")
-	if err != nil || deny != "u.u1.h.host_*.>" {
-		t.Errorf("FrontendDenyPattern = %q, %v", deny, err)
-	}
-	if g := PageQueueGroup("s9"); g != "page-s9" {
-		t.Errorf("PageQueueGroup = %q", g)
-	}
-
-	// 非法段拒绝：点号/通配符/空白/空段/0 credVer
-	bad := []string{"a.b", "a*", "a>", "a b", ""}
-	for _, b := range bad {
-		if _, err := CapsSubject(b, "host_abc", 1); err == nil {
-			t.Errorf("CapsSubject(%q) want error", b)
-		}
-		if _, err := ToolReqSubject("u1", b, ToolFS, "s9"); err == nil {
-			t.Errorf("ToolReqSubject host=%q want error", b)
-		}
-		if _, err := ToolReqSubject("u1", "host_abc", ToolFS, b); err == nil {
-			t.Errorf("ToolReqSubject sid=%q want error", b)
-		}
-	}
-	if _, err := CapsSubject("u1", "host_abc", 0); err == nil {
-		t.Error("credVer=0 want error")
-	}
-	if _, err := ToolReqSubject("u1", "host_abc", "git", "s9"); err == nil {
-		t.Error("tool=git want error")
-	}
-}
-
-func TestParseToolReqSubject(t *testing.T) {
-	// 7 段（§6.1 v4）：host 段 host_{host_id} 解析后还原为裸 host_id（与 1host 参数一致）
-	uid, host, tool, sid, err := ParseToolReqSubject("u.u1.h.host_abc.exec.req.s9")
-	if err != nil || uid != "u1" || host != "abc" || tool != ToolExec || sid != "s9" {
-		t.Errorf("parse = %q %q %q %q, %v", uid, host, tool, sid, err)
-	}
-	// page 保留字原样返回；manual 占位段可解析
-	_, phost, _, psid, err := ParseToolReqSubject("u.u1.h.page.fs.req.manual")
-	if err != nil || phost != HostPage || psid != ManualSessionID {
-		t.Errorf("parse page = %q %q, %v", phost, psid, err)
-	}
-	for _, s := range []string{
-		"u.u1.s.s9.h.host_abc.fs.req", // 会话级（已废除）
-		"u.u1.h.host_abc.1.caps",      // caps（host 段无前缀 + credVer 段）
-		"u.u1.h.host_abc.git.req.s9",  // 非法指令集段
-		"u.u1.h.host_abc.fs.req",      // 缺 sid 段（6 段旧形态）
-		"u.u1.h.host_abc.fs.req.s9.x", // 8 段
+	for _, tc := range []struct {
+		want string
+		call func() (string, error)
+	}{
+		{"u.u1.h.abc.2.caps", func() (string, error) { return CapsSubject("u1", "abc", 2) }},
+		{"u.u1.h.abc.1.presence", func() (string, error) { return PresenceSubject("u1", "abc", 1) }},
+		{"u.u1.h.host_abc.>", func() (string, error) { return HostInboxSubject("u1", "abc") }},
+		{"u.u1.h.host_abc.rtc.in", func() (string, error) { return RtcInSubject("u1", "abc") }},
+		{"u.u1.>", func() (string, error) { return UserAllowPattern("u1") }},
+		{"u.u1.h.host_*.>", func() (string, error) { return FrontendDenyPattern("u1") }},
 	} {
-		if _, _, _, _, err := ParseToolReqSubject(s); err == nil {
-			t.Errorf("ParseToolReqSubject(%q) want error", s)
+		got, err := tc.call()
+		if err != nil || got != tc.want {
+			t.Fatalf("%s %v", got, err)
 		}
 	}
-	if g := PageQueueGroup("s9"); g != "page-s9" {
-		t.Errorf("PageQueueGroup = %q", g)
+	for _, bad := range []string{"a.b", "a*", "a>", "a b", ""} {
+		if _, err := HostInboxSubject("u1", bad); err == nil {
+			t.Fatal("invalid segment admitted")
+		}
+	}
+	if _, err := CapsSubject("u1", "abc", 0); err == nil {
+		t.Fatal("invalid credential version admitted")
 	}
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/veypi/aic-pod/libs/fsx"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
 	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	wire "github.com/veypi/aic-pod/protocol/hosts_tools"
+	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func TestExecNativeEnvironment(t *testing.T) {
@@ -44,7 +44,7 @@ func TestExecNativeEnvironment(t *testing.T) {
 		{"request-isolation", `/bin/sh -c 'printf %s "$AIC_TEST_ENV_DEMO"'`, "inherited"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := c.HandleTool(context.Background(), testCaller(), execRequest(tc.script, 30000))
+			r := callTool(t, c, context.Background(), testCaller(), execRequest(tc.script, 30000))
 			attrs := execAttrs(t, r)
 			if attrs["exit_code"] != "0" {
 				t.Fatalf("exec: %+v", r)
@@ -77,7 +77,6 @@ func testClient(t *testing.T) (*Client, string) {
 // 信封内的审批事实，随信封进可信调用上下文）。
 func signedCall(t *testing.T, c *Client, req wire.Request, grantApproved bool, origin, scope string) wire.Response {
 	t.Helper()
-	req.Protocol = natswire.Protocol
 	if req.ID == "" {
 		req.ID = wire.NewID("r_")
 	}
@@ -85,7 +84,7 @@ func signedCall(t *testing.T, c *Client, req wire.Request, grantApproved bool, o
 	r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Origin: origin, Scope: scope, GrantApproved: grantApproved, Nonce: wire.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: req}
 	natswire.Sign(c.kTool, &r)
 	raw, _ := json.Marshal(r)
-	return c.HandleNATS(context.Background(), route, raw)
+	return callNATS(t, c, route, raw)
 }
 func testCaller() wire.Caller {
 	return wire.Caller{Subject: "owner", ConnectionID: "rtc1", Origin: "s1", ExpiresAt: time.Now().Add(time.Minute)}
@@ -102,11 +101,10 @@ func decoded[T any](t *testing.T, v any) T {
 
 func fsRequest(method string, args any) wire.Request {
 	raw, _ := json.Marshal(args)
-	return wire.Request{ID: wire.NewID("r_"), Action: wire.ActionFS, FS: &wire.FSInvocation{Method: method, Args: raw}}
+	return wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionFS, FS: &wire.FSInvocation{Method: method, Args: raw}}
 }
-
 func execRequest(script string, waitMS int64) wire.Request {
-	return wire.Request{ID: wire.NewID("r_"), Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: script, WaitMS: waitMS}}
+	return wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: script, WaitMS: waitMS}}
 }
 
 // execResult 解码统一 exec 输出（§3.1：content + attrs）。
@@ -124,7 +122,7 @@ func TestExecScriptForeground(t *testing.T) {
 	cfg.Global = cfg.NewOptions()
 	t.Cleanup(func() { cfg.Global = saved })
 	c, _ := testClient(t)
-	r := c.HandleTool(context.Background(), testCaller(), execRequest("echo hello-vsh", 30000))
+	r := callTool(t, c, context.Background(), testCaller(), execRequest("echo hello-vsh", 30000))
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
@@ -197,7 +195,7 @@ func TestExecGrantRequiresGrantApproved(t *testing.T) {
 	c, _ := testClient(t)
 	target := t.TempDir()
 	// 未携带审批事实：grant 修改入口拒绝（退出码非 0，stderr 引导）。
-	r := c.HandleTool(context.Background(), testCaller(), execRequest("grant fs "+target, 30000))
+	r := callTool(t, c, context.Background(), testCaller(), execRequest("grant fs "+target, 30000))
 	res := decoded[wire.ExecResult](t, r.Result)
 	if res.Attrs["exit_code"] == "0" {
 		t.Fatalf("grant without grant_approved succeeded: %q", res.Content)
@@ -208,7 +206,7 @@ func TestExecGrantRequiresGrantApproved(t *testing.T) {
 	// 携带审批事实（签名信封/RTC 确认）：授权执行。
 	approved := testCaller()
 	approved.GrantApproved = true
-	r = c.HandleTool(context.Background(), approved, execRequest("grant fs "+target, 30000))
+	r = callTool(t, c, context.Background(), approved, execRequest("grant fs "+target, 30000))
 	res = decoded[wire.ExecResult](t, r.Result)
 	if res.Attrs["exit_code"] != "0" {
 		t.Fatalf("approved grant failed: %q stderr=%q", res.Content, res.Attrs["stderr"])
@@ -248,7 +246,7 @@ func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
 	// A new RTC connection uses the same authenticated owner and source.
 	rtcCaller := testCaller()
 	rtcCaller.Origin = ""
-	response := c.HandleTool(context.Background(), rtcCaller, fsRequest("source.read", map[string]any{"ref": source.Ref, "offset": 0, "length": 8}))
+	response := callTool(t, c, context.Background(), rtcCaller, fsRequest("source.read", map[string]any{"ref": source.Ref, "offset": 0, "length": 8}))
 	if response.Error != nil {
 		t.Fatal(response.Error)
 	}
@@ -282,14 +280,6 @@ func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
 	forbidden := signedCall(t, c, execRequest("echo no", 1000), false, "", "fs")
 	if forbidden.Error == nil || forbidden.Error.Code != "permission_denied" {
 		t.Fatalf("fs proxy invoked exec: %+v", forbidden)
-	}
-}
-
-func TestCancelUnknownExecution(t *testing.T) {
-	c, _ := testClient(t)
-	r := c.HandleTool(context.Background(), testCaller(), wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: "r_nonexistent"})
-	if r.Error == nil || r.Error.Code != "not_found" {
-		t.Fatalf("%+v", r)
 	}
 }
 
@@ -330,9 +320,9 @@ func TestExecScriptRTCWaitElapsedKeepsLogs(t *testing.T) {
 	t.Cleanup(func() { cfg.Global = saved })
 	c, _ := testClient(t)
 	caller := testCaller()
-	caller.AllowStreams = true // RTC 直连语义：等待超时返回错误、不转 bg
+	caller.Direct = true // RTC 直连语义：等待超时返回错误、不转 bg
 	req := execRequest("sleep 30", 50)
-	r := c.HandleTool(context.Background(), caller, req)
+	r := callTool(t, c, context.Background(), caller, req)
 	if r.Error == nil || r.Error.Code != "deadline_exceeded" {
 		t.Fatalf("resp = %+v", r)
 	}
@@ -345,10 +335,7 @@ func TestExecScriptRTCWaitElapsedKeepsLogs(t *testing.T) {
 		t.Fatalf("stdout log missing: %v", err)
 	}
 	// 执行仍在运行：cancel(request_id) 终止并清理。
-	cancel := c.HandleTool(context.Background(), caller, wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: req.ID})
-	if cancel.Error != nil {
-		t.Fatal(cancel.Error)
-	}
+	c.DisconnectTools(caller)
 	if e := trackedExec(t, c, req.ID); e != nil {
 		waitHandleDone(t, e.handle)
 	}
@@ -369,7 +356,7 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 	caller := testCaller()
 	// 第一次执行等待超时转后台，占满唯一名额。
 	first := execRequest("sleep 30", 50)
-	r1 := c.HandleTool(context.Background(), caller, first)
+	r1 := callTool(t, c, context.Background(), caller, first)
 	if r1.Error != nil {
 		t.Fatal(r1.Error)
 	}
@@ -378,7 +365,7 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 		t.Fatal("第一次执行未转后台占位")
 	}
 	defer func() {
-		c.HandleTool(context.Background(), caller, wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: first.ID})
+		callTool(t, c, context.Background(), caller, execRequest("bg kill "+id1, 30000))
 		// 等占位任务实际结束（取消是异步的），再交 TempDir 清理。
 		if _, err := engine.Tasks.Wait(context.Background(), id1, 10*time.Second, "owner", "s1"); err != nil {
 			t.Errorf("占位任务未结束: %v", err)
@@ -386,7 +373,7 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 	}()
 	// 第二次执行转后台容量不足：取消本次执行并返回 overloaded + 日志路径。
 	second := execRequest("sleep 30", 50)
-	r2 := c.HandleTool(context.Background(), caller, second)
+	r2 := callTool(t, c, context.Background(), caller, second)
 	if r2.Error == nil || r2.Error.Code != "overloaded" {
 		t.Fatalf("resp = %+v", r2)
 	}
@@ -410,8 +397,52 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 	}
 }
 
-// 前台 cancel 路径：exec 阻塞中由另一 goroutine 发 cancel(request_id)，
-// 脚本被终止、响应带日志地址（§2.6）。
+// DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务不受影响）。
+func TestDisconnectToolsCancelsForeground(t *testing.T) {
+	saved := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	t.Cleanup(func() { cfg.Global = saved })
+	c, _ := testClient(t)
+	caller := testCaller()
+	req := execRequest("sleep 30; echo SURVIVED", 30000)
+	type reply struct{ r wire.Response }
+	done := make(chan reply, 1)
+	start := time.Now()
+	go func() { done <- reply{callTool(t, c, context.Background(), caller, req)} }()
+	time.Sleep(300 * time.Millisecond)
+	entry := trackedExec(t, c, req.ID)
+	if entry == nil {
+		t.Fatal("前台执行未登记取消句柄")
+	}
+	c.DisconnectTools(caller)
+	var r wire.Response
+	select {
+	case got := <-done:
+		r = got.r
+	case <-time.After(10 * time.Second):
+		t.Fatal("断连清理未终止前台执行（sleep 30 跑满）")
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("脚本未被终止")
+	}
+	res := execResultLoose(t, r)
+	if strings.Contains(res.Content, "SURVIVED") {
+		t.Fatal("脚本在断连清理后仍跑完")
+	}
+	if res.Attrs["output"] == "" || res.Attrs["error_output"] == "" {
+		t.Fatalf("missing log paths: %v", res.Attrs)
+	}
+	waitHandleDone(t, entry.handle)
+}
+
+func TestCancelUnknownExecution(t *testing.T) {
+	c, _ := testClient(t)
+	r := c.HandleTool(context.Background(), testCaller(), wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: "r_nonexistent"})
+	if r.Error == nil || r.Error.Code != "not_found" {
+		t.Fatalf("%+v", r)
+	}
+}
+
 func TestExecScriptForegroundCancel(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
@@ -449,42 +480,4 @@ func TestExecScriptForegroundCancel(t *testing.T) {
 	if _, err := os.Stat(logOut); err != nil {
 		t.Fatalf("stdout log missing: %v", err)
 	}
-}
-
-// DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务不受影响）。
-func TestDisconnectToolsCancelsForeground(t *testing.T) {
-	saved := cfg.Global
-	cfg.Global = cfg.NewOptions()
-	t.Cleanup(func() { cfg.Global = saved })
-	c, _ := testClient(t)
-	caller := testCaller()
-	req := execRequest("sleep 30; echo SURVIVED", 30000)
-	type reply struct{ r wire.Response }
-	done := make(chan reply, 1)
-	start := time.Now()
-	go func() { done <- reply{c.HandleTool(context.Background(), caller, req)} }()
-	time.Sleep(300 * time.Millisecond)
-	entry := trackedExec(t, c, req.ID)
-	if entry == nil {
-		t.Fatal("前台执行未登记取消句柄")
-	}
-	c.DisconnectTools(caller)
-	var r wire.Response
-	select {
-	case got := <-done:
-		r = got.r
-	case <-time.After(10 * time.Second):
-		t.Fatal("断连清理未终止前台执行（sleep 30 跑满）")
-	}
-	if time.Since(start) > 10*time.Second {
-		t.Fatal("脚本未被终止")
-	}
-	res := execResultLoose(t, r)
-	if strings.Contains(res.Content, "SURVIVED") {
-		t.Fatal("脚本在断连清理后仍跑完")
-	}
-	if res.Attrs["output"] == "" || res.Attrs["error_output"] == "" {
-		t.Fatalf("missing log paths: %v", res.Attrs)
-	}
-	waitHandleDone(t, entry.handle)
 }

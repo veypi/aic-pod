@@ -7,12 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	tools "github.com/veypi/aic-pod/protocol/hosts_tools"
+	tools "github.com/veypi/aic-pod/protocol/tool"
 	"strings"
 	"time"
 )
 
-const Protocol = "hosts_nats/2"
+const Protocol = "hosts_nats/3"
 
 type Request struct {
 	HostID             string `json:"host_id"`
@@ -58,7 +58,7 @@ const (
 
 func Sign(key string, r *Request) { r.Signature = signature(key, *r) }
 func Verify(key, host, subject string, r Request, now time.Time) error {
-	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.Request.Protocol != Protocol || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
+	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
 		return tools.Fail("unauthorized", "Invalid request destination, identity or validity window")
 	}
 	// Caller 必须与签名 subject 目的地中的 uid 一致：执行归属统一从
@@ -69,6 +69,9 @@ func Verify(key, host, subject string, r Request, now time.Time) error {
 	}
 	if !hmac.Equal([]byte(signature(key, r)), []byte(r.Signature)) {
 		return tools.Fail("unauthorized", "Invalid request signature")
+	}
+	if r.Request.Protocol != Protocol {
+		return tools.Fail("unsupported", "Invalid request protocol")
 	}
 	return r.Request.Validate()
 }

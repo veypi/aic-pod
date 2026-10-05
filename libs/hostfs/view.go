@@ -7,7 +7,7 @@ import (
 	"errors"
 	"github.com/veypi/aic-pod/libs/proto"
 	fsp "github.com/veypi/aic-pod/protocol/fs"
-	tool "github.com/veypi/aic-pod/protocol/hosts_tools"
+	tool "github.com/veypi/aic-pod/protocol/tool"
 	"github.com/veypi/vigo/contrib/ufs"
 	"io"
 	"io/fs"

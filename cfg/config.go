@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/policy"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -47,15 +48,15 @@ var DeviceType = "cli"
 //
 // 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
 type Options struct {
-	Host        string `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
-	Key         string `json:"key" yaml:"key" desc:"binding credential key (from platform device page)"`
-	WorkDir     string `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
-	ExecTimeout string `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
+	MCP         mcpx.Settings `json:"mcp" yaml:"mcp" desc:"configured MCP services"`
+	Host        string        `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
+	Key         string        `json:"key" yaml:"key" desc:"binding credential key (from platform device page)"`
+	WorkDir     string        `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
+	ExecTimeout string        `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
-	// browser 自 v6 P5 起是 skill 包（aic-skills/browser）：Chrome 路径/视口/
-	// 状态目录由包内默认 + AIC_BROWSER_* env 覆盖，不再是 pod 配置项。
+	// 内置 browser 的 Chrome 路径/视口/状态目录通过 AIC_BROWSER_* env 配置。
 	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。
