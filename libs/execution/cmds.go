@@ -272,7 +272,7 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 const grantHelp = `usage:
   grant status                          查看各域授权姿态与规则表（只读）
   grant fs <路径> [--permanent]        授权文件访问（默认会话级临时授权；--permanent 落盘永久生效）
-  grant net <host:port> [--permanent]  授权网络目标访问
+  grant net <host:port> [--permanent]  授权网络目标访问（host；cloud 网络默认放行，无授权档）
   grant ssh <host:port> [--permanent]  授权 SSH 目标访问（host）
   grant cmd <命令名> [--permanent]     授权原生命令（host；授予解释器 = 授予该进程一切能力）
 
