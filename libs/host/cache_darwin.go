@@ -1,6 +1,6 @@
 //go:build darwin
 
-package fsauth
+package host
 
 import (
 	"os"

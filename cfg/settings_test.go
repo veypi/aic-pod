@@ -1,25 +1,14 @@
-package settings
+package cfg
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/veypi/aic-pod/cfg"
 )
-
-func isolateConfigDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("HOME", dir)
-	t.Setenv("APPDATA", dir)
-	return dir
-}
 
 func writeRawConfig(t *testing.T, body string) {
 	t.Helper()
-	p, err := cfg.Path()
+	p, err := Path()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,19 +26,19 @@ func TestApplyListSemantics(t *testing.T) {
 	isolateConfigDir(t)
 	writeRawConfig(t, "fs_policy: deny\nfs_rules: ['rw:/workspace']\nssh_rules: ['allow:a:22']\n")
 	// nil 列表：不动现有清单
-	if err := (&Update{FsPolicy: "deny"}).Apply(); err != nil {
+	if err := (&SettingsUpdate{FsPolicy: "deny"}).Apply(); err != nil {
 		t.Fatal(err)
 	}
-	o, err := cfg.LoadFile()
+	o, err := LoadFile()
 	if err != nil || len(o.FsRules) != 1 || o.FsRules[0] != "rw:/workspace" || len(o.SshRules) != 1 {
 		t.Fatalf("nil lists must keep current entries: %+v (%v)", o, err)
 	}
 	// 空数组：整体清空
 	empty := []string{}
-	if err := (&Update{FsRules: &empty}).Apply(); err != nil {
+	if err := (&SettingsUpdate{FsRules: &empty}).Apply(); err != nil {
 		t.Fatal(err)
 	}
-	o, err = cfg.LoadFile()
+	o, err = LoadFile()
 	if err != nil || len(o.FsRules) != 0 {
 		t.Fatalf("empty list must clear entries: %+v (%v)", o, err)
 	}
@@ -63,10 +52,10 @@ func TestApplyWorkDirExpandsHome(t *testing.T) {
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&Update{WorkDir: "~/work"}).Apply(); err != nil {
+	if err := (&SettingsUpdate{WorkDir: "~/work"}).Apply(); err != nil {
 		t.Fatal(err)
 	}
-	o, err := cfg.LoadFile()
+	o, err := LoadFile()
 	if err != nil || o.WorkDir != target {
 		t.Fatalf("work_dir = %q, want %q (%v)", o.WorkDir, target, err)
 	}
@@ -92,10 +81,10 @@ func TestApplyLandsDespiteBrokenFile(t *testing.T) {
 		t.Run(body, func(t *testing.T) {
 			isolateConfigDir(t)
 			writeRawConfig(t, body)
-			if err := (&Update{HomePath: "/agents"}).Apply(); err != nil {
+			if err := (&SettingsUpdate{HomePath: "/agents"}).Apply(); err != nil {
 				t.Fatalf("apply must land regardless of file content: %v", err)
 			}
-			o, err := cfg.LoadFile()
+			o, err := LoadFile()
 			if err != nil || o.HomePath != "/agents" {
 				t.Fatalf("home_path = %q (%v)", o.HomePath, err)
 			}

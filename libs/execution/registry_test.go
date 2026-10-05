@@ -29,14 +29,8 @@ func TestMissingPathNeverCallsNativeExec(t *testing.T) {
 			if err := e.Registry().Register(commands.DefineCommand("ghost", func(context.Context, *commands.Invocation) error { return nil })); err != nil {
 				t.Fatal(err)
 			}
-			if err := e.Registry().Register(commands.DefineCommand("remove-ghost", func(context.Context, *commands.Invocation) error {
-				e.Registry().Unregister("ghost")
-				return nil
-			})); err != nil {
-				t.Fatal(err)
-			}
-			// Removing a name cannot turn a missing file into a native command.
-			result, err := e.Exec(context.Background(), ExecRequest{Script: "remove-ghost; " + missingPath})
+			// A registered name elsewhere cannot turn a missing file into a native command.
+			result, err := e.Exec(context.Background(), ExecRequest{Script: missingPath})
 			if err != nil || result.ExitCode != 127 || result.Stdout != "" || !strings.Contains(result.Stderr, "No such file") {
 				t.Fatalf("removed command result=%+v, err=%v", result, err)
 			}
@@ -47,33 +41,26 @@ func TestMissingPathNeverCallsNativeExec(t *testing.T) {
 	}
 }
 
-// gatedRegistry：只返回实际注册命令；Names 只列 base；
-// 命中经 CommandAllow 门（拒绝 = 权限错误，不继续 fallback）。
-
-func TestRegisteredCommandGate(t *testing.T) {
+// skill 命令准入薄检查（原 gatedRegistry 的等效语义，2026-10-06 §4）：
+// Allow 拒绝 = 126 + grant 引导，不继续执行。
+func TestSkillCommandGate(t *testing.T) {
 	t.Parallel()
-	base := commands.NewRegistry()
 	ran := false
-	_ = base.Register(commands.DefineCommand("browser", func(ctx context.Context, inv *commands.Invocation) error {
-		ran = true
-		return nil
-	}))
-	reg := gatedRegistry{base: base, allow: func(ctx context.Context, name string) bool {
-		return name != "browser"
+	d := PlatformDeps{Skill: SkillDeps{
+		Allow: func(context.Context) bool { return false },
+		Load:  func(context.Context, string, string) (string, error) { ran = true; return "", nil },
 	}}
-	cmd, ok := reg.Lookup("browser")
-	if !ok {
-		t.Fatal("hit missing")
-	}
 	var out, errBuf strings.Builder
-	err := cmd.Run(context.Background(), &commands.Invocation{Stdout: &out, Stderr: &errBuf})
-	if err == nil || !strings.Contains(errBuf.String(), "denied by exec rules") {
-		t.Fatalf("denied command must error with permission guidance: %v %q", err, errBuf.String())
+	err := d.cmdSkill(context.Background(), &commands.Invocation{Args: []string{"load", "x"}, Stdout: &out, Stderr: &errBuf})
+	if code, _ := commands.ExitCode(err); code != 126 || !strings.Contains(errBuf.String(), "denied by exec rules") {
+		t.Fatalf("denied skill must error with permission guidance: %v %q", err, errBuf.String())
 	}
 	if ran {
-		t.Fatal("denied command executed")
+		t.Fatal("denied skill command executed")
 	}
-	// 放行名单正常执行
-	cmd2, _ := reg.Lookup("other-ok")
-	_ = cmd2
+	// nil Allow = 放行（cloud）
+	d.Skill.Allow = nil
+	if err := d.cmdSkill(context.Background(), &commands.Invocation{Args: []string{"load", "x"}, Stdout: &out, Stderr: &errBuf}); err != nil || !ran {
+		t.Fatalf("nil Allow must pass: %v ran=%v", err, ran)
+	}
 }

@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	"github.com/veypi/aic-pod/libs/policy"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
@@ -51,7 +49,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		NewSessionFS: func(ctx context.Context, sid string) (gbfs.FileSystem, string, error) {
 			fsys, err := execution.NewHostFS(execution.HostFSConfig{
 				Backing: OSVFS{},
-				Rules:   func() vbox.FSRuleSet { return c.policy.Snapshot(sid) },
+				Rules:   func() vbox.FSRuleSet { return c.perms.fsSnapshot(sid) },
 			})
 			if err != nil {
 				return nil, "", err
@@ -61,7 +59,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		Network: execution.NewNetClient(execution.NetClientConfig{
 			AllowPrivate: true, // host LAN 合法（私网阻断仅 cloud）
 			Rules: func(ctx context.Context) vbox.NetRuleSet {
-				return c.netPol.Snapshot(execution.SessionFromContext(ctx))
+				return c.perms.netSnapshot(execution.SessionFromContext(ctx))
 			},
 		}),
 		Platform: execution.PlatformDeps{
@@ -69,8 +67,10 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			GrantStatus: c.vshGrantStatus,
 			SSH:         execution.SSHDeps{SSH: c.managedSSH, SCP: c.managedSCP, SFTP: c.managedSFTP},
 			// Host 不提供 ListHosts/SendUser，因此不注册这两个命令。
-			MCP:   mcpx.Command(c.mcpSession),
-			Skill: execution.SkillDeps{Fetch: c.skillFetch},
+			MCP: mcpx.Command(c.mcpSession),
+			Skill: execution.SkillDeps{Fetch: c.skillFetch, Allow: func(ctx context.Context) bool {
+				return c.perms.execAllowed(execution.SessionFromContext(ctx), "skill")
+			}},
 
 			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令与已装包命令。
 			Discoverable: func(name string) bool {
@@ -81,16 +81,6 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 				return false
 			},
 		},
-		// 虚拟指令执行规则门：skill 与已装 skill 包根命令（browser/cua 等）
-		// 按 cfg exec 域检查（exec_policy/exec_rules + 会话 grant）；
-		// 内建与平台基础设施指令放行（它们是 shell 本身，旧模型同样不受
-		// exec 域约束）。
-		CommandAllow: func(ctx context.Context, name string) bool {
-			if name == "skill" {
-				return c.execAllowed(execution.SessionFromContext(ctx), name)
-			}
-			return true
-		},
 		NativeExec: c.nativeExec,
 	})
 	if err != nil {
@@ -100,48 +90,15 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 }
 
 // vshGrantStatus 是 grant status 的执行体：四域姿态 + 规则表 + 会话级
-// 临时授权（只读，不要求 grant_approved）。
+// 临时授权（只读，不要求 grant_approved）。实现在 permissionState。
 func (c *Client) vshGrantStatus(ctx context.Context, sessionKey string) (string, error) {
-	a := cfg.AuthSnapshot()
-	var b strings.Builder
-	// exec 域（policy/deny/allow 三键 + 会话级 cmd 授权）
-	fmt.Fprintf(&b, "exec_policy: %s", a.ExecPolicy)
-	fmt.Fprintf(&b, "\nexec_rules (%d): %s", len(a.ExecRules), strings.Join(a.ExecRules, " "))
-	c.execGrantMu.RLock()
-	session := append([]string(nil), c.execGrants[sessionKey]...)
-	c.execGrantMu.RUnlock()
-	sort.Strings(session)
-	fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
-	fmt.Fprintf(&b, "\n\nfs_policy: %s", a.FsPolicy)
-	fsRows := c.policy.Snapshot(sessionKey).Rules
-	fmt.Fprintf(&b, "\nfs_rules (%d, first match wins):", len(fsRows))
-	for i, row := range fsRows {
-		fmt.Fprintf(&b, "\n  %d. %s:%s [%s]", i+1, row.Effect, row.Pattern, row.Class)
-	}
-	for _, domain := range []struct {
-		name, mode string
-		rules      vbox.NetRuleSet
-	}{
-		{"net", a.NetPolicy, c.netPol.Snapshot(sessionKey)},
-		{"ssh", a.SshPolicy, c.sshPol.Snapshot(sessionKey)},
-	} {
-		fmt.Fprintf(&b, "\n\n%s_policy: %s\n%s_rules (first match wins):", domain.name, domain.mode, domain.name)
-		for i, row := range domain.rules.Rules {
-			effect := "deny"
-			if row.Allow {
-				effect = "allow"
-			}
-			fmt.Fprintf(&b, "\n  %d. %s:%s", i+1, effect, row.HostPort)
-		}
-	}
-	return b.String(), nil
+	return c.perms.grantStatus(sessionKey), nil
 }
 
 // vshGrant 是引擎内 grant 命令的执行体（grant_approved 检查已在引擎内
 // grant 命令完成——pod 唯一审批边界；此处只执行授权动作）：
 // fs/net/ssh 域 temp 授权（temp 行插表头、首命中压一切）或 --permanent
-// 落盘；cmd 域会话级记入 execGrants（native IsAllowed 经 SessionAllow
-// 即时生效），--permanent 追加 exec_rules 落盘。
+// 落盘；cmd 域会话级记入 permissionState（execAllowed 即时生效），--permanent 追加 exec_rules 落盘。
 func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
 	sid := sessionKey
 	switch domain {
@@ -154,7 +111,7 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		if reservedSSHNative(name) {
 			return "", fmt.Errorf("grant cmd %s: reserved SSH command; use grant ssh host:port", name)
 		}
-		if err := policy.ValidateCommandName(name); err != nil {
+		if err := cfg.ValidateCommandName(name); err != nil {
 			return "", fmt.Errorf("grant cmd: invalid command name %q", target)
 		}
 		if permanent {
@@ -163,9 +120,7 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 			}
 			return fmt.Sprintf("granted cmd: %s（scope=permanent，已置于 exec_rules 表头 落盘；注意：授予解释器 = 授予该进程一切能力）", name), nil
 		}
-		c.execGrantMu.Lock()
-		c.execGrants[sid] = append(c.execGrants[sid], name)
-		c.execGrantMu.Unlock()
+		c.perms.grantCmd(sid, name)
 		return fmt.Sprintf("granted cmd: %s（scope=session，重启失效；注意：授予解释器 = 授予该进程一切能力）", name), nil
 	default:
 		return "", fmt.Errorf("grant: host 支持 fs/net/ssh/cmd 域")
@@ -175,7 +130,7 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 // nativePolicy 组合当次配置与会话授权，供原生与 skill 进程共用。
 func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vbox.Policy {
 	sid := execution.SessionFromContext(ctx)
-	return vbox.Policy{FS: c.policy.SnapshotForNative(sid, workdir, cmd), Net: c.netPol.Snapshot(sid)}
+	return vbox.Policy{FS: c.perms.fsSnapshotForNative(sid, workdir, cmd), Net: c.perms.netSnapshot(sid)}
 }
 
 // --- exec 动作的统一外层（§2.4 前台等待/超时登记 + §2.5 统一日志） ---

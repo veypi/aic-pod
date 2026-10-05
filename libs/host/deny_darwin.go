@@ -1,6 +1,6 @@
 //go:build darwin
 
-package fsauth
+package host
 
 // defaultDenyPaths（darwin）：通用条目 + mac 平台特有——系统钥匙串、
 // 系统级 cookie 库、浏览器 profile（密钥库）、密码管理器数据、容器/虚拟机

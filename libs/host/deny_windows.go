@@ -1,6 +1,6 @@
 //go:build windows
 
-package fsauth
+package host
 
 // defaultDenyPaths（windows）：通用条目 + windows 平台特有——浏览器 profile、
 // 密码管理器数据、SAM 口令库。

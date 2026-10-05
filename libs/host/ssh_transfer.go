@@ -132,7 +132,7 @@ func (c *Client) preflightSSHLocal(ctx context.Context, inv *commands.Invocation
 		op = vbox.OpWrite
 	}
 	abs := inv.FS.Resolve(name)
-	if !c.policy.Snapshot(execution.SessionFromContext(ctx)).Match(abs, op).Allow {
+	if !c.perms.fsSnapshot(execution.SessionFromContext(ctx)).Match(abs, op).Allow {
 		return fmt.Errorf("%w: request grant fs %s", execution.ErrRuleDenied, abs)
 	}
 	return nil

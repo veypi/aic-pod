@@ -94,10 +94,6 @@ type EngineConfig struct {
 	Network vshnet.Client
 	// Platform 平台命令依赖（cmds.go）；只注册提供对应能力的命令。
 	Platform PlatformDeps
-	// CommandAllow 虚拟指令的执行规则门（host 接线 cfg exec 域）：
-	// 命中已注册指令时调用，返回 false 即权限拒绝（不继续 fallback）。
-	// nil = 全部放行（cloud；page 无原生能力另由端侧收口）。
-	CommandAllow func(ctx context.Context, name string) bool
 	// BaseEnv 每次 exec 注入的基础环境（HOME/PATH 钉死由调用方给；
 	// 不跨 exec 持久，ExecRequest.Env 覆盖同名键）。
 	BaseEnv    map[string]string
@@ -146,12 +142,8 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		}
 		return fsys, nil
 	})
-	var regIf commands.CommandRegistry = reg
-	if cfg.CommandAllow != nil {
-		regIf = gatedRegistry{base: reg, allow: cfg.CommandAllow}
-	}
 	opts := []vshcore.Option{
-		vshcore.WithRegistry(regIf),
+		vshcore.WithRegistry(reg),
 		vshcore.WithPolicy(pol),
 		vshcore.WithBaseEnv(cfg.BaseEnv),
 		vshcore.WithNativeExec(cfg.NativeExec),
@@ -168,43 +160,6 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	e.rt = rt
 	return e, nil
 }
-
-// gatedRegistry wraps registered commands with a per-call authorization check.
-// Lookup never synthesizes a command or searches the host PATH.
-type gatedRegistry struct {
-	base  *commands.Registry
-	allow func(ctx context.Context, name string) bool
-}
-
-// gated 把命中命令包上执行规则门（每次调用取当次规则——grant/cfg 动态生效）。
-func (r gatedRegistry) gated(name string, c commands.Command) commands.Command {
-	if r.allow == nil {
-		return c
-	}
-	allow := r.allow
-	return commands.DefineCommand(name, func(ctx context.Context, inv *commands.Invocation) error {
-		if !allow(ctx, name) {
-			return commands.Exitf(inv, 126, "%s: command denied by exec rules（grant cmd %s 申请）", name, name)
-		}
-		return c.Run(ctx, inv)
-	})
-}
-
-func (r gatedRegistry) Lookup(name string) (commands.Command, bool) {
-	if c, ok := r.base.Lookup(name); ok {
-		return r.gated(name, c), true
-	}
-
-	return nil, false
-}
-
-func (r gatedRegistry) Register(cmd commands.Command) error { return r.base.Register(cmd) }
-
-func (r gatedRegistry) RegisterLazy(name string, loader commands.LazyCommandLoader) error {
-	return r.base.RegisterLazy(name, loader)
-}
-
-func (r gatedRegistry) Names() []string { return r.base.Names() }
 
 // Registry 暴露组合 Registry（browser/cua 等端侧指令在此追加注册）。
 func (e *Engine) Registry() *commands.Registry { return e.reg }

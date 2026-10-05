@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
 
@@ -44,7 +43,6 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	}
 	c.browserContext, c.browserCancel = context.WithCancel(context.Background())
 	c.mcpServices = manager
-	c.mcpAuth = cfg.AuthSnapshot()
 	c.mcpMu.Unlock()
 	return nil
 }
@@ -77,7 +75,7 @@ type mcpRoundTripper struct {
 }
 
 func (t *mcpRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
-	if cfg.CheckAuth() != nil {
+	if err := t.client.perms.err(); err != nil {
 		return nil, fmt.Errorf("invalid authorization configuration")
 	}
 	port := r.URL.Port()
@@ -88,7 +86,7 @@ func (t *mcpRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 			port = "80"
 		}
 	}
-	if !t.client.netPol.Snapshot("").Match(net.JoinHostPort(r.URL.Hostname(), port)) {
+	if !t.client.perms.netSnapshot("").Match(net.JoinHostPort(r.URL.Hostname(), port)) {
 		return nil, fmt.Errorf("MCP endpoint denied by device net rules")
 	}
 	return t.transport.RoundTrip(r)

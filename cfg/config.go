@@ -17,7 +17,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	"github.com/veypi/aic-pod/libs/policy"
+	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -36,8 +36,8 @@ var DeviceType = "cli"
 // vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：
 //
 //   - json tag：flag 名（-host/-key/-work_dir/-exec_timeout/-home_path）与 env 键
-//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH）的来源，也是设置面（settings 包，
-//     `aic config get|set`）的键
+//     （HOST/KEY/WORK_DIR/EXEC_TIMEOUT/HOME_PATH）的来源，也是设置面（本包
+//     SettingsUpdate，`aic config get|set`）的键
 //   - yaml tag：配置文件的键（与 json tag 同名 snake_case）；未知字段忽略，错误授权字段阻止工具调用
 //   - default tag：结构体默认值（无文件无 env 无 flag 时生效）
 //   - desc tag：-h 帮助文案
@@ -276,11 +276,7 @@ func Load() (*Options, error) {
 	return o, err
 }
 
-// authMu 守护执行策略配置的并发读写：api.SetConfig（用户操作）与
-// host grant --permanent（AI 经审批）两条写入路径共用。
-var authMu sync.RWMutex
-
-// AuthCfg is a snapshot of four first-match rule tables.
+// AuthCfg 是四张首命中规则表的纯数据快照（permissionState 编译输入）。
 type AuthCfg struct {
 	ExecPolicy string
 	ExecRules  []string
@@ -292,51 +288,15 @@ type AuthCfg struct {
 	SshRules   []string
 }
 
-// AuthSnapshot 返回当前授权配置快照（fsauth/netauth Reconcile 的数据源）。
-// policy 在读点归一化（防空值/非法值漂移到安全语义外：fs/ssh 空=deny，net 空=open）。
-func AuthSnapshot() AuthCfg {
-	c := RawAuthSnapshot()
-	c.ExecPolicy = NormalizePolicy(c.ExecPolicy, PolicyOpen)
-	c.FsPolicy = NormalizePolicy(c.FsPolicy, PolicyDeny)
-	c.NetPolicy = NormalizePolicy(c.NetPolicy, PolicyOpen)
-	c.SshPolicy = NormalizePolicy(c.SshPolicy, PolicyDeny)
-	return c
-}
-
-// RawAuthSnapshot exposes malformed fields to the local settings editor so
-// saving unrelated settings cannot mistake a fallback for an explicit repair.
-func RawAuthSnapshot() AuthCfg {
-	authMu.RLock()
-	defer authMu.RUnlock()
-	return AuthFrom(Global)
-}
-
-// CheckAuth gates device tools independently of grants and permission levels.
-// A broken local policy must be repaired through the settings surface (aic config set).
-func CheckAuth() error {
-	authMu.RLock()
-	defer authMu.RUnlock()
-	return Global.ValidateAuth()
-}
-
-// SetAuth 更新授权配置（内存即时生效；落盘由调用方负责——
-// settings.Update.Apply 走 Save，grant --permanent 亦同）。
-func SetAuth(c AuthCfg) {
-	authMu.Lock()
-	defer authMu.Unlock()
-	Global.ExecPolicy, Global.ExecRules = NormalizePolicy(c.ExecPolicy, PolicyOpen), c.ExecRules
-	Global.FsPolicy, Global.FsRules = NormalizePolicy(c.FsPolicy, PolicyDeny), c.FsRules
-	Global.NetPolicy, Global.NetRules = NormalizePolicy(c.NetPolicy, PolicyOpen), c.NetRules
-	Global.SshPolicy, Global.SshRules = NormalizePolicy(c.SshPolicy, PolicyDeny), c.SshRules
-}
-
-// AuthFrom 从 Options 取授权快照（SetAuth 的入参装配）。
+// AuthFrom 从 Options 取授权快照（纯函数；host permissionState 的启动构建
+// 与 permanent grant 的候选编译共用）。policy 在读点归一化（防空值/非法值
+// 漂移到安全语义外：fs/ssh 空=deny，net 空=open）。
 func AuthFrom(o *Options) AuthCfg {
 	return AuthCfg{
-		ExecPolicy: o.ExecPolicy, ExecRules: append([]string(nil), o.ExecRules...),
-		FsPolicy: o.FsPolicy, FsRules: o.FsRules,
-		NetPolicy: o.NetPolicy, NetRules: o.NetRules,
-		SshPolicy: o.SshPolicy, SshRules: o.SshRules,
+		ExecPolicy: NormalizePolicy(o.ExecPolicy, PolicyOpen), ExecRules: append([]string(nil), o.ExecRules...),
+		FsPolicy: NormalizePolicy(o.FsPolicy, PolicyDeny), FsRules: append([]string(nil), o.FsRules...),
+		NetPolicy: NormalizePolicy(o.NetPolicy, PolicyOpen), NetRules: append([]string(nil), o.NetRules...),
+		SshPolicy: NormalizePolicy(o.SshPolicy, PolicyDeny), SshRules: append([]string(nil), o.SshRules...),
 	}
 }
 
@@ -366,14 +326,14 @@ func (o *Options) ValidateAuth() error {
 			return fmt.Errorf("invalid policy %q", mode)
 		}
 	}
-	if err := policy.ValidateFSRules(o.FsRules); err != nil {
+	if err := vbox.ValidateFSRules(o.FsRules); err != nil {
 		return err
 	}
-	if err := policy.ValidateExecRules(o.ExecRules); err != nil {
+	if err := ValidateExecRules(o.ExecRules); err != nil {
 		return err
 	}
 	for _, list := range [][]string{o.NetRules, o.SshRules} {
-		if err := policy.ValidateTargetRules(list); err != nil {
+		if err := vbox.ValidateTargetRules(list); err != nil {
 			return err
 		}
 	}

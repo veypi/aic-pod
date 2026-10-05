@@ -8,15 +8,15 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/netauth"
-	"github.com/veypi/aic-pod/libs/policy"
 
 	"github.com/veypi/vbox"
 )
 
 // grant 由引擎验证可信审批上下文后按 fs/net/ssh/cmd 分派。
-// 临时授权写入会话内存，永久授权写入对应配置规则表；两者均将允许行
-// 放在表头，首命中生效。已启动进程继续使用启动时的沙箱快照。
+// 临时授权写入 permissionState 会话内存；永久授权走受串行保护的更新：
+// 构造候选配置 → 完整编译校验 → 成功保存 → 原子发布基表（任一步失败
+// 均不发布部分规则）。两者均将允许行放在表头，首命中生效。
+// 已启动进程继续使用启动时的沙箱快照。
 
 func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 	wd, _ := os.Getwd()
@@ -25,7 +25,7 @@ func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 		return "", fmt.Errorf("exec grant fs: invalid path %q: %w", path, err)
 	}
 	abs = vbox.HostPathToOS(abs)
-	if err = policy.ValidateFSGrantTarget(abs); err != nil {
+	if err = vbox.ValidateFSGrantTarget(abs); err != nil {
 		return "", fmt.Errorf("exec grant fs: %w", err)
 	}
 	scope := "session"
@@ -35,18 +35,15 @@ func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 		}
 		scope = "permanent"
 	} else {
-		c.policy.Grant(sid, abs)
+		c.perms.grantFS(sid, abs)
 	}
 	return fmt.Sprintf("granted fs write access: %s (scope=%s)", abs, scope), nil
 }
+
 func (c *Client) grantTarget(sid, domain, target string, permanent bool) (string, error) {
-	entry, err := netauth.ParseEntry(target)
+	entry, err := vbox.ParseEntry(target)
 	if err != nil {
 		return "", fmt.Errorf("exec grant %s: %w", domain, err)
-	}
-	pol := c.netPol
-	if domain == "ssh" {
-		pol = c.sshPol
 	}
 	scope := "session"
 	if permanent {
@@ -55,13 +52,16 @@ func (c *Client) grantTarget(sid, domain, target string, permanent bool) (string
 		}
 		scope = "permanent"
 	} else {
-		pol.Grant(sid, entry)
+		c.perms.grantNet(sid, entry, domain == "ssh")
 	}
 	return fmt.Sprintf("granted %s access: %s (scope=%s)", domain, entry.String(), scope), nil
 }
 
-// persistGrant 将归一化后的允许行放到 <域>_rules 表头并去重、落盘。
-// 只修改文件配置，不把 flag/env 启动覆盖持久化。
+// persistGrant 将归一化后的允许行放到 <域>_rules 表头并去重：
+// 构造候选配置 → 完整编译校验（compileAuth 覆盖四域全表）→ 原子保存 →
+// 原子发布 permissionState 基表；任一步失败均不发布部分规则。
+// 只修改文件配置，不把 flag/env 启动覆盖持久化；不触碰 cfg.Global
+// （启动参数，不再是运行权限状态）。
 func (c *Client) persistGrant(domain, value string) error {
 	unlock := cfg.LockUpdate()
 	defer unlock()
@@ -73,7 +73,7 @@ func (c *Client) persistGrant(domain, value string) error {
 	var rule string
 	switch domain {
 	case "exec":
-		if err := policy.ValidateCommandName(value); err != nil {
+		if err := cfg.ValidateCommandName(value); err != nil {
 			return err
 		}
 		rows, rule = &fileCfg.ExecRules, "allow:"+value
@@ -81,7 +81,7 @@ func (c *Client) persistGrant(domain, value string) error {
 		value = vbox.Canonical(value)
 		rows, rule = &fileCfg.FsRules, "rw:"+value
 	case "net", "ssh":
-		e, err := policy.ParseEntry(value)
+		e, err := vbox.ParseEntry(value)
 		if err != nil {
 			return err
 		}
@@ -102,28 +102,20 @@ func (c *Client) persistGrant(domain, value string) error {
 		}
 	}
 	*rows = next
+	// 完整编译校验先于保存：候选无效则不落盘、不发布。
 	if err := fileCfg.ValidateAuth(); err != nil {
+		return err
+	}
+	base, err := compileAuth(cfg.AuthFrom(fileCfg))
+	if err != nil {
 		return err
 	}
 	if err := cfg.Save(fileCfg); err != nil {
 		return err
 	}
-	cfg.SetAuth(cfg.AuthFrom(fileCfg))
-	return c.syncAuth()
-}
-
-// syncAuth 重载三个域的 Policy（cfg.Global 已由调用方更新）。
-func (c *Client) syncAuth() error {
-	if err := cfg.CheckAuth(); err != nil {
-		return err
-	}
-	if err := c.policy.Reconcile(); err != nil {
-		return err
-	}
-	if err := c.netPol.Reconcile(); err != nil {
-		return err
-	}
-	return c.sshPol.Reconcile()
+	// 保存失败则不发布；发布即原子生效（即时生效能力保留）。
+	c.perms.publish(base)
+	return nil
 }
 
 // expandHomeDir 展开路径的 ~ 前缀（与 api 包 expandHome 同语义；grant fs
@@ -144,16 +136,5 @@ func expandHomeDir(p string) string {
 }
 
 func (c *Client) execAllowed(sid, name string) bool {
-	if cfg.CheckAuth() != nil {
-		return false
-	}
-	a := cfg.AuthSnapshot()
-	c.execGrantMu.RLock()
-	rows := make([]string, 0, len(c.execGrants[sid])+len(a.ExecRules))
-	for _, granted := range c.execGrants[sid] {
-		rows = append(rows, "allow:"+granted)
-	}
-	c.execGrantMu.RUnlock()
-	rows = append(rows, a.ExecRules...)
-	return policy.CommandAllowed(a.ExecPolicy, rows, name)
+	return c.perms.execAllowed(sid, name)
 }

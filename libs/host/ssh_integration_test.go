@@ -297,9 +297,7 @@ func TestManagedSFTPTransfersAndRules(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(dir, "secret"), []byte("secret"), 0600)
 	cfg.Global.FsRules = []string{"deny:" + hostCanonical(filepath.Join(dir, "secret")), "deny:" + hostCanonical(filepath.Join(work, "denied"))}
-	if err := c.policy.Reconcile(); err != nil {
-		t.Fatal(err)
-	}
+	publishGlobal(t, c.perms)
 	if r := runManagedScript(t, c, "scp -r tree fixture:tree", ""); r.ExitCode != 126 {
 		t.Fatalf("descendant deny %+v", r)
 	}

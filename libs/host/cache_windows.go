@@ -1,6 +1,6 @@
 //go:build windows
 
-package fsauth
+package host
 
 import (
 	"os"

@@ -1,11 +1,8 @@
-// Copyright (C) 2025 veypi <i@veypi.com>
-// Distributed under terms of the MIT license.
-
-// Package settings 是本机设置面（原 api 包 get_config/set_config 的逻辑，2026-09-22
-// 随本地管理 API 一并从 HTTP 端点改为进程内调用）：
+// 本机设置面（原 settings 包，2026-10-06 批次 6 §4 并入 cfg——cfg 负责
+// 配置的读取、校验、修改与原子保存）：
 //   - cli 的 `aic config get|set` 子命令（Electron 设置窗口经主进程 spawn 调用）
 //   - 读写同一份 config.yaml；Apply 只落盘，生效由调用方重启后端进程完成
-package settings
+package cfg
 
 import (
 	"os"
@@ -13,12 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/policy"
+	"github.com/veypi/vbox"
 )
 
-// View 是设置面读视图（含 key——设置窗口需显示当前凭证；仅本机同用户进程可见）。
-type View struct {
+// SettingsView 是设置面读视图（含 key——设置窗口需显示当前凭证；仅本机同用户进程可见）。
+type SettingsView struct {
 	Version     string   `json:"version"`
 	Host        string   `json:"host"`
 	Key         string   `json:"key"`
@@ -35,22 +31,21 @@ type View struct {
 	SshRules    []string `json:"ssh_rules"`
 }
 
-// Snapshot 返回当前有效配置（cfg.Global：启动解析值；caller 需已 cfg.Load）。
+// SettingsSnapshot 返回当前有效配置（cfg.Global：启动解析值；caller 需已 cfg.Load）。
 // 坏授权字段保持原样可见（供显式修复），不显示成已归一化的策略。
 // 隐藏配置（no_sandbox 等）不在此视图——仅配置文件/flag/env 可配。
-func Snapshot() *View {
-	o := cfg.Global
-	a := cfg.RawAuthSnapshot()
-	return &View{Version: cfg.Version,
+func SettingsSnapshot() *SettingsView {
+	o := Global
+	return &SettingsView{Version: Version,
 		Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
 		HomePath:   o.NormalizedHomePath(),
-		ExecPolicy: a.ExecPolicy, ExecRules: a.ExecRules,
-		FsPolicy: a.FsPolicy, FsRules: a.FsRules,
-		NetPolicy: a.NetPolicy, NetRules: a.NetRules,
-		SshPolicy: a.SshPolicy, SshRules: a.SshRules}
+		ExecPolicy: o.ExecPolicy, ExecRules: o.ExecRules,
+		FsPolicy: o.FsPolicy, FsRules: o.FsRules,
+		NetPolicy: o.NetPolicy, NetRules: o.NetRules,
+		SshPolicy: o.SshPolicy, SshRules: o.SshRules}
 }
 
-// Update 是设置面写请求白名单（host/work_dir/exec_timeout/home_path
+// SettingsUpdate 是设置面写请求白名单（host/work_dir/exec_timeout/home_path
 // 与授权键可写；key 不走这里——只走 bind/unbind 子命令）。
 // browser_* 自 v6 P5 起随拆包删除（browser 是 skill 包，配置 = 包内默认 +
 // AIC_BROWSER_* env）。
@@ -59,7 +54,7 @@ func Snapshot() *View {
 // （permanent grant 直接追加在 rules 表尾，无独立键）。policy 空串 = 不改；
 // 列表 nil = 不改（保持现状），非 nil（含空数组）= 整体替换——空数组即清空，
 // 也是撤销 grant --permanent 条目的出口（删行即撤销）。
-type Update struct {
+type SettingsUpdate struct {
 	Host        string    `json:"host"`
 	WorkDir     string    `json:"work_dir"`
 	ExecTimeout string    `json:"exec_timeout"`
@@ -76,15 +71,15 @@ type Update struct {
 
 // validPolicy 校验 policy 取值（空串 = 不改，合法）。
 func validPolicy(s string) bool {
-	return s == "" || s == cfg.PolicyDeny || s == cfg.PolicyOpen
+	return s == "" || s == PolicyDeny || s == PolicyOpen
 }
 
 // Apply 校验并持久化设置：基于文件配置落盘（flag/env 启动覆盖不落盘）。
 // 只写 config.yaml，不碰运行中进程的内存态——生效由调用方重启后端完成。
 // 表单校验只拦本次提交的值；文件里已有的内容不构成保存门——保存永远落盘
 // （坏内容的可见性由运行时 INVALID 标记与工具门控承担）。
-func (u *Update) Apply() error {
-	unlock := cfg.LockUpdate()
+func (u *SettingsUpdate) Apply() error {
+	unlock := LockUpdate()
 	defer unlock()
 	if s := strings.TrimSpace(u.ExecTimeout); s != "" {
 		if _, err := time.ParseDuration(s); err != nil {
@@ -96,25 +91,25 @@ func (u *Update) Apply() error {
 		return &InvalidArg{Field: "policy", Reason: "want deny | open"}
 	}
 	if u.ExecRules != nil {
-		if err := policy.ValidateExecRules(*u.ExecRules); err != nil {
+		if err := ValidateExecRules(*u.ExecRules); err != nil {
 			return &InvalidArg{Field: "exec_rules", Reason: err.Error()}
 		}
 	}
 	for name, list := range map[string]*[]string{"net_rules": u.NetRules, "ssh_rules": u.SshRules} {
 		if list != nil {
-			if err := policy.ValidateTargetRules(*list); err != nil {
+			if err := vbox.ValidateTargetRules(*list); err != nil {
 				return &InvalidArg{Field: name, Reason: err.Error()}
 			}
 		}
 	}
 	for name, list := range map[string]*[]string{"fs_rules": u.FsRules} {
 		if list != nil {
-			if err := policy.ValidateFSRules(*list); err != nil {
+			if err := vbox.ValidateFSRules(*list); err != nil {
 				return &InvalidArg{Field: name, Reason: err.Error()}
 			}
 		}
 	}
-	fileCfg, err := cfg.LoadFile()
+	fileCfg, err := LoadFile()
 	if err != nil {
 		return err
 	}
@@ -138,7 +133,7 @@ func (u *Update) Apply() error {
 	}
 	fileCfg.WorkDir = wd
 	fileCfg.ExecTimeout = strings.TrimSpace(u.ExecTimeout)
-	applyAuth(u, fileCfg)
+	u.applyAuth(fileCfg)
 	// home_path：必须以单个 / 开头（// 开头是协议相对 URL，拼接后会跳转到别的站点，拒绝）
 	if hp := strings.TrimSpace(u.HomePath); hp != "" {
 		if !strings.HasPrefix(hp, "/") || strings.HasPrefix(hp, "//") {
@@ -148,7 +143,7 @@ func (u *Update) Apply() error {
 	} else {
 		fileCfg.HomePath = "/" // 清空 = 恢复默认首页
 	}
-	return cfg.Save(fileCfg)
+	return Save(fileCfg)
 }
 
 // InvalidArg 是设置面参数错误（前端按 field/reason 展示）。
@@ -159,7 +154,7 @@ type InvalidArg struct {
 
 func (e *InvalidArg) Error() string { return "invalid " + e.Field + ": " + e.Reason }
 
-func applyAuth(u *Update, o *cfg.Options) {
+func (u *SettingsUpdate) applyAuth(o *Options) {
 	for _, field := range []struct {
 		value  string
 		target *string

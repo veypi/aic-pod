@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/settings"
 )
 
 // 子命令实现：`aic config get|set` / `aic bind` / `aic unbind`（2026-09-22 去本地
@@ -43,7 +42,7 @@ func readStdin() ([]byte, error) {
 // cfg.Global 已由 flags.Parse 装载（defaults < 文件 < env < flag）；这里只输出视图，
 // 不再重复 Load——避免丢掉 env/flag 覆盖层。
 func runConfigGet() error {
-	return writeJSON(settings.Snapshot())
+	return writeJSON(cfg.SettingsSnapshot())
 }
 
 // runConfigSet 应用 stdin 的设置 JSON 并落盘（生效 = 调用方重启后端）。
@@ -52,7 +51,7 @@ func runConfigSet() error {
 	if err != nil {
 		return err
 	}
-	var upd settings.Update
+	var upd cfg.SettingsUpdate
 	if err := json.Unmarshal(b, &upd); err != nil {
 		return fmt.Errorf("parse settings json: %w", err)
 	}
@@ -80,7 +79,7 @@ func runBind() error {
 	if err := cfg.Save(o); err != nil {
 		return err
 	}
-	return writeJSON(map[string]any{"ok": true, "host": o.Host, "host_id": settings.BoundHostID(cred)})
+	return writeJSON(map[string]any{"ok": true, "host": o.Host, "host_id": cfg.BoundHostID(cred)})
 }
 
 // runUnbind 清除平台凭证（保留 host/work_dir 等运行参数）。

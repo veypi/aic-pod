@@ -3,7 +3,7 @@ package fsx
 // env.go 是 fsx（fs 工具薄层，自 vcore 移植，cloud/host 共用）的执行
 // 环境：全部文件操作经 FS（cloud = QuotaFS 包装的 ufs.FS；host = hostfs
 // View）；路径经 Resolve 归一（+jail 由调用方实现）；权限经 Gate（vbox
-// 规则表门，cloud 接 CloudFSRules，host 接 fsauth vbox 快照）。read/ls/rg
+// 规则表门，cloud 接 CloudFSRules，host 接 permissionState vbox 快照）。read/ls/rg
 // 开放（读默认放行由规则表保证）；write/edit 出区由 Gate 拒绝并引导 grant fs。
 
 import (

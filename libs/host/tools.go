@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
 )
@@ -96,7 +95,7 @@ func (c *Client) untrackExec(requestID string) {
 }
 
 func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *protocol.FSInvocation) (any, error) {
-	if cfg.CheckAuth() != nil {
+	if c.perms.err() != nil {
 		return nil, protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
 	}
 	if strings.HasPrefix(in.Method, "text.") {
@@ -131,7 +130,7 @@ func (c *Client) dispatch(ctx context.Context, caller protocol.Caller, r protoco
 		return protocol.Reply(r.Protocol, r.ID, nil, err)
 	}
 	// 授权配置损坏 fail-closed（修复本地设置前拒绝一切执行/文件请求）。
-	if cfg.CheckAuth() != nil {
+	if c.perms.err() != nil {
 		return protocol.Reply(r.Protocol, r.ID, nil, protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings"))
 	}
 	// 文件代理原有 fs-only 范围继续有效：不能借文件入口执行命令。

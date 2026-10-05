@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/veypi/aic-pod/protocol"
 	"net/http"
 	"net/http/httptest"
@@ -185,6 +186,15 @@ func TestBrowserStreamUsesExistingCommandAuthorization(t *testing.T) {
 	caller.Scope = "fs"
 	call(caller)
 	caller.Scope = ""
+	// exec 域基表更新 = 编译 + 原子发布（运行中改 cfg.Global 不生效，§4）
 	cfg.Global.ExecRules = []string{"deny:mcp.browser"}
+	publishGlobal(t, c.perms)
 	call(caller)
+	// 会话 temp 授权即时生效
+	c.perms.grantCmd("s1", "mcp.browser")
+	err := c.streamBrowser(context.Background(), caller, nil, func([]byte) error { t.Fatal("unauthorized frame"); return nil })
+	var fault *protocol.Fault
+	if err == nil || errors.As(err, &fault) {
+		t.Fatalf("granted browser must pass the gate (fails later on missing stream): %v", err)
+	}
 }

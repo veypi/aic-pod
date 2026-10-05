@@ -1,6 +1,6 @@
 //go:build linux
 
-package fsauth
+package host
 
 // defaultDenyPaths（linux）：通用条目 + linux 平台特有——系统口令/影子文件、
 // sudoers/sshd 配置、内核内存设备、钥匙串、浏览器 profile、容器运行时数据区。

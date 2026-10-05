@@ -1,6 +1,6 @@
 //go:build !darwin
 
-package fsauth
+package host
 
 // tempRoots（非 darwin）：无字面临时根——os.TempDir() 由
 // rebuildBaseRootsLocked 统一收录已足够：

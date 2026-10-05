@@ -94,7 +94,7 @@ func TestConfigPathIsolated(t *testing.T) {
 }
 
 // StateDir 返回 $HOME/.aic（三平台统一；getter 不创建目录——创建由各
-// 写入方按需 MkdirAll：writeState / LogWriter / fsauth sessions）。
+// 写入方按需 MkdirAll：writeState / LogWriter / permissionState sessions）。
 func TestStateDir(t *testing.T) {
 	dir := isolateConfigDir(t)
 	got, err := StateDir()
@@ -193,7 +193,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 		if Global != o || o.Host != DefaultHost || !o.RTC {
 			t.Fatalf("missing usable defaults for %q", body)
 		}
-		if err := o.ValidateAuth(); err != nil && CheckAuth() == nil {
+		if err := o.ValidateAuth(); err != nil && Global.ValidateAuth() == nil {
 			t.Fatal("malformed authorization did not disable device tools")
 		}
 		data, _ := os.ReadFile(p)
@@ -260,8 +260,8 @@ func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 				t.Fatal(err)
 			}
 			o.Normalize() // repeated startup normalization must not erase the error
-			if gated := CheckAuth() != nil; gated != tc.gated {
-				t.Fatalf("CheckAuth gated = %v, want %v (%v)", gated, tc.gated, CheckAuth())
+			if gated := Global.ValidateAuth() != nil; gated != tc.gated {
+				t.Fatalf("ValidateAuth gated = %v, want %v (%v)", gated, tc.gated, Global.ValidateAuth())
 			}
 			o.HomePath = "/agents"
 			if err := Save(o); err != nil {
@@ -281,8 +281,8 @@ func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 			if _, err := Load(); err != nil {
 				t.Fatal(err)
 			}
-			if gated := CheckAuth() != nil; gated != tc.gated {
-				t.Fatalf("CheckAuth after reload = %v, want %v", gated, tc.gated)
+			if gated := Global.ValidateAuth() != nil; gated != tc.gated {
+				t.Fatalf("ValidateAuth after reload = %v, want %v", gated, tc.gated)
 			}
 		})
 	}

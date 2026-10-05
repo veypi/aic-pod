@@ -1,6 +1,6 @@
 //go:build linux
 
-package fsauth
+package host
 
 import (
 	"os"

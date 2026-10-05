@@ -52,6 +52,8 @@ type SkillDeps struct {
 	Load   func(context.Context, string, string) (string, error)
 	Fetch  func(context.Context, string, string, string) ([]byte, error)
 	Fork   func(context.Context, string, string) (string, error)
+	// Allow 命令准入薄检查（host 接线 exec 域规则门）：nil = 放行（cloud）。
+	Allow func(context.Context) bool
 }
 
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
@@ -371,6 +373,9 @@ func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) er
 	}
 	if len(inv.Args) == 0 {
 		return commands.Exitf(inv, 2, "usage: skill <search|load|download|fork>（--help 查看详情）")
+	}
+	if d.Skill.Allow != nil && !d.Skill.Allow(ctx) {
+		return commands.Exitf(inv, 126, "skill: command denied by exec rules（grant cmd skill 申请）")
 	}
 	sub, rest := inv.Args[0], inv.Args[1:]
 	sid := SessionFromContext(ctx)

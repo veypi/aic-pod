@@ -62,15 +62,3 @@ func Running() bool {
 	defer rtMu.Unlock()
 	return rtClient != nil
 }
-
-// ApplyConfig 应用新运行配置（保存设置后调用）：保留会话与 bg 任务，
-// 仅更新参数；NATS 地址变化时重连（Client.Reconfigure）。未运行则直接启动。
-func ApplyConfig(o cfg.Options) error {
-	rtMu.Lock()
-	c := rtClient
-	rtMu.Unlock()
-	if c == nil {
-		return Start(o)
-	}
-	return c.Reconfigure(o)
-}

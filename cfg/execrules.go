@@ -1,27 +1,12 @@
-// Package policy provides product command rules and delegates filesystem and
-// network rule parsing to vbox. It owns no configuration or approval state.
-package policy
+// exec 域命令规则：解析与校验归 cfg（cfg 自己就要校验这些配置；
+// 原 libs/policy 的命令规则部分，2026-10-06 批次 6 §4 合入）。
+// FS/net 规则解析直接用 vbox。
+package cfg
 
 import (
 	"fmt"
-	"github.com/veypi/vbox"
 	"strings"
 )
-
-const (
-	EffectDeny = "deny"
-	EffectRO   = "ro"
-	EffectRW   = "rw"
-)
-
-func ParseFSRule(raw string) (string, string, error) {
-	effect, pattern, err := vbox.ParseFSRule(raw)
-	return effect.String(), pattern, err
-}
-func ValidateFSRules(rows []string) error             { return vbox.ValidateFSRules(rows) }
-func ValidateFSGrantTarget(target string) error       { return vbox.ValidateFSGrantTarget(target) }
-func ParseTargetRule(raw string) (bool, Entry, error) { return vbox.ParseTargetRule(raw) }
-func ValidateTargetRules(rows []string) error         { return vbox.ValidateTargetRules(rows) }
 
 // ParseExecRule accepts one exact name. Whole-domain behavior belongs to policy.
 func ParseExecRule(raw string) (allow bool, name string, err error) {
@@ -31,12 +16,16 @@ func ParseExecRule(raw string) (allow bool, name string, err error) {
 	}
 	return effect == "allow", name, nil
 }
+
+// ValidateCommandName 校验单个命令名（无路径/空白/通配）。
 func ValidateCommandName(name string) error {
 	if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, "/\\ \t\r\n\x00*?") {
 		return fmt.Errorf("invalid exec command %q", name)
 	}
 	return nil
 }
+
+// ValidateExecRules 校验 exec_rules 全表。
 func ValidateExecRules(rows []string) error {
 	for _, raw := range rows {
 		if _, _, err := ParseExecRule(raw); err != nil {
@@ -45,6 +34,8 @@ func ValidateExecRules(rows []string) error {
 	}
 	return nil
 }
+
+// CommandAllowed 按首命中判定命令准入（rows 有序，先判先赢）。
 func CommandAllowed(mode string, rows []string, name string) bool {
 	if (mode != "open" && mode != "deny") || ValidateCommandName(name) != nil {
 		return false

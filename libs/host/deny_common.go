@@ -1,4 +1,4 @@
-package fsauth
+package host
 
 // denyCommon 返回三平台路径形态完全一致的通用拒绝条目（开发工具链凭证，
 // 各平台位置相同）。平台特有路径（系统凭证库/浏览器 profile/容器运行时等）

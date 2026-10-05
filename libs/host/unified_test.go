@@ -209,7 +209,7 @@ func TestExecGrantRequiresGrantApproved(t *testing.T) {
 	if res.Attrs["exit_code"] != "0" {
 		t.Fatalf("approved grant failed: %q stderr=%q", res.Content, res.Attrs["stderr"])
 	}
-	if !c.policy.Snapshot("s1").Match(filepath.ToSlash(target)+"/x", 1).Allow {
+	if !c.perms.fsSnapshot("s1").Match(filepath.ToSlash(target)+"/x", 1).Allow {
 		t.Fatal("grant not effective")
 	}
 }

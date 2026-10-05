@@ -1,6 +1,6 @@
 //go:build windows
 
-package fsauth
+package host
 
 import (
 	"os"
@@ -37,15 +37,18 @@ func TestDefaultDenyTableWithoutHome(t *testing.T) {
 		t.Fatalf("built-in deny table must compile with HOME unset: %v", err)
 	}
 
-	p := newTestPolicy(t, "")
+	p := newTestPerms(t, "")
 	stateDir := filepath.ToSlash(home) + "/.aic"
-	if !denied(p, stateDir+"/browser/browser.json") {
-		t.Errorf("deniedPath(%q/…) = false, want true (device state must stay denied)", stateDir)
+	denied := func(path string) bool {
+		return !p.fsSnapshot("s1").Match(path, vbox.OpRead).Allow
 	}
-	if !denied(p, stateDir+"/config.yaml") {
-		t.Errorf("deniedPath(%q/config.yaml) = false, want true", stateDir)
+	if !denied(stateDir + "/browser/browser.json") {
+		t.Errorf("denied(%q/…) = false, want true (device state must stay denied)", stateDir)
 	}
-	if denied(p, stateDir+"/sessions/s1/x.txt") {
+	if !denied(stateDir + "/config.yaml") {
+		t.Errorf("denied(%q/config.yaml) = false, want true", stateDir)
+	}
+	if denied(stateDir + "/sessions/s1/x.txt") {
 		t.Error("device state deny must not shadow session files")
 	}
 }

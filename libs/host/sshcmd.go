@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -30,7 +31,7 @@ func (c *Client) sshOptions(ctx context.Context, raw string, port int) (vbox.Sta
 	if err != nil {
 		return vbox.StartOptions{}, err
 	}
-	if c.sshPol == nil || !c.sshPol.Allowed(execution.SessionFromContext(ctx), t.Host, t.Port) {
+	if c.perms == nil || !c.perms.sshAllowed(execution.SessionFromContext(ctx), net.JoinHostPort(t.Host, strconv.Itoa(t.Port))) {
 		return vbox.StartOptions{}, fmt.Errorf("%w: SSH %q resolves to %s (user %s); request grant ssh %s", fs.ErrPermission, raw, t.address(), t.User, t.address())
 	}
 	binary, err := trustedSSHBinary()

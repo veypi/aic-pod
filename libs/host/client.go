@@ -16,19 +16,16 @@ import (
 	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/fsauth"
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	"github.com/veypi/aic-pod/libs/netauth"
 
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/vbox"
@@ -55,7 +52,6 @@ type Client struct {
 	sessionRoot    string
 	mcpMu          sync.RWMutex
 	mcpServices    *mcpx.Manager
-	mcpAuth        cfg.AuthCfg
 	browserConfig  *mcpx.Config
 	browserContext context.Context
 	browserCancel  context.CancelFunc
@@ -63,8 +59,6 @@ type Client struct {
 	execMu      sync.Mutex
 	execHandles map[string]*execHandleEntry // 当前执行请求登记表（前台执行）
 
-	execGrantMu     sync.RWMutex
-	execGrants      map[string][]string
 	optsMu          sync.RWMutex
 	opts            Options
 	lifecycleMu     sync.Mutex // serializes Connect, Reconfigure and Close
@@ -79,10 +73,8 @@ type Client struct {
 	credVer         uint64
 	replay          *replayCache
 	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
-	policy          *fsauth.Policy   // 文件权限模型（fs 域：fs 判定 + 沙箱白名单同实例）
+	perms           *permissionState // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
 	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
-	netPol          *netauth.Policy  // net 域：沙箱内子进程出站目标闸（内建 localhost:*）
-	sshPol          *netauth.Policy  // ssh 域：ssh 一级工具目标闸（独立通道，无内建条目）
 	sshRun          sshProcessRunner // nil uses the managed native process runner
 	rtcMu           sync.RWMutex
 	access          *hostauth.Access
@@ -128,19 +120,14 @@ func New(opts Options) *Client {
 	procs := vbox.NewManager()
 	procs.SetNoSandbox(opts.NoSandbox)
 	procs.SetLogf(logf)
-	// 配置与便利根由 fsauth 组合，启动进程时只下发权限快照。
-	policy, fsErr := fsauth.New()
-	netPolicy, netErr := netauth.New(netauth.NetKeys, "localhost:*")
-	sshPolicy, sshErr := netauth.New(netauth.SshKeys)
-	policy.SetWorkDir(opts.WorkDir)
+	// 唯一运行权限状态：启动参数（cfg.Global 授权字段 + work_dir）编译为基表；
+	// 配置无效不阻断连接——状态带 invalid，设备工具 fail-closed（修复并重启恢复）。
+	perms, err := newPermissionState(opts.WorkDir, cfg.Global)
 	c := &Client{
 		opts:        opts,
 		replay:      &replayCache{store: map[string]time.Time{}},
 		procs:       procs,
-		policy:      policy,
-		netPol:      netPolicy,
-		sshPol:      sshPolicy,
-		execGrants:  map[string][]string{},
+		perms:       perms,
 		execHandles: map[string]*execHandleEntry{},
 		logf:        logf,
 	}
@@ -151,19 +138,15 @@ func New(opts Options) *Client {
 		_, _, c.kTool, _ = protocol.DeriveKeys(parts[2], parts[0])
 		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
 	}
-	// 会话区根 = {StateDir}/sessions：与 fsauth 会话便利根
+	// 会话区根 = {StateDir}/sessions：与 permissionState 会话便利根
 	// 同路径（生产此前从不赋值 → sessionWorkDir 退 Temp 兜底，「会话区」分裂
-	// 为两个概念；win 沙箱对 fsauth 会话根行 grantDirWrite 因目录从未存在而
+	// 为两个概念；win 沙箱对会话根行 grantDirWrite 因目录从未存在而
 	// fail-closed）。ensureSessionWorkDir 自此创建真实目录，两侧归一。
 	if dir, err := cfg.StateDir(); err == nil {
 		c.sessionRoot = filepath.Join(dir, "sessions")
 	}
-	if fsErr != nil {
-		c.initErr = fsErr
-	} else if netErr != nil {
-		c.initErr = netErr
-	} else if sshErr != nil {
-		c.initErr = sshErr
+	if err != nil {
+		c.initErr = err
 	}
 	if c.initErr == nil {
 		c.initTools()
@@ -318,87 +301,6 @@ func (c *Client) Close() error {
 	service := c.detachRTC()
 	if service != nil {
 		service.RevokeAll()
-	}
-	return nil
-}
-
-// Reconfigure 应用新运行配置（保存设置后调用）：
-// 保留 Client 与 vbox Manager（bg 任务原样保留），仅更新
-// work_dir/exec_timeout 参数；NATS 地址（host）变化时重连。
-// 凭证/身份字段不变（换绑走 bind 流程重建）。
-func (c *Client) Reconfigure(o cfg.Options) error {
-	c.lifecycleMu.Lock()
-	defer c.lifecycleMu.Unlock()
-	if c.closed {
-		return fmt.Errorf("host client closed")
-	}
-	opts, err := optionsOf(o, c.options().DeviceType, c.options().Version, c.options().OnLog)
-	if err != nil {
-		return err
-	}
-	// 凭证与身份字段保持现有会话不变
-	opts.Key = c.options().Key
-	opts.DeviceName = c.options().DeviceName
-	if opts.WorkDir == "" {
-		opts.WorkDir = defaultWorkDir()
-	}
-	oldURL := ResolveNATSURL(c.options().Host)
-	restartRTC := c.options().WorkDir != opts.WorkDir || c.options().RTC != opts.RTC || c.options().Transfers != opts.Transfers
-	if restartRTC {
-		c.stopRTC()
-	}
-	restartMCP := !reflect.DeepEqual(c.options().MCP, opts.MCP) || !reflect.DeepEqual(c.mcpAuth, cfg.AuthSnapshot()) || c.options().NoSandbox != opts.NoSandbox || c.options().WorkDir != opts.WorkDir
-	c.procs.SetNoSandbox(opts.NoSandbox)
-	// 授权模型同步（三域）：work_dir 变更 + 配置重载
-	//（九键经 cfg.Global 由 api.SetConfig 先行更新）。
-	c.policy.SetWorkDir(opts.WorkDir)
-	if err := c.syncAuth(); err != nil {
-		return err
-	}
-	c.optsMu.Lock()
-	c.opts = opts
-	c.optsMu.Unlock()
-	if restartMCP {
-		if err := c.configureMCP(opts.MCP); err != nil {
-			return err
-		}
-		c.execGrantMu.Lock()
-		for sid, names := range c.execGrants {
-			keep := names[:0]
-			for _, name := range names {
-				if !strings.HasPrefix(name, "mcp.") {
-					keep = append(keep, name)
-				}
-			}
-			c.execGrants[sid] = keep
-		}
-		c.execGrantMu.Unlock()
-	}
-	if c.files != nil {
-		_, home, osHome, err := deviceFileRoots(opts.WorkDir)
-		if err != nil {
-			return err
-		}
-		c.files.Configure(home, osHomePtr(osHome), opts.Transfers.ProxyUploadBytes)
-		c.bytes.Configure(opts.Transfers.MaxUploadBytes, opts.Transfers.MaxSources)
-	}
-	nc := c.connection()
-	if restartRTC && nc != nil {
-		if err := c.startCommands(); err != nil {
-			return err
-		}
-		if opts.RTC {
-			if err := c.startRTC(); err != nil {
-				return err
-			}
-		}
-	}
-	if nc != nil {
-		c.publishCaps(nc)
-	}
-	if ResolveNATSURL(opts.Host) != oldURL {
-		c.closeConnection()
-		return c.connect()
 	}
 	return nil
 }
