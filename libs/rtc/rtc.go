@@ -147,6 +147,15 @@ func (s *Service) HandleSignal(sig *protocol.RtcSignal) {
 		}
 	}
 }
+
+// newPeer 构造 peer。created 必须打 s.now()（host 装配平台校准时钟）：
+// expire 的未认证窗口以 s.now() 判定，混用原始 time.Now 会在系统钟大
+// 偏移的宿主机上让新 peer 立即「高龄」（win 实测 -70s，首个 maintain
+// tick 即被踢，hello 来不及完成）。
+func (s *Service) newPeer(id string, pc *webrtc.PeerConnection, ctx context.Context, cancel context.CancelFunc) *peer {
+	return &peer{s: s, id: id, pc: pc, ctx: ctx, cancel: cancel, created: s.now(), requests: make(chan struct{}, 32)}
+}
+
 func (s *Service) offer(sig *protocol.RtcSignal) {
 	if len(sig.SDP) == 0 || len(sig.SDP) > protocol.MaxMessageBytes {
 		return
@@ -163,7 +172,7 @@ func (s *Service) offer(sig *protocol.RtcSignal) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &peer{s: s, id: sig.PC, pc: pc, ctx: ctx, cancel: cancel, created: time.Now(), requests: make(chan struct{}, 32)}
+	p := s.newPeer(sig.PC, pc, ctx, cancel)
 	s.pcs[sig.PC] = p
 	s.mu.Unlock()
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {

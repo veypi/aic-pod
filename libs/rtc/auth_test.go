@@ -170,3 +170,34 @@ func TestPeerLeaseExpiry(t *testing.T) {
 		t.Fatal("stale unauthenticated peer not dropped")
 	}
 }
+
+// TestPeerUnauthenticatedWindowUsesCalibratedClock 锁定 peer.created 打校准
+// 钟（§6 回归）：宿主机系统钟大偏移时（win 实测 -70s），若 created 混用
+// 原始 time.Now，新 peer 龄期立即 >30s，首个 maintain tick 即在 hello
+// 完成前踢掉未认证 peer。
+func TestPeerUnauthenticatedWindowUsesCalibratedClock(t *testing.T) {
+	svc, _ := authTestService(t)
+	svc.cfg.Now = func() time.Time { return time.Now().Add(70 * time.Second) }
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := svc.newPeer("pc_skew", pc, context.Background(), func() {})
+	svc.pcs[p.id] = p
+	// created 必须跟随校准钟（与原始钟差 ~70s）。
+	if d := time.Since(p.created); d < time.Hour {
+		// time.Since 用原始钟：created 打校准钟时表现为「-70s」的未来时刻。
+	} else {
+		t.Fatalf("created follows raw clock: %v", d)
+	}
+	// 校准钟下刚创建：30s 窗口内不得被踢（混钟时此处龄期即 ~70s）。
+	p.expire(svc.now())
+	if svc.pcs[p.id] == nil {
+		t.Fatal("unauthenticated peer dropped inside auth window (mixed clock)")
+	}
+	// 超过窗口才踢。
+	p.expire(svc.now().Add(31 * time.Second))
+	if svc.pcs[p.id] != nil {
+		t.Fatal("stale unauthenticated peer not dropped")
+	}
+}
