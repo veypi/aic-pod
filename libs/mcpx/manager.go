@@ -198,7 +198,10 @@ func (m *Manager) connect(ctx context.Context, name string, cfg Config, i *insta
 	stopClose := context.AfterFunc(ctx, func() { _ = session.Close() })
 	defer stopClose()
 	if err := session.Wait(); err != nil {
-		m.options.Logf("mcp %s: connection ended: %v", name, err)
+		// 主动取消（Close/Restart）时连接随进程一起收尾，Wait 报错是噪声。
+		if ctx.Err() == nil {
+			m.options.Logf("mcp %s: connection ended: %v", name, err)
+		}
 	}
 }
 
@@ -234,7 +237,8 @@ func (m *Manager) transport(ctx context.Context, name string, cfg Config) (mcp.T
 		_ = inR.Close()
 		if err != nil && procCtx.Err() == nil {
 			m.options.Logf("mcp %s: process failed: %v", name, err)
-		} else if code != 0 {
+		} else if procCtx.Err() == nil && code != 0 {
+			// 主动取消（Close/Restart）后退出码无意义（-1）：只在服务自行退出时记录。
 			m.options.Logf("mcp %s: process exited with %d", name, code)
 		}
 	}()

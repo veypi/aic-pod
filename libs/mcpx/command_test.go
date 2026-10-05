@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -122,6 +123,40 @@ func TestCommandPreservesResultsAndExitStatus(t *testing.T) {
 		t.Fatal(stdout.String())
 	}
 }
+
+// 下游提前关闭（`mcp tools x | head`）必须按 SIGPIPE 语义收尾：返回
+// ExitError{141}，而不是裸 error（裸 error 会被解释器当作致命中止，
+// 把常用的截断管道变成整段脚本中断）。
+func TestCommandTreatsClosedPipeAsSigpipe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	backend := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
+	backend.AddTool(&mcp.Tool{Name: "save", InputSchema: map[string]any{"type": "object"}}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := backend.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	command := Command(func(context.Context, string) (*mcp.ClientSession, error) { return cs, nil })
+	inv := &commands.Invocation{Args: []string{"tools", "fixture"}, Stdout: closedPipeWriter{}, Stderr: io.Discard}
+	err = command(ctx, inv)
+	var exit *commands.ExitError
+	if !errors.As(err, &exit) || exit.Code != 141 {
+		t.Fatalf("closed pipe must exit 141, got %v", err)
+	}
+}
+
+type closedPipeWriter struct{}
+
+func (closedPipeWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func TestCommandRejectsTargetBeforeResolvingService(t *testing.T) {
 	command := Command(func(context.Context, string) (*mcp.ClientSession, error) {

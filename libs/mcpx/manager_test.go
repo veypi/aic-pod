@@ -3,7 +3,9 @@ package mcpx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,6 +104,42 @@ func TestManagerOwnsProcessAcrossCallerCancellation(t *testing.T) {
 		t.Fatal(value)
 	}
 }
+
+// 主动收尾（Close/Restart）是控制行为，不是故障：连接结束与退出码均不进日志；
+// 只有服务自行退出/崩溃才记录。
+func TestManagerShutdownIsQuiet(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var logs []string
+	manager, err := NewManager(map[string]Config{"fixture": {Command: binary, Args: []string{"-test.run=^TestMCPProcessFixture$"}, Cwd: t.TempDir(), Env: map[string]string{"AIC_MCP_TEST_PROCESS": "1"}, NoSandbox: true}}, Options{Processes: vbox.NewManager(), Logf: func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := manager.Session(ctx, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restart(ctx, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, line := range logs {
+		if strings.Contains(line, "connection ended") || strings.Contains(line, "process exited") || strings.Contains(line, "process failed") {
+			t.Fatalf("shutdown noise: %s", line)
+		}
+	}
+}
+
 func TestManagerRejectsInvalidConfiguration(t *testing.T) {
 	for _, cfg := range []Config{{}, {Command: "tool", URL: "https://example.test/mcp"}, {Command: "tool", Cwd: "relative"}, {URL: "file:///tmp/mcp"}, {URL: "https://example.test/mcp", Env: map[string]string{"TOKEN": "secret"}}} {
 		if _, err := NewManager(map[string]Config{"fixture": cfg}, Options{Processes: vbox.NewManager()}); err == nil {
