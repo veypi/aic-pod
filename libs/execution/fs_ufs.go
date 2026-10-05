@@ -264,11 +264,17 @@ func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 	return nil
 }
 
-// gateMeta 元数据读的 jail 放宽（2026-09-24 实测修复）：内建命令的祖先链
-// 走访（mkdir -p 从 / 逐级 Stat、cd/ls 的符号链接解析）会读到 jail 根的祖先
-// （/、/u）——只放行「jail 根祖先」的 Stat/Lstat/Realpath（存在性元数据不
-// 泄露内容）；Open/ReadDir/OpenFile 仍走 gate 严格判定（ReadDir("/") 会泄露
-// 用户列表，不放行）。
+// gateMeta 元数据读的 jail 放宽（2026-09-24 实测修复；2026-10-05 补 jail 根本身）：
+// 内建命令的祖先链走访（mkdir -p 从 / 逐级 Stat、cd/ls 的符号链接解析）会读到
+// jail 根的祖先（/、/u）与 jail 根本身（/skills）——只放行这两类的
+// Stat/Lstat/Realpath（存在性元数据不泄露内容）；Open/ReadDir/OpenFile 仍走
+// gate 严格判定（ReadDir("/") 会泄露用户列表、ReadDir("/skills") 会泄露他
+// 人私有包，均不放行）。
+//
+// 为什么需要 jail 根本身：vsh 对 lstat 语义（`ls <dir>` / `stat <dir>` 无尾斜杠）
+// 会 Realpath 其父目录做符号链接解析——`ls /skills/{id}` 的父是 jail 根
+// `/skills`，若此处按规则表 deny 即整条命令失败。jail 根是收容边界，元数据
+// 可遍历是正确语义。
 func (a *ufsAdapter) gateMeta(abs string) error {
 	if !a.inJail(abs) {
 		for _, j := range a.jails {
@@ -280,6 +286,12 @@ func (a *ufsAdapter) gateMeta(abs string) error {
 			return nil
 		}
 		return &stdfs.PathError{Op: "read", Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
+	}
+	// jail 根本身：元数据放行（列目录/读内容仍走 gate）。
+	for _, j := range a.jails {
+		if abs == j {
+			return nil
+		}
 	}
 	return a.gate(abs, vbox.OpRead, false)
 }

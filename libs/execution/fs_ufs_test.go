@@ -314,3 +314,58 @@ func TestCloudFSSymlinkEscapeFollowsToBacking(t *testing.T) {
 		t.Fatal("link should be removed")
 	}
 }
+
+// TestCloudFSJailRootMetadataTraversable 回归（2026-10-05）：jail 根（次级根
+// /skills）的元数据（Stat/Lstat/Realpath）放行——vsh 对 lstat 语义会 Realpath
+// 其父目录做符号链接解析，`ls /skills/{id}`（无尾斜杠）的父是 /skills；列目录
+// （ReadDir）仍走 gate 受规则表拒，内容不放宽。
+func TestCloudFSJailRootMetadataTraversable(t *testing.T) {
+	t.Parallel()
+	backing, err := ufs.NewLocalFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := vbox.NewFSRuleSet([]vbox.Rule{
+		{Pattern: "/u/u1", Effect: vbox.EffRW, Class: vbox.ClassConvenience},
+		{Pattern: "/skills/ok", Effect: vbox.EffRO, Class: vbox.ClassCfg},
+		{Pattern: "/skills", Effect: vbox.EffDeny, Class: vbox.ClassCfg},
+	}, vbox.EffDeny)
+	fsys, err := NewCloudFS(CloudFSConfig{
+		UserRoot:  "/u/u1",
+		JailExtra: []string{"/skills"},
+		Backing:   backing,
+		Rules:     func() vbox.FSRuleSet { return rules },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.MkdirAll("/skills/ok", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.WriteFile("/skills/ok/SKILL.md", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// jail 根元数据放行（stat/lstat/realpath）。
+	if _, err := fsys.Stat(ctx, "/skills"); err != nil {
+		t.Fatalf("Stat(/skills) = %v, want nil（jail 根元数据放行）", err)
+	}
+	if _, err := fsys.Lstat(ctx, "/skills"); err != nil {
+		t.Fatalf("Lstat(/skills) = %v, want nil", err)
+	}
+	if p, err := fsys.Realpath(ctx, "/skills"); err != nil || p != "/skills" {
+		t.Fatalf("Realpath(/skills) = %q, %v; want /skills", p, err)
+	}
+	// 一级子目录（RO 行）可 lstat。
+	if _, err := fsys.Lstat(ctx, "/skills/ok"); err != nil {
+		t.Fatalf("Lstat(/skills/ok) = %v, want nil", err)
+	}
+	// 列目录仍拒（不放宽：ReadDir 走 gate）。
+	if _, err := fsys.ReadDir(ctx, "/skills"); !errors.Is(err, ErrRuleDenied) {
+		t.Fatalf("ReadDir(/skills) = %v, want ErrRuleDenied", err)
+	}
+	// 他人私有行/保留名内容读仍拒（deny 兜底）。
+	if _, err := fsys.Open(ctx, "/skills/other/SKILL.md"); !errors.Is(err, ErrRuleDenied) {
+		t.Fatalf("Open other skill = %v, want ErrRuleDenied", err)
+	}
+}
