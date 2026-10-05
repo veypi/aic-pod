@@ -46,6 +46,7 @@ func hostCanonical(p string) string {
 func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, error) {
 	engine, err := execution.NewEngine(execution.EngineConfig{
 		Registry: reg,
+		BaseEnv:  hostIdentityBaseEnv(),
 		NewSessionFS: func(ctx context.Context, sid string) (gbfs.FileSystem, string, error) {
 			fsys, err := execution.NewHostFS(execution.HostFSConfig{
 				Backing: OSVFS{},
