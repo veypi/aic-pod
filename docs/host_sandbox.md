@@ -67,7 +67,7 @@ exec 外层将 stdout/stderr 分别写文件，始终返回已创建文件的路
 ## 6. 实施验收
 
 - 无 grant_approved 的动态 grant 返回权限错误且不写规则（含 env 伪造与 ${g}nt 动态拼接用例，libs/vsh 测试覆盖）；grant/nosandbox 同时出现只审批一次，未指定 nosandbox 则仍使用沙箱。
-- 模型参数和脚本环境不能伪造授权；修改签名信封的标记导致验签失败（protocol/hosts_nats 测试）；新 exec 不继承旧标记。
+- 模型参数和脚本环境不能伪造授权；修改签名信封的标记导致验签失败（protocol 包 hosts_nats 测试）；新 exec 不继承旧标记。
 - 相同资源在 vsh、FS RPC 和原生进程中符合相同可实现规则，fallback 不绕过拒绝。
 - stdout JSON 与 stderr 诊断分离，截断不丢日志；取消、超时转后台和文件关闭不存在重复执行或句柄丢失。
 - macOS/Linux/Windows 分别在真实目标平台验证沙箱；仅编译通过不代表隔离成立（本项仍待真实平台实测）。

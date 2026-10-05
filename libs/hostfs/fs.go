@@ -195,16 +195,7 @@ func (f *FS) validate(method string, raw json.RawMessage) error {
 		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
-		path = p.Path
-		if err := p.Condition.Validate(); err != nil {
-			return err
-		}
-		if p.CreateParents {
-			return protocol.FSFail("unsupported", "Create the parent directory explicitly")
-		}
-		if p.Source.Kind != "bytes" || !protocol.ValidID(p.Source.ID) || !protocol.ValidID(p.Source.Epoch) {
-			return protocol.FSFail("invalid_argument", "Invalid byte source")
-		}
+		return validateWriteArgs(p)
 	case "find":
 		var p findArgs
 		if err := protocol.Decode(raw, &p); err != nil {
@@ -219,31 +210,19 @@ func (f *FS) validate(method string, raw json.RawMessage) error {
 		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
-		if p.IfVersion == "" {
-			return protocol.FSFail("invalid_argument", "if_version is required")
-		}
-		if err := p.Condition.Validate(); err != nil {
-			return err
-		}
-		if err := p.Src.Validate(runtime.GOOS == "windows"); err != nil {
-			return err
-		}
-		path = p.Dst
+		return validateMoveArgs(p)
 	case "mkdir":
 		var p mkdirArgs
 		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
-		path = p.Path
+		return p.Path.Validate(runtime.GOOS == "windows")
 	case "remove":
 		var p removeArgs
 		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
-		path = p.Path
-		if p.IfVersion == "" {
-			return protocol.FSFail("invalid_argument", "if_version is required")
-		}
+		return validateRemoveArgs(p)
 	default:
 		return protocol.FSFail("unsupported", "Unknown fs method")
 	}
@@ -272,14 +251,9 @@ func (f *FS) Authorize(ctx context.Context, call Call) error {
 		return protocol.FSFail("invalid_argument", "Invalid file location")
 	}
 	write := call.Method == "write" || call.Method == "mkdir" || call.Method == "remove" || call.Method == "move" || call.Method == "copy"
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.closed {
-		return protocol.FSFail("expired", "Filesystem closed")
-	}
 	if call.Method == "move" || call.Method == "copy" {
-		if _, _, err := f.check(ctx, call, p.Src, call.Method == "move"); err != nil {
-			return fault(err)
+		if err := f.authorizeTarget(ctx, call, p.Src, call.Method == "move"); err != nil {
+			return err
 		}
 		p.Path = p.Dst
 	}
@@ -290,13 +264,115 @@ func (f *FS) Authorize(ctx context.Context, call Call) error {
 	if call.Method == "mkdir" && p.Parents {
 		return nil
 	}
-	_, _, err := f.check(ctx, call, p.Path, write)
-	if err != nil {
+	return f.authorizeTarget(ctx, call, p.Path, write)
+}
+
+// authorizeTarget 校验单路径访问授权（closed 检查与 fault 映射与 Authorize
+// 同口径）；已解析参数的类型化调用与 JSON 分发共用本函数。
+func (f *FS) authorizeTarget(ctx context.Context, call Call, p protocol.FSPath, write bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return protocol.FSFail("expired", "Filesystem closed")
+	}
+	if _, _, err := f.check(ctx, call, p, write); err != nil {
 		return fault(err)
 	}
 	return nil
 }
-func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
+
+// ---- 类型化入口（批次 2：View 内部调用与 Run 进入同一具体方法，解除
+// 「编码 JSON → 重新解析」的内部回环）----
+
+// validateWriteArgs 是 write 参数的完整校验（Run 的 validate 与类型化入口共用）。
+func validateWriteArgs(p writeArgs) error {
+	if err := p.Condition.Validate(); err != nil {
+		return err
+	}
+	if p.CreateParents {
+		return protocol.FSFail("unsupported", "Create the parent directory explicitly")
+	}
+	if p.Source.Kind != "bytes" || !protocol.ValidID(p.Source.ID) || !protocol.ValidID(p.Source.Epoch) {
+		return protocol.FSFail("invalid_argument", "Invalid byte source")
+	}
+	return p.Path.Validate(runtime.GOOS == "windows")
+}
+
+func validateMoveArgs(p moveArgs) error {
+	if p.IfVersion == "" {
+		return protocol.FSFail("invalid_argument", "if_version is required")
+	}
+	if err := p.Condition.Validate(); err != nil {
+		return err
+	}
+	if err := p.Src.Validate(runtime.GOOS == "windows"); err != nil {
+		return err
+	}
+	return p.Dst.Validate(runtime.GOOS == "windows")
+}
+
+func validateRemoveArgs(p removeArgs) error {
+	if p.IfVersion == "" {
+		return protocol.FSFail("invalid_argument", "if_version is required")
+	}
+	return p.Path.Validate(runtime.GOOS == "windows")
+}
+
+func (f *FS) writeTyped(ctx context.Context, call Call, p writeArgs) error {
+	if err := validateWriteArgs(p); err != nil {
+		return err
+	}
+	if err := f.authorizeTarget(ctx, call, p.Path, true); err != nil {
+		return err
+	}
+	_, err := f.runOp(ctx, func() (any, error) { return f.write(ctx, call, p) })
+	return err
+}
+
+func (f *FS) mkdirTyped(ctx context.Context, call Call, p mkdirArgs) error {
+	if err := p.Path.Validate(runtime.GOOS == "windows"); err != nil {
+		return err
+	}
+	if !p.Parents {
+		if err := f.authorizeTarget(ctx, call, p.Path, true); err != nil {
+			return err
+		}
+	}
+	_, err := f.runOp(ctx, func() (any, error) { return f.mkdir(ctx, call, p) })
+	return err
+}
+
+func (f *FS) removeTyped(ctx context.Context, call Call, p removeArgs) error {
+	if err := validateRemoveArgs(p); err != nil {
+		return err
+	}
+	if err := f.authorizeTarget(ctx, call, p.Path, true); err != nil {
+		return err
+	}
+	_, err := f.runOp(ctx, func() (any, error) { return f.remove(ctx, call, p) })
+	return err
+}
+
+func (f *FS) moveTyped(ctx context.Context, call Call, p moveArgs) error {
+	if err := validateMoveArgs(p); err != nil {
+		return err
+	}
+	if err := f.authorizeTarget(ctx, call, p.Src, true); err != nil {
+		return err
+	}
+	if err := f.authorizeTarget(ctx, call, p.Dst, true); err != nil {
+		return err
+	}
+	_, err := f.runOp(ctx, func() (any, error) { return f.move(ctx, call, p) })
+	return err
+}
+func (f *FS) run(ctx context.Context, call Call) (any, error) {
+	return f.runOp(ctx, func() (any, error) { return f.dispatch(ctx, call) })
+}
+
+// runOp 是已授权调用的执行骨架：互斥、closed/ctx 检查与 fault 映射——
+// JSON 分发（run）与类型化入口（writeTyped 等）共用。
+func (f *FS) runOp(ctx context.Context, op func() (any, error)) (value any, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	defer func() {
@@ -310,6 +386,10 @@ func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
+	return op()
+}
+
+func (f *FS) dispatch(ctx context.Context, call Call) (any, error) {
 	switch call.Method {
 	case "home":
 		p := f.cfg.Home

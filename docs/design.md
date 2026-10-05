@@ -10,8 +10,7 @@ Pod 是设备执行端，负责身份验证、原生命令、文件服务、官�
 | cfg / settings | 配置与设备绑定；MCP 配置是设备所有者提供的固定启动信息 |
 | libs/host | 装配身份、权限、执行器、文件服务与 mcp command |
 | libs/mcpx | 官方 SDK 服务连接管理与一个 vsh mcp 命令 |
-| protocol/hosts_nats、hosts_rtc | 原生 exec/fs/cancel 请求的签名/认证 |
-| protocol/tool | exec/fs 共用的业务载荷与错误；不定义第二套请求/响应协议 |
+| protocol | 全部线上契约单包：tool 请求/响应与错误、FS 数据面类型、hosts_nats/hosts_rtc 签名与认证信封、RTC 票据与信令、subject/caps/凭证、路径可解析层（批次 2 合包；NATS/RTC 信封各自存在，类型 Nats*/Rtc*/FS* 前缀区分） |
 | libs/execution | vsh、日志、前台等待和 bg 任务 |
 | vbox | 原生进程和 OS 沙箱、取消回收 |
 | libs/hostfs、fsauth、netauth | 文件数据面与资源权限 |

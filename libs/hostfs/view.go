@@ -3,7 +3,6 @@ package hostfs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/veypi/aic-pod/protocol"
 
@@ -65,12 +64,13 @@ func (v *fileView) location(name string) (protocol.FSPath, error) {
 	}
 	return protocol.FSPath{}, protocol.FSFail("permission_denied", "Path is outside filesystem roots")
 }
-func (v *fileView) invoke(method string, args any) (any, error) {
-	raw, _ := json.Marshal(args)
+
+// call 返回以 method 标记的调用上下文（类型化入口与 JSON 分发共用同一
+// 具体方法与校验授权链——批次 2 解除「编码 JSON → 重新解析」的内部回环）。
+func (v *fileView) callAs(method string) Call {
 	call := v.call
 	call.Method = method
-	call.Args = raw
-	return v.f.Run(v.ctx, call)
+	return call
 }
 func (v *fileView) remember(name string, info fs.FileInfo) {
 	v.mu.Lock()
@@ -246,8 +246,7 @@ func (v *fileView) commit(name string, r io.Reader, size int64, condition protoc
 		return err
 	}
 	defer v.f.cfg.Bytes.Release(v.call.Owner, source.Ref)
-	_, err = v.invoke("write", writeArgs{Path: p, Source: source.Ref, Condition: condition})
-	return err
+	return v.f.writeTyped(v.ctx, v.callAs("write"), writeArgs{Path: p, Source: source.Ref, Condition: condition})
 }
 func (v *fileView) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	condition, err := v.condition(name)
@@ -308,8 +307,7 @@ func (v *fileView) MkdirAll(name string, perm fs.FileMode) error {
 	if len(p.Segments) == 0 {
 		return nil
 	}
-	_, err = v.invoke("mkdir", mkdirArgs{Path: p, Parents: true, ExistOK: true})
-	return err
+	return v.f.mkdirTyped(v.ctx, v.callAs("mkdir"), mkdirArgs{Path: p, Parents: true, ExistOK: true})
 }
 func (v *fileView) RemoveAll(name string) error {
 	p, err := v.location(name)
@@ -323,8 +321,7 @@ func (v *fileView) RemoveAll(name string) error {
 	if err != nil {
 		return err
 	}
-	_, err = v.invoke("remove", removeArgs{Path: p, IfVersion: version(info), Recursive: true, MissingOK: true})
-	return err
+	return v.f.removeTyped(v.ctx, v.callAs("remove"), removeArgs{Path: p, IfVersion: version(info), Recursive: true, MissingOK: true})
 }
 func (v *fileView) Rename(from, to string) error {
 	src, err := v.location(from)
@@ -343,8 +340,7 @@ func (v *fileView) Rename(from, to string) error {
 	if err != nil {
 		return err
 	}
-	_, err = v.invoke("move", moveArgs{Src: src, Dst: dst, IfVersion: version(info), Condition: condition})
-	return err
+	return v.f.moveTyped(v.ctx, v.callAs("move"), moveArgs{Src: src, Dst: dst, IfVersion: version(info), Condition: condition})
 }
 func (v *fileView) Search(path, glob, pattern string, limit int, ignore bool) ([]ufs.SearchMatch, error) {
 	return ufs.Search(searchView{v}, path, glob, pattern, limit, ignore)
