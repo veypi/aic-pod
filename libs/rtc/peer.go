@@ -2,8 +2,6 @@ package rtc
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"github.com/veypi/aic-pod/protocol"
 
 	"sync"
@@ -24,7 +22,7 @@ type peer struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	mu            sync.Mutex
-	connection    string
+	lease         *peerLease // 认证租约（auth.go：身份/connectionID/绑定指纹/leaseUntil）
 	created       time.Time
 	closed        bool
 	requests      chan struct{}
@@ -38,34 +36,29 @@ func (p *peer) close() {
 	}
 	p.closed = true
 	p.cancel()
-	connection := p.connection
+	lease := p.lease
 	p.mu.Unlock()
-	if connection != "" {
-		if p.s.cfg.Tools != nil {
-			if caller, err := p.toolCaller(); err == nil {
-				p.s.cfg.Tools.DisconnectTools(caller)
-			}
-		}
-		p.s.cfg.Authorization.Close(connection)
+	if lease != nil && p.s.cfg.Disconnect != nil {
+		// 断连清理按连接ID（租约过期也要清——前台执行按 connectionID 归属）。
+		p.s.cfg.Disconnect(protocol.Caller{Subject: lease.subject, ConnectionID: lease.connectionID, Origin: lease.sessionID})
 	}
 	_ = p.pc.Close()
 }
 func (p *peer) expire(now time.Time) {
 	p.mu.Lock()
-	conn := p.connection
+	lease := p.lease
 	created := p.created
 	p.mu.Unlock()
-	if conn == "" {
+	if lease == nil {
+		// 未认证 peer：30 秒认证窗口。
 		if now.Sub(created) > 30*time.Second {
 			p.s.drop(p)
 		}
 		return
 	}
-	if _, err := p.s.cfg.Authorization.Caller(conn); err != nil {
+	if !lease.until.After(now) {
 		p.s.drop(p)
-		return
 	}
-
 }
 func (p *peer) channel(dc *webrtc.DataChannel) {
 	if dc.Label() == protocol.RtcBrowserChannel {
@@ -111,15 +104,4 @@ func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, 
 		return dc.SendText(string(raw))
 	}
 	return dc.Send(raw)
-}
-func (p *peer) fingerprint() (string, error) {
-	if p.pc.SCTP() == nil || p.pc.SCTP().Transport() == nil {
-		return "", protocol.Fail("unauthorized", "DTLS is unavailable")
-	}
-	cert := p.pc.SCTP().Transport().GetRemoteCertificate()
-	if len(cert) == 0 {
-		return "", protocol.Fail("unauthorized", "Peer certificate unavailable")
-	}
-	sum := sha256.Sum256(cert)
-	return protocol.NormalizeFingerprint("sha-256 " + hex.EncodeToString(sum[:]))
 }

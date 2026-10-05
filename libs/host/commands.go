@@ -5,30 +5,11 @@ import (
 	"fmt"
 	"github.com/veypi/aic-pod/protocol"
 	"path/filepath"
-	"strconv"
-	"strings"
 
-	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
 
 	"github.com/veypi/vbox"
 )
-
-func (c *Client) newAccess() (*hostauth.Access, error) {
-	parts := strings.SplitN(c.options().Key, ".", 4)
-	if len(parts) != 4 {
-		return nil, fmt.Errorf("invalid device credential")
-	}
-	version, err := strconv.ParseUint(parts[1], 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	key, err := protocol.RtcDirectKey(parts[2], parts[0])
-	if err != nil {
-		return nil, err
-	}
-	return hostauth.NewAccess(hostauth.AccessConfig{HostID: parts[0], UserID: parts[3], CredentialVersion: version, Key: key, Now: clockNow})
-}
 
 // fsGate 返回 fsx 的 vbox 规则表门（permissionState 快照每次调用取当次值——grant
 // temp 动态行即时生效；first-wins 行序）。读默认开放；写出区硬拒，报错

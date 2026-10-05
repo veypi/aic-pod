@@ -11,11 +11,6 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-type ToolBackend interface {
-	HandleTool(context.Context, protocol.Caller, protocol.Request) protocol.Response
-	DisconnectTools(protocol.Caller)
-}
-
 func (p *peer) sendToolResponse(dc *webrtc.DataChannel, raw []byte) error {
 	if len(raw) == 0 || len(raw) > protocol.RtcToolResponseLimit {
 		return protocol.Fail("overloaded", "Device response too large")
@@ -43,30 +38,30 @@ func (p *peer) sendToolResponse(dc *webrtc.DataChannel, raw []byte) error {
 	return nil
 }
 
+// toolCaller 由 peer 当前租约构造可信调用上下文：Expiry/Check 动态读
+// 租约（含续租后期限），不是第一次认证的快照。
 func (p *peer) toolCaller() (protocol.Caller, error) {
-	p.mu.Lock()
-	connection := p.connection
-	p.mu.Unlock()
-	c, err := p.s.cfg.Authorization.Caller(connection)
-	if err != nil {
-		return protocol.Caller{}, err
+	lease := p.currentLease()
+	if lease == nil {
+		return protocol.Caller{}, protocol.Fail("unauthorized", "Connection authorization expired")
 	}
 	return protocol.Caller{Direct: true, Expiry: func() time.Time {
-		current, err := p.s.cfg.Authorization.Caller(connection)
-		if err != nil {
-			return time.Time{}
+		if current := p.currentLease(); current != nil {
+			return current.until
 		}
-		return current.ExpiresAt
-	}, Subject: c.Subject, ConnectionID: c.ConnectionID, Origin: c.SessionID, ExpiresAt: c.ExpiresAt, Check: func(ctx context.Context) error {
+		return time.Time{}
+	}, Subject: lease.subject, ConnectionID: lease.connectionID, Origin: lease.sessionID, ExpiresAt: lease.until, Check: func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		_, err := p.s.cfg.Authorization.Caller(connection)
-		return err
+		if p.currentLease() == nil {
+			return protocol.Fail("unauthorized", "Connection authorization expired")
+		}
+		return nil
 	}}, nil
 }
 func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
-	if p.s.cfg.Tools == nil || !dc.Ordered() || dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
+	if !dc.Ordered() || dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
 		_ = dc.Close()
 		return
 	}
@@ -107,7 +102,7 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 		}
 		caller.GrantApproved = r.GrantApproved
 		invoke := func() {
-			response := p.s.cfg.Tools.HandleTool(p.ctx, caller, *r.Tool)
+			response := p.s.cfg.Dispatch(p.ctx, caller, *r.Tool)
 			raw, err := json.Marshal(response)
 			if err != nil {
 				fail(err)
@@ -152,25 +147,11 @@ func (p *peer) authenticate(dc *webrtc.DataChannel, r protocol.RtcRequest) {
 	if err == nil {
 		switch r.Auth {
 		case "open":
-			p.mu.Lock()
-			if p.closed || p.connection != "" {
-				err = protocol.Fail("unauthorized", "Peer already authenticated or closed")
-			} else {
-				admission, e := p.s.cfg.Authorization.Admit(r.Ticket, p.id, fp)
-				err = e
-				if e == nil {
-					p.connection = admission.Caller.ConnectionID
-					value = map[string]any{"host_id": p.s.cfg.HostID, "connection_id": p.connection, "expires_at": admission.Caller.ExpiresAt.UnixMilli()}
-				}
-			}
-			p.mu.Unlock()
+			value, err = p.admit(r.Ticket, fp)
 		case "renew":
-			caller, e := p.toolCaller()
-			err = e
-			if e == nil {
-				_, err = p.s.cfg.Authorization.Renew(caller.ConnectionID, r.Ticket, p.id, fp)
-				value = map[string]bool{"renewed": err == nil}
-			}
+			var renewed map[string]bool
+			renewed, err = p.renew(r.Ticket, fp)
+			value = renewed
 		default:
 			err = protocol.Fail("invalid_argument", "Unknown authentication operation")
 		}

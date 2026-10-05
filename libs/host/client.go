@@ -23,7 +23,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/fsx"
-	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
 
@@ -74,7 +73,6 @@ type Client struct {
 	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
 	sshRun          sshProcessRunner // nil uses the managed native process runner
 	rtcMu           sync.RWMutex
-	access          *hostauth.Access
 	files           *hostfs.FS
 	bytes           *hostfs.Bytes
 	initErr         error
@@ -253,10 +251,6 @@ func (c *Client) connect() error {
 
 	c.installConnection(nc)
 
-	// The command runtime also serves authenticated server proxy when RTC is off.
-	if err := c.startCommands(); err != nil {
-		c.logf("device commands unavailable: %v", err)
-	}
 	if c.options().RTC {
 		if err := c.startRTC(); err != nil {
 			c.logf("rtc disabled: %v", err)
@@ -294,50 +288,41 @@ func (c *Client) Close() error {
 	if c.bytes != nil {
 		_ = c.bytes.Close()
 	}
-	service := c.detachRTC()
-	if service != nil {
-		service.RevokeAll()
-	}
+	c.stopRTC()
 	return nil
 }
 
 // ---- RTC 直连应答（2026-09-10，libs/rtc） ----
 
 // startRTC 启动 RTC 应答服务：信令出向发布到 RtcOutSubject（natsauth host JWT
-// pub allow 已放行），设备命令使用独立签名票据。幂等（重连不重复启动——
-// UDP mux 与 PeerConnection 生命周期独立于 NATS 连接）。
-func (c *Client) startCommands() error {
-	c.rtcMu.Lock()
-	defer c.rtcMu.Unlock()
-	if c.access != nil {
-		return nil
-	}
-	commands, err := c.newAccess()
-	if err != nil {
-		return err
-	}
-	c.access = commands
-	return nil
-}
-
+// pub allow 已放行），设备命令使用独立签名票据（验签材料 = 设备凭据派生
+// direct key；认证租约由 peer 自持）。幂等（重连不重复启动——UDP mux 与
+// PeerConnection 生命周期独立于 NATS 连接）。
 func (c *Client) startRTC() error {
-	if err := c.startCommands(); err != nil {
-		return err
-	}
 	c.rtcMu.Lock()
 	defer c.rtcMu.Unlock()
 	if c.rtcSvc != nil {
 		return nil
 	}
-	commands := c.access
+	parts := strings.SplitN(c.options().Key, ".", 4)
+	if len(parts) != 4 {
+		return fmt.Errorf("invalid device credential")
+	}
+	key, err := protocol.RtcDirectKey(parts[2], parts[0])
+	if err != nil {
+		return err
+	}
 	hostname, _ := os.Hostname()
 	svc, err := rtc.New(rtc.Config{
-		Authorization: commands,
-		Tools:         c,
-		Browser:       c.streamBrowser,
-		HostID:        c.hostID,
-		Hostname:      hostname,
-		Version:       c.options().Version,
+		HostID:            c.hostID,
+		UserID:            c.uid,
+		CredentialVersion: c.credVer,
+		Key:               key,
+		Hostname:          hostname,
+		Version:           c.options().Version,
+		Dispatch:          c.HandleTool,
+		Disconnect:        c.DisconnectTools,
+		Browser:           c.streamBrowser,
 		Send: func(sig *protocol.RtcSignal) {
 			nc := c.connection()
 			if nc == nil {
@@ -355,7 +340,6 @@ func (c *Client) startRTC() error {
 	if err != nil {
 		return err
 	}
-	c.access = commands
 	c.rtcSvc = svc
 	return nil
 }
@@ -409,19 +393,13 @@ func (c *Client) buildMgmt() *protocol.MgmtCaps {
 	}
 	return m
 }
-func (c *Client) detachRTC() *hostauth.Access {
+func (c *Client) stopRTC() {
 	c.rtcMu.Lock()
-	svc, commands := c.rtcSvc, c.access
-	c.rtcSvc, c.access = nil, nil
+	svc := c.rtcSvc
+	c.rtcSvc = nil
 	c.rtcMu.Unlock()
 	if svc != nil {
 		svc.Close()
-	}
-	return commands
-}
-func (c *Client) stopRTC() {
-	if service := c.detachRTC(); service != nil {
-		service.RevokeAll()
 	}
 }
 

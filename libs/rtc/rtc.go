@@ -13,34 +13,45 @@ import (
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
-	"github.com/veypi/aic-pod/libs/hostauth"
 )
 
 const maxPeerConnections = 16
 
 type Config struct {
 	HostID, Hostname, Version string
-	Send                      func(*protocol.RtcSignal)
-	Authorization             *hostauth.Access
-	Tools                     ToolBackend
-	Browser                   BrowserRelay
-	Logf                      func(string, ...any)
+	// 票据验签材料（rtc direct key 派生自设备凭据）。
+	UserID            string
+	CredentialVersion uint64
+	Key               []byte
+	Now               func() time.Time // 可选时钟（测试注入）
+	Send              func(*protocol.RtcSignal)
+	// Dispatch/Disconnect 直接接业务分发与断连清理的方法值
+	// （host：HandleTool/DisconnectTools——不再有 ToolBackend 转发层）。
+	Dispatch   func(context.Context, protocol.Caller, protocol.Request) protocol.Response
+	Disconnect func(protocol.Caller)
+	Browser    BrowserRelay
+	Logf       func(string, ...any)
 }
 type Service struct {
-	cfg    Config
-	api    *webrtc.API
-	conn   *net.UDPConn
-	mu     sync.Mutex
-	pcs    map[string]*peer
-	closed bool
-	done   chan struct{}
-	logf   func(string, ...any)
+	cfg      Config
+	api      *webrtc.API
+	conn     *net.UDPConn
+	mu       sync.Mutex
+	pcs      map[string]*peer
+	consumed map[string]time.Time // 一次性 ticket 消费缓存（ticket ID → 准入过期）
+	closed   bool
+	done     chan struct{}
+	logf     func(string, ...any)
 }
 
 func New(cfg Config) (*Service, error) {
-	if cfg.Authorization == nil || cfg.Tools == nil || cfg.Send == nil || !protocol.ValidID(cfg.HostID) {
-		return nil, fmt.Errorf("rtc: Authorization, Tools, Send and HostID are required")
+	if !protocol.ValidID(cfg.HostID) || !protocol.ValidID(cfg.UserID) || cfg.CredentialVersion == 0 || len(cfg.Key) != 32 {
+		return nil, fmt.Errorf("rtc: HostID, UserID, CredentialVersion and a 32-byte Key are required")
 	}
+	if cfg.Dispatch == nil || cfg.Disconnect == nil || cfg.Send == nil {
+		return nil, fmt.Errorf("rtc: Dispatch, Disconnect and Send are required")
+	}
+	cfg.Key = append([]byte(nil), cfg.Key...)
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
 	if err != nil {
 		return nil, fmt.Errorf("rtc: udp listen: %w", err)
@@ -52,7 +63,7 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	s := &Service{cfg: cfg, api: webrtc.NewAPI(webrtc.WithSettingEngine(se)), conn: conn, pcs: map[string]*peer{}, done: make(chan struct{}), logf: cfg.Logf}
+	s := &Service{cfg: cfg, api: webrtc.NewAPI(webrtc.WithSettingEngine(se)), conn: conn, pcs: map[string]*peer{}, consumed: map[string]time.Time{}, done: make(chan struct{}), logf: cfg.Logf}
 	go s.maintain()
 	return s, nil
 }
@@ -65,6 +76,12 @@ func (s *Service) maintain() {
 			return
 		case now := <-ticker.C:
 			s.mu.Lock()
+			// 清扫一次性 ticket 消费缓存（按准入过期时间）。
+			for id, until := range s.consumed {
+				if !until.After(now) {
+					delete(s.consumed, id)
+				}
+			}
 			peers := make([]*peer, 0, len(s.pcs))
 			for _, p := range s.pcs {
 				peers = append(peers, p)
@@ -73,7 +90,6 @@ func (s *Service) maintain() {
 			for _, p := range peers {
 				p.expire(now)
 			}
-			s.cfg.Authorization.Expired()
 		}
 	}
 }

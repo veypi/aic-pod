@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"github.com/pion/webrtc/v4"
-	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/protocol"
 
 	"github.com/veypi/aic-pod/libs/rtc"
@@ -47,11 +46,6 @@ func (b *rtcTools) HandleTool(ctx context.Context, c protocol.Caller, r protocol
 func (b *rtcTools) DisconnectTools(protocol.Caller) {}
 func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	key, _ := protocol.RtcDirectKey("secret", "host_1")
-	auth, err := hostauth.NewAccess(hostauth.AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer auth.RevokeAll()
 	backend := &rtcTools{}
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -128,7 +122,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			}
 		}
 	}
-	service, err := rtc.New(rtc.Config{Browser: relay, HostID: "host_1", Authorization: auth, Tools: backend, Send: func(sig *protocol.RtcSignal) {
+	service, err := rtc.New(rtc.Config{Browser: relay, HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key, Dispatch: backend.HandleTool, Disconnect: backend.DisconnectTools, Send: func(sig *protocol.RtcSignal) {
 		signalMu.Lock()
 		defer signalMu.Unlock()
 		if sig.Kind == protocol.RtcAnswer {
@@ -220,8 +214,13 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := exchange(protocol.RtcRequest{ID: "auth1", Auth: "open", Ticket: ticket}); r["error"] != nil {
-		t.Fatal(r)
+	openedAuth := exchange(protocol.RtcRequest{ID: "auth1", Auth: "open", Ticket: ticket})
+	if openedAuth["error"] != nil {
+		t.Fatal(openedAuth)
+	}
+	connectionID, _ := openedAuth["result"].(map[string]any)["connection_id"].(string)
+	if connectionID == "" {
+		t.Fatalf("open did not return connection_id: %+v", openedAuth)
 	}
 	stream, err := pc.CreateDataChannel(protocol.RtcBrowserChannel, nil)
 	if err != nil {
@@ -341,8 +340,28 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	if r := call("pwd"); r["error"] != nil {
 		t.Fatal("viewer close terminated command connection", r)
 	}
-	auth.RevokeAll()
-	if r := call("mcp call fixture next --json"); r["error"] == nil {
-		t.Fatal("revoked authorization admitted")
+	// 续租：票据绑定本连接的 connectionID 与真实 DTLS 指纹（§6）。
+	renewal, err := protocol.SignRtcTicket(key, protocol.RtcTicket{HostID: "host_1", UserID: "owner", CredentialVersion: 1, PCID: "pc_tools", Fingerprint: fp, ConnectionID: connectionID}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := exchange(protocol.RtcRequest{ID: "renew1", Auth: "renew", Ticket: renewal}); r["error"] != nil || r["result"].(map[string]any)["renewed"] != true {
+		t.Fatalf("renew failed: %+v", r)
+	}
+	// 续租票据一次性：重放拒绝。
+	if r := exchange(protocol.RtcRequest{ID: "renew2", Auth: "renew", Ticket: renewal}); r["error"] == nil {
+		t.Fatal("renewal ticket replay admitted")
+	}
+	// 续租票据不能开新连接（用新票据排除重放拒绝的干扰）。
+	renewal2, err := protocol.SignRtcTicket(key, protocol.RtcTicket{HostID: "host_1", UserID: "owner", CredentialVersion: 1, PCID: "pc_tools", Fingerprint: fp, ConnectionID: connectionID}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := exchange(protocol.RtcRequest{ID: "auth3", Auth: "open", Ticket: renewal2}); r["error"] == nil {
+		t.Fatal("renewal ticket opened a connection")
+	}
+	// 续租后命令照常。
+	if r := call("pwd"); r["error"] != nil {
+		t.Fatal("renew terminated command connection", r)
 	}
 }
