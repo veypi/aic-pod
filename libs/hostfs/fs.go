@@ -877,7 +877,10 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 		return nil, err
 	}
 	oldVersion := ""
-	mode := fs.FileMode(0o600)
+	// 新文件默认 0644（与 umask-022 工具链一致——git/编辑器同仓产物不再
+	// 出现 600/644 混排）；替换已存在文件时保留原 mode。staging 临时文件
+	// 仍 0600（瞬态私有，提交前 chmod 到最终 mode）。
+	mode := fs.FileMode(0o644)
 	if exists {
 		if !existing.Mode().IsRegular() {
 			return nil, protocol.FSFail("unsupported", "Cannot replace a directory or link")
@@ -989,7 +992,8 @@ func (f *FS) mkdir(ctx context.Context, call Call, p mkdirArgs) (any, error) {
 		return nil, err
 	}
 	defer h.Close()
-	err = h.Mkdir(name, 0o700)
+	// 新目录默认 0755（同上，与 umask-022 工具链一致）。
+	err = h.Mkdir(name, 0o755)
 	if err != nil && !(p.ExistOK && errors.Is(err, fs.ErrExist)) {
 		return nil, err
 	}
