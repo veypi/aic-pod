@@ -2,7 +2,9 @@ package rtc
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -13,6 +15,33 @@ import (
 type ToolBackend interface {
 	HandleTool(context.Context, wire.Caller, wire.Request) wire.Response
 	DisconnectTools(wire.Caller)
+}
+
+func (p *peer) sendToolResponse(dc *webrtc.DataChannel, raw []byte) error {
+	if len(raw) == 0 || len(raw) > rtcwire.ToolResponseLimit {
+		return wire.Fail("overloaded", "Device response too large")
+	}
+	// Keep every binary response contiguous even when tool calls finish together.
+	// Authentication text may interleave; it never participates in reassembly.
+	p.toolsResponse.Lock()
+	defer p.toolsResponse.Unlock()
+	if len(raw) <= rtcwire.ToolResponseChunkSize {
+		return p.sendRaw(p.ctx, dc, raw, true)
+	}
+	first := make([]byte, rtcwire.ToolResponseChunkSize)
+	binary.BigEndian.PutUint32(first, uint32(len(raw)))
+	n := copy(first[4:], raw)
+	if err := p.sendRaw(p.ctx, dc, first[:4+n], false); err != nil {
+		return err
+	}
+	for raw = raw[n:]; len(raw) > 0; {
+		n = min(len(raw), rtcwire.ToolResponseChunkSize)
+		if err := p.sendRaw(p.ctx, dc, raw[:n], false); err != nil {
+			return err
+		}
+		raw = raw[n:]
+	}
+	return nil
 }
 
 func (p *peer) toolCaller() (wire.Caller, error) {
@@ -61,10 +90,16 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 			go p.authenticate(dc, r)
 			return
 		}
-		send := func(raw []byte) error { return p.sendRaw(p.ctx, dc, raw, true) }
+		send := func(raw []byte) {
+			if err := p.sendToolResponse(dc, raw); err != nil {
+				// A partially delivered response cannot be resumed. Closing rejects
+				// pending client calls immediately instead of leaving them to time out.
+				p.s.drop(p)
+			}
+		}
 		fail := func(err error) {
 			raw, _ := json.Marshal(wire.Reply(rtcwire.Protocol, r.Tool.ID, nil, err))
-			_ = send(raw)
+			send(raw)
 		}
 		caller, err := p.toolCaller()
 		if err != nil {
@@ -73,12 +108,31 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 		}
 		caller.GrantApproved = r.GrantApproved
 		invoke := func() {
-			raw, err := json.Marshal(p.s.cfg.Tools.HandleTool(p.ctx, caller, *r.Tool))
+			response := p.s.cfg.Tools.HandleTool(p.ctx, caller, *r.Tool)
+			raw, err := json.Marshal(response)
 			if err != nil {
 				fail(err)
 				return
 			}
-			_ = send(raw)
+			if len(raw) > rtcwire.ToolResponseLimit {
+				// Keep only small execution metadata so callers can locate the
+				// completed output without replaying a possibly mutating command.
+				var result any
+				if exec, ok := response.Result.(*wire.ExecResult); ok && exec != nil {
+					attrs := make(map[string]string)
+					for _, key := range []string{"action", "exit_code", "output", "error_output"} {
+						if value := exec.Attrs[key]; value != "" && len(value) <= 4096 {
+							attrs[key] = value
+						}
+					}
+					result = &wire.ExecResult{Attrs: attrs}
+				}
+				err := wire.Fail("overloaded", fmt.Sprintf("Device response is %d bytes, exceeding the %d MiB limit; use execution logs for the complete output", len(raw), rtcwire.ToolResponseLimit>>20))
+				raw, _ = json.Marshal(wire.Reply(rtcwire.Protocol, r.Tool.ID, result, err))
+				send(raw)
+				return
+			}
+			send(raw)
 		}
 		// Cancellation must not queue behind the work it cancels.
 		if r.Tool.Action == wire.ActionCancel {

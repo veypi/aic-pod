@@ -16,9 +16,10 @@ type Resolve func(context.Context, string) (*mcp.ClientSession, error)
 const commandHelp = `usage:
   mcp tools <server>
   mcp describe <server> <tool>
-  mcp call <server> <tool> [--input JSON|-] [--json]
+  mcp call <server> <tool> [--input JSON|-] [--image-preview WIDTHxHEIGHT] [--json]
   mcp read <server> <resource-uri> [--json]
 
+--image-preview explicitly converts successful image results to bounded JPEG previews (each dimension 1..4096).
 Services are configured on the execution host selected by exec.1host. Paths are explicit tool arguments;
 the current shell directory and environment do not change a shared service.`
 
@@ -30,6 +31,7 @@ func Command(resolve Resolve) commands.CommandFunc {
 			return nil
 		}
 		input, jsonOut := "{}", false
+		var preview *imagePreviewSize
 		var positional []string
 		for n := 0; n < len(args); n++ {
 			switch args[n] {
@@ -41,6 +43,19 @@ func Command(resolve Resolve) commands.CommandFunc {
 				n++
 			case "--json":
 				jsonOut = true
+			case "--image-preview":
+				if n+1 >= len(args) {
+					return commands.Exitf(inv, 2, "mcp: %s requires a value", args[n])
+				}
+				if preview != nil {
+					return commands.Exitf(inv, 2, "mcp: --image-preview may only be specified once")
+				}
+				var err error
+				preview, err = parseImagePreviewSize(args[n+1])
+				if err != nil {
+					return commands.Exitf(inv, 2, "mcp: %s", err)
+				}
+				n++
 			default:
 				if strings.HasPrefix(args[n], "-") {
 					return commands.Exitf(inv, 2, "mcp: unknown option %s", args[n])
@@ -57,6 +72,9 @@ func Command(resolve Resolve) commands.CommandFunc {
 		}
 		if op != "tools" && op != "describe" && op != "call" && op != "read" {
 			return commands.Exitf(inv, 2, "mcp: unknown operation %q", op)
+		}
+		if preview != nil && op != "call" {
+			return commands.Exitf(inv, 2, "mcp: --image-preview is only supported by call")
 		}
 		session, err := resolve(ctx, server)
 		if err != nil {
@@ -115,6 +133,9 @@ func Command(resolve Resolve) commands.CommandFunc {
 					failed = result.IsError
 					if result.NeedsInput() {
 						err = fmt.Errorf("tool requires unsupported interactive input")
+					}
+					if err == nil && !failed && preview != nil {
+						value, err = previewToolImages(result, *preview)
 					}
 				}
 			}

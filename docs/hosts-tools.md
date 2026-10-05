@@ -39,11 +39,17 @@ stdio 服务懒启动并复用一个 SDK session。进程由 vbox 负责；manag
 
 ## 结果与边界
 
-原生 RTC/NATS 消息上限 1 MiB。mcp command 复用现有 exec 结果规则：AI 路径可返回预览与日志引用，RTC 直连返回结果。大文件走 fs source/upload 分块，大图走资源或导出路径。工具失败使用 isError 并退出非零，可保留部分结果。工具名称、schema、content、structuredContent、isError 与 _meta 使用上游值。执行取消使用 cancel(request_id) 或 bg kill，MCP 协议细节由 Pod SDK 处理。
+原生 RTC 请求与 NATS 消息上限 1 MiB。RTC 工具响应不超过 16 KiB 时为 JSON 文本，更大的响应使用 4 字节大端总长度头和连续的 16 KiB 二进制片段，完整 JSON 上限 16 MiB；并发响应按整包串行发送，认证文本不参与二进制重组。前端有界重组并校验 UTF-8，未完成响应超时或连接关闭时释放缓存；发送失败关闭连接，使待处理请求立即失败。此能力需前端与 Pod 同步升级。
+
+mcp command 复用现有 exec 结果规则：AI 路径可返回预览与日志引用，RTC 直连返回结果，包括 CUA 截图的标准 MCP image 内容。引擎的 stdout/stderr 内存采集上限仍分别为 8 MiB、1 MiB；仅 RTC 前台执行完成后，对截断的流从本次执行自有日志中有界补全，最终响应仍受 16 MiB JSON 总上限约束。补全不重新执行命令；日志读取失败或结果超限明确返回错误并保留可用日志元数据，不返回半截成功结果。NATS 预览与日志引用规则保持不变。
+
+`mcp call <server> <tool> --image-preview WIDTHxHEIGHT` 显式启用设备端图片预览，每边必须为 1..4096，仅 `call` 支持。成功结果中的 image 内容等比缩入指定尺寸、小图不放大，JPEG 质量从 70 起按需降低，单图不超过 600 KiB；上游 structuredContent、capture_id、annotations 与其他元数据保留，图片 `_meta["aic.dev/image-preview"]` 增加 `source_width/source_height/width/height`，供调用方还原上游截图坐标。CUA UI 使用 `1280x720`。工具错误结果不转换，压缩失败不重跑工具；普通调用默认透传，无需增加截图文件或文件授权。
+
+大文件走 fs source/upload 分块。工具失败使用 isError 并退出非零，可保留部分结果。除显式图片预览外，工具名称、schema、content、structuredContent、isError 与 _meta 使用上游值。执行取消使用 cancel(request_id) 或 bg kill，MCP 协议细节由 Pod SDK 处理。
 
 command 提供 tools/describe/call/read；不引入 prompts、sampling、任务引擎或技能依赖求解器。服务的业务权限仍由对应服务负责，MCP 传输本身不是沙箱。
 
-Browser UI 调用上游 list_pages、new_page、navigate_page、take_snapshot、take_screenshot 等工具。没有实时 viewer、键鼠接管、媒体协议或输入租约。CUA UI 显示上游 check_permissions 结果。
+Browser UI 调用上游工具并通过下述 `aic-browser` 通道查看与控制画面；CUA UI 使用截图预览和上游输入工具，并保留 `check_permissions({prompt:false})` 只读诊断。
 
 依赖与用法见 [browser](../../aic-skills/browser/SKILL.md)、[CUA](../../aic-skills/cua/SKILL.md) 与 [构建发行](release-architecture.md)。
 

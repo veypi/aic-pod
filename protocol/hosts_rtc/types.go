@@ -10,6 +10,11 @@ const Channel = "aic-tools"
 const BrowserChannel = "aic-browser"
 const BrowserMessageLimit = 16 << 20
 
+// Tool responses larger than one chunk use binary frames: uint32 BE payload
+// length, then ordered chunks of the original JSON. Requests remain JSON text.
+const ToolResponseLimit = 16 << 20
+const ToolResponseChunkSize = 16 << 10
+
 // Exactly one authentication or platform request per frame.
 type Request struct {
 	Tool          *wire.Request `json:"tool,omitempty"`

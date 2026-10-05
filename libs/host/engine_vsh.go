@@ -19,6 +19,7 @@ import (
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/policy"
 	"github.com/veypi/aic-pod/libs/proto"
+	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	wire "github.com/veypi/aic-pod/protocol/tool"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
@@ -183,7 +184,8 @@ func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vbox.Pol
 // execScript 执行 script：execution 等待编排（后台墙钟运行 + 前台等待；NATS 超时
 // Adopt 转后台，RTC 超时返回 deadline_exceeded 不转 bg）。输出契约：NATS
 // （AI 消费）content=stdout 前 1000 行预览（截断置 truncated）；RTC 直连
-// 全量 content+attrs（不截断、无 truncated 标记）。attrs 恒含
+// 成功时全量 content+attrs（无 truncated 标记），完整输出超限或恢复失败
+// 明确报错。attrs 恒含
 // action/output/error_output，完成时含 exit_code（stderr 预览按需），转
 // 后台含 background/id。日志 = .exec/{short}.stdout.log / .stderr.log 双流
 // 全量；FS 写审计追加进 stderr 日志（不污染 stdout 契约）；日志创建失败
@@ -242,6 +244,9 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 	h := execution.NewExecHandle(nil)
 	c.trackExec(reqID, caller.Subject, sid, caller.ConnectionID, h)
 
+	// Written by onDone before h.Finish publishes completion. Incomplete outcomes
+	// must not inspect this snapshot or read the still-open execution logs.
+	var logs execLogSnapshot
 	wait := time.Duration(p.WaitMS) * time.Millisecond
 	outcome := execution.Execute(ctx, engine, execution.ExecRequest{
 		SessionKey:    sid,
@@ -262,9 +267,7 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 		// 转后台（bg）只服务 NATS/AI 通道；RTC 直连等待超时返回
 		// ErrWaitElapsed——执行继续、不产生 bg 记录。
 	}, !caller.Direct, func(res *execution.ExecResult) {
-		auditWrites(errFile, res)
-		_ = outFile.Close()
-		_ = errFile.Close()
+		logs = closeExecLogs(outFile, errFile, res)
 	})
 
 	attrs := map[string]string{"action": "exec", "output": logOut, "error_output": logErr}
@@ -313,23 +316,112 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 			return &wire.ExecResult{Attrs: attrs}, wire.Fail("internal", "exec: "+outcome.Err.Error())
 		}
 		// 执行完成但引擎层报错：结果与错误一并带出（Reply 保留 Result）。
-		res := execResultResponse(outcome.Result, attrs, caller.Direct)
+		res, outputErr := completedExecResultResponse(outcome.Result, attrs, caller.Direct, logs)
+		if outputErr != nil {
+			return res, outputErr
+		}
 		return res, wire.Fail("internal", "exec: "+outcome.Err.Error())
 	}
 	res := outcome.Result
 	if res == nil {
 		return nil, wire.Fail("internal", "exec: no result")
 	}
-	return execResultResponse(res, attrs, caller.Direct), nil
+	return completedExecResultResponse(res, attrs, caller.Direct, logs)
 }
 
-// execResultResponse 构造完成响应（§3.1 统一输出形状）：attrs 恒含
+// execLogSnapshot records stream lengths before FS audit lines are appended.
+// Completion publishes it only after both logs have closed.
+type execLogSnapshot struct {
+	stdoutBytes int64
+	stderrBytes int64
+	err         error
+}
+
+func closeExecLogs(stdout, stderr *os.File, res *execution.ExecResult) execLogSnapshot {
+	var logs execLogSnapshot
+	if res != nil {
+		for _, stream := range []struct {
+			file      *os.File
+			truncated bool
+			size      *int64
+		}{{stdout, res.StdoutTruncated, &logs.stdoutBytes}, {stderr, res.StderrTruncated, &logs.stderrBytes}} {
+			if stream.truncated {
+				info, err := stream.file.Stat()
+				if err != nil {
+					logs.err = errors.Join(logs.err, err)
+				} else {
+					*stream.size = info.Size()
+				}
+			}
+		}
+	}
+	auditWrites(stderr, res)
+	logs.err = errors.Join(logs.err, stdout.Close(), stderr.Close())
+	return logs
+}
+
+// completedExecResultResponse recovers full RTC streams from this execution's
+// closed logs when the engine's bounded in-memory captures were truncated.
+// Errors retain log paths, but never advertise a partial JSON payload as success.
+func completedExecResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool, logs execLogSnapshot) (*wire.ExecResult, error) {
+	if !rtcFull {
+		return execResultResponse(res, attrs, false), nil
+	}
+	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
+	fail := func(code, message string) (*wire.ExecResult, error) {
+		delete(attrs, "stderr")
+		return &wire.ExecResult{Attrs: attrs}, wire.Fail(code, "exec: "+message)
+	}
+	if logs.err != nil {
+		return fail("internal", "finish output logs: "+logs.err.Error())
+	}
+	stdoutBytes, stderrBytes := int64(len(res.Stdout)), int64(len(res.Stderr))
+	if res.StdoutTruncated {
+		stdoutBytes = logs.stdoutBytes
+	}
+	if res.StderrTruncated {
+		stderrBytes = logs.stderrBytes
+	}
+	if stdoutBytes < int64(len(res.Stdout)) || stderrBytes < int64(len(res.Stderr)) {
+		return fail("internal", "complete output log is shorter than the captured output")
+	}
+	if stdoutBytes < 0 || stderrBytes < 0 || stdoutBytes > rtcwire.ToolResponseLimit || stderrBytes > rtcwire.ToolResponseLimit-stdoutBytes {
+		return fail("overloaded", fmt.Sprintf("output exceeds %d bytes; full output is available in the execution logs", rtcwire.ToolResponseLimit))
+	}
+	// Copy the result so restoring output never changes shared engine/task state.
+	full := *res
+	for _, stream := range []struct {
+		path      string
+		truncated bool
+		size      int64
+		value     *string
+	}{{attrs["output"], res.StdoutTruncated, stdoutBytes, &full.Stdout}, {attrs["error_output"], res.StderrTruncated, stderrBytes, &full.Stderr}} {
+		if !stream.truncated {
+			continue
+		}
+		file, err := os.Open(stream.path)
+		if err != nil {
+			return fail("internal", "read complete output log: "+err.Error())
+		}
+		data := make([]byte, int(stream.size))
+		_, readErr := io.ReadFull(file, data)
+		closeErr := file.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return fail("internal", "read complete output log: "+err.Error())
+		}
+		*stream.value = string(data)
+	}
+	full.StdoutTruncated, full.StderrTruncated = false, false
+	return execResultResponse(&full, attrs, true), nil
+}
+
+// execResultResponse 构造响应（§3.1 统一输出形状）：attrs 恒含
 // action/output/error_output/exit_code。输出策略按通道分：
 //   - NATS（AI 消费）：有界预览——content=stdout 前 1000 行、attrs.stderr
 //     前 100 行；任一截断（行/引擎采集）置 truncated，全量经
 //     attrs.output/error_output 日志读取。
-//   - RTC 直连（viewer 等非 AI 消费）：全量 content+attrs——不截断、
-//     不转后台、没有 truncated 标记；更多数据（完整日志）经 fs 调用读取。
+//   - RTC 直连（viewer 等非 AI 消费）：成功响应的完整输出须先经
+//     completedExecResultResponse 恢复；没有 truncated 标记。
 func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool) *wire.ExecResult {
 	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
 	if rtcFull {

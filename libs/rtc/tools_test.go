@@ -13,6 +13,7 @@ import (
 	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 	wire "github.com/veypi/aic-pod/protocol/tool"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,7 +24,25 @@ type rtcTools struct {
 	calls atomic.Int32
 }
 
+func largeToolContent(script string) string {
+	count := 400000
+	if script == "large-a" {
+		// Recovered command output can exceed the engine's 8 MiB capture
+		// budget, but must still fit the bounded RTC response.
+		count = 1500000
+	}
+	return strings.Repeat(script, count)
+}
+
 func (b *rtcTools) HandleTool(ctx context.Context, c wire.Caller, r wire.Request) wire.Response {
+	if strings.HasPrefix(r.Exec.Script, "large-") {
+		return wire.Reply(r.Protocol, r.ID, &wire.ExecResult{Content: largeToolContent(r.Exec.Script)}, nil)
+	}
+	if r.Exec.Script == "oversized" {
+		return wire.Reply(r.Protocol, r.ID, &wire.ExecResult{Content: strings.Repeat("x", rtcwire.ToolResponseLimit), Attrs: map[string]string{
+			"action": "exec", "exit_code": "0", "output": "/logs/stdout", "error_output": "/logs/stderr", "stderr": "large diagnostics",
+		}}, nil)
+	}
 	return wire.Reply(r.Protocol, r.ID, map[string]any{"native": r.Action, "approved": c.GrantApproved, "script": r.Exec.Script, "calls": b.calls.Add(1)}, nil)
 }
 func (b *rtcTools) DisconnectTools(wire.Caller) {}
@@ -47,8 +66,43 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	opened := make(chan struct{})
 	dc.OnOpen(func() { close(opened) })
 	responses := make(chan json.RawMessage, 8)
+	var toolResponse []byte
+	var toolOffset int
+	var toolChunks atomic.Int32
 	dc.OnMessage(func(m webrtc.DataChannelMessage) {
-		responses <- append(json.RawMessage(nil), m.Data...)
+		if m.IsString {
+			responses <- append(json.RawMessage(nil), m.Data...)
+			return
+		}
+		toolChunks.Add(1)
+		if len(m.Data) > rtcwire.ToolResponseChunkSize {
+			t.Error("tool response exceeded SCTP chunk size")
+			return
+		}
+		data := m.Data
+		if toolResponse == nil {
+			if len(data) < 4 {
+				t.Error("missing tool response header")
+				return
+			}
+			size := binary.BigEndian.Uint32(data[:4])
+			if size == 0 || size > rtcwire.ToolResponseLimit {
+				t.Error("invalid tool response length")
+				return
+			}
+			toolResponse = make([]byte, size)
+			toolOffset = 0
+			data = data[4:]
+		}
+		if len(data) > len(toolResponse)-toolOffset {
+			t.Error("tool response fragments interleaved")
+			return
+		}
+		toolOffset += copy(toolResponse[toolOffset:], data)
+		if toolOffset == len(toolResponse) {
+			responses <- toolResponse
+			toolResponse = nil
+		}
 	})
 	var signalMu sync.Mutex
 	var candidates []webrtc.ICECandidateInit
@@ -234,6 +288,47 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		value, ok := r["result"].(map[string]any)
 		if !ok || value["native"] != "exec" || value["approved"] != approved || r["request_id"] != "native" {
 			t.Fatalf("native route failed: %+v", r)
+		}
+	}
+	// Concurrent multi-megabyte tool results stay distinct, even while the
+	// browser stream shares this peer and the buffered send queue fills.
+	for _, name := range []string{"large-a", "large-b"} {
+		raw, _ := json.Marshal(rtcwire.Request{Tool: &wire.Request{Protocol: rtcwire.Protocol, ID: name, Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: name}}})
+		if err := dc.SendText(string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case raw := <-responses:
+			var response struct {
+				ID     string `json:"request_id"`
+				Result struct {
+					Content string `json:"content"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(raw, &response); err != nil {
+				t.Fatalf("fragmented response is invalid JSON: %v", err)
+			}
+			if seen[response.ID] || (response.ID != "large-a" && response.ID != "large-b") || response.Result.Content != largeToolContent(response.ID) {
+				t.Fatalf("concurrent response %q was corrupted or duplicated", response.ID)
+			}
+			seen[response.ID] = true
+		case <-time.After(10 * time.Second):
+			t.Fatal("fragmented tool response timeout")
+		}
+	}
+	if toolChunks.Load() < 2 {
+		t.Fatal("large tool responses did not use binary chunks")
+	}
+	if r := call("oversized"); r["error"].(map[string]any)["code"] != "overloaded" {
+		t.Fatal("oversized response did not return a bounded error")
+	} else {
+		result := r["result"].(map[string]any)
+		attrs := result["attrs"].(map[string]any)
+		if result["content"] != "" || attrs["output"] != "/logs/stdout" || attrs["error_output"] != "/logs/stderr" || attrs["exit_code"] != "0" || attrs["stderr"] != nil {
+			t.Fatal("oversized response must keep log metadata without large content")
 		}
 	}
 	if err := stream.Close(); err != nil {

@@ -14,20 +14,21 @@ import (
 )
 
 type peer struct {
-	toolsDC     *webrtc.DataChannel
-	browserDC   *webrtc.DataChannel
-	toolsSend   sync.Mutex
-	browserSend sync.Mutex
-	s           *Service
-	id          string
-	pc          *webrtc.PeerConnection
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.Mutex
-	connection  string
-	created     time.Time
-	closed      bool
-	requests    chan struct{}
+	toolsDC       *webrtc.DataChannel
+	browserDC     *webrtc.DataChannel
+	toolsSend     sync.Mutex
+	toolsResponse sync.Mutex
+	browserSend   sync.Mutex
+	s             *Service
+	id            string
+	pc            *webrtc.PeerConnection
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	connection    string
+	created       time.Time
+	closed        bool
+	requests      chan struct{}
 }
 
 func (p *peer) close() {
