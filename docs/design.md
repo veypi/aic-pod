@@ -23,6 +23,8 @@ AI 使用 exec/vsh：普通 CLI 原生调用，有状态工具使用 `mcp call <
 
 权限来自可信传输身份和本地规则（cfg 授权字段；设置修改重启生效，permanent grant 即时生效——候选完整编译校验 → 原子保存 → 原子发布基表）。`mcp.<alias>` 是服务调用门，内置桌面服务以 Pod 设备权限运行；第三方进程默认使用设备沙箱。原生 fs 规则不能隔离浏览器/桌面操作；browser 显式文件参数由上游 filesystem-root 检查。临时会话 grant 不改变共享进程的启动权限。
 
+命令准入按域分离（四仓精简后）：原生命令与 `mcp.<alias>` 走 exec 域规则门；ssh/scp/sftp 只走 ssh 域（`exec_policy: deny` 不再能封住它们）；grant 只走审批边界（grant_approved）；bg/commands 无门。
+
 Browser UI 使用上游页面列表、导航、快照和截图，CUA UI 使用上游权限诊断。没有自研 MCP server、工具重命名、页面/元素 ID 映射或媒体控制层。
 
 构建、内容发布与软件安装分开，见 [构建与发行](release-architecture.md)。

@@ -70,8 +70,8 @@ func NormalizeHostPath(p string) string {
 
 // SplitDriveRoot 拆规范形首段盘符：/c → ('c', "", true)；/c/Users →
 // ('c', "Users", true)；其余 → false。纯语法（首段为单字母即盘符）——
-// 只在 Windows 路径语义上下文使用（osvfs/fsauth 的 win 分支），POSIX 主
-// 流程不得用本函数区别对待 /c/…。
+// 只在 Windows 路径语义上下文使用（libs/host osvfs 与 hostfs 的 win 分支），
+// POSIX 主流程不得用本函数区别对待 /c/…。
 func SplitDriveRoot(p string) (drive byte, rest string, ok bool) {
 	if len(p) >= 2 && p[0] == '/' && isLetter(p[1]) {
 		if len(p) == 2 {

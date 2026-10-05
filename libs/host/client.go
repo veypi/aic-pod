@@ -57,7 +57,7 @@ type Client struct {
 
 	optsMu          sync.RWMutex
 	opts            Options
-	lifecycleMu     sync.Mutex // serializes Connect, Reconfigure and Close
+	lifecycleMu     sync.Mutex // serializes Connect and Close
 	closed          bool
 	ncMu            sync.RWMutex
 	nc              *nats.Conn

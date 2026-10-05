@@ -7,6 +7,15 @@
 
 ## 未发布
 
+- **四仓架构精简（pod 侧批次 1b/2a/2b/6 + review 收敛，破坏性，2026-10-06）**：删除随功能增长形成的多余架构层，能力与权限语义不变（发版自 v0.8.5 进位 minor）。
+  - **protocol 合包（批次 2a）**：libs/proto 与 protocol 四子包收为单一 `protocol` 包；**hostfs View 解除内部 JSON 回环（批次 2b）**。
+  - **唯一运行权限状态 permissionState（批次 6 §4，破坏性）**：FS/net/SSH/cmd 四域一份编译基表 + 会话 temp 授权单锁快照；`fsauth`/`netauth`/`policy` 包删除，settings 并入 cfg。cfg.Global 只是启动参数——设置不再热重载，改动重启生效（导出 API `host.ApplyConfig`、`Client.Reconfigure` 删除）；permanent grant 候选完整编译校验 → 原子保存 → 原子发布；启动配置无效时工具面 fail-closed（四域快照自身 fail-closed，不再依赖入口各自查 err()）。
+  - **一次执行一条运行记录（批次 6 §5）**：execution 任务表唯一登记，host 前台登记表/track/watcher/预建句柄/BindCancel 删除，cancel/bg kill/断连同表裁决。
+  - **RTC peer 自持认证租约（批次 6 §6，破坏性）**：`hostauth` 包删除，租约/指纹/leaseUntil 存 peer，Service 只留票据消费缓存。
+  - **命令准入域分离（语义变化，明写）**：exec 规则门不再覆盖全部注册命令——原生命令与 `mcp.<alias>` 走 exec 域，ssh/scp/sftp 只走 ssh 域（`exec_policy: deny` 不再封住它们），grant 只走审批边界，bg/commands 无门。
+  - **时钟与回归修复**：RTC 票据时效与 peer.created 接平台校准时钟（未认证窗口混钟回归）；RTC 租约锁竞态与票据消费原子化；grantCmd 去重；vsh 基础环境注入设备真实 UID/GID（修复 700 目录 cd 被拒）；hostfs 新建文件/目录默认 0644/0755（对齐 umask-022）。
+  - **review 收敛（2026-10-06）**：任务表 requestID 撞键不再静默覆盖——旧运行改挂影子键保住取消可达性（CancelConnection 全表遍历仍可命中），主键归新运行并记日志；RTC renew 拒绝已关闭 peer（不再消费续租票据）、close 清租约。
+
 - **设备端图片预览与 RTC 输出完整性（2026-10-05）**：`mcp call` 新增显式 `--image-preview WIDTHxHEIGHT`，成功 image 内容在输出前等比缩放并转为最多 600 KiB 的 JPEG，保留上游结构化捕获元数据及图片 annotations/_meta，记录原图与预览尺寸；CUA 使用 1280×720，普通调用默认透传，转换失败不重跑工具。RTC 前台完成输出从本次执行自有日志有界补全截断流，超限或读取失败明确报错并保留日志元数据；引擎 8 MiB 采集、NATS 预览、RTC 工具与 Browser 流的 16 MiB 上限保持不变。补充缩图、元数据保留、单次执行、日志补全和传输回归；前端与内置技能需同步更新。
 
 - **RTC 工具大响应分块（2026-10-05）**：`aic-tools` 的大 JSON 响应使用长度头与 16 KiB 二进制片段，完整响应上限 16 MiB，可传输 CUA 截图；按整包互斥避免并发片段交错，超限返回错误，发送失败主动关闭连接。补充真实 RTC 并发大响应、超限与 race 验证；前端需同步更新。

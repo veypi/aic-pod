@@ -37,6 +37,7 @@ func (p *peer) close() {
 	p.closed = true
 	p.cancel()
 	lease := p.lease
+	p.lease = nil // 关闭即清租约：renew/查询不再视本 peer 为已认证
 	p.mu.Unlock()
 	if lease != nil && p.s.cfg.Disconnect != nil {
 		// 断连清理按连接ID（租约过期也要清——前台执行按 connectionID 归属）。

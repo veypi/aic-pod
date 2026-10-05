@@ -477,3 +477,35 @@ func TestShellQuoteRoundtrip(t *testing.T) {
 		t.Fatalf("quoted vectors executed side effects: %q", res.Stdout)
 	}
 }
+
+// TestRegisterRequestIDCollision requestID 撞键不静默覆盖：旧运行改挂影子键
+// 保住取消可达性（CancelConnection 遍历全表命中），主键归新运行（review #2）。
+func TestRegisterRequestIDCollision(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTable()
+	oldCancelled := false
+	newCancelled := false
+	meta := TaskMeta{Owner: "o1", Session: "s1", RequestID: "req-1", ConnectionID: "conn-1"}
+	oldR := tt.register(func() { oldCancelled = true }, "old", meta)
+	newR := tt.register(func() { newCancelled = true }, "new", meta)
+	if oldR == newR {
+		t.Fatal("撞键不应返回同一记录")
+	}
+	// 主键归新运行：cancel(requestID) 命中新运行。
+	if err := tt.CancelByRequest("req-1", "o1", "s1"); err != nil {
+		t.Fatalf("CancelByRequest 应命中新运行: %v", err)
+	}
+	if !newCancelled || oldCancelled {
+		t.Fatalf("cancel 应只触发新运行: new=%v old=%v", newCancelled, oldCancelled)
+	}
+	// 旧运行仍经连接索引可达：断连清理命中。
+	tt.CancelConnection("conn-1")
+	if !oldCancelled {
+		t.Fatal("CancelConnection 应能取消被改挂影子键的旧运行")
+	}
+	// 旧运行结算：身份检查走影子键，不误删新记录。
+	tt.finish(oldR, &ExecResult{ExitCode: 0}, nil)
+	if tt.runs["req-1"] != newR {
+		t.Fatal("旧运行 finish 不应删除主键上的新记录")
+	}
+}

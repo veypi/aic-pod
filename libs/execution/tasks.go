@@ -122,10 +122,18 @@ type TaskTable struct {
 	maxGlobal   int
 	maxPerOwner int
 	maxRetained int
+	logf        func(format string, args ...any) // 可选日志（撞键告警等）
 }
 
 func NewTaskTable() *TaskTable {
 	return NewTaskTableWithCaps(maxRunningTasksGlobal(), MaxRunningTasksPerOwner)
+}
+
+// SetLogf 注入可选日志（引擎装配时接入 host OnLog）。
+func (t *TaskTable) SetLogf(logf func(format string, args ...any)) {
+	t.mu.Lock()
+	t.logf = logf
+	t.mu.Unlock()
 }
 
 // NewTaskTableWithCaps 自定义容量闸（测试用；生产走 NewTaskTable）。
@@ -158,7 +166,17 @@ func (t *TaskTable) register(cancel context.CancelFunc, command string, meta Tas
 		cancel: cancel, done: make(chan struct{}),
 	}
 	// requestID 由协议保证唯一（NATS/RTC 请求 ID、cloud tool call ID）；
-	// 撞键时旧记录仍可经 bgID/连接索引到达，这里直接覆盖主键。
+	// 撞键（同 ID 复用）不静默覆盖——旧运行改挂影子键保住取消可达性
+	// （CancelConnection 遍历全表仍可命中，bg 索引不受影响），主键归新
+	// 运行（cancel/WaitRun 按 requestID 指向最新一次请求）（review #2）。
+	if old := t.runs[key]; old != nil {
+		shadow := fmt.Sprintf("%s#%d", key, old.seq)
+		t.runs[shadow] = old
+		old.key = shadow
+		if t.logf != nil {
+			t.logf("task table: requestID %q 复用撞键——旧运行改挂影子键 %s", key, shadow)
+		}
+	}
 	t.runs[key] = r
 	return r
 }

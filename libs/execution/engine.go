@@ -124,6 +124,9 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	}
 
 	e := &Engine{cfg: cfg, reg: reg, Tasks: NewTaskTable()}
+	if cfg.Logf != nil {
+		e.Tasks.SetLogf(cfg.Logf)
+	}
 	// bg 指令需要任务登记表（cmds.go 不反向引用引擎，由此注入）。
 	cfg.Platform.Tasks = e.Tasks
 	if err := RegisterPlatformCommands(reg, cfg.Platform); err != nil {

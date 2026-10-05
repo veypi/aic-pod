@@ -296,6 +296,11 @@ func (p *permissionState) netSnapshot(sid string) vbox.NetRuleSet {
 }
 
 func (p *permissionState) netSnapshotLocked(sid string) vbox.NetRuleSet {
+	// 与 fs 快照同一不变量：启动配置无效时快照自身 fail-closed（含内建
+	// localhost 放行也不下发）——未来新调用点不再依赖入口各自查 err()。
+	if p.invalid != nil {
+		return vbox.NetRuleSet{}
+	}
 	var rows []vbox.NetRule
 	if g := p.grants[sid]; g != nil {
 		for _, e := range g.net {
@@ -314,6 +319,10 @@ func (p *permissionState) sshSnapshot(sid string) vbox.NetRuleSet {
 }
 
 func (p *permissionState) sshSnapshotLocked(sid string) vbox.NetRuleSet {
+	// 同上：invalid 时快照自身 fail-closed。
+	if p.invalid != nil {
+		return vbox.NetRuleSet{}
+	}
 	var rows []vbox.NetRule
 	if g := p.grants[sid]; g != nil {
 		for _, e := range g.ssh {

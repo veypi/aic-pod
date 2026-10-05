@@ -85,22 +85,31 @@ func (p *peer) admit(ticket, fingerprint string) (map[string]any, error) {
 }
 
 // renew 续租：票据必须绑定本 peer 的活跃租约（connectionID/指纹一致），
-// 只延长期限不回拨。
+// 只延长期限不回拨。已关闭 peer 拒绝续租（不消费票据）。
 func (p *peer) renew(ticket, fingerprint string) (map[string]bool, error) {
 	t, err := p.s.verifyTicket(ticket, p.id, fingerprint)
 	if err != nil {
 		return nil, err
 	}
-	lease := p.currentLease()
-	if lease == nil || t.ConnectionID != lease.connectionID || t.Fingerprint != lease.fingerprint {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, protocol.Fail("unauthorized", "peer is closed")
+	}
+	lease := p.lease
+	if lease == nil || !lease.until.After(p.s.now()) || t.ConnectionID != lease.connectionID || t.Fingerprint != lease.fingerprint {
+		p.mu.Unlock()
 		return nil, protocol.Fail("unauthorized", "Renewal does not match the active connection")
 	}
+	p.mu.Unlock()
 	if err := p.s.consumeTicket(t); err != nil {
 		return nil, err
 	}
 	until := time.Unix(t.LeaseUntil, 0)
 	p.mu.Lock()
-	if until.After(p.lease.until) {
+	// close 可能发生在票据消费之后：租约已置空则不再写入（票据已消费，
+	// 但租约不会被复活）。
+	if !p.closed && p.lease != nil && until.After(p.lease.until) {
 		p.lease.until = until
 	}
 	p.mu.Unlock()
