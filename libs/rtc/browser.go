@@ -3,15 +3,14 @@ package rtc
 import (
 	"context"
 	"encoding/binary"
+	"github.com/veypi/aic-pod/protocol"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // BrowserRelay transports upstream WebSocket messages, not browser commands.
-type BrowserRelay func(context.Context, wire.Caller, <-chan []byte, func([]byte) error) error
+type BrowserRelay func(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error
 
 func (p *peer) browserChannel(dc *webrtc.DataChannel) {
 	if p.s.cfg.Browser == nil || !dc.Ordered() || dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
@@ -61,8 +60,8 @@ func (p *peer) browserChannel(dc *webrtc.DataChannel) {
 		go func() {
 			defer closeStream()
 			send := func(raw []byte) error {
-				if len(raw) == 0 || len(raw) > rtcwire.BrowserMessageLimit {
-					return wire.Fail("overloaded", "Browser frame too large")
+				if len(raw) == 0 || len(raw) > protocol.RtcBrowserMessageLimit {
+					return protocol.Fail("overloaded", "Browser frame too large")
 				}
 				// One upstream message may exceed SCTP's message limit. Only transport
 				// framing is added: uint32 length, followed by ordered 16 KiB chunks.

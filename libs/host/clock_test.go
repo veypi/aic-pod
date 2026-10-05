@@ -2,13 +2,11 @@ package host
 
 import (
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func TestResolveTimeURL(t *testing.T) {
@@ -81,11 +79,11 @@ func TestToolsVerifyUsesCalibratedClock(t *testing.T) {
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
 	defer setClockOffset(0)
 
-	route, _ := natswire.Subject(c.uid, c.hostID)
+	route, _ := protocol.NatsSubject(c.uid, c.hostID)
 	setClockOffset((2 * time.Hour).Milliseconds())
 	makeReq := func(deadlineMS, untilMS int64) []byte {
-		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: deadlineMS, AuthorizationUntil: untilMS, Request: fsRequest("roots", map[string]any{})}
-		natswire.Sign(c.kTool, &r)
+		r := protocol.NatsRequest{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: protocol.NewID("n_"), Deadline: deadlineMS, AuthorizationUntil: untilMS, Request: fsRequest("roots", map[string]any{})}
+		protocol.NatsSign(c.kTool, &r)
 		b, _ := json.Marshal(r)
 		return b
 	}

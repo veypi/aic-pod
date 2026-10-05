@@ -3,13 +3,13 @@ package host
 import (
 	"errors"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"io/fs"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/veypi/aic-pod/libs/proto"
 	"github.com/veypi/vigo/contrib/ufs"
 )
 
@@ -17,12 +17,12 @@ import (
 //
 // 路径模型（2026-09-24 全局统一 /c/ 类 Linux 规范形，废除 C:/ 盘符形）：
 //   - 输入为公共规范形：斜杠分隔绝对路径；Windows 盘符 = 首段单字母
-//     （/c/…，/c = 盘符根）。C:/…、C:\… 等输入形由 proto.NormalizeHostPath
+//     （/c/…，/c = 盘符根）。C:/…、C:\… 等输入形由 protocol.NormalizeHostPath
 //     容错归一；
 //   - Windows 下 "/" 是虚拟挂载根：ReadDir 返回盘符挂载列表（c、d…），
 //     Stat 返回合成目录信息；其余操作作用于 "/" 报错；
 //   - Windows 下 /tmp 是虚拟别名（cygwin 式语义）：映射到 os.TempDir()，
-//     与规则表侧 canonical（proto.HostPathToOS）同口径——vsh 引擎布局
+//     与规则表侧 canonical（vbox.HostPathToOS）同口径——vsh 引擎布局
 //     初始化与脚本的 /tmp 写在 win 上有真实落点；
 //   - Windows 下非盘符绝对路径（/x）一律拒绝——虚拟根下只有盘符挂载。
 type OSVFS struct{}
@@ -36,9 +36,9 @@ func isVirtualRoot(name string) bool { return runtime.GOOS == "windows" && name 
 // toOS 把规范形路径映射为 OS 路径（非 Windows 为恒等映射；Windows 见 winToOS）。
 func toOS(p string) (string, error) {
 	if runtime.GOOS == "windows" {
-		p = proto.NormalizeHostPath(p)
+		p = protocol.NormalizeHostPath(p)
 		// /tmp 虚拟别名优先于盘根判定（winToOS 对非盘符绝对路径报错）。
-		if q, ok := proto.WinTmpToOS(p, os.TempDir()); ok {
+		if q, ok := protocol.WinTmpToOS(p, os.TempDir()); ok {
 			return q, nil
 		}
 		return winToOS(p)
@@ -47,17 +47,17 @@ func toOS(p string) (string, error) {
 }
 
 // winToOS 把规范形路径映射为 Windows OS 路径（纯函数，跨平台可测）：
-//   - 归一与规则匹配层共用 proto.NormalizeHostPath（本层兜底 ls/rg 递归拼接等
+//   - 归一与规则匹配层共用 protocol.NormalizeHostPath（本层兜底 ls/rg 递归拼接等
 //     绕过主入口的产物；多斜杠前缀 //c、旧输入形 C:/… 同样归一）；
 //   - /c → C:\（盘根）；/c/x → C:\x；
 //   - "/" → errVirtualRoot（Stat/ReadDir 特判，其余操作拒绝）；
 //   - 其余 /…（非盘符绝对路径）→ 错误：虚拟根下只有盘符挂载。
 func winToOS(p string) (string, error) {
-	p = proto.NormalizeHostPath(p)
+	p = protocol.NormalizeHostPath(p)
 	if p == "/" {
 		return "", errVirtualRoot
 	}
-	drive, rest, ok := proto.SplitDriveRoot(p)
+	drive, rest, ok := protocol.SplitDriveRoot(p)
 	if ok {
 		d := strings.ToUpper(string(drive)) + ":"
 		// 分隔符转换不能用 filepath.FromSlash（非 windows 上是恒等映射，

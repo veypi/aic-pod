@@ -1,48 +1,25 @@
-package proto
+package protocol
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"regexp"
-	"runtime"
 	"strings"
 )
 
 // ResolvePath 实现 §2.1.1 可解析层的路径展开：纯路径运算，执行前完成。
 // 规则匹配层与执行层各自独立调用、结果一致——双端禁止各自另写展开逻辑。
 //
-//   - vars：根变量映射（预留；三端当前均无变量），nil 表示该端无变量
-//     （物理 host 不做变量展开，§4.1）；
 //   - workdir：当次调用显式携带的基准目录，必须绝对（缺省值由调用方先行填充：
 //     cloud/page = "/"（空间根），物理 host = host 端配置工作区）；
-//   - 绝对路径（/ 开头、根变量开头、Windows 盘符）忽略 workdir；
+//   - 绝对路径（/ 开头、Windows 盘符）忽略 workdir；
 //     其余（含 "."）相对 workdir 展开。
 //
-// 返回清理后的绝对路径。根变量路径展开后逃逸变量根 → 错误。
-// 根收容校验不在此函数——规则匹配层另调 WithinRoots，两处结果一致。
-func ResolvePath(p, workdir string, vars map[string]string) (string, error) {
+// 返回清理后的绝对路径。根收容校验不在此函数——规则匹配层另调 WithinRoots，
+// 两处结果一致。
+func ResolvePath(p, workdir string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("proto: path is empty")
-	}
-	// 根变量前缀：最长匹配，变量名后必须跟 / 或结束（"$USERX/a" 不匹配 "$USER"）。
-	if len(vars) > 0 && p[0] == '$' {
-		name, rest := "", ""
-		for k := range vars {
-			if len(k) > len(name) && strings.HasPrefix(p, k) &&
-				(len(p) == len(k) || p[len(k)] == '/') {
-				name, rest = k, p[len(k):]
-			}
-		}
-		if name != "" {
-			root := vars[name]
-			joined := path.Clean(root + rest)
-			if joined != root && !strings.HasPrefix(joined, root+"/") {
-				return "", fmt.Errorf("proto: path %q escapes root %s", p, name)
-			}
-			return joined, nil
-		}
-		// 未匹配的 $ 开头按字面相对路径处理（不做任何变量展开）。
 	}
 	// 盘符相关形态归一（主入口，与执行层兜底 OSVFS.winToOS 共用
 	// NormalizeHostPath——双端禁止各自另写展开逻辑）。归一后 Windows 路径
@@ -109,27 +86,6 @@ func SplitDriveRoot(p string) (drive byte, rest string, ok bool) {
 
 func isLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
-// HostPathToOS 把 /c/ 规范形（及旧输入形 C:/…、C:\…）转回 OS 原生路径
-// （windows；posix 恒等）。原生 OS 边界（进程启动 cwd、ACL、EvalSymlinks）
-// 统一从此出，禁止各处另写反转逻辑。
-//
-// windows 上 /tmp 是虚拟别名：cygwin 式映射到 os.TempDir()（规则表侧
-// canonical 经本函数同样映射——/tmp 查询落进临时目录便利根，无需任何字面
-// /tmp 规则行；字面根进 Snapshot write rules 会让 win 沙箱 grantDirWrite 失败）。
-func HostPathToOS(p string) string {
-	if runtime.GOOS != "windows" {
-		return p
-	}
-	p = NormalizeHostPath(p)
-	if q, ok := WinTmpToOS(p, os.TempDir()); ok {
-		return q
-	}
-	if d, rest, ok := SplitDriveRoot(p); ok {
-		return strings.ToUpper(string(d)) + `:\` + strings.ReplaceAll(rest, "/", `\`)
-	}
-	return p
 }
 
 // WinTmpToOS 把 /tmp（及子路径）映射为 windows 临时目录原生路径：/tmp →

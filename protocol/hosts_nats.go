@@ -1,5 +1,5 @@
-// Package hosts_nats binds a tool request to its authenticated destination and caller.
-package hosts_nats
+// hosts_nats/3 签名信封：工具请求绑定已认证目的地与调用方。
+package protocol
 
 import (
 	"crypto/hmac"
@@ -7,14 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	tools "github.com/veypi/aic-pod/protocol/tool"
 	"strings"
 	"time"
 )
 
-const Protocol = "hosts_nats/3"
+const NatsProtocol = "hosts_nats/3"
 
-type Request struct {
+type NatsRequest struct {
 	HostID             string `json:"host_id"`
 	Subject            string `json:"subject"`
 	Caller             string `json:"caller"`
@@ -23,24 +22,24 @@ type Request struct {
 	AuthorizationUntil int64  `json:"authorization_until_ms"`
 	// GrantApproved 是服务端审批结果事实（默认 false）：本次脚本可通过 grant
 	// 修改授权。随签名信封传递，模型不能自行设置，篡改即验签失败。
-	GrantApproved bool          `json:"grant_approved,omitempty"`
-	Nonce         string        `json:"nonce"`
-	Deadline      int64         `json:"deadline_ms"`
-	Request       tools.Request `json:"request"`
-	Signature     string        `json:"signature"`
+	GrantApproved bool    `json:"grant_approved,omitempty"`
+	Nonce         string  `json:"nonce"`
+	Deadline      int64   `json:"deadline_ms"`
+	Request       Request `json:"request"`
+	Signature     string  `json:"signature"`
 }
 
-func Subject(uid, host string) (string, error) {
+func NatsSubject(uid, host string) (string, error) {
 	if uid == "" || host == "" || strings.ContainsAny(uid+host, ".*> \t\n\r") {
 		return "", fmt.Errorf("invalid destination")
 	}
 	return "u." + uid + ".h.host_" + host + ".tools.req", nil
 }
-func signature(key string, r Request) string {
+func signature(key string, r NatsRequest) string {
 	r.Signature = ""
 	b, _ := json.Marshal(r)
 	m := hmac.New(sha256.New, []byte(key))
-	m.Write([]byte(Protocol + "\n"))
+	m.Write([]byte(NatsProtocol + "\n"))
 	m.Write(b)
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
@@ -56,22 +55,25 @@ const (
 	deadlineHorizon     = 15 * time.Minute
 )
 
-func Sign(key string, r *Request) { r.Signature = signature(key, *r) }
-func Verify(key, host, subject string, r Request, now time.Time) error {
-	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !tools.ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.HostID != host || r.Subject != subject || !tools.ValidID(r.Caller) || !tools.ValidID(r.Nonce) || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
-		return tools.Fail("unauthorized", "Invalid request destination, identity or validity window")
+// NatsSign 为信封签名（先清 Signature 再覆盖全字段）。
+func NatsSign(key string, r *NatsRequest) { r.Signature = signature(key, *r) }
+
+// NatsVerify 校验信封目的地、身份、时效窗口与签名。
+func NatsVerify(key, host, subject string, r NatsRequest, now time.Time) error {
+	if (r.Scope != "" && r.Scope != "fs") || (r.Origin != "" && !ValidID(r.Origin)) || r.AuthorizationUntil < r.Deadline || r.AuthorizationUntil > now.Add(authorizationWindow).UnixMilli() || r.HostID != host || r.Subject != subject || !ValidID(r.Caller) || !ValidID(r.Nonce) || r.Deadline <= now.Add(-clockSlack).UnixMilli() || r.Deadline > now.Add(deadlineHorizon).UnixMilli() {
+		return Fail("unauthorized", "Invalid request destination, identity or validity window")
 	}
 	// Caller 必须与签名 subject 目的地中的 uid 一致：执行归属统一从
 	// caller.Subject 派生（exec/任务表/取消登记），信封里的 Caller 不能
 	// 与服务端路由的归属 uid 脱节。
-	if dest, err := Subject(r.Caller, host); err != nil || r.Subject != dest {
-		return tools.Fail("unauthorized", "Caller does not match request destination")
+	if dest, err := NatsSubject(r.Caller, host); err != nil || r.Subject != dest {
+		return Fail("unauthorized", "Caller does not match request destination")
 	}
 	if !hmac.Equal([]byte(signature(key, r)), []byte(r.Signature)) {
-		return tools.Fail("unauthorized", "Invalid request signature")
+		return Fail("unauthorized", "Invalid request signature")
 	}
-	if r.Request.Protocol != Protocol {
-		return tools.Fail("unsupported", "Invalid request protocol")
+	if r.Request.Protocol != NatsProtocol {
+		return Fail("unsupported", "Invalid request protocol")
 	}
 	return r.Request.Validate()
 }

@@ -6,22 +6,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	fsp "github.com/veypi/aic-pod/protocol/fs"
-	hosts "github.com/veypi/aic-pod/protocol/fs"
-	tool "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type fixture struct {
 	fs     *FS
 	store  *Bytes
 	root   string
-	caller tool.Caller
+	caller protocol.Caller
 	owner  string
 	count  int
 }
@@ -36,14 +33,14 @@ func setup(t *testing.T) *fixture {
 	}
 	f.fs, err = New(Config{Roots: []Root{{ID: "home", Name: "Home", Path: f.root, Default: true}}, Bytes: f.store, Check: func(_ context.Context, _ Call, path string, _ bool) error {
 		if strings.Contains(filepath.Base(path), "denied") {
-			return hosts.Fail("permission_denied", "Denied by local policy")
+			return protocol.FSFail("permission_denied", "Denied by local policy")
 		}
 		return nil
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.caller = tool.Caller{Subject: "owner", ConnectionID: "test", ExpiresAt: time.Now().Add(time.Hour)}
+	f.caller = protocol.Caller{Subject: "owner", ConnectionID: "test", ExpiresAt: time.Now().Add(time.Hour)}
 	f.owner = Owner(f.caller)
 	t.Cleanup(func() {
 		f.fs.Close()
@@ -51,18 +48,18 @@ func setup(t *testing.T) *fixture {
 	})
 	return f
 }
-func loc(parts ...string) fsp.Path {
+func loc(parts ...string) protocol.FSPath {
 	if parts == nil {
 		parts = []string{}
 	}
-	return fsp.Path{RootID: "home", Segments: parts}
+	return protocol.FSPath{RootID: "home", Segments: parts}
 }
 func (f *fixture) call(t *testing.T, method string, args any) outcome {
 	t.Helper()
 	raw, _ := json.Marshal(args)
 	result, err := f.fs.Run(context.Background(), Call{Caller: f.caller, Owner: f.owner, Command: "fs", Method: method, Args: raw})
 	if err != nil {
-		fault := hosts.AsFault(err)
+		fault := protocol.AsFault(err)
 		status := "failed"
 		if fault.Code == "cancelled" {
 			status = "cancelled"
@@ -75,7 +72,7 @@ func (f *fixture) call(t *testing.T, method string, args any) outcome {
 
 type outcome struct {
 	Status string
-	Error  *hosts.Fault
+	Error  *protocol.Fault
 	Value  json.RawMessage
 }
 
@@ -90,7 +87,7 @@ func value[T any](t *testing.T, op outcome) T {
 	}
 	return v
 }
-func (f *fixture) upload(t *testing.T, data []byte) hosts.ResourceRef {
+func (f *fixture) upload(t *testing.T, data []byte) protocol.FSResourceRef {
 	t.Helper()
 	size := int64(len(data))
 	src, err := f.store.Upload(context.Background(), f.owner, bytes.NewReader(data), &size, "", "")
@@ -103,12 +100,12 @@ func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
 	f := setup(t)
 	data := append([]byte{0xef, 0xbb, 0xbf}, []byte(strings.Repeat("line\r\n", 1800)+"last line without newline")...)
 	path := loc("note.txt")
-	saved := value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, data), Condition: fsp.Condition{Absent: true}}))
+	saved := value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, data), Condition: protocol.FSCondition{Absent: true}}))
 	disk, err := os.ReadFile(filepath.Join(f.root, "note.txt"))
 	if err != nil || !bytes.Equal(disk, data) {
 		t.Fatal("saved bytes differ")
 	}
-	current := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: path}))
+	current := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: path}))
 	if current.Version != saved.Version {
 		t.Fatal("commit returned a stale version")
 	}
@@ -121,22 +118,22 @@ func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
 		t.Fatal("read changed line endings/BOM/long text")
 	}
 	next := f.upload(t, []byte{0, 255, 1, 0})
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: path, Source: next, Condition: fsp.Condition{Version: saved.Version}}))
-	stale := f.call(t, "write", writeArgs{Path: path, Source: next, Condition: fsp.Condition{Version: saved.Version}})
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: next, Condition: protocol.FSCondition{Version: saved.Version}}))
+	stale := f.call(t, "write", writeArgs{Path: path, Source: next, Condition: protocol.FSCondition{Version: saved.Version}})
 	if stale.Error == nil || stale.Error.Code != "version_conflict" {
 		t.Fatalf("stale save accepted: %+v", stale)
 	}
 	if err = f.store.Copy(context.Background(), f.owner, src.Ref, 0, nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("old live source was not invalidated")
 	}
-	empty := value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("empty"), Source: f.upload(t, nil), Condition: fsp.Condition{Absent: true}}))
+	empty := value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("empty"), Source: f.upload(t, nil), Condition: protocol.FSCondition{Absent: true}}))
 	if empty.Size == nil || *empty.Size != 0 {
 		t.Fatal("empty file was lost")
 	}
 }
 func TestPathsPolicyAndLinks(t *testing.T) {
 	f := setup(t)
-	for _, path := range []fsp.Path{loc("..", "outside"), loc("a/b"), loc(""), {RootID: "unknown", Segments: []string{}}, loc("denied.txt")} {
+	for _, path := range []protocol.FSPath{loc("..", "outside"), loc("a/b"), loc(""), {RootID: "unknown", Segments: []string{}}, loc("denied.txt")} {
 		if op := f.call(t, "stat", pathArgs{Path: path}); op.Status == "succeeded" {
 			t.Fatalf("accepted invalid path: %v", path)
 		}
@@ -151,10 +148,10 @@ func TestPathsPolicyAndLinks(t *testing.T) {
 	if op := f.call(t, "read", pathArgs{Path: loc("link", "secret")}); op.Status == "succeeded" {
 		t.Fatal("followed outside link")
 	}
-	if op := f.call(t, "write", writeArgs{Path: loc("denied.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Any: true}}); op.Error == nil || op.Error.Code != "permission_denied" {
+	if op := f.call(t, "write", writeArgs{Path: loc("denied.txt"), Source: f.upload(t, []byte("x")), Condition: protocol.FSCondition{Any: true}}); op.Error == nil || op.Error.Code != "permission_denied" {
 		t.Fatalf("policy bypass: %+v", op)
 	}
-	if op := f.call(t, "write", writeArgs{Path: loc(), Source: f.upload(t, nil), Condition: fsp.Condition{Any: true}}); op.Status == "succeeded" {
+	if op := f.call(t, "write", writeArgs{Path: loc(), Source: f.upload(t, nil), Condition: protocol.FSCondition{Any: true}}); op.Status == "succeeded" {
 		t.Fatal("root replace accepted")
 	}
 }
@@ -166,8 +163,8 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 		}
 	}
 	type page struct {
-		Entries []fsp.Entry `json:"entries"`
-		Next    string      `json:"next_cursor"`
+		Entries []protocol.FSEntry `json:"entries"`
+		Next    string             `json:"next_cursor"`
 	}
 	first := value[page](t, f.call(t, "list", listArgs{Path: loc(), Limit: 2}))
 	if len(first.Entries) != 2 || first.Entries[0].Name != "a" || first.Next == "" {
@@ -177,7 +174,7 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 	if len(second.Entries) != 1 || second.Entries[0].Name != "c" {
 		t.Fatalf("bad next page: %+v", second)
 	}
-	dir := value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("empty-dir")}))
+	dir := value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("empty-dir")}))
 	if dir.Kind != "directory" {
 		t.Fatal("empty directory not created")
 	}
@@ -194,7 +191,7 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "full", "x"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	full := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("full")}))
+	full := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("full")}))
 	if op := f.call(t, "remove", removeArgs{Path: loc("full"), IfVersion: full.Version}); op.Status == "succeeded" {
 		t.Fatal("implicitly recursive remove")
 	}
@@ -220,9 +217,9 @@ func TestMetadataSourcePolicyAllowsWriteConsumptionAndRevocation(t *testing.T) {
 		t.Fatal("metadata source could not be written", op)
 	}
 	f.fs.cfg.Check = func(context.Context, Call, string, bool) error {
-		return hosts.Fail("permission_denied", "changed policy")
+		return protocol.FSFail("permission_denied", "changed policy")
 	}
-	if err = f.store.Copy(context.Background(), f.owner, source.Ref, 0, nil, &bytes.Buffer{}); err == nil || hosts.AsFault(err).Code != "permission_denied" {
+	if err = f.store.Copy(context.Background(), f.owner, source.Ref, 0, nil, &bytes.Buffer{}); err == nil || protocol.AsFault(err).Code != "permission_denied" {
 		t.Fatal("snapshot policy not rechecked", err)
 	}
 }

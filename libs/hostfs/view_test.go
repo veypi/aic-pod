@@ -5,13 +5,13 @@ package hostfs
 import (
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/libs/fsx"
-	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 // Exercise the AI adapter as well as the binary FS methods: the Windows
@@ -66,7 +66,7 @@ func TestViewRejectsStaleWrite(t *testing.T) {
 	if err := os.WriteFile(path, []byte("changed externally"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := view.WriteFile(path, []byte("stale"), 0600); err == nil || hosts.AsFault(err).Code != "version_conflict" {
+	if err := view.WriteFile(path, []byte("stale"), 0600); err == nil || protocol.AsFault(err).Code != "version_conflict" {
 		t.Fatal("stale write accepted", err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "changed externally" {
@@ -90,7 +90,7 @@ func TestAIWriteWithOnlyTargetFileAllowed(t *testing.T) {
 			}
 			f.fs.cfg.Check = func(_ context.Context, _ Call, path string, write bool) error {
 				if filepath.Clean(path) != file {
-					return hosts.Fail("permission_denied", "only the target file is allowed")
+					return protocol.FSFail("permission_denied", "only the target file is allowed")
 				}
 				return nil
 			}

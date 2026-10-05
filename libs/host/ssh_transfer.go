@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"io"
 	"io/fs"
 	"os"
@@ -15,7 +16,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"github.com/veypi/aic-pod/libs/execution"
-	"github.com/veypi/aic-pod/libs/proto"
+
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
@@ -120,7 +121,7 @@ func parseSSHOperand(s string) (sshOperand, error) {
 
 func sshLocalPath(s string) string {
 	if runtime.GOOS == "windows" {
-		return proto.NormalizeHostPath(s)
+		return protocol.NormalizeHostPath(s)
 	}
 	return s
 }

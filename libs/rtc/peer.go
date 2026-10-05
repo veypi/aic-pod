@@ -4,13 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/veypi/aic-pod/protocol"
 
 	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	hosts "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type peer struct {
@@ -69,11 +68,11 @@ func (p *peer) expire(now time.Time) {
 
 }
 func (p *peer) channel(dc *webrtc.DataChannel) {
-	if dc.Label() == rtcwire.BrowserChannel {
+	if dc.Label() == protocol.RtcBrowserChannel {
 		p.browserChannel(dc)
 		return
 	}
-	if dc.Label() == rtcwire.Channel {
+	if dc.Label() == protocol.RtcChannel {
 		p.toolsChannel(dc)
 		return
 	}
@@ -81,10 +80,10 @@ func (p *peer) channel(dc *webrtc.DataChannel) {
 }
 func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, text bool) error {
 	if dc == nil {
-		return hosts.Fail("unreachable", "Channel is unavailable")
+		return protocol.Fail("unreachable", "Channel is unavailable")
 	}
 	lock := &p.toolsSend
-	if dc.Label() == rtcwire.BrowserChannel {
+	if dc.Label() == protocol.RtcBrowserChannel {
 		lock = &p.browserSend
 	}
 	lock.Lock()
@@ -98,7 +97,7 @@ func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
-			return hosts.Fail("overloaded", "Channel send timeout")
+			return protocol.Fail("overloaded", "Channel send timeout")
 		case <-ticker.C:
 		}
 	}
@@ -106,7 +105,7 @@ func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, 
 		return err
 	}
 	if dc.ReadyState() != webrtc.DataChannelStateOpen {
-		return hosts.Fail("unreachable", "Channel closed")
+		return protocol.Fail("unreachable", "Channel closed")
 	}
 	if text {
 		return dc.SendText(string(raw))
@@ -115,12 +114,12 @@ func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, 
 }
 func (p *peer) fingerprint() (string, error) {
 	if p.pc.SCTP() == nil || p.pc.SCTP().Transport() == nil {
-		return "", hosts.Fail("unauthorized", "DTLS is unavailable")
+		return "", protocol.Fail("unauthorized", "DTLS is unavailable")
 	}
 	cert := p.pc.SCTP().Transport().GetRemoteCertificate()
 	if len(cert) == 0 {
-		return "", hosts.Fail("unauthorized", "Peer certificate unavailable")
+		return "", protocol.Fail("unauthorized", "Peer certificate unavailable")
 	}
 	sum := sha256.Sum256(cert)
-	return rtcwire.NormalizeFingerprint("sha-256 " + hex.EncodeToString(sum[:]))
+	return protocol.NormalizeFingerprint("sha-256 " + hex.EncodeToString(sum[:]))
 }

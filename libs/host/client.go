@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,12 +29,9 @@ import (
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/netauth"
-	"github.com/veypi/aic-pod/libs/proto"
+
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/vbox"
-
-	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
 )
 
 // Options 客户端配置。
@@ -116,7 +114,7 @@ func New(opts Options) *Client {
 	if opts.WorkDir == "" {
 		opts.WorkDir = defaultWorkDir()
 	}
-	// WorkDir 的反斜杠规范形归一由 proto.ResolvePath 在路径运算层统一处理
+	// WorkDir 的反斜杠规范形归一由 protocol.ResolvePath 在路径运算层统一处理
 	//（Windows 下 os.TempDir() 为反斜杠形，workdir 分支同样归一）。
 	if opts.ExecTimeout <= 0 {
 		opts.ExecTimeout = 30 * time.Minute
@@ -150,7 +148,7 @@ func New(opts Options) *Client {
 	if parts := strings.SplitN(opts.Key, ".", 4); len(parts) == 4 {
 		c.hostID = parts[0]
 		c.uid = parts[3]
-		_, _, c.kTool, _ = proto.DeriveKeys(parts[2], parts[0])
+		_, _, c.kTool, _ = protocol.DeriveKeys(parts[2], parts[0])
 		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
 	}
 	// 会话区根 = {StateDir}/sessions：与 fsauth 会话便利根
@@ -201,7 +199,7 @@ func (c *Client) connect() error {
 	}
 	secret := parts[2]
 
-	kConnect, _, _, err := proto.DeriveKeys(secret, c.hostID)
+	kConnect, _, _, err := protocol.DeriveKeys(secret, c.hostID)
 	if err != nil {
 		return fmt.Errorf("derive keys: %w", err)
 	}
@@ -212,7 +210,7 @@ func (c *Client) connect() error {
 	opts := []nats.Option{
 		nats.Name("aic-host-" + c.hostID),
 		nats.TokenHandler(func() string {
-			return proto.GenerateConnectToken(c.hostID, c.uid, c.options().Version, c.options().DeviceType, c.options().DeviceName,
+			return protocol.GenerateConnectToken(c.hostID, c.uid, c.options().Version, c.options().DeviceType, c.options().DeviceName,
 				clockNowMS(), mustNonce(), kConnect)
 		}),
 		nats.ReconnectWait(2 * time.Second),
@@ -262,7 +260,7 @@ func (c *Client) connect() error {
 
 	c.publishCaps(nc)
 
-	inbox, err := proto.HostInboxSubject(c.uid, c.hostID)
+	inbox, err := protocol.HostInboxSubject(c.uid, c.hostID)
 	if err != nil {
 		nc.Close()
 		return err
@@ -442,12 +440,12 @@ func (c *Client) startRTC() error {
 		HostID:        c.hostID,
 		Hostname:      hostname,
 		Version:       c.options().Version,
-		Send: func(sig *proto.RtcSignal) {
+		Send: func(sig *protocol.RtcSignal) {
 			nc := c.connection()
 			if nc == nil {
 				return
 			}
-			subj, err := proto.RtcOutSubject(c.uid, c.hostID, c.credVer)
+			subj, err := protocol.RtcOutSubject(c.uid, c.hostID, c.credVer)
 			if err != nil {
 				return
 			}
@@ -472,7 +470,7 @@ func (c *Client) handleRTCSignal(data []byte) {
 	if svc == nil {
 		return
 	}
-	var sig proto.RtcSignal
+	var sig protocol.RtcSignal
 	if err := json.Unmarshal(data, &sig); err != nil {
 		return
 	}
@@ -482,10 +480,10 @@ func (c *Client) handleRTCSignal(data []byte) {
 // ---- caps v2 上报（§6.3） ----
 
 // buildCaps 声明原生执行与文件传输能力；mcp 只是 exec 内的命令。
-func (c *Client) buildCaps() *proto.Caps {
+func (c *Client) buildCaps() *protocol.Caps {
 	hostname, _ := os.Hostname()
 	actions := append([]string(nil), fsx.FSActions...)
-	return &proto.Caps{
+	return &protocol.Caps{
 		HostID:        c.hostID,
 		CredentialVer: c.credVer,
 		AgentVersion:  c.options().Version,
@@ -493,23 +491,23 @@ func (c *Client) buildCaps() *proto.Caps {
 		Hostname:      hostname,
 		DeviceInfo:    deviceInfo(),
 		Mgmt:          c.buildMgmt(),
-		ToolProtocols: []string{natswire.Protocol, rtcwire.Protocol},
-		FS:            proto.FSCaps{Actions: &actions},
+		ToolProtocols: []string{protocol.NatsProtocol, protocol.RtcProtocol},
+		FS:            protocol.FSCaps{Actions: &actions},
 	}
 }
 
 // buildMgmt advertises only the live generic transport, never a management code.
-func (c *Client) buildMgmt() *proto.MgmtCaps {
+func (c *Client) buildMgmt() *protocol.MgmtCaps {
 	c.rtcMu.RLock()
 	defer c.rtcMu.RUnlock()
 	if c.files == nil {
 		return nil
 	}
-	m := &proto.MgmtCaps{Transports: map[string]proto.TransportCaps{"proxy": {Enabled: true, Protocol: natswire.Protocol, Commands: []string{"fs"}}}}
+	m := &protocol.MgmtCaps{Transports: map[string]protocol.TransportCaps{"proxy": {Enabled: true, Protocol: protocol.NatsProtocol, Commands: []string{"fs"}}}}
 	if c.rtcSvc != nil {
 		commands := []string{"fs", "exec"}
 
-		m.Transports["rtc"] = proto.TransportCaps{Enabled: true, Protocol: rtcwire.Protocol, Commands: commands}
+		m.Transports["rtc"] = protocol.TransportCaps{Enabled: true, Protocol: protocol.RtcProtocol, Commands: commands}
 	}
 	return m
 }
@@ -530,7 +528,7 @@ func (c *Client) stopRTC() {
 }
 
 func (c *Client) publishCaps(nc *nats.Conn) {
-	subj, err := proto.CapsSubject(c.uid, c.hostID, c.credVer)
+	subj, err := protocol.CapsSubject(c.uid, c.hostID, c.credVer)
 	if err != nil {
 		c.logf("caps subject: %v", err)
 		return
@@ -591,7 +589,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, nc *nats.Conn) {
 		if nc.IsClosed() {
 			return
 		}
-		subj, err := proto.PresenceSubject(c.uid, c.hostID, c.credVer)
+		subj, err := protocol.PresenceSubject(c.uid, c.hostID, c.credVer)
 		if err != nil {
 			continue
 		}

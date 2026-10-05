@@ -2,6 +2,7 @@ package host
 
 import (
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -9,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/libs/hostfs"
-	fsp "github.com/veypi/aic-pod/protocol/fs"
 )
 
 // Mount filesystem roots, not WorkDir. WorkDir is only the initial directory.
@@ -18,9 +18,9 @@ import (
 // 返回 home（fs home = WorkDir，工作区语义）与 osHome（OS 用户主目录，
 // ~/.aic 等运行数据定位用——两者在 pod 上是不同目录，不可混用）。osHome
 // 未落在任一挂载根内时返回零值（fs os_home 方法报不可用）。
-func deviceFileRoots(workdir string) ([]hostfs.Root, fsp.Path, fsp.Path, error) {
+func deviceFileRoots(workdir string) ([]hostfs.Root, protocol.FSPath, protocol.FSPath, error) {
 	roots := make([]hostfs.Root, 0)
-	var home, osHome fsp.Path
+	var home, osHome protocol.FSPath
 	for _, path := range filesystemRoots() {
 		if runtime.GOOS == "windows" && path == "/" {
 			continue
@@ -35,14 +35,14 @@ func deviceFileRoots(workdir string) ([]hostfs.Root, fsp.Path, fsp.Path, error) 
 		contains := err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 		roots = append(roots, hostfs.Root{ID: id, Name: filepath.ToSlash(path), Path: path, Default: contains})
 		if contains {
-			home = fsp.Path{RootID: id, Segments: []string{}}
+			home = protocol.FSPath{RootID: id, Segments: []string{}}
 			if rel != "." {
 				home.Segments = strings.Split(filepath.ToSlash(rel), "/")
 			}
 		}
 		if dir, err := os.UserHomeDir(); err == nil {
 			if rel, err := filepath.Rel(path, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				osHome = fsp.Path{RootID: id, Segments: []string{}}
+				osHome = protocol.FSPath{RootID: id, Segments: []string{}}
 				if rel != "." {
 					osHome.Segments = strings.Split(filepath.ToSlash(rel), "/")
 				}
@@ -56,7 +56,7 @@ func deviceFileRoots(workdir string) ([]hostfs.Root, fsp.Path, fsp.Path, error) 
 }
 
 // osHomePtr 零值 osHome（未落在任一挂载根内）→ nil（fs os_home 报不可用）。
-func osHomePtr(p fsp.Path) *fsp.Path {
+func osHomePtr(p protocol.FSPath) *protocol.FSPath {
 	if p.RootID == "" {
 		return nil
 	}

@@ -2,6 +2,7 @@ package host
 
 import (
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,7 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/netauth"
 	"github.com/veypi/aic-pod/libs/policy"
-	"github.com/veypi/aic-pod/libs/proto"
+
 	"github.com/veypi/vbox"
 )
 
@@ -19,11 +20,11 @@ import (
 
 func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 	wd, _ := os.Getwd()
-	abs, err := proto.ResolvePath(expandHomeDir(path), wd, nil)
+	abs, err := protocol.ResolvePath(expandHomeDir(path), wd)
 	if err != nil {
 		return "", fmt.Errorf("exec grant fs: invalid path %q: %w", path, err)
 	}
-	abs = proto.HostPathToOS(abs)
+	abs = vbox.HostPathToOS(abs)
 	if err = policy.ValidateFSGrantTarget(abs); err != nil {
 		return "", fmt.Errorf("exec grant fs: %w", err)
 	}

@@ -3,12 +3,11 @@
 package hostfs
 
 import (
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
-
-	fsp "github.com/veypi/aic-pod/protocol/fs"
 )
 
 func TestWindowsOpenRegularRejectsLinksAndNonLeafNames(t *testing.T) {
@@ -121,8 +120,8 @@ func TestWindowsListToleratesUnstatableChildren(t *testing.T) {
 	}
 	defer syscall.CloseHandle(handle)
 	type page struct {
-		Entries []fsp.Entry `json:"entries"`
-		Next    string      `json:"next_cursor"`
+		Entries []protocol.FSEntry `json:"entries"`
+		Next    string             `json:"next_cursor"`
 	}
 	got := value[page](t, f.call(t, "list", listArgs{Path: loc()}))
 	if len(got.Entries) != 2 || got.Entries[0].Name != "locked.txt" || got.Entries[1].Name != "open.txt" {
@@ -150,7 +149,7 @@ func TestWindowsListSkipsHiddenAttributeEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	type page struct {
-		Entries []fsp.Entry `json:"entries"`
+		Entries []protocol.FSEntry `json:"entries"`
 	}
 	got := value[page](t, f.call(t, "list", listArgs{Path: loc()}))
 	if len(got.Entries) != 1 || got.Entries[0].Name != "visible.txt" {
@@ -161,8 +160,8 @@ func TestWindowsListSkipsHiddenAttributeEntries(t *testing.T) {
 		t.Fatalf("hidden=true must reveal attribute-hidden entries: %+v", all.Entries)
 	}
 	found := value[struct {
-		Entries   []fsp.Entry `json:"entries"`
-		Truncated bool        `json:"truncated"`
+		Entries   []protocol.FSEntry `json:"entries"`
+		Truncated bool               `json:"truncated"`
 	}](t, f.call(t, "find", findArgs{Path: loc(), Glob: "*", Depth: 2, Limit: 10}))
 	if len(found.Entries) != 1 || found.Entries[0].Name != "visible.txt" {
 		t.Fatalf("find did not skip the hidden attribute entry: %+v", found.Entries)
@@ -180,7 +179,7 @@ func TestWindowsListClassifiesDirectoryLinksAsDirectories(t *testing.T) {
 		t.Skipf("cannot create a directory symlink: %v", err)
 	}
 	type page struct {
-		Entries []fsp.Entry `json:"entries"`
+		Entries []protocol.FSEntry `json:"entries"`
 	}
 	got := value[page](t, f.call(t, "list", listArgs{Path: loc()}))
 	kind := ""

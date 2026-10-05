@@ -1,4 +1,4 @@
-package proto
+package host
 
 import (
 	"os"
@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/veypi/aic-pod/protocol"
+	"github.com/veypi/vbox"
 )
 
 // NormalizeHostPathList 将 OS PATH 转为 shell 使用的规范路径列表。
@@ -14,7 +17,7 @@ func NormalizeHostPathList(value string) string {
 	paths := filepath.SplitList(value)
 	for i, p := range paths {
 		if p != "" {
-			paths[i] = NormalizeHostPath(filepath.ToSlash(p))
+			paths[i] = protocol.NormalizeHostPath(filepath.ToSlash(p))
 		}
 	}
 	return strings.Join(paths, ":")
@@ -30,13 +33,13 @@ func HostEnvMapToOS(env map[string]string) map[string]string {
 			paths := strings.Split(value, ":")
 			for i, p := range paths {
 				if p != "" {
-					paths[i] = HostPathToOS(p)
+					paths[i] = vbox.HostPathToOS(p)
 				}
 			}
 			value = strings.Join(paths, string(os.PathListSeparator))
 		case "HOME", "PWD", "OLDPWD", "TMPDIR", "TMP", "TEMP":
 			if value != "" {
-				value = HostPathToOS(value)
+				value = vbox.HostPathToOS(value)
 			}
 		}
 		out[key] = value
@@ -74,7 +77,7 @@ func HostEnvFromOS(env []string) map[string]string {
 			value = NormalizeHostPathList(value)
 		case "HOME", "PWD", "OLDPWD", "TMPDIR", "TMP", "TEMP":
 			if value != "" {
-				value = NormalizeHostPath(filepath.ToSlash(value))
+				value = protocol.NormalizeHostPath(filepath.ToSlash(value))
 			}
 		}
 		out[key] = value

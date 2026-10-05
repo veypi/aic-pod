@@ -3,19 +3,17 @@ package hostfs
 import (
 	"context"
 	"errors"
+	"github.com/veypi/aic-pod/protocol"
 	"io"
 	"path/filepath"
 	"strings"
-
-	fsp "github.com/veypi/aic-pod/protocol/fs"
-	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 // A directory copy is a bounded sequence of conditional commits, not a
 // transaction. Failure reports the number of entries already committed.
 func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if len(p.Dst.Segments) == 0 {
-		return nil, hosts.Fail("permission_denied", "Cannot replace a root")
+		return nil, protocol.FSFail("permission_denied", "Cannot replace a root")
 	}
 	_, sourcePath, err := f.check(ctx, call, p.Src, false)
 	if err != nil {
@@ -27,28 +25,28 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	}
 	rel, err := filepath.Rel(sourcePath, targetPath)
 	if err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
-		return nil, hosts.Fail("invalid_argument", "Cannot copy into the source subtree")
+		return nil, protocol.FSFail("invalid_argument", "Cannot copy into the source subtree")
 	}
 	info, err := f.info(ctx, call, p.Src, false)
 	if err != nil {
 		return nil, err
 	}
 	if version(info) != p.IfVersion {
-		return nil, hosts.Fail("version_conflict", "Copy source changed")
+		return nil, protocol.FSFail("version_conflict", "Copy source changed")
 	}
 	if info.IsDir() && !p.Condition.Absent {
-		return nil, hosts.Fail("unsupported", "Directory copy requires an absent destination")
+		return nil, protocol.FSFail("unsupported", "Directory copy requires an absent destination")
 	}
-	destination := func(src fsp.Path) fsp.Path {
-		return fsp.Path{RootID: p.Dst.RootID, Segments: append(append([]string{}, p.Dst.Segments...), src.Segments[len(p.Src.Segments):]...)}
+	destination := func(src protocol.FSPath) protocol.FSPath {
+		return protocol.FSPath{RootID: p.Dst.RootID, Segments: append(append([]string{}, p.Dst.Segments...), src.Segments[len(p.Src.Segments):]...)}
 	}
 	var plan []walkEntry
 	err = f.walk(ctx, call, p.Src, 256, false, false, false, func(e walkEntry) error {
 		if !e.info.IsDir() && !e.info.Mode().IsRegular() {
-			return hosts.Fail("unsupported", "Copy does not follow or recreate links")
+			return protocol.FSFail("unsupported", "Copy does not follow or recreate links")
 		}
 		if e.info.Mode().IsRegular() && e.info.Size() > 512<<20 {
-			return hosts.Fail("overloaded", "Copy source exceeds 512 MiB per file")
+			return protocol.FSFail("overloaded", "Copy source exceeds 512 MiB per file")
 		}
 		if _, _, err := f.check(ctx, call, destination(e.path), true); err != nil {
 			return err
@@ -57,7 +55,7 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 		return nil
 	})
 	if errors.Is(err, stopWalk) {
-		return nil, hosts.Fail("overloaded", "Copy exceeds entry budget")
+		return nil, protocol.FSFail("overloaded", "Copy exceeds entry budget")
 	}
 	if err != nil {
 		return nil, err
@@ -69,13 +67,13 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 			return nil, partial(err, completed)
 		}
 		if version(current) != version(e.info) {
-			return nil, partial(hosts.Fail("source_changed", "Copy source changed"), completed)
+			return nil, partial(protocol.FSFail("source_changed", "Copy source changed"), completed)
 		}
 		dst := destination(e.path)
 		if e.info.IsDir() {
 			_, err = f.mkdir(ctx, call, mkdirArgs{Path: dst})
 		} else {
-			condition := fsp.Condition{Absent: true}
+			condition := protocol.FSCondition{Absent: true}
 			if len(plan) == 1 {
 				condition = p.Condition
 			}
@@ -93,7 +91,7 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	return map[string]any{"entry": entry(p.Dst, current), "completed": completed}, nil
 }
 
-func (f *FS) copyFile(ctx context.Context, call Call, src, dst fsp.Path, version string, condition fsp.Condition) error {
+func (f *FS) copyFile(ctx context.Context, call Call, src, dst protocol.FSPath, version string, condition protocol.FSCondition) error {
 	readCall := call
 	readCall.Method = "read"
 	value, err := f.readOrStat(ctx, readCall, pathArgs{Path: src, IfVersion: version})

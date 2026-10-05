@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,19 +14,17 @@ import (
 	"github.com/coder/websocket"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // The built-in UI attaches only to our default agent-browser daemon. Owner MCP
 // overrides are independent services, with their own UI/transport contracts.
-func (c *Client) streamBrowser(parent context.Context, caller wire.Caller, input <-chan []byte, send func([]byte) error) error {
+func (c *Client) streamBrowser(parent context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error {
 	check := func() error {
 		if err := caller.Validate(parent); err != nil {
 			return err
 		}
 		if !caller.Direct || caller.Scope != "" || cfg.CheckAuth() != nil || !c.execAllowed(caller.Origin, "mcp.browser") {
-			return wire.Fail("permission_denied", "Browser access denied; request grant cmd mcp.browser")
+			return protocol.Fail("permission_denied", "Browser access denied; request grant cmd mcp.browser")
 		}
 		return nil
 	}
@@ -36,7 +35,7 @@ func (c *Client) streamBrowser(parent context.Context, caller wire.Caller, input
 	config, lifetime := c.browserConfig, c.browserContext
 	c.mcpMu.RUnlock()
 	if config == nil || lifetime == nil {
-		return wire.Fail("unsupported", "Live view requires the built-in agent-browser service")
+		return protocol.Fail("unsupported", "Live view requires the built-in agent-browser service")
 	}
 	// agent-browser publishes its OS-assigned stream port beside the daemon socket.
 	raw, err := os.ReadFile(filepath.Join(config.Env["AGENT_BROWSER_SOCKET_DIR"], "aic.stream"))
@@ -56,7 +55,7 @@ func (c *Client) streamBrowser(parent context.Context, caller wire.Caller, input
 		return fmt.Errorf("Browser stream: %w", err)
 	}
 	defer ws.CloseNow()
-	ws.SetReadLimit(rtcwire.BrowserMessageLimit)
+	ws.SetReadLimit(protocol.RtcBrowserMessageLimit)
 	writes := make(chan error, 1)
 	go func() {
 		var err error

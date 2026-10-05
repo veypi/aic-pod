@@ -4,6 +4,7 @@ package hostfs
 
 import (
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	hosts "github.com/veypi/aic-pod/protocol/fs"
 	"golang.org/x/sys/windows"
 )
 
@@ -65,7 +65,7 @@ func openRegular(root *os.Root, name string) (*os.File, error) {
 		if err != nil {
 			return nil, err
 		}
-		return nil, hosts.Fail("unsupported", "Read requires a regular file, not a reparse point")
+		return nil, protocol.FSFail("unsupported", "Read requires a regular file, not a reparse point")
 	}
 	return os.NewFile(uintptr(handle), filepath.Join(root.Name(), name)), nil
 }

@@ -7,11 +7,10 @@ import (
 	"encoding/json"
 	"github.com/pion/webrtc/v4"
 	"github.com/veypi/aic-pod/libs/hostauth"
-	"github.com/veypi/aic-pod/libs/proto"
+	"github.com/veypi/aic-pod/protocol"
+
 	"github.com/veypi/aic-pod/libs/rtc"
-	hosts "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
+
 	"regexp"
 	"strings"
 	"sync"
@@ -34,20 +33,20 @@ func largeToolContent(script string) string {
 	return strings.Repeat(script, count)
 }
 
-func (b *rtcTools) HandleTool(ctx context.Context, c wire.Caller, r wire.Request) wire.Response {
+func (b *rtcTools) HandleTool(ctx context.Context, c protocol.Caller, r protocol.Request) protocol.Response {
 	if strings.HasPrefix(r.Exec.Script, "large-") {
-		return wire.Reply(r.Protocol, r.ID, &wire.ExecResult{Content: largeToolContent(r.Exec.Script)}, nil)
+		return protocol.Reply(r.Protocol, r.ID, &protocol.Output{Content: largeToolContent(r.Exec.Script)}, nil)
 	}
 	if r.Exec.Script == "oversized" {
-		return wire.Reply(r.Protocol, r.ID, &wire.ExecResult{Content: strings.Repeat("x", rtcwire.ToolResponseLimit), Attrs: map[string]string{
+		return protocol.Reply(r.Protocol, r.ID, &protocol.Output{Content: strings.Repeat("x", protocol.RtcToolResponseLimit), Attrs: map[string]string{
 			"action": "exec", "exit_code": "0", "output": "/logs/stdout", "error_output": "/logs/stderr", "stderr": "large diagnostics",
 		}}, nil)
 	}
-	return wire.Reply(r.Protocol, r.ID, map[string]any{"native": r.Action, "approved": c.GrantApproved, "script": r.Exec.Script, "calls": b.calls.Add(1)}, nil)
+	return protocol.Reply(r.Protocol, r.ID, map[string]any{"native": r.Action, "approved": c.GrantApproved, "script": r.Exec.Script, "calls": b.calls.Add(1)}, nil)
 }
-func (b *rtcTools) DisconnectTools(wire.Caller) {}
+func (b *rtcTools) DisconnectTools(protocol.Caller) {}
 func TestRTCToolsWithoutBusinessSession(t *testing.T) {
-	key, _ := hosts.DirectKey("secret", "host_1")
+	key, _ := protocol.RtcDirectKey("secret", "host_1")
 	auth, err := hostauth.NewAccess(hostauth.AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key})
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +58,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pc.Close()
-	dc, err := pc.CreateDataChannel(rtcwire.Channel, nil)
+	dc, err := pc.CreateDataChannel(protocol.RtcChannel, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +74,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			return
 		}
 		toolChunks.Add(1)
-		if len(m.Data) > rtcwire.ToolResponseChunkSize {
+		if len(m.Data) > protocol.RtcToolResponseChunkSize {
 			t.Error("tool response exceeded SCTP chunk size")
 			return
 		}
@@ -86,7 +85,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 				return
 			}
 			size := binary.BigEndian.Uint32(data[:4])
-			if size == 0 || size > rtcwire.ToolResponseLimit {
+			if size == 0 || size > protocol.RtcToolResponseLimit {
 				t.Error("invalid tool response length")
 				return
 			}
@@ -111,7 +110,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	browserInput := make(chan []byte, 2)
 	browserStopped := make(chan struct{}, 2)
 	frame := []byte(`{"type":"frame","seq":73,"data":"` + string(bytes.Repeat([]byte("a"), 220000)) + `"}`)
-	relay := func(ctx context.Context, caller wire.Caller, input <-chan []byte, send func([]byte) error) error {
+	relay := func(ctx context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error {
 		browserStarted <- struct{}{}
 		defer func() { browserStopped <- struct{}{} }()
 		if err := send(frame); err != nil {
@@ -129,10 +128,10 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			}
 		}
 	}
-	service, err := rtc.New(rtc.Config{Browser: relay, HostID: "host_1", Authorization: auth, Tools: backend, Send: func(sig *proto.RtcSignal) {
+	service, err := rtc.New(rtc.Config{Browser: relay, HostID: "host_1", Authorization: auth, Tools: backend, Send: func(sig *protocol.RtcSignal) {
 		signalMu.Lock()
 		defer signalMu.Unlock()
-		if sig.Kind == proto.RtcAnswer {
+		if sig.Kind == protocol.RtcAnswer {
 			if e := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sig.SDP}); e != nil {
 				t.Error(e)
 			}
@@ -142,7 +141,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			}
 			candidates = nil
 		}
-		if sig.Kind == proto.RtcCandidate {
+		if sig.Kind == protocol.RtcCandidate {
 			var c webrtc.ICECandidateInit
 			_ = json.Unmarshal([]byte(sig.Candidate), &c)
 			if remote {
@@ -170,7 +169,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		t.Fatal("ICE timeout")
 	}
 	fp := regexp.MustCompile(`(?m)^a=fingerprint:(sha-256 [^\r\n]+)`).FindStringSubmatch(pc.LocalDescription().SDP)[1]
-	service.HandleSignal(&proto.RtcSignal{PC: "pc_tools", Kind: proto.RtcOffer, SDP: pc.LocalDescription().SDP})
+	service.HandleSignal(&protocol.RtcSignal{PC: "pc_tools", Kind: protocol.RtcOffer, SDP: pc.LocalDescription().SDP})
 	select {
 	case <-opened:
 	case <-time.After(10 * time.Second):
@@ -196,12 +195,12 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		}
 	}
 	call := func(script string) map[string]any {
-		return exchange(rtcwire.Request{Tool: &wire.Request{Protocol: rtcwire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: script}}})
+		return exchange(protocol.RtcRequest{Tool: &protocol.Request{Protocol: protocol.RtcProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionExec, Exec: &protocol.ExecPayload{Script: script}}})
 	}
 	if r := call("mcp call fixture next --json"); r["error"] == nil {
 		t.Fatal("unauthenticated call admitted")
 	}
-	denied, err := pc.CreateDataChannel(rtcwire.BrowserChannel, nil)
+	denied, err := pc.CreateDataChannel(protocol.RtcBrowserChannel, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,14 +216,14 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		t.Fatal("unauthenticated browser relay started")
 	default:
 	}
-	ticket, err := hosts.SignTicket(key, hosts.Ticket{HostID: "host_1", UserID: "owner", CredentialVersion: 1, PCID: "pc_tools", Fingerprint: fp}, time.Now())
+	ticket, err := protocol.SignRtcTicket(key, protocol.RtcTicket{HostID: "host_1", UserID: "owner", CredentialVersion: 1, PCID: "pc_tools", Fingerprint: fp}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := exchange(rtcwire.Request{ID: "auth1", Auth: "open", Ticket: ticket}); r["error"] != nil {
+	if r := exchange(protocol.RtcRequest{ID: "auth1", Auth: "open", Ticket: ticket}); r["error"] != nil {
 		t.Fatal(r)
 	}
-	stream, err := pc.CreateDataChannel(rtcwire.BrowserChannel, nil)
+	stream, err := pc.CreateDataChannel(protocol.RtcBrowserChannel, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +260,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("renderer ACK not forwarded")
 	}
-	duplicate, _ := pc.CreateDataChannel(rtcwire.BrowserChannel, nil)
+	duplicate, _ := pc.CreateDataChannel(protocol.RtcBrowserChannel, nil)
 	duplicateClosed := make(chan struct{})
 	duplicate.OnClose(func() { close(duplicateClosed) })
 	select {
@@ -280,11 +279,11 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			t.Fatal(out)
 		}
 	}
-	if r := exchange(rtcwire.Request{ID: "auth2", Auth: "open", Ticket: ticket}); r["error"] == nil {
+	if r := exchange(protocol.RtcRequest{ID: "auth2", Auth: "open", Ticket: ticket}); r["error"] == nil {
 		t.Fatal("duplicate authentication admitted")
 	}
 	for _, approved := range []bool{true, false} {
-		r := exchange(rtcwire.Request{Tool: &wire.Request{Protocol: rtcwire.Protocol, ID: "native", Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: "pwd"}}, GrantApproved: approved})
+		r := exchange(protocol.RtcRequest{Tool: &protocol.Request{Protocol: protocol.RtcProtocol, ID: "native", Action: protocol.ActionExec, Exec: &protocol.ExecPayload{Script: "pwd"}}, GrantApproved: approved})
 		value, ok := r["result"].(map[string]any)
 		if !ok || value["native"] != "exec" || value["approved"] != approved || r["request_id"] != "native" {
 			t.Fatalf("native route failed: %+v", r)
@@ -293,7 +292,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	// Concurrent multi-megabyte tool results stay distinct, even while the
 	// browser stream shares this peer and the buffered send queue fills.
 	for _, name := range []string{"large-a", "large-b"} {
-		raw, _ := json.Marshal(rtcwire.Request{Tool: &wire.Request{Protocol: rtcwire.Protocol, ID: name, Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: name}}})
+		raw, _ := json.Marshal(protocol.RtcRequest{Tool: &protocol.Request{Protocol: protocol.RtcProtocol, ID: name, Action: protocol.ActionExec, Exec: &protocol.ExecPayload{Script: name}}})
 		if err := dc.SendText(string(raw)); err != nil {
 			t.Fatal(err)
 		}

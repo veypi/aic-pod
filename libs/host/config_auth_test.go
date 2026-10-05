@@ -2,12 +2,12 @@ package host
 
 import (
 	"context"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // TestMalformedAuthBlocksRTCAndNATSUntilRepaired 锁定授权配置损坏的
@@ -23,7 +23,7 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(c.options().WorkDir, "marker.txt")
-	requests := []wire.Request{
+	requests := []protocol.Request{
 		execRequest("echo ran > "+filepath.ToSlash(marker), 30000),
 		fsRequest("text.write", map[string]any{"path": filepath.ToSlash(path), "content": "changed"}),
 	}
@@ -38,8 +38,8 @@ func TestMalformedAuthBlocksRTCAndNATSUntilRepaired(t *testing.T) {
 		corrupt()
 		cfg.Global.Normalize()
 		for _, request := range requests {
-			request.ID = wire.NewID("r_")
-			for _, response := range []wire.Response{callTool(t, c, context.Background(), testCaller(), request), signedCall(t, c, request, false, "s1", "")} {
+			request.ID = protocol.NewID("r_")
+			for _, response := range []protocol.Response{callTool(t, c, context.Background(), testCaller(), request), signedCall(t, c, request, false, "s1", "")} {
 				if response.Error == nil || response.Error.Code != "permission_denied" {
 					t.Fatalf("damaged authorization admitted call: %+v", response)
 				}

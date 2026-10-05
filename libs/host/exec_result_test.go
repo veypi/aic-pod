@@ -7,6 +7,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,8 +15,6 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func TestExecResultResponsePolicy(t *testing.T) {
@@ -119,8 +118,8 @@ func TestCompletedExecResultRecoveryFailures(t *testing.T) {
 		res              execution.ExecResult
 		logs             execLogSnapshot
 	}{
-		{"stdout-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: rtcwire.ToolResponseLimit + 1}},
-		{"combined-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", Stderr: "!", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: rtcwire.ToolResponseLimit}},
+		{"stdout-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: protocol.RtcToolResponseLimit + 1}},
+		{"combined-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", Stderr: "!", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: protocol.RtcToolResponseLimit}},
 		{"missing", path + ".missing", "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: 10}},
 		{"file-shortened", path, "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: 10}},
 		{"snapshot-shorter-than-capture", path, "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: 5}},
@@ -129,7 +128,7 @@ func TestCompletedExecResultRecoveryFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			attrs := map[string]string{"action": "exec", "output": tc.path, "error_output": tc.path}
 			got, err := completedExecResultResponse(&tc.res, attrs, true, tc.logs)
-			if err == nil || wire.AsFault(err).Code != tc.code {
+			if err == nil || protocol.AsFault(err).Code != tc.code {
 				t.Fatalf("error = %v, want %s", err, tc.code)
 			}
 			if got.Content != "" || got.Attrs["stderr"] != "" || got.Attrs["truncated"] != "" || got.Attrs["output"] != tc.path || got.Attrs["error_output"] != tc.path || got.Attrs["exit_code"] != "0" {
@@ -143,7 +142,7 @@ func TestCompletedExecResultNATSDoesNotReadLogs(t *testing.T) {
 	t.Parallel()
 	res := &execution.ExecResult{Stdout: "captured", Stderr: "diagnostic", StdoutTruncated: true, StderrTruncated: true}
 	attrs := map[string]string{"action": "exec", "output": "/missing", "error_output": "/missing"}
-	got, err := completedExecResultResponse(res, attrs, false, execLogSnapshot{stdoutBytes: rtcwire.ToolResponseLimit + 1, err: os.ErrNotExist})
+	got, err := completedExecResultResponse(res, attrs, false, execLogSnapshot{stdoutBytes: protocol.RtcToolResponseLimit + 1, err: os.ErrNotExist})
 	if err != nil || got.Content != "captured" || got.Attrs["stderr"] != "diagnostic" || got.Attrs["truncated"] != "true" {
 		t.Fatalf("NATS must keep bounded capture without reading logs: response=%+v, error=%v", got, err)
 	}
@@ -171,7 +170,7 @@ func TestExecScriptRTCRestoresLargeJSON(t *testing.T) {
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
-	got, ok := r.Result.(*wire.ExecResult)
+	got, ok := r.Result.(*protocol.Output)
 	if !ok {
 		t.Fatalf("result type = %T", r.Result)
 	}
@@ -188,7 +187,7 @@ func TestExecScriptRTCRestoresLargeJSON(t *testing.T) {
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
-	got, ok = r.Result.(*wire.ExecResult)
+	got, ok = r.Result.(*protocol.Output)
 	if !ok {
 		t.Fatalf("NATS result type = %T", r.Result)
 	}

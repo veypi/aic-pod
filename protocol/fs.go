@@ -1,6 +1,5 @@
-// Package fs defines structured filesystem locations and results, independent
-// from AI text formatting and physical host path syntax.
-package fs
+// FS 数据面的结构化位置与写入条件（独立于 AI 文本格式化与物理 host 路径语法）。
+package protocol
 
 import (
 	"fmt"
@@ -8,14 +7,14 @@ import (
 	"unicode/utf8"
 )
 
-const Contract = "fs/1"
+const FSContract = "fs/1"
 
-type Path struct {
+type FSPath struct {
 	RootID   string   `json:"root_id"`
 	Segments []string `json:"segments"`
 }
 
-func (p Path) Validate(windows bool) error {
+func (p FSPath) Validate(windows bool) error {
 	if !ValidID(p.RootID) || p.Segments == nil || len(p.Segments) > 256 {
 		return Fail("invalid_argument", "Invalid file location")
 	}
@@ -32,8 +31,8 @@ func (p Path) Validate(windows bool) error {
 	return nil
 }
 
-type Entry struct {
-	Path       Path   `json:"path"`
+type FSEntry struct {
+	Path       FSPath `json:"path"`
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`
 	Size       *int64 `json:"size,omitempty"`
@@ -41,13 +40,13 @@ type Entry struct {
 	Version    string `json:"version"`
 	MediaType  string `json:"media_type,omitempty"`
 }
-type Condition struct {
+type FSCondition struct {
 	Absent  bool   `json:"absent,omitempty"`
 	Version string `json:"version,omitempty"`
 	Any     bool   `json:"any,omitempty"`
 }
 
-func (c Condition) Validate() error {
+func (c FSCondition) Validate() error {
 	n := 0
 	if c.Absent {
 		n++
@@ -63,7 +62,7 @@ func (c Condition) Validate() error {
 	}
 	return nil
 }
-func (c Condition) Check(version string, exists bool) error {
+func (c FSCondition) Check(version string, exists bool) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -77,4 +76,18 @@ func (c Condition) Check(version string, exists bool) error {
 	}
 	return nil
 }
-func (p Path) String() string { return fmt.Sprintf("%s/%s", p.RootID, strings.Join(p.Segments, "/")) }
+func (p FSPath) String() string { return fmt.Sprintf("%s/%s", p.RootID, strings.Join(p.Segments, "/")) }
+
+// FSResourceRef 是上传/下载字料的身份引用（owner 隔离由服务层校验）。
+type FSResourceRef struct {
+	ID    string `json:"id"`
+	Epoch string `json:"epoch"`
+	Kind  string `json:"kind"`
+}
+
+// FSMaxSafeInteger 是 JS 互通的整数上限。
+const FSMaxSafeInteger = 1<<53 - 1
+
+// FSFail 构造 FS 失败：Effect=none——FS 各失败入口保证无任何副作用
+// （批次 2 错误模型收敛后保留此语义，不得机械替换为无 Effect 的 Fail）。
+func FSFail(code, message string) *Fault { f := Fail(code, message); f.Effect = "none"; return f }

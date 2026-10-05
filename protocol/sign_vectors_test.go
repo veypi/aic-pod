@@ -1,4 +1,4 @@
-package proto
+package protocol
 
 // 固定向量值（sign_test.go）。由实现生成一次后硬编码锁定：
 // 任何派生参数、canonical 结构、编码方式的变化都会使测试失败——

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // This test launches the release's actual upstream servers. It is opt-in because
@@ -62,7 +62,7 @@ func TestUpstreamMCPThroughExec(t *testing.T) {
 		if response.Error != nil {
 			t.Fatal(response.Error)
 		}
-		out := decoded[wire.ExecResult](t, response.Result)
+		out := decoded[protocol.Output](t, response.Result)
 		if out.Attrs["exit_code"] != "0" {
 			t.Fatalf("%s: %+v", script, out)
 		}

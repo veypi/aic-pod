@@ -1,23 +1,22 @@
 package hostauth
 
 import (
+	"github.com/veypi/aic-pod/protocol"
 	"strings"
 	"testing"
 	"time"
-
-	hosts "github.com/veypi/aic-pod/protocol/hosts_rtc"
 )
 
 func TestAccessBindsTicketPeerAndLease(t *testing.T) {
 	now := time.Unix(1800000000, 0)
-	key, _ := hosts.DirectKey("secret", "host_1")
+	key, _ := protocol.RtcDirectKey("secret", "host_1")
 	a, err := NewAccess(AccessConfig{HostID: "host_1", UserID: "owner", CredentialVersion: 2, Key: key, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fp := "sha-256 " + strings.TrimSuffix(strings.Repeat("AB:", 32), ":")
 	makeTicket := func(connection string) string {
-		ticket, err := hosts.SignTicket(key, hosts.Ticket{HostID: "host_1", UserID: "owner", CredentialVersion: 2, PCID: "pc_1", Fingerprint: fp, ConnectionID: connection}, now)
+		ticket, err := protocol.SignRtcTicket(key, protocol.RtcTicket{HostID: "host_1", UserID: "owner", CredentialVersion: 2, PCID: "pc_1", Fingerprint: fp, ConnectionID: connection}, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,4 +53,3 @@ func TestAccessBindsTicketPeerAndLease(t *testing.T) {
 		t.Fatal("ticket replay after disconnect")
 	}
 }
-

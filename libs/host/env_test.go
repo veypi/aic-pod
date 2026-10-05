@@ -1,6 +1,7 @@
-package proto
+package host
 
 import (
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"reflect"
 	"runtime"
@@ -13,7 +14,7 @@ func TestHostEnvironmentPaths(t *testing.T) {
 		path, home = `C:\Windows\System32;C:\Tools`, `C:\Users\agent`
 	}
 	env := map[string]string{
-		"PATH": NormalizeHostPathList(path), "HOME": NormalizeHostPath(home),
+		"PATH": NormalizeHostPathList(path), "HOME": protocol.NormalizeHostPath(home),
 		"EMPTY": "", "DEMO": "value with spaces=a:b", "TMPDIR": "/tmp",
 	}
 	tmp := "/tmp"

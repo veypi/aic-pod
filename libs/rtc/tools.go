@@ -5,37 +5,36 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"time"
 
 	"github.com/pion/webrtc/v4"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type ToolBackend interface {
-	HandleTool(context.Context, wire.Caller, wire.Request) wire.Response
-	DisconnectTools(wire.Caller)
+	HandleTool(context.Context, protocol.Caller, protocol.Request) protocol.Response
+	DisconnectTools(protocol.Caller)
 }
 
 func (p *peer) sendToolResponse(dc *webrtc.DataChannel, raw []byte) error {
-	if len(raw) == 0 || len(raw) > rtcwire.ToolResponseLimit {
-		return wire.Fail("overloaded", "Device response too large")
+	if len(raw) == 0 || len(raw) > protocol.RtcToolResponseLimit {
+		return protocol.Fail("overloaded", "Device response too large")
 	}
 	// Keep every binary response contiguous even when tool calls finish together.
 	// Authentication text may interleave; it never participates in reassembly.
 	p.toolsResponse.Lock()
 	defer p.toolsResponse.Unlock()
-	if len(raw) <= rtcwire.ToolResponseChunkSize {
+	if len(raw) <= protocol.RtcToolResponseChunkSize {
 		return p.sendRaw(p.ctx, dc, raw, true)
 	}
-	first := make([]byte, rtcwire.ToolResponseChunkSize)
+	first := make([]byte, protocol.RtcToolResponseChunkSize)
 	binary.BigEndian.PutUint32(first, uint32(len(raw)))
 	n := copy(first[4:], raw)
 	if err := p.sendRaw(p.ctx, dc, first[:4+n], false); err != nil {
 		return err
 	}
 	for raw = raw[n:]; len(raw) > 0; {
-		n = min(len(raw), rtcwire.ToolResponseChunkSize)
+		n = min(len(raw), protocol.RtcToolResponseChunkSize)
 		if err := p.sendRaw(p.ctx, dc, raw[:n], false); err != nil {
 			return err
 		}
@@ -44,15 +43,15 @@ func (p *peer) sendToolResponse(dc *webrtc.DataChannel, raw []byte) error {
 	return nil
 }
 
-func (p *peer) toolCaller() (wire.Caller, error) {
+func (p *peer) toolCaller() (protocol.Caller, error) {
 	p.mu.Lock()
 	connection := p.connection
 	p.mu.Unlock()
 	c, err := p.s.cfg.Authorization.Caller(connection)
 	if err != nil {
-		return wire.Caller{}, err
+		return protocol.Caller{}, err
 	}
-	return wire.Caller{Direct: true, Expiry: func() time.Time {
+	return protocol.Caller{Direct: true, Expiry: func() time.Time {
 		current, err := p.s.cfg.Authorization.Caller(connection)
 		if err != nil {
 			return time.Time{}
@@ -81,8 +80,8 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 	p.mu.Unlock()
 	dc.OnClose(func() { p.s.drop(p) })
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		var r rtcwire.Request
-		if !msg.IsString || len(msg.Data) > wire.MaxMessageBytes || wire.Decode(msg.Data, &r) != nil || r.Validate() != nil {
+		var r protocol.RtcRequest
+		if !msg.IsString || len(msg.Data) > protocol.MaxMessageBytes || protocol.Decode(msg.Data, &r) != nil || r.Validate() != nil {
 			p.s.drop(p)
 			return
 		}
@@ -98,7 +97,7 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 			}
 		}
 		fail := func(err error) {
-			raw, _ := json.Marshal(wire.Reply(rtcwire.Protocol, r.Tool.ID, nil, err))
+			raw, _ := json.Marshal(protocol.Reply(protocol.RtcProtocol, r.Tool.ID, nil, err))
 			send(raw)
 		}
 		caller, err := p.toolCaller()
@@ -114,28 +113,28 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 				fail(err)
 				return
 			}
-			if len(raw) > rtcwire.ToolResponseLimit {
+			if len(raw) > protocol.RtcToolResponseLimit {
 				// Keep only small execution metadata so callers can locate the
 				// completed output without replaying a possibly mutating command.
 				var result any
-				if exec, ok := response.Result.(*wire.ExecResult); ok && exec != nil {
+				if exec, ok := response.Result.(*protocol.Output); ok && exec != nil {
 					attrs := make(map[string]string)
 					for _, key := range []string{"action", "exit_code", "output", "error_output"} {
 						if value := exec.Attrs[key]; value != "" && len(value) <= 4096 {
 							attrs[key] = value
 						}
 					}
-					result = &wire.ExecResult{Attrs: attrs}
+					result = &protocol.Output{Attrs: attrs}
 				}
-				err := wire.Fail("overloaded", fmt.Sprintf("Device response is %d bytes, exceeding the %d MiB limit; use execution logs for the complete output", len(raw), rtcwire.ToolResponseLimit>>20))
-				raw, _ = json.Marshal(wire.Reply(rtcwire.Protocol, r.Tool.ID, result, err))
+				err := protocol.Fail("overloaded", fmt.Sprintf("Device response is %d bytes, exceeding the %d MiB limit; use execution logs for the complete output", len(raw), protocol.RtcToolResponseLimit>>20))
+				raw, _ = json.Marshal(protocol.Reply(protocol.RtcProtocol, r.Tool.ID, result, err))
 				send(raw)
 				return
 			}
 			send(raw)
 		}
 		// Cancellation must not queue behind the work it cancels.
-		if r.Tool.Action == wire.ActionCancel {
+		if r.Tool.Action == protocol.ActionCancel {
 			invoke()
 			return
 		}
@@ -143,11 +142,11 @@ func (p *peer) toolsChannel(dc *webrtc.DataChannel) {
 		case p.requests <- struct{}{}:
 			go func() { defer func() { <-p.requests }(); invoke() }()
 		default:
-			fail(wire.Fail("overloaded", "Too many pending requests"))
+			fail(protocol.Fail("overloaded", "Too many pending requests"))
 		}
 	})
 }
-func (p *peer) authenticate(dc *webrtc.DataChannel, r rtcwire.Request) {
+func (p *peer) authenticate(dc *webrtc.DataChannel, r protocol.RtcRequest) {
 	var value any
 	fp, err := p.fingerprint()
 	if err == nil {
@@ -155,7 +154,7 @@ func (p *peer) authenticate(dc *webrtc.DataChannel, r rtcwire.Request) {
 		case "open":
 			p.mu.Lock()
 			if p.closed || p.connection != "" {
-				err = wire.Fail("unauthorized", "Peer already authenticated or closed")
+				err = protocol.Fail("unauthorized", "Peer already authenticated or closed")
 			} else {
 				admission, e := p.s.cfg.Authorization.Admit(r.Ticket, p.id, fp)
 				err = e
@@ -173,12 +172,12 @@ func (p *peer) authenticate(dc *webrtc.DataChannel, r rtcwire.Request) {
 				value = map[string]bool{"renewed": err == nil}
 			}
 		default:
-			err = wire.Fail("invalid_argument", "Unknown authentication operation")
+			err = protocol.Fail("invalid_argument", "Unknown authentication operation")
 		}
 	}
-	result := rtcwire.AuthResult{ID: r.ID, Result: value}
+	result := protocol.RtcAuthResult{ID: r.ID, Result: value}
 	if err != nil {
-		result.Error = wire.AsFault(err)
+		result.Error = protocol.AsFault(err)
 	}
 	raw, _ := json.Marshal(result)
 	if err = p.sendRaw(p.ctx, dc, raw, true); err != nil {

@@ -3,11 +3,9 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"testing"
 	"time"
-
-	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 // TestNatsToolsAuthentication 锁定 NATS 可信转发边界（hosts_nats/2）：
@@ -18,13 +16,13 @@ func TestNatsToolsAuthentication(t *testing.T) {
 	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir()})
 	t.Cleanup(func() { _ = c.Close() })
 	c.hostID, c.uid, c.kTool = "host_1", "owner", "test-tool-key"
-	route, _ := natswire.Subject(c.uid, c.hostID)
-	makeReq := func() natswire.Request {
-		r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: wire.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: fsRequest("roots", map[string]any{})}
-		natswire.Sign(c.kTool, &r)
+	route, _ := protocol.NatsSubject(c.uid, c.hostID)
+	makeReq := func() protocol.NatsRequest {
+		r := protocol.NatsRequest{HostID: c.hostID, Subject: route, Caller: c.uid, Nonce: protocol.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: fsRequest("roots", map[string]any{})}
+		protocol.NatsSign(c.kTool, &r)
 		return r
 	}
-	send := func(r natswire.Request, subject string) wire.Response {
+	send := func(r protocol.NatsRequest, subject string) protocol.Response {
 		b, _ := json.Marshal(r)
 		return callNATS(t, c, subject, b)
 	}
@@ -37,7 +35,7 @@ func TestNatsToolsAuthentication(t *testing.T) {
 	}
 	r = makeReq()
 	r.Request.Action = "stream.open"
-	natswire.Sign(c.kTool, &r)
+	protocol.NatsSign(c.kTool, &r)
 	if got := send(r, route); got.Error == nil {
 		t.Fatal("NATS exposed RTC-only stream")
 	}
@@ -51,7 +49,7 @@ func TestNatsToolsAuthentication(t *testing.T) {
 	}
 	r = makeReq()
 	r.Caller = "foreign"
-	natswire.Sign(c.kTool, &r)
+	protocol.NatsSign(c.kTool, &r)
 	if got := send(r, route); got.Error == nil {
 		t.Fatal("foreign owner admitted")
 	}

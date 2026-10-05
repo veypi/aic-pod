@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,9 +14,6 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
-	fsp "github.com/veypi/aic-pod/protocol/fs"
-	natswire "github.com/veypi/aic-pod/protocol/hosts_nats"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func TestExecNativeEnvironment(t *testing.T) {
@@ -75,19 +73,19 @@ func testClient(t *testing.T) (*Client, string) {
 
 // signedCall 经 NATS 可信通道下发请求（hosts_nats/2：grantApproved 是签名
 // 信封内的审批事实，随信封进可信调用上下文）。
-func signedCall(t *testing.T, c *Client, req wire.Request, grantApproved bool, origin, scope string) wire.Response {
+func signedCall(t *testing.T, c *Client, req protocol.Request, grantApproved bool, origin, scope string) protocol.Response {
 	t.Helper()
 	if req.ID == "" {
-		req.ID = wire.NewID("r_")
+		req.ID = protocol.NewID("r_")
 	}
-	route, _ := natswire.Subject(c.uid, c.hostID)
-	r := natswire.Request{HostID: c.hostID, Subject: route, Caller: c.uid, Origin: origin, Scope: scope, GrantApproved: grantApproved, Nonce: wire.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: req}
-	natswire.Sign(c.kTool, &r)
+	route, _ := protocol.NatsSubject(c.uid, c.hostID)
+	r := protocol.NatsRequest{HostID: c.hostID, Subject: route, Caller: c.uid, Origin: origin, Scope: scope, GrantApproved: grantApproved, Nonce: protocol.NewID("n_"), Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: req}
+	protocol.NatsSign(c.kTool, &r)
 	raw, _ := json.Marshal(r)
 	return callNATS(t, c, route, raw)
 }
-func testCaller() wire.Caller {
-	return wire.Caller{Subject: "owner", ConnectionID: "rtc1", Origin: "s1", ExpiresAt: time.Now().Add(time.Minute)}
+func testCaller() protocol.Caller {
+	return protocol.Caller{Subject: "owner", ConnectionID: "rtc1", Origin: "s1", ExpiresAt: time.Now().Add(time.Minute)}
 }
 func decoded[T any](t *testing.T, v any) T {
 	t.Helper()
@@ -99,21 +97,21 @@ func decoded[T any](t *testing.T, v any) T {
 	return out
 }
 
-func fsRequest(method string, args any) wire.Request {
+func fsRequest(method string, args any) protocol.Request {
 	raw, _ := json.Marshal(args)
-	return wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionFS, FS: &wire.FSInvocation{Method: method, Args: raw}}
+	return protocol.Request{Protocol: protocol.NatsProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionFS, FS: &protocol.FSInvocation{Method: method, Args: raw}}
 }
-func execRequest(script string, waitMS int64) wire.Request {
-	return wire.Request{Protocol: natswire.Protocol, ID: wire.NewID("r_"), Action: wire.ActionExec, Exec: &wire.ExecPayload{Script: script, WaitMS: waitMS}}
+func execRequest(script string, waitMS int64) protocol.Request {
+	return protocol.Request{Protocol: protocol.NatsProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionExec, Exec: &protocol.ExecPayload{Script: script, WaitMS: waitMS}}
 }
 
 // execResult 解码统一 exec 输出（§3.1：content + attrs）。
-func execAttrs(t *testing.T, r wire.Response) map[string]string {
+func execAttrs(t *testing.T, r protocol.Response) map[string]string {
 	t.Helper()
 	if r.Error != nil {
 		t.Fatalf("exec failed: %+v", r.Error)
 	}
-	res := decoded[wire.ExecResult](t, r.Result)
+	res := decoded[protocol.Output](t, r.Result)
 	return res.Attrs
 }
 
@@ -126,7 +124,7 @@ func TestExecScriptForeground(t *testing.T) {
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
-	res := decoded[wire.ExecResult](t, r.Result)
+	res := decoded[protocol.Output](t, r.Result)
 	if !strings.Contains(res.Content, "hello-vsh") {
 		t.Fatalf("content = %q", res.Content)
 	}
@@ -158,12 +156,12 @@ func TestExecScriptTimeoutAdoptsBackgroundThenCancel(t *testing.T) {
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
-	res := decoded[wire.ExecResult](t, r.Result)
+	res := decoded[protocol.Output](t, r.Result)
 	if res.Attrs["background"] != "true" || res.Attrs["id"] == "" {
 		t.Fatalf("not backgrounded: %v", res.Attrs)
 	}
 	// cancel(request_id) 终止同一执行（§2.6）。
-	cancel := c.HandleTool(context.Background(), caller, wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: req.ID})
+	cancel := c.HandleTool(context.Background(), caller, protocol.Request{ID: protocol.NewID("r_"), Action: protocol.ActionCancel, CancelID: req.ID})
 	if cancel.Error != nil {
 		t.Fatal(cancel.Error)
 	}
@@ -182,7 +180,7 @@ func TestExecScriptTimeoutAdoptsBackgroundThenCancel(t *testing.T) {
 	// 归属不匹配 = 不存在（取消不跨用户/会话）。
 	stranger := testCaller()
 	stranger.Origin = "other"
-	r2 := c.HandleTool(context.Background(), stranger, wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: req.ID})
+	r2 := c.HandleTool(context.Background(), stranger, protocol.Request{ID: protocol.NewID("r_"), Action: protocol.ActionCancel, CancelID: req.ID})
 	if r2.Error == nil || r2.Error.Code != "not_found" {
 		t.Fatalf("cross-session cancel admitted: %+v", r2)
 	}
@@ -196,7 +194,7 @@ func TestExecGrantRequiresGrantApproved(t *testing.T) {
 	target := t.TempDir()
 	// 未携带审批事实：grant 修改入口拒绝（退出码非 0，stderr 引导）。
 	r := callTool(t, c, context.Background(), testCaller(), execRequest("grant fs "+target, 30000))
-	res := decoded[wire.ExecResult](t, r.Result)
+	res := decoded[protocol.Output](t, r.Result)
 	if res.Attrs["exit_code"] == "0" {
 		t.Fatalf("grant without grant_approved succeeded: %q", res.Content)
 	}
@@ -207,7 +205,7 @@ func TestExecGrantRequiresGrantApproved(t *testing.T) {
 	approved := testCaller()
 	approved.GrantApproved = true
 	r = callTool(t, c, context.Background(), approved, execRequest("grant fs "+target, 30000))
-	res = decoded[wire.ExecResult](t, r.Result)
+	res = decoded[protocol.Output](t, r.Result)
 	if res.Attrs["exit_code"] != "0" {
 		t.Fatalf("approved grant failed: %q stderr=%q", res.Content, res.Attrs["stderr"])
 	}
@@ -219,17 +217,17 @@ func TestExecGrantRequiresGrantApproved(t *testing.T) {
 func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
 	c, _ := testClient(t)
 	m := c.buildMgmt()
-	if m.Transports["rtc"].Enabled || !m.Transports["proxy"].Supports(natswire.Protocol, "fs") {
+	if m.Transports["rtc"].Enabled || !m.Transports["proxy"].Supports(protocol.NatsProtocol, "fs") {
 		t.Fatal(m)
 	}
 	path := filepath.Join(c.opts.WorkDir, "note.txt")
 	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	call := func(method string, args any, scope string) wire.Response {
+	call := func(method string, args any, scope string) protocol.Response {
 		return signedCall(t, c, fsRequest(method, args), false, "", scope)
 	}
-	location := fsp.Path{RootID: "root", Segments: strings.Split(strings.TrimPrefix(filepath.ToSlash(path), "/"), "/")}
+	location := protocol.FSPath{RootID: "root", Segments: strings.Split(strings.TrimPrefix(filepath.ToSlash(path), "/"), "/")}
 	roots := decoded[struct {
 		Roots []struct {
 			ID string `json:"id"`
@@ -241,7 +239,7 @@ func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
 		t.Fatal(stat.Error)
 	}
 	source := decoded[struct {
-		Ref fsp.ResourceRef `json:"ref"`
+		Ref protocol.FSResourceRef `json:"ref"`
 	}](t, call("read", map[string]any{"path": location}, "fs").Result)
 	// A new RTC connection uses the same authenticated owner and source.
 	rtcCaller := testCaller()
@@ -285,12 +283,12 @@ func TestSignedFSProxySharesFilesystemWithoutSession(t *testing.T) {
 
 // execResultLoose 解码错误响应中保留的部分结果（Reply 保留 Result——
 // 错误与部分结果并存，attrs 恒含日志地址）。
-func execResultLoose(t *testing.T, r wire.Response) wire.ExecResult {
+func execResultLoose(t *testing.T, r protocol.Response) protocol.Output {
 	t.Helper()
 	if r.Result == nil {
 		t.Fatalf("错误响应丢失了部分结果（日志地址）: %+v", r.Error)
 	}
-	return decoded[wire.ExecResult](t, r.Result)
+	return decoded[protocol.Output](t, r.Result)
 }
 
 // trackedExec 取前台执行的登记句柄（测试等待执行实际结束用——取消/断连
@@ -360,8 +358,8 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 	if r1.Error != nil {
 		t.Fatal(r1.Error)
 	}
-	id1 := decoded[wire.ExecResult](t, r1.Result).Attrs["id"]
-	if decoded[wire.ExecResult](t, r1.Result).Attrs["background"] != "true" || id1 == "" {
+	id1 := decoded[protocol.Output](t, r1.Result).Attrs["id"]
+	if decoded[protocol.Output](t, r1.Result).Attrs["background"] != "true" || id1 == "" {
 		t.Fatal("第一次执行未转后台占位")
 	}
 	defer func() {
@@ -405,7 +403,7 @@ func TestDisconnectToolsCancelsForeground(t *testing.T) {
 	c, _ := testClient(t)
 	caller := testCaller()
 	req := execRequest("sleep 30; echo SURVIVED", 30000)
-	type reply struct{ r wire.Response }
+	type reply struct{ r protocol.Response }
 	done := make(chan reply, 1)
 	start := time.Now()
 	go func() { done <- reply{callTool(t, c, context.Background(), caller, req)} }()
@@ -415,7 +413,7 @@ func TestDisconnectToolsCancelsForeground(t *testing.T) {
 		t.Fatal("前台执行未登记取消句柄")
 	}
 	c.DisconnectTools(caller)
-	var r wire.Response
+	var r protocol.Response
 	select {
 	case got := <-done:
 		r = got.r
@@ -437,7 +435,7 @@ func TestDisconnectToolsCancelsForeground(t *testing.T) {
 
 func TestCancelUnknownExecution(t *testing.T) {
 	c, _ := testClient(t)
-	r := c.HandleTool(context.Background(), testCaller(), wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: "r_nonexistent"})
+	r := c.HandleTool(context.Background(), testCaller(), protocol.Request{ID: protocol.NewID("r_"), Action: protocol.ActionCancel, CancelID: "r_nonexistent"})
 	if r.Error == nil || r.Error.Code != "not_found" {
 		t.Fatalf("%+v", r)
 	}
@@ -450,16 +448,16 @@ func TestExecScriptForegroundCancel(t *testing.T) {
 	c, _ := testClient(t)
 	caller := testCaller()
 	req := execRequest("sleep 30; echo SURVIVED", 30000)
-	type reply struct{ r wire.Response }
+	type reply struct{ r protocol.Response }
 	done := make(chan reply, 1)
 	start := time.Now()
 	go func() { done <- reply{c.HandleTool(context.Background(), caller, req)} }()
 	time.Sleep(300 * time.Millisecond)
-	cancel := c.HandleTool(context.Background(), caller, wire.Request{ID: wire.NewID("r_"), Action: wire.ActionCancel, CancelID: req.ID})
+	cancel := c.HandleTool(context.Background(), caller, protocol.Request{ID: protocol.NewID("r_"), Action: protocol.ActionCancel, CancelID: req.ID})
 	if cancel.Error != nil {
 		t.Fatal(cancel.Error)
 	}
-	var r wire.Response
+	var r protocol.Response
 	select {
 	case got := <-done:
 		r = got.r

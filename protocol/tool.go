@@ -1,4 +1,4 @@
-package tool
+package protocol
 
 import (
 	"bytes"
@@ -52,14 +52,18 @@ type FSInvocation struct {
 	Args   json.RawMessage `json:"args"`
 }
 
-// ExecResult 是 exec 的响应结果：整段脚本的输出预览和 attrs，
-// 不是逐指令的业务对象。attrs 约定（字符串值）：
+// Output 是指令输出（exec 响应结果与 fs 数据面结果同一形状）：Content 为
+// 文本正文，Attrs 为结构化元数据（字符串值）。exec 的 attrs 约定：
 //   - output / error_output：stdout / stderr 日志地址（日志创建后恒有）
 //   - exit_code：完成时存在
 //   - truncated：任一预览超限
 //   - stderr：stderr 预览
 //   - background=true + id：仅等待超时转后台时存在
-type ExecResult struct {
+//
+// json tag 同时是 RTC 直连帧协议的线上契约（libs/rtc fschan 直接
+// json.Marshal 本类型）——页面端按小写键解析（2026-09-10 实网事故：Go 侧
+// 消费方反序列化大小写不敏感，仅 JS 侧可见大写键丢空）。
+type Output struct {
 	Content string            `json:"content"`
 	Attrs   map[string]string `json:"attrs,omitempty"`
 }
@@ -108,11 +112,11 @@ func Reply(protocol, id string, v any, err error) Response {
 	return r
 }
 
-var name = regexp.MustCompile(`^[a-z][a-zA-Z0-9_.-]{0,63}$`)
-var id = regexp.MustCompile(`^[A-Za-z0-9_:-]{1,128}$`)
+var nameRe = regexp.MustCompile(`^[a-z][a-zA-Z0-9_.-]{0,63}$`)
+var idRe = regexp.MustCompile(`^[A-Za-z0-9_:-]{1,128}$`)
 
-func ValidName(v string) bool { return name.MatchString(v) }
-func ValidID(v string) bool   { return id.MatchString(v) }
+func ValidName(v string) bool { return nameRe.MatchString(v) }
+func ValidID(v string) bool   { return idRe.MatchString(v) }
 func NewID(prefix string) string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

@@ -1,11 +1,9 @@
 package hostauth
 
 import (
+	"github.com/veypi/aic-pod/protocol"
 	"sync"
 	"time"
-
-	hosts "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type AccessConfig struct {
@@ -35,8 +33,8 @@ type Access struct {
 }
 
 func NewAccess(cfg AccessConfig) (*Access, error) {
-	if !wire.ValidID(cfg.HostID) || !wire.ValidID(cfg.UserID) || cfg.CredentialVersion == 0 || len(cfg.Key) != 32 {
-		return nil, wire.Fail("invalid_argument", "Invalid device authorization configuration")
+	if !protocol.ValidID(cfg.HostID) || !protocol.ValidID(cfg.UserID) || cfg.CredentialVersion == 0 || len(cfg.Key) != 32 {
+		return nil, protocol.Fail("invalid_argument", "Invalid device authorization configuration")
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -47,18 +45,18 @@ func NewAccess(cfg AccessConfig) (*Access, error) {
 	cfg.Key = append([]byte(nil), cfg.Key...)
 	return &Access{cfg: cfg, consumed: map[string]time.Time{}, connections: map[string]*connection{}}, nil
 }
-func (a *Access) check(ticket, pcID, fingerprint string) (hosts.Ticket, error) {
-	t, err := hosts.VerifyTicket(a.cfg.Key, ticket, a.cfg.Now())
+func (a *Access) check(ticket, pcID, fingerprint string) (protocol.RtcTicket, error) {
+	t, err := protocol.VerifyRtcTicket(a.cfg.Key, ticket, a.cfg.Now())
 	if err != nil {
 		return t, err
 	}
-	fp, err := hosts.NormalizeFingerprint(fingerprint)
+	fp, err := protocol.NormalizeFingerprint(fingerprint)
 	if err != nil || t.HostID != a.cfg.HostID || t.UserID != a.cfg.UserID || t.CredentialVersion != a.cfg.CredentialVersion || t.PCID != pcID || t.Fingerprint != fp {
-		return hosts.Ticket{}, wire.Fail("unauthorized", "Direct ticket does not match this DTLS connection")
+		return protocol.RtcTicket{}, protocol.Fail("unauthorized", "Direct ticket does not match this DTLS connection")
 	}
 	return t, nil
 }
-func (a *Access) consume(t hosts.Ticket) error {
+func (a *Access) consume(t protocol.RtcTicket) error {
 	now := a.cfg.Now()
 	if !now.Before(a.nextSweep) {
 		a.nextSweep = now.Add(time.Second)
@@ -69,10 +67,10 @@ func (a *Access) consume(t hosts.Ticket) error {
 		}
 	}
 	if _, exists := a.consumed[t.ID]; exists {
-		return wire.Fail("unauthorized", "Direct ticket has already been used")
+		return protocol.Fail("unauthorized", "Direct ticket has already been used")
 	}
 	if len(a.consumed) >= 32768 {
-		return wire.Fail("overloaded", "Ticket admission quota reached")
+		return protocol.Fail("overloaded", "Ticket admission quota reached")
 	}
 	a.consumed[t.ID] = time.Unix(t.ExpiresAt, 0)
 	return nil
@@ -83,18 +81,18 @@ func (a *Access) Admit(ticket, pcID, remoteFingerprint string) (Admission, error
 		return Admission{}, err
 	}
 	if t.ConnectionID != "" {
-		return Admission{}, wire.Fail("unauthorized", "A renewal ticket cannot open a connection")
+		return Admission{}, protocol.Fail("unauthorized", "A renewal ticket cannot open a connection")
 	}
-	id := wire.NewID("conn_")
+	id := protocol.NewID("conn_")
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, existing := range a.connections {
 		if existing.pcID == pcID {
-			return Admission{}, wire.Fail("unauthorized", "Peer connection is already authenticated")
+			return Admission{}, protocol.Fail("unauthorized", "Peer connection is already authenticated")
 		}
 	}
 	if len(a.connections) >= a.cfg.MaxConnections {
-		return Admission{}, wire.Fail("overloaded", "Connection limit reached")
+		return Admission{}, protocol.Fail("overloaded", "Connection limit reached")
 	}
 	if err = a.consume(t); err != nil {
 		return Admission{}, err
@@ -108,7 +106,7 @@ func (a *Access) Caller(connectionID string) (Caller, error) {
 	defer a.mu.Unlock()
 	c := a.connections[connectionID]
 	if c == nil || !c.caller.ExpiresAt.After(a.cfg.Now()) {
-		return Caller{}, wire.Fail("unauthorized", "Connection authorization expired")
+		return Caller{}, protocol.Fail("unauthorized", "Connection authorization expired")
 	}
 	return c.caller, nil
 }
@@ -122,7 +120,7 @@ func (a *Access) Renew(connectionID, ticket, pcID, remoteFingerprint string) (Ca
 	defer a.mu.Unlock()
 	c := a.connections[connectionID]
 	if c == nil || !c.caller.ExpiresAt.After(a.cfg.Now()) || t.ConnectionID != connectionID || c.pcID != pcID || c.fingerprint != t.Fingerprint {
-		return Caller{}, wire.Fail("unauthorized", "Renewal does not match the active connection")
+		return Caller{}, protocol.Fail("unauthorized", "Renewal does not match the active connection")
 	}
 	if err = a.consume(t); err != nil {
 		return Caller{}, err

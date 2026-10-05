@@ -1,4 +1,4 @@
-package proto
+package protocol
 
 import (
 	"fmt"
@@ -9,12 +9,6 @@ import (
 const (
 	HostCloud = "cloud"
 	HostPage  = "page"
-)
-
-// 指令集名（§6.2）：信封 tool 字段与 subject 段一致。
-const (
-	ToolFS   = "fs"
-	ToolExec = "exec"
 )
 
 // HostIDPrefix 是**会话级 subject 中物理 host 段**的强制前缀（§6.1）。它是安全

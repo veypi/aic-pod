@@ -1,4 +1,4 @@
-package hosts_rtc
+package protocol
 
 import (
 	"bytes"
@@ -12,17 +12,16 @@ import (
 	"strings"
 	"time"
 
-	wire "github.com/veypi/aic-pod/protocol/tool"
 	"golang.org/x/crypto/hkdf"
 )
 
 const ticketDomain = "aic/host/direct-ticket/v1"
-const TicketAdmissionTTL = time.Minute
-const AuthorizationLease = 5 * time.Minute
+const RtcTicketAdmissionTTL = time.Minute
+const RtcAuthorizationLease = 5 * time.Minute
 
-// Ticket is authenticated as the exact encoded payload, not reserialized by a
+// RtcTicket is authenticated as the exact encoded payload, not reserialized by a
 // verifier. Admission expiry and connection authorization expiry are distinct.
-type Ticket struct {
+type RtcTicket struct {
 	Domain            string `json:"domain"`
 	HostID            string `json:"host_id"`
 	UserID            string `json:"user_id"`
@@ -39,7 +38,7 @@ type Ticket struct {
 	LeaseUntil int64  `json:"lease_until"`
 }
 
-func DirectKey(secret, hostID string) ([]byte, error) {
+func RtcDirectKey(secret, hostID string) ([]byte, error) {
 	if secret == "" || hostID == "" {
 		return nil, fmt.Errorf("missing direct key material")
 	}
@@ -50,12 +49,12 @@ func DirectKey(secret, hostID string) ([]byte, error) {
 func NormalizeFingerprint(s string) (string, error) {
 	p := strings.Fields(s)
 	if len(p) != 2 || strings.ToLower(p[0]) != "sha-256" {
-		return "", wire.Fail("invalid_argument", "Expected SHA-256 DTLS fingerprint")
+		return "", Fail("invalid_argument", "Expected SHA-256 DTLS fingerprint")
 	}
 	raw := strings.ReplaceAll(p[1], ":", "")
 	data, err := hex.DecodeString(raw)
 	if err != nil || len(data) != sha256.Size {
-		return "", wire.Fail("invalid_argument", "Invalid DTLS fingerprint")
+		return "", Fail("invalid_argument", "Invalid DTLS fingerprint")
 	}
 	groups := make([]string, len(data))
 	for i, b := range data {
@@ -63,15 +62,15 @@ func NormalizeFingerprint(s string) (string, error) {
 	}
 	return "sha-256 " + strings.Join(groups, ":"), nil
 }
-func SignTicket(key []byte, ticket Ticket, now time.Time) (string, error) {
+func SignRtcTicket(key []byte, ticket RtcTicket, now time.Time) (string, error) {
 	ticket.Domain = ticketDomain
 	if ticket.ID == "" {
-		id := wire.NewID("t_")
+		id := NewID("t_")
 		ticket.ID = id
 	}
 	ticket.IssuedAt = now.Unix()
-	ticket.ExpiresAt = now.Add(TicketAdmissionTTL).Unix()
-	ticket.LeaseUntil = now.Add(AuthorizationLease).Unix()
+	ticket.ExpiresAt = now.Add(RtcTicketAdmissionTTL).Unix()
+	ticket.LeaseUntil = now.Add(RtcAuthorizationLease).Unix()
 	fp, err := NormalizeFingerprint(ticket.Fingerprint)
 	if err != nil {
 		return "", err
@@ -92,9 +91,11 @@ func SignTicket(key []byte, ticket Ticket, now time.Time) (string, error) {
 	mac.Write([]byte(encoded))
 	return encoded + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
-func VerifyTicket(key []byte, raw string, now time.Time) (Ticket, error) {
-	var ticket Ticket
-	reject := func() (Ticket, error) { return Ticket{}, wire.Fail("unauthorized", "Invalid or expired direct ticket") }
+func VerifyRtcTicket(key []byte, raw string, now time.Time) (RtcTicket, error) {
+	var ticket RtcTicket
+	reject := func() (RtcTicket, error) {
+		return RtcTicket{}, Fail("unauthorized", "Invalid or expired direct ticket")
+	}
 	if len(key) != 32 || len(raw) > 4096 {
 		return reject()
 	}
@@ -115,7 +116,7 @@ func VerifyTicket(key []byte, raw string, now time.Time) (Ticket, error) {
 	if err != nil {
 		return reject()
 	}
-	if err = wire.Decode(payload, &ticket); err != nil {
+	if err = Decode(payload, &ticket); err != nil {
 		return reject()
 	}
 	if err = ticket.validate(now); err != nil {
@@ -123,23 +124,23 @@ func VerifyTicket(key []byte, raw string, now time.Time) (Ticket, error) {
 	}
 	return ticket, nil
 }
-func (t Ticket) validate(now time.Time) error {
-	if t.Domain != ticketDomain || !wire.ValidID(t.HostID) || !wire.ValidID(t.UserID) || !wire.ValidID(t.PCID) || !wire.ValidID(t.ID) || t.CredentialVersion == 0 {
-		return wire.Fail("invalid_argument", "Invalid ticket identity")
+func (t RtcTicket) validate(now time.Time) error {
+	if t.Domain != ticketDomain || !ValidID(t.HostID) || !ValidID(t.UserID) || !ValidID(t.PCID) || !ValidID(t.ID) || t.CredentialVersion == 0 {
+		return Fail("invalid_argument", "Invalid ticket identity")
 	}
-	if t.ConnectionID != "" && !wire.ValidID(t.ConnectionID) {
-		return wire.Fail("invalid_argument", "Invalid connection identity")
+	if t.ConnectionID != "" && !ValidID(t.ConnectionID) {
+		return Fail("invalid_argument", "Invalid connection identity")
 	}
-	if t.SessionID != "" && !wire.ValidID(t.SessionID) {
-		return wire.Fail("invalid_argument", "Invalid session identity")
+	if t.SessionID != "" && !ValidID(t.SessionID) {
+		return Fail("invalid_argument", "Invalid session identity")
 	}
 	fp, err := NormalizeFingerprint(t.Fingerprint)
 	if err != nil || !bytes.Equal([]byte(fp), []byte(t.Fingerprint)) {
-		return wire.Fail("invalid_argument", "Invalid fingerprint")
+		return Fail("invalid_argument", "Invalid fingerprint")
 	}
 	n := now.Unix()
-	if t.IssuedAt > n+5 || t.ExpiresAt <= n || t.ExpiresAt <= t.IssuedAt || t.ExpiresAt-t.IssuedAt > int64(TicketAdmissionTTL/time.Second) || t.LeaseUntil < t.ExpiresAt || t.LeaseUntil-t.IssuedAt > int64(AuthorizationLease/time.Second) {
-		return wire.Fail("unauthorized", "Invalid ticket lifetime")
+	if t.IssuedAt > n+5 || t.ExpiresAt <= n || t.ExpiresAt <= t.IssuedAt || t.ExpiresAt-t.IssuedAt > int64(RtcTicketAdmissionTTL/time.Second) || t.LeaseUntil < t.ExpiresAt || t.LeaseUntil-t.IssuedAt > int64(RtcAuthorizationLease/time.Second) {
+		return Fail("unauthorized", "Invalid ticket lifetime")
 	}
 	return nil
 }

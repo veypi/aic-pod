@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"net"
 	"sync"
 	"time"
@@ -13,15 +14,13 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 	"github.com/veypi/aic-pod/libs/hostauth"
-	"github.com/veypi/aic-pod/libs/proto"
-	hosts "github.com/veypi/aic-pod/protocol/tool"
 )
 
 const maxPeerConnections = 16
 
 type Config struct {
 	HostID, Hostname, Version string
-	Send                      func(*proto.RtcSignal)
+	Send                      func(*protocol.RtcSignal)
 	Authorization             *hostauth.Access
 	Tools                     ToolBackend
 	Browser                   BrowserRelay
@@ -39,7 +38,7 @@ type Service struct {
 }
 
 func New(cfg Config) (*Service, error) {
-	if cfg.Authorization == nil || cfg.Tools == nil || cfg.Send == nil || !hosts.ValidID(cfg.HostID) {
+	if cfg.Authorization == nil || cfg.Tools == nil || cfg.Send == nil || !protocol.ValidID(cfg.HostID) {
 		return nil, fmt.Errorf("rtc: Authorization, Tools, Send and HostID are required")
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
@@ -102,11 +101,11 @@ func (s *Service) drop(p *peer) {
 	s.mu.Unlock()
 	p.close()
 }
-func (s *Service) HandleSignal(sig *proto.RtcSignal) {
-	if sig == nil || !hosts.ValidID(sig.PC) {
+func (s *Service) HandleSignal(sig *protocol.RtcSignal) {
+	if sig == nil || !protocol.ValidID(sig.PC) {
 		return
 	}
-	if sig.Kind == proto.RtcOffer {
+	if sig.Kind == protocol.RtcOffer {
 		s.offer(sig)
 		return
 	}
@@ -117,9 +116,9 @@ func (s *Service) HandleSignal(sig *proto.RtcSignal) {
 		return
 	}
 	switch sig.Kind {
-	case proto.RtcBye:
+	case protocol.RtcBye:
 		s.drop(p)
-	case proto.RtcCandidate:
+	case protocol.RtcCandidate:
 		if len(sig.Candidate) > 8192 {
 			return
 		}
@@ -129,8 +128,8 @@ func (s *Service) HandleSignal(sig *proto.RtcSignal) {
 		}
 	}
 }
-func (s *Service) offer(sig *proto.RtcSignal) {
-	if len(sig.SDP) == 0 || len(sig.SDP) > hosts.MaxMessageBytes {
+func (s *Service) offer(sig *protocol.RtcSignal) {
+	if len(sig.SDP) == 0 || len(sig.SDP) > protocol.MaxMessageBytes {
 		return
 	}
 	s.mu.Lock()
@@ -151,7 +150,7 @@ func (s *Service) offer(sig *proto.RtcSignal) {
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			b, _ := json.Marshal(c.ToJSON())
-			s.cfg.Send(&proto.RtcSignal{PC: p.id, Kind: proto.RtcCandidate, Candidate: string(b)})
+			s.cfg.Send(&protocol.RtcSignal{PC: p.id, Kind: protocol.RtcCandidate, Candidate: string(b)})
 		}
 	})
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
@@ -173,5 +172,5 @@ func (s *Service) offer(sig *proto.RtcSignal) {
 		s.drop(p)
 		return
 	}
-	s.cfg.Send(&proto.RtcSignal{PC: p.id, Kind: proto.RtcAnswer, SDP: pc.LocalDescription().SDP})
+	s.cfg.Send(&protocol.RtcSignal{PC: p.id, Kind: protocol.RtcAnswer, SDP: pc.LocalDescription().SDP})
 }

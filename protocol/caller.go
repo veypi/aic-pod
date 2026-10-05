@@ -1,8 +1,7 @@
-package tool
+package protocol
 
 import (
 	"context"
-	"io"
 	"time"
 )
 
@@ -13,10 +12,8 @@ import (
 // GrantApproved=服务端确认过的「本次脚本可通过 grant 修改授权」事实，
 // 默认 false，只能由可信适配器写入，不从脚本可修改的 argv/env 读取。
 type Caller struct {
-	Output        io.Writer // Per-execution output; never process-global stdout.
-	Scope         string    // Empty = device capabilities; fs = owner file proxy.
-	RequestID     string
-	Direct        bool // Set only by the authenticated RTC adapter.
+	Scope         string // Empty = device capabilities; fs = owner file proxy.
+	Direct        bool   // Set only by the authenticated RTC adapter.
 	Subject       string
 	ConnectionID  string
 	Origin        string

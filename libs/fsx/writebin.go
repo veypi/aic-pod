@@ -37,10 +37,10 @@ func WriteBin(env *Env, filePath string, data []byte) (int, error) {
 		return 0, err
 	}
 	if err := env.FS.MkdirAll(path.Dir(abs), 0o755); err != nil {
-		return 0, fsVFSErr("writebin", err, "%s", err)
+		return 0, fsErr("writebin", "%s", err)
 	}
 	if err := env.FS.WriteFile(abs, data, 0o644); err != nil {
-		return 0, fsVFSErr("writebin", err, "%s", err)
+		return 0, fsErr("writebin", "%s", err)
 	}
 	return len(data), nil
 }

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"net"
 	"net/http"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	wire "github.com/veypi/aic-pod/protocol/tool"
+
 	"github.com/veypi/vbox"
 )
 
@@ -65,7 +66,7 @@ func (c *Client) mcpSession(ctx context.Context, server string) (*mcp.ClientSess
 // service-specific permission checks belong to the upstream server.
 func (c *Client) authorizeMCP(ctx context.Context, server, _ string, _ mcp.Params) error {
 	if !c.execAllowed(execution.SessionFromContext(ctx), "mcp."+server) {
-		return wire.Fail("permission_denied", "Service denied; request grant cmd mcp."+server)
+		return protocol.Fail("permission_denied", "Service denied; request grant cmd mcp."+server)
 	}
 	return nil
 }

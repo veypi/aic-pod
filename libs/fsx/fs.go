@@ -7,8 +7,6 @@ package fsx
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // fsParams 是 fs 指令集的原生 JSON 参数（三端 schema 一致）。
@@ -76,9 +74,7 @@ func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) 
 		return fsRg(ctx, env, &p)
 	case "cp", "mv", "rm":
 		// 壳层动作下线（D11/v4.1）：引导 exec 内建（引擎 90 内建承接）。
-		return nil, &proto.ExecError{Tool: proto.ToolFS, Action: p.Action,
-			Reason: "fs 不再提供 " + p.Action + "——壳层动作（cp/mv/rm）请用 exec（如 `exec cp a b`）；fs 只保留结构化读写编辑（read/write/edit/ls/rg）"}
+		return nil, fsErr(p.Action, "%s", "fs 不再提供 "+p.Action+"——壳层动作（cp/mv/rm）请用 exec（如 `exec cp a b`）；fs 只保留结构化读写编辑（read/write/edit/ls/rg）")
 	}
-	return nil, &proto.ExecError{Tool: proto.ToolFS,
-		Reason: "unknown action " + p.Action + " (supported: read, write, edit, ls, rg)"}
+	return nil, fsErr("", "%s", "unknown action "+p.Action+" (supported: read, write, edit, ls, rg)")
 }

@@ -5,24 +5,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"io"
 	"os"
 	"strings"
 	"sync"
 	"time"
-
-	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 type ByteSource struct {
-	Ref       hosts.ResourceRef `json:"ref"`
-	Size      int64             `json:"size"`
-	MediaType string            `json:"media_type"`
-	Seekable  bool              `json:"seekable"`
-	Immutable bool              `json:"immutable"`
-	SHA256    string            `json:"sha256,omitempty"`
-	Version   string            `json:"version,omitempty"`
-	Lifetime  string            `json:"lifetime"`
+	Ref       protocol.FSResourceRef `json:"ref"`
+	Size      int64                  `json:"size"`
+	MediaType string                 `json:"media_type"`
+	Seekable  bool                   `json:"seekable"`
+	Immutable bool                   `json:"immutable"`
+	SHA256    string                 `json:"sha256,omitempty"`
+	Version   string                 `json:"version,omitempty"`
+	Lifetime  string                 `json:"lifetime"`
 }
 type byteSource struct {
 	mu         sync.RWMutex
@@ -68,11 +67,7 @@ func NewBytes(cfg BytesConfig) (*Bytes, error) {
 	if err != nil {
 		return nil, err
 	}
-	epoch, err := hosts.NewID("bytes_")
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
+	epoch := protocol.NewID("bytes_")
 	return &Bytes{cfg: cfg, dir: dir, epoch: epoch, sources: map[string]*byteSource{}, pendingOwners: map[string]int{}, closingOwners: map[string]bool{}}, nil
 }
 func (b *Bytes) reservation(owner string) error {
@@ -80,10 +75,10 @@ func (b *Bytes) reservation(owner string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed || b.closingOwners[owner] {
-		return hosts.Fail("expired", "Byte store closed")
+		return protocol.FSFail("expired", "Byte store closed")
 	}
 	if len(b.sources)+b.pending >= b.cfg.MaxSources {
-		return hosts.Fail("overloaded", "Byte source quota reached")
+		return protocol.FSFail("overloaded", "Byte source quota reached")
 	}
 	b.pending++
 	b.pendingOwners[owner]++
@@ -101,10 +96,10 @@ func (b *Bytes) reserveBytes(n int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
-		return hosts.Fail("expired", "Byte store closed")
+		return protocol.FSFail("expired", "Byte store closed")
 	}
 	if n < 0 || b.used > b.cfg.MaxBytes-n {
-		return hosts.Fail("overloaded", "Byte storage quota reached")
+		return protocol.FSFail("overloaded", "Byte storage quota reached")
 	}
 	b.used += n
 	return nil
@@ -114,15 +109,15 @@ func (b *Bytes) reserveBytes(n int64) error {
 // verification. A caller must already be authenticated and bound to owner.
 func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size *int64, sha string, mediaType string) (ByteSource, error) {
 	limit := b.sourceLimit()
-	if !hosts.ValidID(owner) || reader == nil {
-		return ByteSource{}, hosts.Fail("invalid_argument", "Invalid upload owner or body")
+	if !protocol.ValidID(owner) || reader == nil {
+		return ByteSource{}, protocol.FSFail("invalid_argument", "Invalid upload owner or body")
 	}
 	if size != nil && (*size < 0 || *size > limit) {
-		return ByteSource{}, hosts.Fail("overloaded", "Upload size exceeds quota")
+		return ByteSource{}, protocol.FSFail("overloaded", "Upload size exceeds quota")
 	}
 	if sha != "" {
 		if raw, err := hex.DecodeString(sha); err != nil || len(raw) != 32 {
-			return ByteSource{}, hosts.Fail("invalid_argument", "Invalid SHA-256")
+			return ByteSource{}, protocol.FSFail("invalid_argument", "Invalid SHA-256")
 		}
 		sha = strings.ToLower(sha)
 	}
@@ -158,7 +153,7 @@ func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size
 		n, readErr := reader.Read(buf)
 		if n > 0 {
 			if charged+int64(n) > limit || (size != nil && charged+int64(n) > *size) {
-				return ByteSource{}, hosts.Fail("invalid_argument", "Upload exceeded declared size or quota")
+				return ByteSource{}, protocol.FSFail("invalid_argument", "Upload exceeded declared size or quota")
 			}
 			if err = b.reserveBytes(int64(n)); err != nil {
 				return ByteSource{}, err
@@ -184,23 +179,20 @@ func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size
 	}
 	sum := hex.EncodeToString(hash.Sum(nil))
 	if (size != nil && charged != *size) || (sha != "" && sum != sha) {
-		return ByteSource{}, hosts.Fail("invalid_argument", "Upload length or SHA-256 mismatch")
+		return ByteSource{}, protocol.FSFail("invalid_argument", "Upload length or SHA-256 mismatch")
 	}
 	if err = file.Sync(); err != nil {
 		return ByteSource{}, err
 	}
-	id, err := hosts.NewID("src_")
-	if err != nil {
-		return ByteSource{}, err
-	}
+	id := protocol.NewID("src_")
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	descriptor := ByteSource{Ref: hosts.ResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: charged, MediaType: mediaType, Seekable: true, Immutable: true, SHA256: sum, Lifetime: "fs_source"}
+	descriptor := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: charged, MediaType: mediaType, Seekable: true, Immutable: true, SHA256: sum, Lifetime: "fs_source"}
 	b.mu.Lock()
 	if b.closed || b.closingOwners[owner] {
 		b.mu.Unlock()
-		return ByteSource{}, hosts.Fail("expired", "Byte store closed")
+		return ByteSource{}, protocol.FSFail("expired", "Byte store closed")
 	}
 	b.sources[id] = &byteSource{expires: time.Now().Add(30 * time.Minute), owner: owner, descriptor: descriptor, file: file, temp: file.Name()}
 	success = true
@@ -212,7 +204,7 @@ func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size
 // both policy and source identity before/during/after a range read.
 func (b *Bytes) AddFile(owner string, file *os.File, size int64, version, mediaType string, verify func(context.Context) error) (ByteSource, error) {
 	if file == nil {
-		return ByteSource{}, hosts.Fail("invalid_argument", "Missing source file")
+		return ByteSource{}, protocol.FSFail("invalid_argument", "Missing source file")
 	}
 	success := false
 	defer func() {
@@ -220,43 +212,40 @@ func (b *Bytes) AddFile(owner string, file *os.File, size int64, version, mediaT
 			file.Close()
 		}
 	}()
-	if !hosts.ValidID(owner) || size < 0 || size > hosts.MaxSafeInteger || verify == nil {
-		return ByteSource{}, hosts.Fail("invalid_argument", "Invalid source")
+	if !protocol.ValidID(owner) || size < 0 || size > protocol.FSMaxSafeInteger || verify == nil {
+		return ByteSource{}, protocol.FSFail("invalid_argument", "Invalid source")
 	}
 	if err := b.reservation(owner); err != nil {
 		return ByteSource{}, err
 	}
 	defer func() { b.mu.Lock(); b.finishReservation(owner); b.mu.Unlock() }()
-	id, err := hosts.NewID("src_")
-	if err != nil {
-		return ByteSource{}, err
-	}
+	id := protocol.NewID("src_")
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	descriptor := ByteSource{Ref: hosts.ResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: size, Version: version, MediaType: mediaType, Seekable: true, Lifetime: "fs_source"}
+	descriptor := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: size, Version: version, MediaType: mediaType, Seekable: true, Lifetime: "fs_source"}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed || b.closingOwners[owner] {
-		return ByteSource{}, hosts.Fail("expired", "Byte store closed")
+		return ByteSource{}, protocol.FSFail("expired", "Byte store closed")
 	}
 	b.sources[id] = &byteSource{expires: time.Now().Add(30 * time.Minute), owner: owner, descriptor: descriptor, file: file, verify: verify}
 	success = true
 	return descriptor, nil
 }
-func (b *Bytes) source(owner string, ref hosts.ResourceRef) (*byteSource, error) {
+func (b *Bytes) source(owner string, ref protocol.FSResourceRef) (*byteSource, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.sources[ref.ID]
 	if b.closed || ref.Kind != "bytes" || ref.Epoch != b.epoch || s == nil || s.owner != owner || time.Now().After(s.expires) {
-		return nil, hosts.Fail("expired", "Byte source is unavailable for this owner")
+		return nil, protocol.FSFail("expired", "Byte source is unavailable for this owner")
 	}
 	return s, nil
 }
 
 // SetVerifier attaches current policy checks to a staged command result.
 // Transport/session authorization is still checked by the shared endpoint.
-func (b *Bytes) SetVerifier(owner string, ref hosts.ResourceRef, verify func(context.Context) error) error {
+func (b *Bytes) SetVerifier(owner string, ref protocol.FSResourceRef, verify func(context.Context) error) error {
 	source, err := b.source(owner, ref)
 	if err != nil {
 		return err
@@ -264,12 +253,12 @@ func (b *Bytes) SetVerifier(owner string, ref hosts.ResourceRef, verify func(con
 	source.mu.Lock()
 	defer source.mu.Unlock()
 	if source.closed {
-		return hosts.Fail("expired", "Byte source closed")
+		return protocol.FSFail("expired", "Byte source closed")
 	}
 	source.verify = verify
 	return nil
 }
-func (b *Bytes) Describe(owner string, ref hosts.ResourceRef) (ByteSource, error) {
+func (b *Bytes) Describe(owner string, ref protocol.FSResourceRef) (ByteSource, error) {
 	s, err := b.source(owner, ref)
 	if err != nil {
 		return ByteSource{}, err
@@ -277,11 +266,11 @@ func (b *Bytes) Describe(owner string, ref hosts.ResourceRef) (ByteSource, error
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
-		return ByteSource{}, hosts.Fail("expired", "Byte source closed")
+		return ByteSource{}, protocol.FSFail("expired", "Byte source closed")
 	}
 	return s.descriptor, nil
 }
-func (b *Bytes) Copy(ctx context.Context, owner string, ref hosts.ResourceRef, offset int64, length *int64, dst io.Writer) error {
+func (b *Bytes) Copy(ctx context.Context, owner string, ref protocol.FSResourceRef, offset int64, length *int64, dst io.Writer) error {
 	s, err := b.source(owner, ref)
 	if err != nil {
 		return err
@@ -289,11 +278,11 @@ func (b *Bytes) Copy(ctx context.Context, owner string, ref hosts.ResourceRef, o
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
-		return hosts.Fail("expired", "Byte source closed")
+		return protocol.FSFail("expired", "Byte source closed")
 	}
 	total := s.descriptor.Size
 	if offset < 0 || offset > total || length != nil && (*length < 0 || *length > total-offset) {
-		return hosts.Fail("invalid_argument", "Byte range outside source")
+		return protocol.FSFail("invalid_argument", "Byte range outside source")
 	}
 	count := total - offset
 	if length != nil {
@@ -340,7 +329,7 @@ func (b *Bytes) Copy(ctx context.Context, owner string, ref hosts.ResourceRef, o
 	}
 	return verify()
 }
-func (b *Bytes) Release(owner string, ref hosts.ResourceRef) error {
+func (b *Bytes) Release(owner string, ref protocol.FSResourceRef) error {
 	b.mu.Lock()
 	s := b.sources[ref.ID]
 	if s == nil {
@@ -349,7 +338,7 @@ func (b *Bytes) Release(owner string, ref hosts.ResourceRef) error {
 	}
 	if s.owner != owner || ref.Epoch != b.epoch || ref.Kind != "bytes" {
 		b.mu.Unlock()
-		return hosts.Fail("permission_denied", "Byte source belongs to another owner")
+		return protocol.FSFail("permission_denied", "Byte source belongs to another owner")
 	}
 	delete(b.sources, ref.ID)
 	b.mu.Unlock()
@@ -370,7 +359,7 @@ func (b *Bytes) CloseOwner(owner string) {
 	if b.pendingOwners[owner] > 0 {
 		b.closingOwners[owner] = true
 	}
-	var refs []hosts.ResourceRef
+	var refs []protocol.FSResourceRef
 	for _, s := range b.sources {
 		if s.owner == owner {
 			refs = append(refs, s.descriptor.Ref)
@@ -399,7 +388,7 @@ func (b *Bytes) Reap() {
 	b.mu.Lock()
 	type key struct {
 		owner string
-		ref   hosts.ResourceRef
+		ref   protocol.FSResourceRef
 	}
 	expired := []key{}
 	for _, s := range b.sources {

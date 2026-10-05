@@ -3,6 +3,7 @@ package host
 import (
 	"crypto/sha256"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // handleMsg 处理一条入站消息：rtc.in 信令路由到 RTC 服务（不参与验签流程——
@@ -54,12 +54,12 @@ func (c *Client) ensureSessionWorkDir(sid string) error {
 	return nil
 }
 
-func deviceInfo() *proto.DeviceInfo {
-	return &proto.DeviceInfo{OS: runtime.GOOS, Arch: runtime.GOARCH, NumCPU: runtime.NumCPU()}
+func deviceInfo() *protocol.DeviceInfo {
+	return &protocol.DeviceInfo{OS: runtime.GOOS, Arch: runtime.GOARCH, NumCPU: runtime.NumCPU()}
 }
 
 func mustNonce() string {
-	n, err := proto.NewNonce()
+	n, err := protocol.NewNonce()
 	if err != nil {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}

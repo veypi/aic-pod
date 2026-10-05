@@ -4,22 +4,20 @@ package hostfs
 
 import (
 	"context"
+	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	fsp "github.com/veypi/aic-pod/protocol/fs"
-	hosts "github.com/veypi/aic-pod/protocol/fs"
 )
 
 func TestCancelledCopyRetainsExplicitPartialEffects(t *testing.T) {
 	f := setup(t)
-	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src")}))
+	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src")}))
 	for _, name := range []string{"a", "b"} {
-		value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("src", name), Source: f.upload(t, []byte(name)), Condition: fsp.Condition{Absent: true}}))
+		value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("src", name), Source: f.upload(t, []byte(name)), Condition: protocol.FSCondition{Absent: true}}))
 	}
-	src := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
+	src := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
 	check := f.fs.cfg.Check
 	f.fs.cfg.Check = func(ctx context.Context, call Call, path string, write bool) error {
 		if filepath.Base(path) == "b" {
@@ -29,7 +27,7 @@ func TestCancelledCopyRetainsExplicitPartialEffects(t *testing.T) {
 		}
 		return check(ctx, call, path, write)
 	}
-	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("dst"), IfVersion: src.Version, Condition: fsp.Condition{Absent: true}})
+	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("dst"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}})
 	if op.Status != "cancelled" || op.Error == nil || op.Error.Effect != "partial" || op.Error.Details.(map[string]any)["completed"] != 2 {
 		t.Fatalf("copy cancellation hid committed entries: %+v / %+v", op, op.Error)
 	}
@@ -43,23 +41,23 @@ func TestCancelledCopyRetainsExplicitPartialEffects(t *testing.T) {
 
 func TestTreeCopyMoveFindAndRemove(t *testing.T) {
 	f := setup(t)
-	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src", "nested"), Parents: true}))
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("src", "nested", "中文%.txt"), Source: f.upload(t, []byte("\xef\xbb\xbfx\r\n")), Condition: fsp.Condition{Absent: true}}))
-	src := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
-	value[map[string]any](t, f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("clone"), IfVersion: src.Version, Condition: fsp.Condition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src", "nested"), Parents: true}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("src", "nested", "中文%.txt"), Source: f.upload(t, []byte("\xef\xbb\xbfx\r\n")), Condition: protocol.FSCondition{Absent: true}}))
+	src := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
+	value[map[string]any](t, f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("clone"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}}))
 	body, err := os.ReadFile(filepath.Join(f.root, "clone", "nested", "中文%.txt"))
 	if err != nil || string(body) != "\xef\xbb\xbfx\r\n" {
 		t.Fatalf("copy corrupted content: %q %v", body, err)
 	}
-	clone := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("clone")}))
-	conflict := f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("src"), IfVersion: clone.Version, Condition: fsp.Condition{Absent: true}})
+	clone := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("clone")}))
+	conflict := f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("src"), IfVersion: clone.Version, Condition: protocol.FSCondition{Absent: true}})
 	if conflict.Error == nil || conflict.Error.Code != "already_exists" {
 		t.Fatalf("move replaced an existing directory: %+v", conflict)
 	}
-	moved := value[fsp.Entry](t, f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("moved"), IfVersion: clone.Version, Condition: fsp.Condition{Absent: true}}))
+	moved := value[protocol.FSEntry](t, f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("moved"), IfVersion: clone.Version, Condition: protocol.FSCondition{Absent: true}}))
 	found := value[struct {
-		Entries   []fsp.Entry `json:"entries"`
-		Truncated bool        `json:"truncated"`
+		Entries   []protocol.FSEntry `json:"entries"`
+		Truncated bool               `json:"truncated"`
 	}](t, f.call(t, "find", findArgs{Path: loc(), Glob: "*.txt", Depth: 5, Limit: 10}))
 	if len(found.Entries) != 2 || found.Truncated {
 		t.Fatalf("find: %+v", found)
@@ -77,14 +75,14 @@ func TestTreeCopyMoveFindAndRemove(t *testing.T) {
 // rg 与 cloud/page 搜索口径一致）；copy/remove/move 的递归不受影响。
 func TestFindSkipsHiddenEntries(t *testing.T) {
 	f := setup(t)
-	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("visible", ".hidden"), Parents: true}))
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("visible", "target.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("visible", ".dotfile"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("visible", ".hidden", "secret.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("visible", ".hidden"), Parents: true}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("visible", "target.txt"), Source: f.upload(t, []byte("x")), Condition: protocol.FSCondition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("visible", ".dotfile"), Source: f.upload(t, []byte("x")), Condition: protocol.FSCondition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("visible", ".hidden", "secret.txt"), Source: f.upload(t, []byte("x")), Condition: protocol.FSCondition{Absent: true}}))
 	findNames := func(glob string) []string {
 		found := value[struct {
-			Entries   []fsp.Entry `json:"entries"`
-			Truncated bool        `json:"truncated"`
+			Entries   []protocol.FSEntry `json:"entries"`
+			Truncated bool               `json:"truncated"`
 		}](t, f.call(t, "find", findArgs{Path: loc("visible"), Glob: glob, Depth: 5, Limit: 20}))
 		names := make([]string, 0, len(found.Entries))
 		for _, e := range found.Entries {
@@ -108,19 +106,19 @@ func TestFindSkipsHiddenEntries(t *testing.T) {
 // 照常上抛，写侧（remove/copy/move）保持严格。
 func TestFindToleratesUnreadableChildren(t *testing.T) {
 	f := setup(t)
-	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("tree", "flaky"), Parents: true}))
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("tree", "ok.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
-	value[fsp.Entry](t, f.call(t, "write", writeArgs{Path: loc("tree", "flaky", "inner.txt"), Source: f.upload(t, []byte("x")), Condition: fsp.Condition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("tree", "flaky"), Parents: true}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("tree", "ok.txt"), Source: f.upload(t, []byte("x")), Condition: protocol.FSCondition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("tree", "flaky", "inner.txt"), Source: f.upload(t, []byte("x")), Condition: protocol.FSCondition{Absent: true}}))
 	base := f.fs.cfg.Check
 	f.fs.cfg.Check = func(ctx context.Context, call Call, path string, write bool) error {
 		if filepath.Base(path) == "flaky" {
-			return hosts.Fail("flaky_source", "Transient failure")
+			return protocol.FSFail("flaky_source", "Transient failure")
 		}
 		return base(ctx, call, path, write)
 	}
 	found := value[struct {
-		Entries   []fsp.Entry `json:"entries"`
-		Truncated bool        `json:"truncated"`
+		Entries   []protocol.FSEntry `json:"entries"`
+		Truncated bool               `json:"truncated"`
 	}](t, f.call(t, "find", findArgs{Path: loc("tree"), Glob: "*", Depth: 5, Limit: 20}))
 	if len(found.Entries) != 1 || found.Entries[0].Name != "ok.txt" {
 		t.Fatalf("find did not tolerate an unreadable child: %+v", found)
@@ -128,7 +126,7 @@ func TestFindToleratesUnreadableChildren(t *testing.T) {
 	if op := f.call(t, "find", findArgs{Path: loc("tree", "flaky"), Glob: "*", Depth: 5, Limit: 20}); op.Error == nil || op.Error.Code != "flaky_source" {
 		t.Fatalf("root error swallowed: %+v", op)
 	}
-	tree := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("tree")}))
+	tree := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("tree")}))
 	if op := f.call(t, "remove", removeArgs{Path: tree.Path, IfVersion: tree.Version, Recursive: true}); op.Error == nil || op.Error.Code != "flaky_source" {
 		t.Fatalf("write side did not stay strict: %+v", op)
 	}
@@ -146,12 +144,12 @@ func TestTreeOperationsValidateEntirePlanBeforeEffects(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			src := value[fsp.Entry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
+			src := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
 			var op outcome
 			if method == "remove" {
 				op = f.call(t, method, removeArgs{Path: src.Path, IfVersion: src.Version, Recursive: true})
 			} else {
-				op = f.call(t, method, moveArgs{Src: src.Path, Dst: loc("dst"), IfVersion: src.Version, Condition: fsp.Condition{Absent: true}})
+				op = f.call(t, method, moveArgs{Src: src.Path, Dst: loc("dst"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}})
 			}
 			if op.Error == nil || op.Error.Code != "permission_denied" || op.Error.Effect != "none" {
 				t.Fatalf("policy failure: %+v", op)
@@ -168,8 +166,8 @@ func TestTreeOperationsValidateEntirePlanBeforeEffects(t *testing.T) {
 
 func TestRecursiveCopyRejectsSelfAndMkdirPreflightsDeniedPaths(t *testing.T) {
 	f := setup(t)
-	src := value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src")}))
-	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("src", "inside"), IfVersion: src.Version, Condition: fsp.Condition{Absent: true}})
+	src := value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src")}))
+	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("src", "inside"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}})
 	if op.Error == nil || op.Error.Code != "invalid_argument" {
 		t.Fatalf("recursive self copy accepted: %+v", op)
 	}
@@ -192,17 +190,17 @@ func TestMkdirParentsDoesNotRequireGrantsOnExistingAncestors(t *testing.T) {
 	check := f.fs.cfg.Check
 	f.fs.cfg.Check = func(ctx context.Context, call Call, path string, write bool) error {
 		if write && filepath.Base(path) != "leaf" {
-			return hosts.Fail("permission_denied", "write requires a grant on "+path)
+			return protocol.FSFail("permission_denied", "write requires a grant on "+path)
 		}
 		return check(ctx, call, path, write)
 	}
 	// 只授缺失的 leaf 级：已存在的 held 与 root 不需要写授权。
-	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("held", "leaf"), Parents: true}))
+	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("held", "leaf"), Parents: true}))
 	if info, err := os.Stat(filepath.Join(f.root, "held", "leaf")); err != nil || !info.IsDir() {
 		t.Fatal("leaf not created", err)
 	}
 	// 目标全部已存在、零创建：任何层级都不需要写授权（fs write 补父目录的便利路径）。
-	value[fsp.Entry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("held"), Parents: true, ExistOK: true}))
+	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("held"), Parents: true, ExistOK: true}))
 }
 
 // 缺失层级的拒绝提示指向最小授权目标（最上层缺失级），且拒绝时零副作用。
@@ -214,7 +212,7 @@ func TestMkdirParentsPreflightNamesTopmostMissingLevel(t *testing.T) {
 	check := f.fs.cfg.Check
 	f.fs.cfg.Check = func(ctx context.Context, call Call, path string, write bool) error {
 		if write && filepath.Base(path) == "mid" {
-			return hosts.Fail("permission_denied", "grant "+path)
+			return protocol.FSFail("permission_denied", "grant "+path)
 		}
 		return check(ctx, call, path, write)
 	}

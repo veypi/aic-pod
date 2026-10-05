@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,9 +19,7 @@ import (
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/policy"
-	"github.com/veypi/aic-pod/libs/proto"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
+
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 	gbfs "github.com/veypi/vsh/fs"
@@ -43,7 +42,7 @@ func (c *Client) engine() (*execution.Engine, error) {
 // 形，全局统一；posix 恒等）。引擎只看规范形——PATH 按 : 切分不吃盘符、
 // 绝对性判定只看 / 前缀，均不感知盘符。
 func hostCanonical(p string) string {
-	return proto.NormalizeHostPath(filepath.ToSlash(p))
+	return protocol.NormalizeHostPath(filepath.ToSlash(p))
 }
 
 func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, error) {
@@ -190,13 +189,13 @@ func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vbox.Pol
 // 后台含 background/id。日志 = .exec/{short}.stdout.log / .stderr.log 双流
 // 全量；FS 写审计追加进 stderr 日志（不污染 stdout 契约）；日志创建失败
 // 是明确错误（不静默降级）。
-func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID string, p *wire.ExecPayload) (*wire.ExecResult, error) {
+func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID string, p *protocol.ExecPayload) (*protocol.Output, error) {
 	if p == nil || strings.TrimSpace(p.Script) == "" {
-		return nil, wire.Fail("invalid_argument", "exec: script is required")
+		return nil, protocol.Fail("invalid_argument", "exec: script is required")
 	}
 	engine, err := c.engine()
 	if err != nil {
-		return nil, wire.Fail("internal", "exec: engine: "+err.Error())
+		return nil, protocol.Fail("internal", "exec: engine: "+err.Error())
 	}
 	sid := caller.Origin
 
@@ -204,30 +203,30 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 	if workdir == "" {
 		workdir = hostCanonical(c.options().WorkDir)
 	} else {
-		workdir = proto.NormalizeHostPath(workdir)
+		workdir = protocol.NormalizeHostPath(workdir)
 	}
 	if err := c.ensureSessionWorkDir(sid); err != nil {
-		return nil, wire.Fail("internal", err.Error())
+		return nil, protocol.Fail("internal", err.Error())
 	}
 	logOut, logErr := c.execLogPaths(sid, reqID)
 	if err := os.MkdirAll(filepath.Dir(logOut), 0o700); err != nil {
-		return nil, wire.Fail("internal", "exec: prepare log: "+err.Error())
+		return nil, protocol.Fail("internal", "exec: prepare log: "+err.Error())
 	}
 	outFile, err := os.Create(logOut)
 	if err != nil {
-		return nil, wire.Fail("internal", "exec: open log: "+err.Error())
+		return nil, protocol.Fail("internal", "exec: open log: "+err.Error())
 	}
 	errFile, err := os.Create(logErr)
 	if err != nil {
 		_ = outFile.Close()
-		return nil, wire.Fail("internal", "exec: open log: "+err.Error())
+		return nil, protocol.Fail("internal", "exec: open log: "+err.Error())
 	}
 
 	inherited := os.Environ()
 	if !p.NoSandbox && !c.options().NoSandbox {
 		inherited = vbox.ScrubEnv(inherited)
 	}
-	env := proto.HostEnvFromOS(inherited)
+	env := HostEnvFromOS(inherited)
 	env["TMPDIR"] = hostCanonical(os.TempDir())
 	if home, herr := os.UserHomeDir(); herr == nil {
 		env["HOME"] = hostCanonical(home)
@@ -274,10 +273,10 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 	if errors.Is(outcome.Err, execution.ErrWaitElapsed) {
 		// RTC 直连等待超时：执行继续（保留取消登记——cancel(request_id)
 		// 与 DisconnectTools 仍可终止）；日志在实际结束时关闭。
-		return &wire.ExecResult{
+		return &protocol.Output{
 			Content: fmt.Sprintf("execution still running; output: %s（cancel(request_id) 可终止）", logOut),
 			Attrs:   attrs,
-		}, wire.Fail("deadline_exceeded", "exec: wait elapsed; execution continues (cancel to stop)")
+		}, protocol.Fail("deadline_exceeded", "exec: wait elapsed; execution continues (cancel to stop)")
 	}
 	if outcome.Background {
 		// 超时转 bg：任务继续（独立墙钟）；日志文件在执行结束时关闭。
@@ -286,7 +285,7 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 		c.untrackExec(reqID)
 		attrs["background"] = "true"
 		attrs["id"] = outcome.Task.ID
-		return &wire.ExecResult{
+		return &protocol.Output{
 			Content: fmt.Sprintf("execution backgrounded (id=%s); output: %s", outcome.Task.ID, logOut),
 			Attrs:   attrs,
 		}, nil
@@ -296,9 +295,9 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 	// 时关闭；错误响应仍携带本次执行已创建的日志地址（Reply 保留
 	// Result）。错误码用资源类 overloaded（与连接/页面/排队上限同码）。
 	if errors.Is(outcome.Err, execution.ErrCapacity) {
-		err := wire.Fail("overloaded", "exec: "+outcome.Err.Error())
+		err := protocol.Fail("overloaded", "exec: "+outcome.Err.Error())
 		if outcome.Result == nil {
-			return &wire.ExecResult{Attrs: attrs}, err
+			return &protocol.Output{Attrs: attrs}, err
 		}
 		return execResultResponse(outcome.Result, attrs, caller.Direct), err
 	}
@@ -306,25 +305,25 @@ func (c *Client) execScript(ctx context.Context, caller wire.Caller, reqID strin
 	// 停止等待但执行继续（取消登记保留），日志在实际执行结束时关闭。
 	if errors.Is(outcome.Err, context.Canceled) || errors.Is(outcome.Err, context.DeadlineExceeded) {
 		if outcome.Result == nil {
-			return &wire.ExecResult{Attrs: attrs}, outcome.Err
+			return &protocol.Output{Attrs: attrs}, outcome.Err
 		}
 		return execResultResponse(outcome.Result, attrs, caller.Direct), outcome.Err
 	}
 	// 前台完成（审计与日志关闭已由完成回调处理）。
 	if outcome.Err != nil {
 		if outcome.Result == nil {
-			return &wire.ExecResult{Attrs: attrs}, wire.Fail("internal", "exec: "+outcome.Err.Error())
+			return &protocol.Output{Attrs: attrs}, protocol.Fail("internal", "exec: "+outcome.Err.Error())
 		}
 		// 执行完成但引擎层报错：结果与错误一并带出（Reply 保留 Result）。
 		res, outputErr := completedExecResultResponse(outcome.Result, attrs, caller.Direct, logs)
 		if outputErr != nil {
 			return res, outputErr
 		}
-		return res, wire.Fail("internal", "exec: "+outcome.Err.Error())
+		return res, protocol.Fail("internal", "exec: "+outcome.Err.Error())
 	}
 	res := outcome.Result
 	if res == nil {
-		return nil, wire.Fail("internal", "exec: no result")
+		return nil, protocol.Fail("internal", "exec: no result")
 	}
 	return completedExecResultResponse(res, attrs, caller.Direct, logs)
 }
@@ -363,14 +362,14 @@ func closeExecLogs(stdout, stderr *os.File, res *execution.ExecResult) execLogSn
 // completedExecResultResponse recovers full RTC streams from this execution's
 // closed logs when the engine's bounded in-memory captures were truncated.
 // Errors retain log paths, but never advertise a partial JSON payload as success.
-func completedExecResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool, logs execLogSnapshot) (*wire.ExecResult, error) {
+func completedExecResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool, logs execLogSnapshot) (*protocol.Output, error) {
 	if !rtcFull {
 		return execResultResponse(res, attrs, false), nil
 	}
 	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
-	fail := func(code, message string) (*wire.ExecResult, error) {
+	fail := func(code, message string) (*protocol.Output, error) {
 		delete(attrs, "stderr")
-		return &wire.ExecResult{Attrs: attrs}, wire.Fail(code, "exec: "+message)
+		return &protocol.Output{Attrs: attrs}, protocol.Fail(code, "exec: "+message)
 	}
 	if logs.err != nil {
 		return fail("internal", "finish output logs: "+logs.err.Error())
@@ -385,8 +384,8 @@ func completedExecResultResponse(res *execution.ExecResult, attrs map[string]str
 	if stdoutBytes < int64(len(res.Stdout)) || stderrBytes < int64(len(res.Stderr)) {
 		return fail("internal", "complete output log is shorter than the captured output")
 	}
-	if stdoutBytes < 0 || stderrBytes < 0 || stdoutBytes > rtcwire.ToolResponseLimit || stderrBytes > rtcwire.ToolResponseLimit-stdoutBytes {
-		return fail("overloaded", fmt.Sprintf("output exceeds %d bytes; full output is available in the execution logs", rtcwire.ToolResponseLimit))
+	if stdoutBytes < 0 || stderrBytes < 0 || stdoutBytes > protocol.RtcToolResponseLimit || stderrBytes > protocol.RtcToolResponseLimit-stdoutBytes {
+		return fail("overloaded", fmt.Sprintf("output exceeds %d bytes; full output is available in the execution logs", protocol.RtcToolResponseLimit))
 	}
 	// Copy the result so restoring output never changes shared engine/task state.
 	full := *res
@@ -422,13 +421,13 @@ func completedExecResultResponse(res *execution.ExecResult, attrs map[string]str
 //     attrs.output/error_output 日志读取。
 //   - RTC 直连（viewer 等非 AI 消费）：成功响应的完整输出须先经
 //     completedExecResultResponse 恢复；没有 truncated 标记。
-func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool) *wire.ExecResult {
+func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool) *protocol.Output {
 	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
 	if rtcFull {
 		if res.Stderr != "" {
 			attrs["stderr"] = res.Stderr
 		}
-		return &wire.ExecResult{Content: res.Stdout, Attrs: attrs}
+		return &protocol.Output{Content: res.Stdout, Attrs: attrs}
 	}
 	truncated := res.StdoutTruncated || res.StderrTruncated
 	content, cut := headLines(res.Stdout, 1000)
@@ -441,7 +440,7 @@ func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcF
 	if truncated {
 		attrs["truncated"] = "true"
 	}
-	return &wire.ExecResult{Content: content, Attrs: attrs}
+	return &protocol.Output{Content: content, Attrs: attrs}
 }
 
 // auditWrites 把 FS 写审计追加进 stderr 日志（诊断信息——不污染 stdout

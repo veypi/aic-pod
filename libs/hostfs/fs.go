@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"io"
 	"io/fs"
 	"mime"
@@ -21,10 +22,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	fsp "github.com/veypi/aic-pod/protocol/fs"
-	hosts "github.com/veypi/aic-pod/protocol/fs"
-	tool "github.com/veypi/aic-pod/protocol/tool"
 )
 
 type Root struct {
@@ -34,10 +31,10 @@ type Root struct {
 type Config struct {
 	Roots []Root
 	// Home is the initial browsing directory, not a filesystem boundary.
-	Home *fsp.Path
+	Home *protocol.FSPath
 	// OSHome 是 OS 用户主目录（~/.aic 等运行数据定位用；与 Home 的
 	// 工作区语义不同源）。nil = fs os_home 方法不可用。
-	OSHome *fsp.Path
+	OSHome *protocol.FSPath
 	Bytes  *Bytes
 	// Check must consult the current device policy; it must not trust args.
 	Check               func(context.Context, Call, string, bool) error
@@ -68,7 +65,7 @@ func New(cfg Config) (*FS, error) {
 	f := &FS{cfg: cfg, roots: map[string]*root{}}
 	defaults := 0
 	for _, r := range cfg.Roots {
-		if !hosts.ValidID(r.ID) || f.roots[r.ID] != nil {
+		if !protocol.ValidID(r.ID) || f.roots[r.ID] != nil {
 			f.Close()
 			return nil, fmt.Errorf("invalid or duplicate root ID")
 		}
@@ -123,40 +120,40 @@ func (f *FS) Close() error {
 }
 
 type pathArgs struct {
-	Path        fsp.Path `json:"path"`
-	IfVersion   string   `json:"if_version,omitempty"`
-	Follow      bool     `json:"follow_symlinks,omitempty"`
-	Consistency string   `json:"consistency,omitempty"`
+	Path        protocol.FSPath `json:"path"`
+	IfVersion   string          `json:"if_version,omitempty"`
+	Follow      bool            `json:"follow_symlinks,omitempty"`
+	Consistency string          `json:"consistency,omitempty"`
 }
 type listArgs struct {
-	Path   fsp.Path `json:"path"`
-	Limit  int      `json:"limit,omitempty"`
-	Cursor string   `json:"cursor,omitempty"`
-	Hidden bool     `json:"hidden,omitempty"`
-	Sort   string   `json:"sort,omitempty"`
+	Path   protocol.FSPath `json:"path"`
+	Limit  int             `json:"limit,omitempty"`
+	Cursor string          `json:"cursor,omitempty"`
+	Hidden bool            `json:"hidden,omitempty"`
+	Sort   string          `json:"sort,omitempty"`
 }
 type writeArgs struct {
-	Path          fsp.Path          `json:"path"`
-	Source        hosts.ResourceRef `json:"source"`
-	Condition     fsp.Condition     `json:"condition"`
-	CreateParents bool              `json:"create_parents,omitempty"`
+	Path          protocol.FSPath        `json:"path"`
+	Source        protocol.FSResourceRef `json:"source"`
+	Condition     protocol.FSCondition   `json:"condition"`
+	CreateParents bool                   `json:"create_parents,omitempty"`
 }
 type mkdirArgs struct {
-	Path    fsp.Path `json:"path"`
-	Parents bool     `json:"parents,omitempty"`
-	ExistOK bool     `json:"exist_ok,omitempty"`
+	Path    protocol.FSPath `json:"path"`
+	Parents bool            `json:"parents,omitempty"`
+	ExistOK bool            `json:"exist_ok,omitempty"`
 }
 type removeArgs struct {
-	Path      fsp.Path `json:"path"`
-	IfVersion string   `json:"if_version"`
-	Recursive bool     `json:"recursive,omitempty"`
-	MissingOK bool     `json:"missing_ok,omitempty"`
+	Path      protocol.FSPath `json:"path"`
+	IfVersion string          `json:"if_version"`
+	Recursive bool            `json:"recursive,omitempty"`
+	MissingOK bool            `json:"missing_ok,omitempty"`
 }
 
 // Handle 是 FS 数据面直调入口（MCP §4.1：fs 载荷 {method, args}
 // 直达现有 FS 服务；不再有方法声明/schema 目录层——方法集为协议固定集，
 // 参数校验在 validate/Authorize 内）。
-func (f *FS) Handle(ctx context.Context, caller tool.Caller, method string, args json.RawMessage) (any, error) {
+func (f *FS) Handle(ctx context.Context, caller protocol.Caller, method string, args json.RawMessage) (any, error) {
 	call := Call{Caller: caller, Owner: Owner(caller), Command: "fs", Method: method, Args: args}
 	if v, ok, err := f.handleBytes(ctx, call); ok {
 		return v, err
@@ -164,38 +161,38 @@ func (f *FS) Handle(ctx context.Context, caller tool.Caller, method string, args
 	return f.Run(ctx, call)
 }
 func (f *FS) validate(method string, raw json.RawMessage) error {
-	var path fsp.Path
+	var path protocol.FSPath
 	switch method {
 	case "roots", "home", "os_home":
 		var p struct{}
-		return hosts.Decode(raw, &p)
+		return protocol.Decode(raw, &p)
 	case "stat", "read":
 		var p pathArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		path = p.Path
 		if p.Follow {
-			return hosts.Fail("unsupported", "Following symbolic links is not available")
+			return protocol.FSFail("unsupported", "Following symbolic links is not available")
 		}
 		if p.Consistency != "" && (method != "read" || p.Consistency != "verified") {
-			return hosts.Fail("unsupported", "Requested read consistency is unavailable")
+			return protocol.FSFail("unsupported", "Requested read consistency is unavailable")
 		}
 	case "list":
 		var p listArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		path = p.Path
 		if p.Limit < 0 || p.Limit > 1000 || len(p.Cursor) > 2048 {
-			return hosts.Fail("invalid_argument", "Invalid list bounds")
+			return protocol.FSFail("invalid_argument", "Invalid list bounds")
 		}
 		if p.Sort != "" && p.Sort != "name" {
-			return hosts.Fail("unsupported", "Unsupported directory sort")
+			return protocol.FSFail("unsupported", "Unsupported directory sort")
 		}
 	case "write":
 		var p writeArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		path = p.Path
@@ -203,27 +200,27 @@ func (f *FS) validate(method string, raw json.RawMessage) error {
 			return err
 		}
 		if p.CreateParents {
-			return hosts.Fail("unsupported", "Create the parent directory explicitly")
+			return protocol.FSFail("unsupported", "Create the parent directory explicitly")
 		}
-		if p.Source.Kind != "bytes" || !hosts.ValidID(p.Source.ID) || !hosts.ValidID(p.Source.Epoch) {
-			return hosts.Fail("invalid_argument", "Invalid byte source")
+		if p.Source.Kind != "bytes" || !protocol.ValidID(p.Source.ID) || !protocol.ValidID(p.Source.Epoch) {
+			return protocol.FSFail("invalid_argument", "Invalid byte source")
 		}
 	case "find":
 		var p findArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		path = p.Path
 		if p.Depth < 0 || p.Depth > 64 || p.Limit < 0 || p.Limit > 1000 || len(p.Glob) > 256 || strings.ContainsAny(p.Glob, `/\[]{}`) {
-			return hosts.Fail("invalid_argument", "Invalid find bounds or basename glob")
+			return protocol.FSFail("invalid_argument", "Invalid find bounds or basename glob")
 		}
 	case "move", "copy":
 		var p moveArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		if p.IfVersion == "" {
-			return hosts.Fail("invalid_argument", "if_version is required")
+			return protocol.FSFail("invalid_argument", "if_version is required")
 		}
 		if err := p.Condition.Validate(); err != nil {
 			return err
@@ -234,21 +231,21 @@ func (f *FS) validate(method string, raw json.RawMessage) error {
 		path = p.Dst
 	case "mkdir":
 		var p mkdirArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		path = p.Path
 	case "remove":
 		var p removeArgs
-		if err := hosts.Decode(raw, &p); err != nil {
+		if err := protocol.Decode(raw, &p); err != nil {
 			return err
 		}
 		path = p.Path
 		if p.IfVersion == "" {
-			return hosts.Fail("invalid_argument", "if_version is required")
+			return protocol.FSFail("invalid_argument", "if_version is required")
 		}
 	default:
-		return hosts.Fail("unsupported", "Unknown fs method")
+		return protocol.FSFail("unsupported", "Unknown fs method")
 	}
 	return path.Validate(runtime.GOOS == "windows")
 }
@@ -257,7 +254,7 @@ func (f *FS) validate(method string, raw json.RawMessage) error {
 // retained results. Execution and range reads also check at the point of use.
 func (f *FS) Authorize(ctx context.Context, call Call) error {
 	if call.Command != "fs" {
-		return hosts.Fail("unsupported", "Command is not registered")
+		return protocol.FSFail("unsupported", "Command is not registered")
 	}
 	if err := f.validate(call.Method, call.Args); err != nil {
 		return err
@@ -266,19 +263,19 @@ func (f *FS) Authorize(ctx context.Context, call Call) error {
 		return nil // Mount metadata grants no access; home checks its actual path.
 	}
 	var p struct {
-		Path    fsp.Path `json:"path"`
-		Src     fsp.Path `json:"src"`
-		Dst     fsp.Path `json:"dst"`
-		Parents bool     `json:"parents"`
+		Path    protocol.FSPath `json:"path"`
+		Src     protocol.FSPath `json:"src"`
+		Dst     protocol.FSPath `json:"dst"`
+		Parents bool            `json:"parents"`
 	}
 	if err := json.Unmarshal(call.Args, &p); err != nil {
-		return hosts.Fail("invalid_argument", "Invalid file location")
+		return protocol.FSFail("invalid_argument", "Invalid file location")
 	}
 	write := call.Method == "write" || call.Method == "mkdir" || call.Method == "remove" || call.Method == "move" || call.Method == "copy"
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
-		return hosts.Fail("expired", "Filesystem closed")
+		return protocol.FSFail("expired", "Filesystem closed")
 	}
 	if call.Method == "move" || call.Method == "copy" {
 		if _, _, err := f.check(ctx, call, p.Src, call.Method == "move"); err != nil {
@@ -308,7 +305,7 @@ func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 		}
 	}()
 	if f.closed {
-		return nil, hosts.Fail("expired", "Filesystem closed")
+		return nil, protocol.FSFail("expired", "Filesystem closed")
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
@@ -319,7 +316,7 @@ func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 		if p == nil {
 			for _, r := range f.roots {
 				if r.Default {
-					p = &fsp.Path{RootID: r.ID, Segments: []string{}}
+					p = &protocol.FSPath{RootID: r.ID, Segments: []string{}}
 					break
 				}
 			}
@@ -331,7 +328,7 @@ func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 	case "os_home":
 		p := f.cfg.OSHome
 		if p == nil {
-			return nil, hosts.Fail("unavailable", "OS home is not addressable on this device")
+			return nil, protocol.FSFail("unavailable", "OS home is not addressable on this device")
 		}
 		if _, _, err := f.check(ctx, call, *p, false); err != nil {
 			return nil, err
@@ -352,41 +349,41 @@ func (f *FS) run(ctx context.Context, call Call) (value any, err error) {
 		return map[string]any{"roots": out}, nil
 	case "stat", "read":
 		var p pathArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.readOrStat(ctx, call, p)
 	case "list":
 		var p listArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.list(ctx, call, p)
 	case "write":
 		var p writeArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.write(ctx, call, p)
 	case "find":
 		var p findArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.find(ctx, call, p)
 	case "copy":
 		var p moveArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.copy(ctx, call, p)
 	case "move":
 		var p moveArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.move(ctx, call, p)
 	case "mkdir":
 		var p mkdirArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.mkdir(ctx, call, p)
 	case "remove":
 		var p removeArgs
-		_ = hosts.Decode(call.Args, &p)
+		_ = protocol.Decode(call.Args, &p)
 		return f.remove(ctx, call, p)
 	}
-	return nil, hosts.Fail("unsupported", "Unknown fs method")
+	return nil, protocol.FSFail("unsupported", "Unknown fs method")
 }
 func fault(err error) error {
-	var f *hosts.Fault
+	var f *protocol.Fault
 	if errors.As(err, &f) {
 		return f
 	}
@@ -394,20 +391,20 @@ func fault(err error) error {
 		return err
 	}
 	if errors.Is(err, fs.ErrNotExist) {
-		return hosts.Fail("not_found", "File or directory does not exist")
+		return protocol.FSFail("not_found", "File or directory does not exist")
 	}
 	if errors.Is(err, fs.ErrExist) {
-		return hosts.Fail("already_exists", "File or directory already exists")
+		return protocol.FSFail("already_exists", "File or directory already exists")
 	}
 	if errors.Is(err, fs.ErrPermission) {
-		return hosts.Fail("permission_denied", "Filesystem access denied")
+		return protocol.FSFail("permission_denied", "Filesystem access denied")
 	}
-	return hosts.Fail("filesystem_error", "Filesystem operation could not be completed")
+	return protocol.FSFail("filesystem_error", "Filesystem operation could not be completed")
 }
-func (f *FS) check(ctx context.Context, call Call, p fsp.Path, write bool) (*root, string, error) {
+func (f *FS) check(ctx context.Context, call Call, p protocol.FSPath, write bool) (*root, string, error) {
 	r := f.roots[p.RootID]
 	if r == nil {
-		return nil, "", hosts.Fail("not_found", "Unknown filesystem root")
+		return nil, "", protocol.FSFail("not_found", "Unknown filesystem root")
 	}
 	abs := filepath.Join(append([]string{r.Path}, p.Segments...)...)
 	if err := f.cfg.Check(ctx, call, abs, write); err != nil {
@@ -428,10 +425,10 @@ func (f *FS) check(ctx context.Context, call Call, p fsp.Path, write bool) (*roo
 // locate 是 check 去掉策略门控的部分：根身份校验、父链符号链接解析与
 // root 收容。策略判定只在 check 内发生；mkdirParents 的存在性探测走本层，
 // 已存在的祖先不因 -p 便利逻辑被要求授权。
-func (f *FS) locate(p fsp.Path) (*root, string, error) {
+func (f *FS) locate(p protocol.FSPath) (*root, string, error) {
 	r := f.roots[p.RootID]
 	if r == nil {
-		return nil, "", hosts.Fail("not_found", "Unknown filesystem root")
+		return nil, "", protocol.FSFail("not_found", "Unknown filesystem root")
 	}
 	current, err := os.Stat(r.Path)
 	if err != nil {
@@ -442,7 +439,7 @@ func (f *FS) locate(p fsp.Path) (*root, string, error) {
 		return nil, "", err
 	}
 	if !os.SameFile(current, opened) {
-		return nil, "", hosts.Fail("expired", "Filesystem root identity changed")
+		return nil, "", protocol.FSFail("expired", "Filesystem root identity changed")
 	}
 	resolved := filepath.Join(append([]string{r.Path}, p.Segments...)...)
 	if len(p.Segments) > 0 {
@@ -453,7 +450,7 @@ func (f *FS) locate(p fsp.Path) (*root, string, error) {
 	}
 	rel, err := filepath.Rel(r.Path, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", hosts.Fail("permission_denied", "Path is outside the filesystem root")
+		return nil, "", protocol.FSFail("permission_denied", "Path is outside the filesystem root")
 	}
 	return r, resolved, nil
 }
@@ -461,7 +458,7 @@ func (f *FS) locate(p fsp.Path) (*root, string, error) {
 // probe 是 mkdirParents 的存在性探测：返回末段最终信息（跟随符号链接——
 // mkdir -p 穿过已存在的链接层级），不做策略门控。探测只决定「哪几级缺失」；
 // 创建动作自身仍经 check（写）逐层判定。
-func (f *FS) probe(p fsp.Path) (fs.FileInfo, error) {
+func (f *FS) probe(p protocol.FSPath) (fs.FileInfo, error) {
 	r, resolved, err := f.locate(p)
 	if err != nil {
 		return nil, err
@@ -481,7 +478,7 @@ func (f *FS) probe(p fsp.Path) (fs.FileInfo, error) {
 	}
 	rel, err := filepath.Rel(r.Path, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, hosts.Fail("permission_denied", "Path is outside the filesystem root")
+		return nil, protocol.FSFail("permission_denied", "Path is outside the filesystem root")
 	}
 	h2, name2, err := parent(r, full)
 	if err != nil {
@@ -515,7 +512,7 @@ func resolveParentPath(abs string) (string, error) {
 func parent(r *root, abs string) (*os.Root, string, error) {
 	rel, err := filepath.Rel(r.Path, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", hosts.Fail("permission_denied", "Path is outside the filesystem root")
+		return nil, "", protocol.FSFail("permission_denied", "Path is outside the filesystem root")
 	}
 	h, err := r.handle.OpenRoot(".")
 	if err != nil {
@@ -533,7 +530,7 @@ func parent(r *root, abs string) (*os.Root, string, error) {
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			h.Close()
-			return nil, "", hosts.Fail("source_changed", "Directory changed during lookup")
+			return nil, "", protocol.FSFail("source_changed", "Directory changed during lookup")
 		}
 		next, e := h.OpenRoot(part)
 		if e != nil {
@@ -544,13 +541,13 @@ func parent(r *root, abs string) (*os.Root, string, error) {
 		h.Close()
 		if e != nil || !os.SameFile(info, actual) {
 			next.Close()
-			return nil, "", hosts.Fail("source_changed", "Directory changed during lookup")
+			return nil, "", protocol.FSFail("source_changed", "Directory changed during lookup")
 		}
 		h = next
 	}
 	return h, parts[len(parts)-1], nil
 }
-func entry(p fsp.Path, info fs.FileInfo) fsp.Entry {
+func entry(p protocol.FSPath, info fs.FileInfo) protocol.FSEntry {
 	kind := "other"
 	var size *int64
 	// dirLink：Windows 上指向目录的 reparse（junction/目录符号链接）按目录归类——
@@ -571,7 +568,7 @@ func entry(p fsp.Path, info fs.FileInfo) fsp.Entry {
 			media = "application/octet-stream"
 		}
 	}
-	return fsp.Entry{Path: p, Name: info.Name(), Kind: kind, Size: size, ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), Version: version(info), MediaType: media}
+	return protocol.FSEntry{Path: p, Name: info.Name(), Kind: kind, Size: size, ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), Version: version(info), MediaType: media}
 }
 func version(info fs.FileInfo) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%d/%d/%d/%s", info.Size(), info.ModTime().UnixNano(), info.Mode(), fileIdentity(info))))
@@ -593,13 +590,13 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 	}
 	e := entry(p.Path, info)
 	if p.IfVersion != "" && p.IfVersion != e.Version {
-		return nil, hosts.Fail("version_conflict", "File version changed")
+		return nil, protocol.FSFail("version_conflict", "File version changed")
 	}
 	if call.Method == "stat" {
 		return e, nil
 	}
 	if !info.Mode().IsRegular() {
-		return nil, hosts.Fail("unsupported", "read requires a regular file, not a directory or link")
+		return nil, protocol.FSFail("unsupported", "read requires a regular file, not a directory or link")
 	}
 	file, err := openRegular(h, name)
 	if err != nil {
@@ -608,7 +605,7 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 	actual, err := file.Stat()
 	if err != nil || !os.SameFile(info, actual) || version(actual) != e.Version {
 		file.Close()
-		return nil, hosts.Fail("source_changed", "File changed while being opened")
+		return nil, protocol.FSFail("source_changed", "File changed while being opened")
 	}
 	requested := filepath.Join(append([]string{r.Path}, p.Path.Segments...)...)
 	src, err := f.cfg.Bytes.AddFile(call.Owner, file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
@@ -623,14 +620,14 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 			return err
 		}
 		if version(now) != e.Version {
-			return hosts.Fail("source_changed", "File changed during range read")
+			return protocol.FSFail("source_changed", "File changed during range read")
 		}
 		// 路径对象与句柄对象必须是同一对象（替换/删除即失效）。unix 的 version 变化
 		// 由 ctime（unlink 递增）承担；Windows 的 CreationTime/属性不随替换变化，
 		// 需显式 SameFile 校验，否则旧句柄会继续提供已被替换对象的旧内容。
 		current, err := os.Lstat(requested)
 		if err != nil || !os.SameFile(current, now) {
-			return hosts.Fail("source_changed", "File replaced during range read")
+			return protocol.FSFail("source_changed", "File replaced during range read")
 		}
 		return nil
 	})
@@ -648,7 +645,7 @@ type cursor struct {
 
 // Directory browsing may follow a directory alias, but authorizes both names
 // and opens the resolved target through pinned, no-follow directory handles.
-func (f *FS) directory(ctx context.Context, call Call, p fsp.Path, write bool) (*os.Root, fs.FileInfo, error) {
+func (f *FS) directory(ctx context.Context, call Call, p protocol.FSPath, write bool) (*os.Root, fs.FileInfo, error) {
 	r, abs, err := f.check(ctx, call, p, write)
 	if err != nil {
 		return nil, nil, err
@@ -670,7 +667,7 @@ func (f *FS) directory(ctx context.Context, call Call, p fsp.Path, write bool) (
 		return nil, nil, err
 	}
 	if !info.IsDir() {
-		return nil, nil, hosts.Fail("invalid_argument", "A directory is required")
+		return nil, nil, protocol.FSFail("invalid_argument", "A directory is required")
 	}
 	dir, err := h.OpenRoot(name)
 	if err != nil {
@@ -679,7 +676,7 @@ func (f *FS) directory(ctx context.Context, call Call, p fsp.Path, write bool) (
 	actual, err := dir.Stat(".")
 	if err != nil || !os.SameFile(info, actual) {
 		dir.Close()
-		return nil, nil, hosts.Fail("source_changed", "Directory changed during lookup")
+		return nil, nil, protocol.FSFail("source_changed", "Directory changed during lookup")
 	}
 	return dir, info, nil
 }
@@ -700,11 +697,11 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 		return nil, err
 	}
 	if len(entries) > f.cfg.MaxDirectoryEntries {
-		return nil, hosts.Fail("overloaded", "Directory exceeds this backend's enumeration limit")
+		return nil, protocol.FSFail("overloaded", "Directory exceeds this backend's enumeration limit")
 	}
 	revision := version(info)
 	queryRaw, _ := json.Marshal(struct {
-		Path   fsp.Path
+		Path   protocol.FSPath
 		Hidden bool
 	}{p.Path, p.Hidden})
 	queryHash := sha256.Sum256(queryRaw)
@@ -713,13 +710,13 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 	if p.Cursor != "" {
 		raw, e := base64.RawURLEncoding.DecodeString(p.Cursor)
 		var c cursor
-		if e != nil || hosts.Decode(raw, &c) != nil || c.Query != query || c.Version != revision || c.Offset < 0 {
-			return nil, hosts.Fail("cursor_invalid", "Directory cursor is stale or has different options")
+		if e != nil || protocol.Decode(raw, &c) != nil || c.Query != query || c.Version != revision || c.Offset < 0 {
+			return nil, protocol.FSFail("cursor_invalid", "Directory cursor is stale or has different options")
 		}
 		start = c.Offset
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	out := make([]fsp.Entry, 0, min(len(entries), 1000))
+	out := make([]protocol.FSEntry, 0, min(len(entries), 1000))
 	visible := 0
 	limit := p.Limit
 	if limit == 0 {
@@ -735,7 +732,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 		if !p.Hidden && (strings.HasPrefix(item.Name(), ".") || entryHidden(item)) {
 			continue
 		}
-		child := fsp.Path{RootID: p.Path.RootID, Segments: append(append([]string{}, p.Path.Segments...), item.Name())}
+		child := protocol.FSPath{RootID: p.Path.RootID, Segments: append(append([]string{}, p.Path.Segments...), item.Name())}
 		if _, _, e := f.check(ctx, call, child, false); e != nil {
 			continue
 		}
@@ -767,16 +764,16 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 		return nil, err
 	}
 	if version(after) != revision {
-		return nil, hosts.Fail("cursor_invalid", "Directory changed during enumeration")
+		return nil, protocol.FSFail("cursor_invalid", "Directory changed during enumeration")
 	}
 	return map[string]any{"entries": out, "next_cursor": next, "revision": revision}, nil
 }
 func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if len(p.Path.Segments) == 0 {
-		return nil, hosts.Fail("permission_denied", "Cannot replace a root")
+		return nil, protocol.FSFail("permission_denied", "Cannot replace a root")
 	}
 	if !atomicReplaceSupported() {
-		return nil, hosts.Fail("unsupported", "Atomic replacement is unavailable")
+		return nil, protocol.FSFail("unsupported", "Atomic replacement is unavailable")
 	}
 	r, abs, err := f.check(ctx, call, p.Path, true)
 	if err != nil {
@@ -787,7 +784,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 		return nil, err
 	}
 	if !src.Immutable {
-		return nil, hosts.Fail("invalid_argument", "write requires a sealed immutable byte source")
+		return nil, protocol.FSFail("invalid_argument", "write requires a sealed immutable byte source")
 	}
 	h, name, err := parent(r, abs)
 	if err != nil {
@@ -803,7 +800,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	mode := fs.FileMode(0o600)
 	if exists {
 		if !existing.Mode().IsRegular() {
-			return nil, hosts.Fail("unsupported", "Cannot replace a directory or link")
+			return nil, protocol.FSFail("unsupported", "Cannot replace a directory or link")
 		}
 		oldVersion = version(existing)
 		mode = existing.Mode().Perm()
@@ -811,10 +808,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if err = p.Condition.Check(oldVersion, exists); err != nil {
 		return nil, err
 	}
-	temp, err := hosts.NewID(".aic-write-")
-	if err != nil {
-		return nil, err
-	}
+	temp := protocol.NewID(".aic-write-")
 	file, err := h.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -841,7 +835,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 		opened, openErr := reader.Stat()
 		if statErr != nil || openErr != nil || !os.SameFile(staged, opened) {
 			reader.Close()
-			return nil, hosts.Fail("source_changed", "Staging file changed before commit")
+			return nil, protocol.FSFail("source_changed", "Staging file changed before commit")
 		}
 		closeErr := file.Close()
 		file = reader
@@ -866,7 +860,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	}
 	if currentExists {
 		if !current.Mode().IsRegular() {
-			return nil, hosts.Fail("version_conflict", "Destination type changed")
+			return nil, protocol.FSFail("version_conflict", "Destination type changed")
 		}
 		currentVersion = version(current)
 	}
@@ -891,7 +885,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	// Cancellation after commit must not turn a completed save into a retry.
 	info, err := file.Stat()
 	if err != nil {
-		e := hosts.Fail("filesystem_error", "File committed but metadata could not be read")
+		e := protocol.FSFail("filesystem_error", "File committed but metadata could not be read")
 		e.Effect = "partial"
 		return nil, e
 	}
@@ -904,7 +898,7 @@ func (f *FS) mkdir(ctx context.Context, call Call, p mkdirArgs) (any, error) {
 		return f.mkdirParents(ctx, call, p)
 	}
 	if len(p.Path.Segments) == 0 {
-		return nil, hosts.Fail("permission_denied", "Cannot create a root")
+		return nil, protocol.FSFail("permission_denied", "Cannot create a root")
 	}
 	r, abs, err := f.check(ctx, call, p.Path, true)
 	if err != nil {
@@ -924,7 +918,7 @@ func (f *FS) mkdir(ctx context.Context, call Call, p mkdirArgs) (any, error) {
 		return nil, err
 	}
 	if !info.IsDir() {
-		return nil, hosts.Fail("already_exists", "Destination is not a directory")
+		return nil, protocol.FSFail("already_exists", "Destination is not a directory")
 	}
 	return entry(p.Path, info), nil
 }
@@ -933,7 +927,7 @@ func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 		return f.removeTree(ctx, call, p)
 	}
 	if len(p.Path.Segments) == 0 {
-		return nil, hosts.Fail("permission_denied", "Cannot remove a root")
+		return nil, protocol.FSFail("permission_denied", "Cannot remove a root")
 	}
 	r, abs, err := f.check(ctx, call, p.Path, true)
 	if err != nil {
@@ -952,7 +946,7 @@ func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 		return nil, err
 	}
 	if version(info) != p.IfVersion {
-		return nil, hosts.Fail("version_conflict", "Destination changed before removal")
+		return nil, protocol.FSFail("version_conflict", "Destination changed before removal")
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
@@ -973,9 +967,9 @@ func (f *FS) ResultPolicy(call Call) (func(context.Context) error, error) {
 		return func(context.Context) error { return nil }, nil
 	}
 	var p struct {
-		Path fsp.Path `json:"path"`
-		Src  fsp.Path `json:"src"`
-		Dst  fsp.Path `json:"dst"`
+		Path protocol.FSPath `json:"path"`
+		Src  protocol.FSPath `json:"src"`
+		Dst  protocol.FSPath `json:"dst"`
 	}
 	if err := json.Unmarshal(call.Args, &p); err != nil {
 		return nil, err
@@ -985,7 +979,7 @@ func (f *FS) ResultPolicy(call Call) (func(context.Context) error, error) {
 		write bool
 	}
 	var paths []target
-	add := func(path fsp.Path, write bool) error {
+	add := func(path protocol.FSPath, write bool) error {
 		r, abs, err := f.check(context.Background(), call, path, write)
 		if err != nil {
 			return err
@@ -1019,12 +1013,12 @@ type fsMethod struct {
 	Effect      string
 }
 type Call struct {
-	Caller                 tool.Caller
+	Caller                 protocol.Caller
 	Owner, Command, Method string
 	Args                   json.RawMessage
 }
 
-func Owner(c tool.Caller) string {
+func Owner(c protocol.Caller) string {
 	h := sha256.Sum256([]byte(c.Subject + "\x00" + c.Origin))
 	return hex.EncodeToString(h[:16])
 }
@@ -1035,7 +1029,7 @@ func (f *FS) Run(ctx context.Context, call Call) (any, error) {
 	return f.run(ctx, call)
 }
 
-func (f *FS) Configure(home fsp.Path, osHome *fsp.Path, proxyLimit int64) {
+func (f *FS) Configure(home protocol.FSPath, osHome *protocol.FSPath, proxyLimit int64) {
 	if proxyLimit <= 0 {
 		proxyLimit = 64 << 20
 	}

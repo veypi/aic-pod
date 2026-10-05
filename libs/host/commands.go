@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"github.com/veypi/aic-pod/protocol"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -10,8 +11,7 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/hostauth"
 	"github.com/veypi/aic-pod/libs/hostfs"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
+
 	"github.com/veypi/vbox"
 )
 
@@ -24,7 +24,7 @@ func (c *Client) newAccess() (*hostauth.Access, error) {
 	if err != nil {
 		return nil, err
 	}
-	key, err := rtcwire.DirectKey(parts[2], parts[0])
+	key, err := protocol.RtcDirectKey(parts[2], parts[0])
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (c *Client) initFilesystem() error {
 	}
 	files, err := hostfs.New(hostfs.Config{Roots: roots, Home: &home, OSHome: osHomePtr(osHome), Bytes: store, MaxProxyUploadBytes: c.options().Transfers.ProxyUploadBytes, Check: func(ctx context.Context, call hostfs.Call, path string, write bool) error {
 		if cfg.CheckAuth() != nil {
-			return wire.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
+			return protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -80,7 +80,7 @@ func (c *Client) initFilesystem() error {
 			d = rules.Match(p, vop)
 		}
 		if !d.Allow {
-			return wire.Fail("permission_denied", fmt.Sprintf("fs: %s 被规则表拒绝（如需写入请 grant fs %s）", p, p))
+			return protocol.Fail("permission_denied", fmt.Sprintf("fs: %s 被规则表拒绝（如需写入请 grant fs %s）", p, p))
 		}
 		return nil
 	}})

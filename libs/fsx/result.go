@@ -6,14 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/veypi/aic-pod/libs/proto"
 )
 
 // Result 是指令输出（§2.2）：Content 为文本正文，Attrs 为结构化元数据。
 // json tag 是 RTC 直连帧协议的线上契约（libs/rtc fschan 直接 json.Marshal
 // 本类型）——页面端按小写键解析；缺 tag 时 Go 产出大写键，页面静默丢空
-//（2026-09-10 实网事故：Go 侧消费方反序列化大小写不敏感，仅 JS 侧可见）。
+// （2026-09-10 实网事故：Go 侧消费方反序列化大小写不敏感，仅 JS 侧可见）。
 type Result struct {
 	Content string            `json:"content"`
 	Attrs   map[string]string `json:"attrs,omitempty"`
@@ -109,18 +107,14 @@ func detectMIME(data []byte, path string) string {
 
 // ---- 错误构造（格式锁定，§2.3/§5.4） ----
 
-// fsErr 构造 fs 错误：消息为 fs {action}: {原因}（§2.3）。
-func fsErr(action, format string, args ...any) *proto.ExecError {
-	return &proto.ExecError{Tool: proto.ToolFS, Action: action, Reason: fmt.Sprintf(format, args...)}
-}
-
-// fsVFSErr 包装 VFS 操作错误为 fs 指令错误：错误链含策略类错误
-// （proto.ApprovalError / proto.DeniedError）时保型上抛——审批/拒绝语义不能被
-// 拍平（cloud 内联路径 GatedFS 的写分级兜底依赖它进入审批流）；其余按
-// fs {action}: {原因}（§2.3）归一。
-func fsVFSErr(action string, vfsErr error, format string, args ...any) error {
-	if se := proto.StrategyError(vfsErr); se != nil {
-		return se
+// fsErr 构造 fs 错误：消息为 fs {action}: {原因}（§2.3 格式锁定；
+// action 空时退化为 fs: {原因}）。批次 2 错误模型收敛：ExecError/ApprovalError
+// 历史包装已删（无生产者与消费者），具体错误在所属实现构造，跨进程统一由
+// Fault 表达。
+func fsErr(action, format string, args ...any) error {
+	reason := fmt.Sprintf(format, args...)
+	if action == "" {
+		return fmt.Errorf("fs: %s", reason)
 	}
-	return fsErr(action, format, args...)
+	return fmt.Errorf("fs %s: %s", action, reason)
 }

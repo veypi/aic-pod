@@ -1,4 +1,4 @@
-package proto
+package protocol
 
 // RTC 信令（2026-09-10，WebRTC 直连）：页面为 offer 方，host 为应答方。
 // 信令双向走 NATS（入向 RtcInSubject / 出向 RtcOutSubject，权限模型见

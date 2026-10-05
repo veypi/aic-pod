@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"github.com/veypi/aic-pod/protocol"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,8 +17,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	rtcwire "github.com/veypi/aic-pod/protocol/hosts_rtc"
-	wire "github.com/veypi/aic-pod/protocol/tool"
 )
 
 func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
@@ -61,12 +60,12 @@ func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-func callTool(t *testing.T, c *Client, ctx context.Context, caller wire.Caller, r wire.Request) wire.Response {
+func callTool(t *testing.T, c *Client, ctx context.Context, caller protocol.Caller, r protocol.Request) protocol.Response {
 	t.Helper()
-	r.Protocol = rtcwire.Protocol
+	r.Protocol = protocol.RtcProtocol
 	return c.HandleTool(ctx, caller, r)
 }
-func callNATS(t *testing.T, c *Client, subject string, raw []byte) wire.Response {
+func callNATS(t *testing.T, c *Client, subject string, raw []byte) protocol.Response {
 	t.Helper()
 	return c.HandleNATS(context.Background(), subject, raw)
 }
@@ -77,7 +76,7 @@ func TestMCPHasNoPlatformServer(t *testing.T) {
 	t.Cleanup(func() { cfg.Global = saved })
 	c, _ := testClient(t)
 	response := callTool(t, c, context.Background(), testCaller(), execRequest("mcp tools aic", 30000))
-	out := decoded[wire.ExecResult](t, response.Result)
+	out := decoded[protocol.Output](t, response.Result)
 	if response.Error != nil || out.Attrs["exit_code"] == "0" || !strings.Contains(out.Attrs["stderr"], "aic") {
 		t.Fatalf("unexpected unconfigured service result: %+v %+v", response, out)
 	}
@@ -118,7 +117,7 @@ func TestMCPConfiguredServiceFromNativeExecAndUI(t *testing.T) {
 		caller := testCaller()
 		caller.Direct = want == 3 // UI uses the same exec path with a direct RTC caller.
 		response := callTool(t, c, context.Background(), caller, execRequest("mcp call fixture next --json", 30000))
-		output := decoded[wire.ExecResult](t, response.Result)
+		output := decoded[protocol.Output](t, response.Result)
 		var result mcp.CallToolResult
 		if response.Error != nil || output.Attrs["exit_code"] != "0" || json.Unmarshal([]byte(output.Content), &result) != nil {
 			t.Fatalf("native exec service call: %+v %+v", response, output)
@@ -140,14 +139,14 @@ func TestMCPConfiguredServiceFromNativeExecAndUI(t *testing.T) {
 	caller := testCaller()
 	caller.Direct = true
 	request := execRequest("mcp call fixture wait --json", 30000)
-	finished := make(chan wire.Response, 1)
+	finished := make(chan protocol.Response, 1)
 	go func() { finished <- callTool(t, c, ctx, caller, request) }()
 	select {
 	case <-started:
 	case <-ctx.Done():
 		t.Fatal("command did not reach MCP service")
 	}
-	response := callTool(t, c, ctx, caller, wire.Request{ID: "cancel_mcp", Action: wire.ActionCancel, CancelID: request.ID})
+	response := callTool(t, c, ctx, caller, protocol.Request{ID: "cancel_mcp", Action: protocol.ActionCancel, CancelID: request.ID})
 	if response.Error != nil {
 		t.Fatal(response.Error)
 	}
@@ -162,7 +161,7 @@ func TestMCPConfiguredServiceFromNativeExecAndUI(t *testing.T) {
 		t.Fatal("native cancellation did not reach MCP service")
 	}
 	response = callTool(t, c, ctx, caller, execRequest("mcp call fixture next --json", 30000))
-	out := decoded[wire.ExecResult](t, response.Result)
+	out := decoded[protocol.Output](t, response.Result)
 	if response.Error != nil || out.Attrs["exit_code"] != "0" || calls.Load() != 4 {
 		t.Fatalf("service unusable after cancellation: %+v %+v", response, out)
 	}
@@ -174,10 +173,10 @@ func TestBrowserStreamUsesExistingCommandAuthorization(t *testing.T) {
 	t.Cleanup(func() { cfg.Global = saved })
 	c, _ := testClient(t)
 	caller := testCaller()
-	call := func(caller wire.Caller) {
+	call := func(caller protocol.Caller) {
 		t.Helper()
 		err := c.streamBrowser(context.Background(), caller, nil, func([]byte) error { t.Fatal("unauthorized frame"); return nil })
-		if err == nil || wire.AsFault(err).Code != "permission_denied" {
+		if err == nil || protocol.AsFault(err).Code != "permission_denied" {
 			t.Fatalf("browser bypassed command gate: %v", err)
 		}
 	}
