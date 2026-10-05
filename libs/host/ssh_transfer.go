@@ -379,6 +379,9 @@ func (c *Client) managedSFTP(ctx context.Context, inv *commands.Invocation) erro
 				return nil
 			case "pwd":
 				_, err = fmt.Fprintln(inv.Stdout, cwd)
+				if commands.BrokenPipe(err) {
+					return errStdoutClosed
+				}
 			case "get":
 				err = t.copy(resolve(a[0]), a[1], false, op.recursive, 0)
 			case "put":
@@ -407,12 +410,18 @@ func (c *Client) managedSFTP(ctx context.Context, inv *commands.Invocation) erro
 							break
 						}
 					}
+					if commands.BrokenPipe(err) {
+						return errStdoutClosed
+					}
 				}
 			case "stat":
 				var fi fs.FileInfo
 				fi, err = remote.Lstat(resolve(a[0]))
 				if err == nil {
 					_, err = fmt.Fprintf(inv.Stdout, "%s %d %s\n", fi.Mode(), fi.Size(), a[0])
+					if commands.BrokenPipe(err) {
+						return errStdoutClosed
+					}
 				}
 			case "mkdir":
 				err = remote.Mkdir(resolve(a[0]))
@@ -429,6 +438,9 @@ func (c *Client) managedSFTP(ctx context.Context, inv *commands.Invocation) erro
 		}
 		return nil
 	})
+	if errors.Is(err, errStdoutClosed) {
+		return &commands.ExitError{Code: 141}
+	}
 	return transferError(inv, "sftp", err)
 }
 

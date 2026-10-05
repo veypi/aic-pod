@@ -3,11 +3,9 @@ package mcpx
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
-	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/vsh/commands"
@@ -131,7 +129,7 @@ func Command(resolve Resolve) commands.CommandFunc {
 			enc.SetIndent("", "  ")
 		}
 		if err = enc.Encode(value); err != nil {
-			if brokenPipe(err) {
+			if commands.BrokenPipe(err) {
 				// 下游提前关闭（`mcp ... | head`）：与 vsh 内建命令（cat/printf/tee…）
 				// 同一约定，按 SIGPIPE 语义返回 141。裸 error 会被解释器当作致命中止，
 				// 会把常用的截断管道变成整段脚本中断。
@@ -144,13 +142,4 @@ func Command(resolve Resolve) commands.CommandFunc {
 		}
 		return nil
 	}
-}
-
-// brokenPipe 判断写端失败是下游关闭所致（断管是正常终止，不是错误）。
-func brokenPipe(err error) bool {
-	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) {
-		return true
-	}
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "broken pipe") || strings.Contains(lower, "closed pipe")
 }

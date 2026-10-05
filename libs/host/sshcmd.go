@@ -207,6 +207,11 @@ func (c *Client) withSFTP(ctx context.Context, opts vbox.StartOptions, stderr io
 	return err
 }
 
+// errStdoutClosed 表示批处理的输出下游已关闭（`sftp -b - ... | head`）：这不是
+// 某一行失败，而是 SIGPIPE 语义的正常终止——不打印 stderr、不带批处理行号，
+// 由调用方转成 ExitError{141}。
+var errStdoutClosed = errors.New("sftp: output closed by downstream")
+
 func transferError(inv *commands.Invocation, name string, err error) error {
 	if err == nil {
 		return nil

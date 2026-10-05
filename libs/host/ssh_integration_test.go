@@ -260,6 +260,12 @@ func TestManagedSFTPTransfersAndRules(t *testing.T) {
 			t.Fatalf("binary mismatch %s %v", file, err)
 		}
 	}
+	// 输出下游提前关闭（`| head`）：与内建命令同一约定，按 SIGPIPE 收尾（141）——
+	// 不是批处理某一行失败，不打印 stderr；管道整体状态仍取末命令，脚本继续。
+	closed := strings.Repeat("pwd\n", 500)
+	if r := runManagedScript(t, c, "sftp -b - fixture | head -1; echo after:$? ps:${PIPESTATUS[@]}", closed); r.ExitCode != 0 || r.Stderr != "" || !strings.HasSuffix(r.Stdout, "after:0 ps:141 0\n") {
+		t.Fatalf("closed pipe %+v", r)
+	}
 	// Failure must leave an existing destination intact and remove .part files.
 	if r := runManagedScript(t, c, "scp fixture:missing downloaded", ""); r.ExitCode == 0 {
 		t.Fatal("missing source accepted")
