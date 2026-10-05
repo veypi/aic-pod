@@ -56,9 +56,6 @@ type Client struct {
 	browserContext context.Context
 	browserCancel  context.CancelFunc
 
-	execMu      sync.Mutex
-	execHandles map[string]*execHandleEntry // 当前执行请求登记表（前台执行）
-
 	optsMu          sync.RWMutex
 	opts            Options
 	lifecycleMu     sync.Mutex // serializes Connect, Reconfigure and Close
@@ -124,12 +121,11 @@ func New(opts Options) *Client {
 	// 配置无效不阻断连接——状态带 invalid，设备工具 fail-closed（修复并重启恢复）。
 	perms, err := newPermissionState(opts.WorkDir, cfg.Global)
 	c := &Client{
-		opts:        opts,
-		replay:      &replayCache{store: map[string]time.Time{}},
-		procs:       procs,
-		perms:       perms,
-		execHandles: map[string]*execHandleEntry{},
-		logf:        logf,
+		opts:   opts,
+		replay: &replayCache{store: map[string]time.Time{}},
+		procs:  procs,
+		perms:  perms,
+		logf:   logf,
 	}
 
 	if parts := strings.SplitN(opts.Key, ".", 4); len(parts) == 4 {

@@ -190,8 +190,6 @@ type ExecRequest struct {
 	// 持有）。返回值（下方 ExecResult 采集串）不受接线影响。
 	Stdout io.Writer
 	Stderr io.Writer
-	// Handle 本次执行的外层句柄（bg wait 禁止等待自身）；空 = 无。
-	Handle *ExecHandle
 }
 
 // ExecResult 执行结果：stdout/stderr 采集串 + exit_code，仅此而已。
@@ -235,9 +233,6 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 	ctx = context.WithValue(ctx, noSandboxKey{}, req.NoSandbox)
 	if req.WaitBudget > 0 {
 		ctx = context.WithValue(ctx, waitBudgetKey{}, time.Now().Add(req.WaitBudget))
-	}
-	if req.Handle != nil {
-		ctx = context.WithValue(ctx, execHandleKey{}, req.Handle)
 	}
 	timeout := req.Timeout
 	if timeout <= 0 {

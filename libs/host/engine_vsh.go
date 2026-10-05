@@ -191,15 +191,14 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		stdin = strings.NewReader(p.Stdin)
 	}
 
-	// 取消登记表：cancel(request_id) 与转后台后的 bg kill 共用此句柄。
+	// 唯一运行记录：execution 任务表（cancel 已绑定，登记先于启动）——
+	// cancel(request_id)/bg kill/断连都查同一记录，host 不再登记执行。
 	// 归属统一从 caller.Subject 派生（与 cancelExec 的归属检查同源——
 	// NATS 信封 Caller 与 RTC 票据 Subject 都是已认证用户身份；不能用
 	// 设备属主 c.uid，否则跨用户归属判定与任务表脱节）。
-	h := execution.NewExecHandle(nil)
-	c.trackExec(reqID, caller.Subject, sid, caller.ConnectionID, h)
 
-	// Written by onDone before h.Finish publishes completion. Incomplete outcomes
-	// must not inspect this snapshot or read the still-open execution logs.
+	// Written by onDone before the run record settles completion. Incomplete
+	// outcomes must not inspect this snapshot or read the still-open execution logs.
 	var logs execLogSnapshot
 	wait := time.Duration(p.WaitMS) * time.Millisecond
 	outcome := execution.Execute(ctx, engine, execution.ExecRequest{
@@ -213,10 +212,9 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		Stdin:         stdin,
 		Stdout:        outFile,
 		Stderr:        errFile,
-		Handle:        h,
 		Timeout:       c.options().ExecTimeout,
 	}, wait, execution.TaskMeta{
-		Owner: caller.Subject, Session: sid, RequestID: reqID,
+		Owner: caller.Subject, Session: sid, RequestID: reqID, ConnectionID: caller.ConnectionID,
 		LogOut: logOut, LogErr: logErr,
 		// 转后台（bg）只服务 NATS/AI 通道；RTC 直连等待超时返回
 		// ErrWaitElapsed——执行继续、不产生 bg 记录。
@@ -226,7 +224,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 
 	attrs := map[string]string{"action": "exec", "output": logOut, "error_output": logErr}
 	if errors.Is(outcome.Err, execution.ErrWaitElapsed) {
-		// RTC 直连等待超时：执行继续（保留取消登记——cancel(request_id)
+		// RTC 直连等待超时：执行继续（前台记录保留——cancel(request_id)
 		// 与 DisconnectTools 仍可终止）；日志在实际结束时关闭。
 		return &protocol.Output{
 			Content: fmt.Sprintf("execution still running; output: %s（cancel(request_id) 可终止）", logOut),
@@ -234,10 +232,9 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		}, protocol.Fail("deadline_exceeded", "exec: wait elapsed; execution continues (cancel to stop)")
 	}
 	if outcome.Background {
-		// 超时转 bg：任务继续（独立墙钟）；日志文件在执行结束时关闭。
-		// 后台执行的取消走任务表 Kill（RequestID 关联）——从取消登记表
-		// 摘除，DisconnectTools 只影响前台执行（断线/停止等待不是取消）。
-		c.untrackExec(reqID)
+		// 超时转 bg：同一记录标记 bg（任务继续，独立墙钟）；日志文件在
+		// 执行结束时关闭。后台执行的取消走任务表 Kill/CancelByRequest，
+		// DisconnectTools 只取消前台执行（断线/停止等待不是取消）。
 		attrs["background"] = "true"
 		attrs["id"] = outcome.Task.ID
 		return &protocol.Output{
@@ -257,7 +254,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		return execResultResponse(outcome.Result, attrs, caller.Direct), err
 	}
 	// 调用方 ctx 结束（传输断连/前台预算到期，§2.6）：断线不是取消——
-	// 停止等待但执行继续（取消登记保留），日志在实际执行结束时关闭。
+	// 停止等待但执行继续（前台记录保留），日志在实际执行结束时关闭。
 	if errors.Is(outcome.Err, context.Canceled) || errors.Is(outcome.Err, context.DeadlineExceeded) {
 		if outcome.Result == nil {
 			return &protocol.Output{Attrs: attrs}, outcome.Err

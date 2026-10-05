@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/veypi/aic-pod/protocol"
 
 	"path/filepath"
@@ -14,14 +15,6 @@ import (
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
 )
-
-// execHandleEntry 是取消登记表的一项（前台执行按 request_id 登记；
-// 转后台后同一句柄经任务表 RequestID 可达）。
-type execHandleEntry struct {
-	handle         *execution.ExecHandle
-	owner, session string
-	connectionID   string
-}
 
 func (c *Client) initTools() {
 	if c.initErr = c.initFilesystem(); c.initErr != nil {
@@ -42,20 +35,11 @@ func (c *Client) initTools() {
 	}
 }
 
-// DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务的取消
-// 显式走 cancel/bg kill；stream 随 RTC 通道关闭由对端清理）。
+// DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务继续，
+// 其取消显式走 cancel/bg kill；stream 随 RTC 通道关闭由对端清理）。
 func (c *Client) DisconnectTools(caller protocol.Caller) {
-	var handles []*execution.ExecHandle
-	c.execMu.Lock()
-	for id, e := range c.execHandles {
-		if e.connectionID == caller.ConnectionID {
-			handles = append(handles, e.handle)
-			delete(c.execHandles, id)
-		}
-	}
-	c.execMu.Unlock()
-	for _, h := range handles {
-		h.Cancel()
+	if engine, err := c.engine(); err == nil {
+		engine.Tasks.CancelConnection(caller.ConnectionID)
 	}
 }
 
@@ -68,30 +52,6 @@ func (c *Client) handleToolsMsg(msg *nats.Msg) {
 	if err != nil {
 		c.logf("Tool request: %v", err)
 	}
-}
-
-// --- cancel 登记表（cancel(request_id) 与 bg kill 共用执行句柄，§2.6） ---
-
-// trackExec 登记前台执行的取消句柄（完成时经 watcher 移除；转后台时经
-// untrackExec 摘除——后台执行的取消走任务表 Kill（RequestID 关联），
-// DisconnectTools 不杀后台任务）。
-func (c *Client) trackExec(requestID, owner, session, connectionID string, h *execution.ExecHandle) {
-	c.execMu.Lock()
-	c.execHandles[requestID] = &execHandleEntry{handle: h, owner: owner, session: session, connectionID: connectionID}
-	c.execMu.Unlock()
-	go func() {
-		<-h.Done()
-		c.execMu.Lock()
-		delete(c.execHandles, requestID)
-		c.execMu.Unlock()
-	}()
-}
-
-// untrackExec 摘除取消登记（转后台时调用；幂等——watcher 的删除同为幂等）。
-func (c *Client) untrackExec(requestID string) {
-	c.execMu.Lock()
-	delete(c.execHandles, requestID)
-	c.execMu.Unlock()
 }
 
 func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *protocol.FSInvocation) (any, error) {
@@ -191,23 +151,17 @@ func (c *Client) HandleTool(ctx context.Context, caller protocol.Caller, r proto
 }
 
 func (c *Client) cancelExec(caller protocol.Caller, cancelID string) (any, error) {
-	owner, session := caller.Subject, caller.Origin
-	// 已转后台的执行走任务表 Kill（同一执行句柄，置 killed 终态）；
-	// 前台未登记的执行用取消登记表。归属不匹配等同不存在。
-	if engine, err := c.engine(); err == nil {
-		if task, found := engine.Tasks.FindByRequest(cancelID, owner, session); found {
-			if err := engine.Tasks.Kill(task.ID, owner, session); err != nil {
-				return nil, err
-			}
-			return map[string]bool{"cancel_requested": true}, nil
+	// 唯一运行记录表：前台与 bg 同一记录（bg 置 killed 终态）。
+	// 归属不匹配或已终结等同不存在。
+	engine, err := c.engine()
+	if err != nil {
+		return nil, protocol.Fail("internal", "exec: engine: "+err.Error())
+	}
+	if err := engine.Tasks.CancelByRequest(cancelID, caller.Subject, caller.Origin); err != nil {
+		if errors.Is(err, execution.ErrNoRun) {
+			return nil, protocol.Fail("not_found", "No active execution")
 		}
+		return nil, err
 	}
-	c.execMu.Lock()
-	e, ok := c.execHandles[cancelID]
-	c.execMu.Unlock()
-	if ok && e.owner == owner && e.session == session {
-		e.handle.Cancel()
-		return map[string]bool{"cancel_requested": true}, nil
-	}
-	return nil, protocol.Fail("not_found", "No active execution")
+	return map[string]bool{"cancel_requested": true}, nil
 }

@@ -32,14 +32,6 @@ func newWaitTestEngine(t *testing.T) *Engine {
 	return e
 }
 
-// waitBlockHandle 构造阻塞中的执行句柄（Adopt 测试件）。
-func waitBlockHandle() (*ExecHandle, chan struct{}) {
-	release := make(chan struct{})
-	h := NewExecHandle(func() {})
-	go func() { <-release; h.Finish(&ExecResult{ExitCode: 0}, nil) }()
-	return h, release
-}
-
 // TestForegroundNoBGRecord 前台完成不产生 bg 记录（§2.4）。
 func TestForegroundNoBGRecord(t *testing.T) {
 	t.Parallel()
@@ -63,9 +55,8 @@ func TestForegroundNoBGRecord(t *testing.T) {
 func TestNoAdoptRTC(t *testing.T) {
 	t.Parallel()
 	e := newWaitTestEngine(t)
-	h := NewExecHandle(nil)
 	out := Execute(context.Background(), e, ExecRequest{
-		SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late", Handle: h,
+		SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late",
 	}, 50*time.Millisecond, TaskMeta{Owner: "u:t1", Session: "s1"}, false, nil)
 	if !errors.Is(out.Err, ErrWaitElapsed) || out.Background || out.Result != nil {
 		t.Fatalf("out = %+v", out)
@@ -73,13 +64,13 @@ func TestNoAdoptRTC(t *testing.T) {
 	if got := e.Tasks.List("u:t1", "s1"); len(got) != 0 {
 		t.Fatalf("RTC 超时不应产生 bg 记录: %v", got)
 	}
-	// 执行继续并完成（取消只能经句柄/cancel——本例等自然完成）。
+	// 执行继续并完成（取消只能经记录/cancel——本例等自然完成）。
 	select {
-	case <-h.Done():
+	case <-out.Run.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("execution did not continue to completion")
 	}
-	res, _ := h.Result()
+	res, _ := out.Run.Result()
 	if res == nil || strings.TrimSpace(res.Stdout) != "late" {
 		t.Fatalf("res = %+v", res)
 	}
@@ -124,18 +115,18 @@ func TestTimeoutAdoptsOnce(t *testing.T) {
 func TestContextCancelStopsWaitingOnly(t *testing.T) {
 	t.Parallel()
 	e := newWaitTestEngine(t)
-	h := NewExecHandle(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan *Outcome, 1)
 	go func() {
 		done <- Execute(ctx, e, ExecRequest{
-			SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late", Handle: h,
+			SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late",
 		}, 30*time.Second, TaskMeta{Owner: "u:t1", Session: "s1"}, true, nil)
 	}()
 	time.Sleep(100 * time.Millisecond)
 	cancel()
+	var out *Outcome
 	select {
-	case out := <-done:
+	case out = <-done:
 		if !errors.Is(out.Err, context.Canceled) || out.Background || out.Result != nil {
 			t.Fatalf("out = %+v", out)
 		}
@@ -147,11 +138,11 @@ func TestContextCancelStopsWaitingOnly(t *testing.T) {
 	}
 	// 执行不被取消：跑完并写入结果。
 	select {
-	case <-h.Done():
+	case <-out.Run.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("execution was cancelled by caller ctx")
 	}
-	res, _ := h.Result()
+	res, _ := out.Run.Result()
 	if res == nil || strings.TrimSpace(res.Stdout) != "late" {
 		t.Fatalf("res = %+v", res)
 	}
@@ -167,9 +158,9 @@ func TestCapacityCancel(t *testing.T) {
 	e := newWaitTestEngine(t)
 	e.Tasks = NewTaskTableWithCaps(1, 1)
 	// 占满唯一名额
-	h, release := waitBlockHandle()
+	occupant, release := blockRun(e.Tasks, TaskMeta{Owner: "u:t1", Session: "s1"})
 	defer close(release)
-	if _, err := e.Tasks.Adopt(h, "occupant", TaskMeta{Owner: "u:t1", Session: "s1"}); err != nil {
+	if _, err := e.Tasks.adoptBackground(occupant); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
@@ -193,10 +184,9 @@ func TestCapacityCancel(t *testing.T) {
 // A wait timeout must not close execution resources; completion owns cleanup.
 func TestCompletionAfterWait(t *testing.T) {
 	e := newWaitTestEngine(t)
-	h := NewExecHandle(nil)
 	var completed atomic.Int32
 	out := Execute(context.Background(), e, ExecRequest{
-		SessionKey: "cleanup", Script: "sleep 0.2; echo late", Handle: h,
+		SessionKey: "cleanup", Script: "sleep 0.2; echo late",
 	}, 10*time.Millisecond, TaskMeta{}, false, func(res *ExecResult) {
 		if res == nil || strings.TrimSpace(res.Stdout) != "late" {
 			t.Errorf("completion result: %+v", res)
@@ -207,12 +197,12 @@ func TestCompletionAfterWait(t *testing.T) {
 		t.Fatalf("premature completion: %+v", out)
 	}
 	select {
-	case <-h.Done():
+	case <-out.Run.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("execution did not finish")
 	}
 	if completed.Load() != 1 {
-		t.Fatal("cleanup must finish exactly once before handle completion")
+		t.Fatal("cleanup must finish exactly once before record completion")
 	}
 }
 

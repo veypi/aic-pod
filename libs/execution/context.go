@@ -26,8 +26,8 @@ type noSandboxKey struct{}
 // waitBudgetKey 携带前台等待截止（bg wait 的共享预算源）。
 type waitBudgetKey struct{}
 
-// execHandleKey 携带本次执行的句柄（bg wait 禁止等待自身用）。
-type execHandleKey struct{}
+// execRunKey 携带本次执行的运行记录（bg wait 禁止等待自身用）。
+type execRunKey struct{}
 
 // OwnerFromContext 取 Exec 注入的任务归属（无注入 = 空串匿名共池）。
 func OwnerFromContext(ctx context.Context) string {
@@ -69,8 +69,16 @@ func WaitBudgetRemaining(ctx context.Context) (time.Duration, bool) {
 	return remain, true
 }
 
-// HandleFromContext 取本次执行的句柄（bg wait 禁止等待自身用）。
-func HandleFromContext(ctx context.Context) *ExecHandle {
-	h, _ := ctx.Value(execHandleKey{}).(*ExecHandle)
-	return h
+// runFromContext 取本次执行的运行记录（bg wait 禁止等待自身用）。
+func runFromContext(ctx context.Context) *Run {
+	r, _ := ctx.Value(execRunKey{}).(*Run)
+	return r
+}
+
+// CurrentRunID 取本次执行的 bg 编号（未转后台为空）。
+func CurrentRunID(ctx context.Context) string {
+	if r := runFromContext(ctx); r != nil {
+		return r.BGID()
+	}
+	return ""
 }

@@ -31,41 +31,24 @@ func newTestEngine(t *testing.T) *Engine {
 	return e
 }
 
-// blockHandle 构造阻塞中的执行句柄（Adopt 测试件）。
-func blockHandle() (*ExecHandle, chan struct{}) {
+// blockRun 构造阻塞中的运行记录（转后台/容量测试件）。
+func blockRun(tt *TaskTable, meta TaskMeta) (*Run, chan struct{}) {
 	release := make(chan struct{})
-	h := NewExecHandle(func() {})
-	go func() { <-release; h.Finish(&ExecResult{ExitCode: 0}, nil) }()
-	return h, release
+	r := tt.register(func() {}, "t", meta)
+	go func() { <-release; tt.finish(r, &ExecResult{ExitCode: 0}, nil) }()
+	return r, release
 }
 
-// Cancel 先于 BindCancel：取消请求不得丢失（接入层预建句柄与 execution 等待编排
-// 编排层绑定墙钟 cancel 之间存在竞态窗）——绑定时补触发。
-func TestExecHandleCancelBeforeBind(t *testing.T) {
+// 运行记录取消：cancel 在登记发布前已绑定（不存在先取消后绑定的竞态窗），
+// Cancel 即时触发。
+func TestRunCancel(t *testing.T) {
 	t.Parallel()
-	h := NewExecHandle(nil)
-	h.Cancel() // cancel 未绑定：仅记标志
-	bound := false
-	h.BindCancel(func() { bound = true })
-	if !bound {
-		t.Fatal("BindCancel 应补触发先于它的 Cancel")
-	}
-	// 重复 Cancel 幂等（context.CancelFunc 语义：多次调用无副作用）。
-	h.Cancel()
-	if !bound {
-		t.Fatal("重复 Cancel 不应丢失绑定")
-	}
-}
-
-// BindCancel 先于 Cancel：正常路径即时触发。
-func TestExecHandleCancelAfterBind(t *testing.T) {
-	t.Parallel()
-	h := NewExecHandle(nil)
-	bound := 0
-	h.BindCancel(func() { bound++ })
-	h.Cancel()
-	if bound != 1 {
-		t.Fatalf("Cancel 应触发绑定的 cancel，实际 %d 次", bound)
+	tt := NewTaskTable()
+	ctx, cancel := context.WithCancel(context.Background())
+	r := tt.register(cancel, "t", TaskMeta{Owner: "o1", Session: "s1"})
+	r.Cancel()
+	if ctx.Err() == nil {
+		t.Fatal("Cancel 应触发登记的 cancel")
 	}
 }
 
@@ -76,8 +59,8 @@ func TestTaskTableCapacity(t *testing.T) {
 	tt := NewTaskTableWithCaps(3, 2)
 	releases := map[string]chan struct{}{}
 	adopt := func(owner string) (Task, error) {
-		h, release := blockHandle()
-		task, err := tt.Adopt(h, "t", TaskMeta{Owner: owner, Session: "s1"})
+		r, release := blockRun(tt, TaskMeta{Owner: owner, Session: "s1"})
+		task, err := tt.adoptBackground(r)
 		if err == nil {
 			releases[task.ID] = release
 		}
@@ -124,13 +107,13 @@ func TestTaskTableCapacity(t *testing.T) {
 func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
 	t.Parallel()
 	tt := NewTaskTableWithCaps(2, 2)
-	h1, release1 := blockHandle()
-	k1, err := tt.Adopt(h1, "t", TaskMeta{Owner: "o1", Session: "s1"})
+	r1, release1 := blockRun(tt, TaskMeta{Owner: "o1", Session: "s1"})
+	k1, err := tt.adoptBackground(r1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2, release2 := blockHandle()
-	if _, err := tt.Adopt(h2, "t", TaskMeta{Owner: "o1", Session: "s1"}); err != nil {
+	r2, release2 := blockRun(tt, TaskMeta{Owner: "o1", Session: "s1"})
+	if _, err := tt.adoptBackground(r2); err != nil {
 		t.Fatal(err)
 	}
 	defer close(release2)
@@ -143,9 +126,9 @@ func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
 		t.Fatalf("kill 后快照 = %+v ok=%v", snap, ok)
 	}
 	// 执行未实际退出：容量未释放，新登记仍撞满。
-	h3, release3 := blockHandle()
+	r3, release3 := blockRun(tt, TaskMeta{Owner: "o1", Session: "s1"})
 	defer close(release3)
-	if _, err := tt.Adopt(h3, "t", TaskMeta{Owner: "o1", Session: "s1"}); err == nil {
+	if _, err := tt.adoptBackground(r3); err == nil {
 		t.Fatal("执行未退出时容量不应提前释放")
 	}
 	// 执行实际结束 → 终态结算 + 容量释放（不双重释放）。
@@ -153,13 +136,13 @@ func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
 	if _, err := tt.Wait(context.Background(), k1.ID, 3*time.Second, "o1", "s1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tt.Adopt(h3, "t", TaskMeta{Owner: "o1", Session: "s1"}); err != nil {
+	if _, err := tt.adoptBackground(r3); err != nil {
 		t.Fatalf("实际结束后应可补位: %v", err)
 	}
 	tt.mu.Lock()
 	defer tt.mu.Unlock()
-	if tt.running != 2 || tt.runningByOwner["o1"] != 2 {
-		t.Fatalf("running=%d byOwner=%v, want 2/2（双重释放？）", tt.running, tt.runningByOwner)
+	if tt.bgRunning != 2 || tt.bgByOwner["o1"] != 2 {
+		t.Fatalf("bgRunning=%d byOwner=%v, want 2/2（双重释放？）", tt.bgRunning, tt.bgByOwner)
 	}
 }
 
@@ -168,13 +151,10 @@ func TestTaskTableEviction(t *testing.T) {
 	t.Parallel()
 	tt := NewTaskTableWithCaps(16, 16)
 	tt.maxRetained = 3
-	var last Task
+	var first, last Task
 	for i := 0; i < 6; i++ {
-		h := NewExecHandle(func() {})
-		h.Finish(&ExecResult{ExitCode: 0}, nil)
-		// 已完成句柄不能 Adopt——先登记再完成
-		h2, release := blockHandle()
-		task, err := tt.Adopt(h2, "t", TaskMeta{Owner: "o1", Session: "s1"})
+		r, release := blockRun(tt, TaskMeta{Owner: "o1", Session: "s1"})
+		task, err := tt.adoptBackground(r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -182,18 +162,21 @@ func TestTaskTableEviction(t *testing.T) {
 		if _, err := tt.Wait(context.Background(), task.ID, 3*time.Second, "o1", "s1"); err != nil {
 			t.Fatal(err)
 		}
+		if i == 0 {
+			first = task
+		}
 		last = task
 	}
 	tasks := tt.List("o1", "s1")
-	if len(tasks) > 4 { // maxRetained 3 + 最后一个 running/finished
-		t.Fatalf("retained = %d, want <= 4", len(tasks))
+	if len(tasks) > 3 { // maxRetained 3
+		t.Fatalf("retained = %d, want <= 3", len(tasks))
 	}
-	// 最新的必须在，最旧的 bg-1/bg-2 已逐出。
+	// 最新的必须在，最旧的已逐出。
 	if _, ok := tt.Get(last.ID, "o1", "s1"); !ok {
 		t.Fatalf("latest task %s evicted", last.ID)
 	}
-	if _, ok := tt.Get("bg-1", "o1", "s1"); ok {
-		t.Fatal("oldest bg-1 should be evicted")
+	if _, ok := tt.Get(first.ID, "o1", "s1"); ok {
+		t.Fatalf("oldest %s should be evicted", first.ID)
 	}
 }
 

@@ -209,17 +209,15 @@ func TestCmdBGClosedLoop(t *testing.T) {
 		t.Fatalf("empty list: %q %v", out, err)
 	}
 
-	// Adopt 一个已完成的执行：登记被拒（竞争回退为完成结果）
-	h := NewExecHandle(func() {})
-	h.Finish(&ExecResult{ExitCode: 0}, nil)
-	if _, err := tasks.Adopt(h, "echo hi", TaskMeta{Owner: "u1", Session: "s1", LogOut: "/log/out", LogErr: "/log/err"}); err == nil {
+	// 已完成的执行转后台：登记被拒（竞争回退为完成结果）
+	fin := tasks.register(func() {}, "echo hi", TaskMeta{Owner: "u1", Session: "s1", LogOut: "/log/out", LogErr: "/log/err"})
+	tasks.finish(fin, &ExecResult{ExitCode: 0}, nil)
+	if _, err := tasks.adoptBackground(fin); err == nil {
 		t.Fatal("adopt of finished execution must be rejected")
 	}
 
-	h2 := NewExecHandle(func() {})
-	release := make(chan struct{})
-	go func() { <-release; h2.Finish(&ExecResult{ExitCode: 0}, nil) }()
-	task2, err := tasks.Adopt(h2, "sleep 1", TaskMeta{Owner: "u1", Session: "s1", LogOut: "/log/o2", LogErr: "/log/e2"})
+	r2, release := blockRun(tasks, TaskMeta{Owner: "u1", Session: "s1", LogOut: "/log/o2", LogErr: "/log/e2"})
+	task2, err := tasks.adoptBackground(r2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,9 +273,9 @@ func TestCmdBGKillCancelsHandle(t *testing.T) {
 	ctx := identityCtx("u1", "s1", false)
 
 	cancelled := false
-	h := NewExecHandle(func() { cancelled = true })
-	go func() { <-time.After(10 * time.Second); h.Finish(&ExecResult{}, nil) }()
-	task, err := tasks.Adopt(h, "sleep 10", TaskMeta{Owner: "u1", Session: "s1"})
+	r := tasks.register(func() { cancelled = true }, "sleep 10", TaskMeta{Owner: "u1", Session: "s1"})
+	go func() { <-time.After(10 * time.Second); tasks.finish(r, &ExecResult{}, nil) }()
+	task, err := tasks.adoptBackground(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,10 +297,8 @@ func TestBGWaitBudget(t *testing.T) {
 	_ = RegisterPlatformCommands(reg, PlatformDeps{Tasks: tasks})
 
 	// 构造运行中任务测预算路径
-	running := NewExecHandle(func() {})
-	release := make(chan struct{})
-	go func() { <-release; running.Finish(&ExecResult{ExitCode: 0}, nil) }()
-	task, err := tasks.Adopt(running, "sleep 60", TaskMeta{Owner: "u1", Session: "s1"})
+	running, release := blockRun(tasks, TaskMeta{Owner: "u1", Session: "s1"})
+	task, err := tasks.adoptBackground(running)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,9 +320,11 @@ func TestBGWaitBudget(t *testing.T) {
 	}
 	close(release)
 	// 禁止等待自身
-	self := NewExecHandle(func() {})
-	self.adopt("bg-self")
-	ctx3 := context.WithValue(ctx, execHandleKey{}, self)
+	self := tasks.register(func() {}, "self", TaskMeta{Owner: "u1", Session: "s1"})
+	self.mu.Lock()
+	self.background, self.bgID = true, "bg-self"
+	self.mu.Unlock()
+	ctx3 := context.WithValue(ctx, execRunKey{}, self)
 	if _, _, err := runCmdCtx(ctx3, t, reg, "bg", "wait", "bg-self", "1"); err == nil {
 		t.Fatal("wait on self must fail")
 	}

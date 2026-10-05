@@ -212,7 +212,7 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 			return commands.Exitf(inv, 2, "usage: bg wait <id> [秒] [--json]")
 		}
 		// 禁止等待自身（后台执行里的 wait 只查询——等待链不派生）。
-		if h := HandleFromContext(ctx); h != nil && h.TaskID() != "" && h.TaskID() == args[1] {
+		if id := CurrentRunID(ctx); id != "" && id == args[1] {
 			return commands.Exitf(inv, 2, "bg wait: cannot wait on self (%s)", args[1])
 		}
 		// 有界等待（§2.4）：实际等待 = min(指定秒数, 本次 exec 剩余前台预算

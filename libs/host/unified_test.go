@@ -291,21 +291,15 @@ func execResultLoose(t *testing.T, r protocol.Response) protocol.Output {
 	return decoded[protocol.Output](t, r.Result)
 }
 
-// trackedExec 取前台执行的登记句柄（测试等待执行实际结束用——取消/断连
-// 是异步的，测试返回前必须等执行 goroutine 写完日志，否则与
-// TempDir 清理竞争）。
-func trackedExec(t *testing.T, c *Client, requestID string) *execHandleEntry {
+// waitRunDone 等 requestID 对应执行实际结束（取消/断连是异步的，测试
+// 返回前必须等执行 goroutine 写完日志，否则与 TempDir 清理竞争）。
+func waitRunDone(t *testing.T, c *Client, requestID string) {
 	t.Helper()
-	c.execMu.Lock()
-	defer c.execMu.Unlock()
-	return c.execHandles[requestID]
-}
-
-func waitHandleDone(t *testing.T, h *execution.ExecHandle) {
-	t.Helper()
-	select {
-	case <-h.Done():
-	case <-time.After(10 * time.Second):
+	engine, err := c.engine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !engine.Tasks.WaitRun(requestID, 10*time.Second) {
 		t.Fatal("执行未在预期内结束")
 	}
 }
@@ -332,11 +326,9 @@ func TestExecScriptRTCWaitElapsedKeepsLogs(t *testing.T) {
 	if _, err := os.Stat(logOut); err != nil {
 		t.Fatalf("stdout log missing: %v", err)
 	}
-	// 执行仍在运行：cancel(request_id) 终止并清理。
+	// 执行仍在运行：断连取消前台执行并清理。
 	c.DisconnectTools(caller)
-	if e := trackedExec(t, c, req.ID); e != nil {
-		waitHandleDone(t, e.handle)
-	}
+	waitRunDone(t, c, req.ID)
 }
 
 // 转后台容量不足取消：错误码为资源类 overloaded，错误响应仍含日志路径；
@@ -390,9 +382,7 @@ func TestExecScriptCapacityCancelKeepsLogs(t *testing.T) {
 		t.Fatalf("容量不足的执行不应登记后台: %v", got)
 	}
 	// 容量取消是异步的：等被取消的执行 goroutine 实际结束。
-	if e := trackedExec(t, c, second.ID); e != nil {
-		waitHandleDone(t, e.handle)
-	}
+	waitRunDone(t, c, second.ID)
 }
 
 // DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务不受影响）。
@@ -408,10 +398,6 @@ func TestDisconnectToolsCancelsForeground(t *testing.T) {
 	start := time.Now()
 	go func() { done <- reply{callTool(t, c, context.Background(), caller, req)} }()
 	time.Sleep(300 * time.Millisecond)
-	entry := trackedExec(t, c, req.ID)
-	if entry == nil {
-		t.Fatal("前台执行未登记取消句柄")
-	}
 	c.DisconnectTools(caller)
 	var r protocol.Response
 	select {
@@ -430,7 +416,7 @@ func TestDisconnectToolsCancelsForeground(t *testing.T) {
 	if res.Attrs["output"] == "" || res.Attrs["error_output"] == "" {
 		t.Fatalf("missing log paths: %v", res.Attrs)
 	}
-	waitHandleDone(t, entry.handle)
+	waitRunDone(t, c, req.ID)
 }
 
 func TestCancelUnknownExecution(t *testing.T) {
