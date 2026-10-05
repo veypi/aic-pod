@@ -109,28 +109,15 @@ func detectMIME(data []byte, path string) string {
 
 // ---- 错误构造（格式锁定，§2.3/§5.4） ----
 
-// execErr 构造虚拟指令错误：消息为 {cmd}: {原因}（§5.4 基准，不带 exec 前缀——
-// 指令名本身即 action）。
-func execErr(cmd, format string, args ...any) *proto.ExecError {
-	return &proto.ExecError{Action: cmd, Reason: fmt.Sprintf(format, args...)}
-}
-
 // fsErr 构造 fs 错误：消息为 fs {action}: {原因}（§2.3）。
 func fsErr(action, format string, args ...any) *proto.ExecError {
 	return &proto.ExecError{Tool: proto.ToolFS, Action: action, Reason: fmt.Sprintf(format, args...)}
 }
 
-// execVFSErr / fsVFSErr 包装 VFS 操作错误为指令错误：错误链含策略类错误
+// fsVFSErr 包装 VFS 操作错误为 fs 指令错误：错误链含策略类错误
 // （proto.ApprovalError / proto.DeniedError）时保型上抛——审批/拒绝语义不能被
 // 拍平（cloud 内联路径 GatedFS 的写分级兜底依赖它进入审批流）；其余按
-// {cmd}: {原因}（§5.4）/ fs {action}: {原因}（§2.3）归一。
-func execVFSErr(cmd string, vfsErr error, format string, args ...any) error {
-	if se := proto.StrategyError(vfsErr); se != nil {
-		return se
-	}
-	return execErr(cmd, format, args...)
-}
-
+// fs {action}: {原因}（§2.3）归一。
 func fsVFSErr(action string, vfsErr error, format string, args ...any) error {
 	if se := proto.StrategyError(vfsErr); se != nil {
 		return se

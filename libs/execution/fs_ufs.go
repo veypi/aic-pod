@@ -673,15 +673,6 @@ func (f roFile) Write([]byte) (int, error) {
 	return 0, &stdfs.PathError{Op: "write", Path: f.name, Err: stdfs.ErrPermission}
 }
 
-// rwSeekCloser 保留接口（backing.Open 可写断言目标，预留给支持 OpenFile 的
-// backing；当前 localFS 只读句柄走 bufferedWriteFile 回退）。
-type rwSeekCloser interface {
-	io.Reader
-	io.Writer
-	io.Seeker
-	io.Closer
-}
-
 // bufferedWriteFile 读改写回退文件：装载现有内容到内存缓冲，Write 按光标
 // 覆盖/追加，Close 时 WriteFile 整写回 backing。
 type bufferedWriteFile struct {
