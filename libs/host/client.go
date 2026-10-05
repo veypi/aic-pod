@@ -313,16 +313,30 @@ func (c *Client) startRTC() error {
 		return err
 	}
 	hostname, _ := os.Hostname()
-	svc, err := rtc.New(rtc.Config{
+	svc, err := rtc.New(c.newRTCConfig(key, hostname))
+	if err != nil {
+		return err
+	}
+	c.rtcSvc = svc
+	return nil
+}
+
+// newRTCConfig 装配 RTC 应答服务配置（抽出以便锁定关键接线）。
+func (c *Client) newRTCConfig(key []byte, hostname string) rtc.Config {
+	return rtc.Config{
 		HostID:            c.hostID,
 		UserID:            c.uid,
 		CredentialVersion: c.credVer,
 		Key:               key,
-		Hostname:          hostname,
-		Version:           c.options().Version,
-		Dispatch:          c.HandleTool,
-		Disconnect:        c.DisconnectTools,
-		Browser:           c.streamBrowser,
+		// 票据时效校验用平台校准时钟（旧 hostauth.Access 即接 clockNow）：
+		// 宿主机系统时钟可能显著偏离平台（win 实测落后 70s），用原始
+		// time.Now 会把刚签发的票据判为「未生效/过期」。
+		Now:        clockNow,
+		Hostname:   hostname,
+		Version:    c.options().Version,
+		Dispatch:   c.HandleTool,
+		Disconnect: c.DisconnectTools,
+		Browser:    c.streamBrowser,
 		Send: func(sig *protocol.RtcSignal) {
 			nc := c.connection()
 			if nc == nil {
@@ -336,12 +350,7 @@ func (c *Client) startRTC() error {
 			nc.Publish(subj, data)
 		},
 		Logf: c.logf,
-	})
-	if err != nil {
-		return err
 	}
-	c.rtcSvc = svc
-	return nil
 }
 
 // handleRTCSignal 处理一条 rtc.in 信令（dispatch.go handleMsg 路由过来）。

@@ -97,3 +97,26 @@ func TestToolsVerifyUsesCalibratedClock(t *testing.T) {
 		}
 	}
 }
+
+// TestRTCConfigUsesCalibratedClock 锁定 RTC 票据时效校验接校准时钟
+// （§6 回归：newRTCConfig 漏接 Now 时回退原始 time.Now，宿主机时钟
+// 偏离平台数秒即把刚签发的票据判为未生效/过期——win 实测 -70s 全拒）。
+func TestRTCConfigUsesCalibratedClock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir()})
+	t.Cleanup(func() { _ = c.Close() })
+	c.hostID, c.uid, c.credVer = "host_1", "owner", 1
+	defer setClockOffset(0)
+
+	cfg := c.newRTCConfig(make([]byte, 32), "test-host")
+	if cfg.Now == nil {
+		t.Fatal("rtc.Config.Now must be wired (calibrated clock)")
+	}
+	setClockOffset((2 * time.Hour).Milliseconds())
+	if d := cfg.Now().Sub(clockNow()); d < -time.Second || d > time.Second {
+		t.Fatalf("rtc Now deviates from calibrated clock: %v", d)
+	}
+	if d := cfg.Now().Sub(time.Now()); d < time.Hour {
+		t.Fatalf("rtc Now must not follow raw system time: %v", d)
+	}
+}

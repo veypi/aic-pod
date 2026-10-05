@@ -74,7 +74,10 @@ func (s *Service) maintain() {
 		select {
 		case <-s.done:
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
+			// 时效判定统一走 s.now()（host 装配的是平台校准时钟）；
+			// ticker 的原始时间只在时钟准确时与之一致。
+			now := s.now()
 			s.mu.Lock()
 			// 清扫一次性 ticket 消费缓存（按准入过期时间）。
 			for id, until := range s.consumed {
