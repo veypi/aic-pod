@@ -91,7 +91,7 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	abs, err := env.Resolve(target)
 	if err != nil {
-		return nil, fsErr("ls", "%s", err)
+		return nil, fsOpErr("ls", err)
 	}
 	if err := env.CheckPath("ls", abs); err != nil {
 		return nil, err
@@ -101,7 +101,7 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	info, err := env.FS.Stat(abs)
 	if err != nil {
-		return nil, fsErr("ls", "%s", err)
+		return nil, fsOpErr("ls", err)
 	}
 
 	r := newResult("ls", abs)

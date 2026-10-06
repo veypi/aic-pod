@@ -238,7 +238,7 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 
 	abs, err := env.Resolve(target)
 	if err != nil {
-		return nil, fsErr("rg", "%s", err)
+		return nil, fsOpErr("rg", err)
 	}
 	if err := checkRgVirtualRoot(env, abs); err != nil {
 		return nil, err
@@ -251,7 +251,7 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	info, err := env.FS.Stat(abs)
 	if err != nil {
-		return nil, fsErr("rg", "%s", err)
+		return nil, fsOpErr("rg", err)
 	}
 	// 候选文件集：单文件直搜（显式路径不受 glob 过滤，也不做 minified 跳过——
 	// 用户显式指定文件即明确意图）；目录递归按字节序遍历（minified 默认跳过）。
@@ -260,7 +260,7 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		candidates = []string{abs}
 		return rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, true)
 	} else if err := rgWalk(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }); err != nil {
-		return nil, fsErr("rg", "%s", err)
+		return nil, fsOpErr("rg", err)
 	}
 	return rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, p.All)
 }
@@ -381,7 +381,7 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	}
 	abs, err := env.Resolve(target)
 	if err != nil {
-		return nil, fsErr("rg", "%s", err)
+		return nil, fsOpErr("rg", err)
 	}
 	if err := checkRgVirtualRoot(env, abs); err != nil {
 		return nil, err
@@ -394,14 +394,14 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	}
 	info, err := env.FS.Stat(abs)
 	if err != nil {
-		return nil, fsErr("rg", "%s", err)
+		return nil, fsOpErr("rg", err)
 	}
 	var files []string
 	if !info.IsDir() {
 		// 单文件显式路径：直出（不受隐藏/glob 过滤，对齐真实 rg 显式路径语义）
 		files = []string{abs}
 	} else if err := rgWalkDepth(ctx, env, abs, globs, hidden, func(p string) { files = append(files, p) }, depth); err != nil {
-		return nil, fsErr("rg", "%s", err)
+		return nil, fsOpErr("rg", err)
 	}
 	// UTF-8 字节序排序（禁止 locale 相关排序，§5.4）
 	sort.Strings(files)

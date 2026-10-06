@@ -8,8 +8,10 @@ package fsx
 
 import (
 	"path"
+	"runtime"
 	"strings"
 
+	"github.com/veypi/aic-pod/protocol"
 	"github.com/veypi/vigo/contrib/ufs"
 )
 
@@ -36,6 +38,18 @@ type Env struct {
 
 // Resolve 归一路径（相对 → Workdir 下；词法 clean；委托 ResolveFunc）。
 func (e *Env) Resolve(p string) (string, error) {
+	return e.resolve(p, runtime.GOOS == "windows")
+}
+
+// resolve 是 Resolve 的参数化版本（windows 由调用方注入，便于跨平台单测）：
+// Windows 下先按 protocol.NormalizeHostPath 把盘符形（C:、C:/…、C:\…）收口为
+// 规范形 /c/…——盘符形本身是绝对路径，不收口就会被当成相对名拼到 Workdir 下。
+// 2026-10-07 win 实测：fs ls C:/Users/v → 路径被拼成 "…/ivec/C:/Users/v"，
+// 再到 hostfs 切段时留下 "C:" 段 → invalid_argument: Invalid path segment。
+func (e *Env) resolve(p string, windows bool) (string, error) {
+	if windows {
+		p = protocol.NormalizeHostPath(p)
+	}
 	if e.ResolveFunc != nil {
 		return e.ResolveFunc(p)
 	}

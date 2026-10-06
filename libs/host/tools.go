@@ -77,7 +77,9 @@ func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *proto
 		if result != nil {
 			c.attachFileURL(result.Attrs)
 		}
-		return result, err
+		// FS 层失败按需归类（not_found / permission_denied / filesystem_error），
+		// 其余交给 AsFault（internal 等）。
+		return result, fsFault(err)
 	}
 	return c.files.Handle(ctx, caller, in.Method, in.Args)
 }

@@ -77,7 +77,25 @@ func (v *fileView) remember(name string, info fs.FileInfo) {
 	v.versions[name] = version(info)
 	v.mu.Unlock()
 }
-func (v *fileView) Stat(name string) (fs.FileInfo, error) {
+
+// echoPath 把底层错误里的路径改写为调用者传入的形态（fileView 各方法用
+// `defer func() { err = echoPath(name, err) }()` 统一回显）：pod 侧 os.Root 系调用
+// 只报根内相对名（"statat fsedit-nope: no such file or directory"），调用者（平台 fs
+// 工具）拿到这种路径无法纠偏。非 *fs.PathError（规则表拒绝、协议 Fault、context
+// 取消等）原样透出。
+func echoPath(name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var pe *fs.PathError
+	if !errors.As(err, &pe) {
+		return err
+	}
+	return &fs.PathError{Op: pe.Op, Path: name, Err: pe.Err}
+}
+
+func (v *fileView) Stat(name string) (result fs.FileInfo, err error) {
+	defer func() { err = echoPath(name, err) }()
 	if runtime.GOOS == "windows" && name == "/" {
 		return virtualDir("/"), v.ctx.Err()
 	}
@@ -93,7 +111,8 @@ func (v *fileView) Stat(name string) (fs.FileInfo, error) {
 	}
 	return info, err
 }
-func (v *fileView) Open(name string) (fs.File, error) {
+func (v *fileView) Open(name string) (result fs.File, err error) {
+	defer func() { err = echoPath(name, err) }()
 	p, err := v.location(name)
 	if err != nil {
 		return nil, err
@@ -171,7 +190,8 @@ func (v *fileView) ReadFile(name string) ([]byte, error) {
 	}
 	return data, err
 }
-func (v *fileView) ReadDir(name string) ([]fs.DirEntry, error) {
+func (v *fileView) ReadDir(name string) (result []fs.DirEntry, err error) {
+	defer func() { err = echoPath(name, err) }()
 	if runtime.GOOS == "windows" && name == "/" {
 		if err := v.ctx.Err(); err != nil {
 			return nil, err
@@ -248,14 +268,16 @@ func (v *fileView) commit(name string, r io.Reader, size int64, condition protoc
 	defer v.f.cfg.Bytes.Release(v.call.Owner, source.Ref)
 	return v.f.writeTyped(v.ctx, v.callAs("write"), writeArgs{Path: p, Source: source.Ref, Condition: condition})
 }
-func (v *fileView) WriteFile(name string, data []byte, perm fs.FileMode) error {
+func (v *fileView) WriteFile(name string, data []byte, perm fs.FileMode) (err error) {
+	defer func() { err = echoPath(name, err) }()
 	condition, err := v.condition(name)
 	if err != nil {
 		return err
 	}
 	return v.commit(name, bytes.NewReader(data), int64(len(data)), condition)
 }
-func (v *fileView) Create(name string) (ufs.File, error) {
+func (v *fileView) Create(name string) (result ufs.File, err error) {
+	defer func() { err = echoPath(name, err) }()
 	condition, err := v.condition(name)
 	if err != nil {
 		return nil, err
@@ -299,7 +321,8 @@ func (f *commitFile) Close() error {
 	os.Remove(f.Name())
 	return err
 }
-func (v *fileView) MkdirAll(name string, perm fs.FileMode) error {
+func (v *fileView) MkdirAll(name string, perm fs.FileMode) (err error) {
+	defer func() { err = echoPath(name, err) }()
 	p, err := v.location(name)
 	if err != nil {
 		return err
@@ -309,7 +332,8 @@ func (v *fileView) MkdirAll(name string, perm fs.FileMode) error {
 	}
 	return v.f.mkdirTyped(v.ctx, v.callAs("mkdir"), mkdirArgs{Path: p, Parents: true, ExistOK: true})
 }
-func (v *fileView) RemoveAll(name string) error {
+func (v *fileView) RemoveAll(name string) (err error) {
+	defer func() { err = echoPath(name, err) }()
 	p, err := v.location(name)
 	if err != nil {
 		return err
@@ -323,7 +347,9 @@ func (v *fileView) RemoveAll(name string) error {
 	}
 	return v.f.removeTyped(v.ctx, v.callAs("remove"), removeArgs{Path: p, IfVersion: version(info), Recursive: true, MissingOK: true})
 }
-func (v *fileView) Rename(from, to string) error {
+func (v *fileView) Rename(from, to string) (err error) {
+	// 报错回显源路径（move 类失败以 src 侧为主）。
+	defer func() { err = echoPath(from, err) }()
 	src, err := v.location(from)
 	if err != nil {
 		return err

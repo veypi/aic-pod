@@ -37,7 +37,7 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	abs, err := env.Resolve(p.Path)
 	if err != nil {
-		return nil, fsErr("read", "%s", err)
+		return nil, fsOpErr("read", err)
 	}
 	if err := env.CheckPath("fs", abs); err != nil {
 		return nil, err
@@ -53,7 +53,7 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 
 	data, err := env.FS.ReadFile(abs)
 	if err != nil {
-		return nil, fsErr("read", "%s", err)
+		return nil, fsOpErr("read", err)
 	}
 	if !isTextContent(data) {
 		return binaryResult(env, abs, data)
@@ -178,7 +178,7 @@ func readHint(total, offset, end int) string {
 func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Result, error) {
 	f, err := env.FS.Open(abs)
 	if err != nil {
-		return nil, fsErr("read", "%s", err)
+		return nil, fsOpErr("read", err)
 	}
 	defer f.Close()
 	r := bufio.NewReaderSize(f, 64<<10)
@@ -239,7 +239,7 @@ func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Re
 		}
 		body, kept2, err := readTailWindow(env, abs, start, readTailLines)
 		if err != nil {
-			return nil, fsErr("read", "%s", err)
+			return nil, fsOpErr("read", err)
 		}
 		b.Reset()
 		b.WriteString(body)
@@ -316,7 +316,7 @@ func binaryResult(env *Env, abs string, data []byte) (*Result, error) {
 func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 	info, err := env.FS.Stat(abs)
 	if err != nil {
-		return nil, fsErr("read", "%s", err)
+		return nil, fsOpErr("read", err)
 	}
 	mime := detectMIME(head, abs)
 	r := newResult("read", abs)
@@ -327,7 +327,7 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 			// host/page 端图片仍需整读以压缩产出 image_data（§4.2 环境能力差异）
 			data, err := env.FS.ReadFile(abs)
 			if err != nil {
-				return nil, fsErr("read", "%s", err)
+				return nil, fsOpErr("read", err)
 			}
 			return imageResult(env, abs, data, mime)
 		}

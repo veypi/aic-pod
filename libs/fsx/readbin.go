@@ -31,7 +31,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 	}
 	abs, err := env.Resolve(path)
 	if err != nil {
-		return nil, "", 0, fsErr("readbin", "%s", err)
+		return nil, "", 0, fsOpErr("readbin", err)
 	}
 	if err := env.CheckPath("readbin", abs); err != nil {
 		return nil, "", 0, err
@@ -41,7 +41,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 	}
 	info, err := env.FS.Stat(abs)
 	if err != nil {
-		return nil, "", 0, fsErr("readbin", "%s", err)
+		return nil, "", 0, fsOpErr("readbin", err)
 	}
 	if info.IsDir() {
 		return nil, "", 0, fsErr("readbin", "%s is a directory", abs)
@@ -60,7 +60,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 
 	f, err := env.FS.Open(abs)
 	if err != nil {
-		return nil, "", 0, fsErr("readbin", "%s", err)
+		return nil, "", 0, fsOpErr("readbin", err)
 	}
 	defer f.Close()
 	// 区间定位：底层支持 Seek 直接跳（OS 文件）；否则整读切片（memfs 等）。
@@ -82,7 +82,7 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 		}
 	}
 	if err != nil {
-		return nil, "", 0, fsErr("readbin", "%s", err)
+		return nil, "", 0, fsOpErr("readbin", err)
 	}
 
 	// mime 按文件头探测：off=0 时复用已读数据，否则单独补读头部。

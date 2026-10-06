@@ -2,8 +2,10 @@ package fsx
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -27,6 +29,14 @@ func newResult(action, path string) *Result {
 
 func (r *Result) set(k string, v any) {
 	r.Attrs[k] = fmt.Sprint(v)
+}
+
+// contentVersion 返回内容的 FNV-1a 64bit 十六进制（写后版本号；供 P3
+// baseVersion 校验取用，JS 端为 BigInt 等价实现）。
+func contentVersion(s string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // ---- 上限（§2.5） ----
@@ -118,3 +128,28 @@ func fsErr(action, format string, args ...any) error {
 	}
 	return fmt.Errorf("fs %s: %s", action, reason)
 }
+
+// fsOpErr 包装底层 FS/OS 操作的错误：Error() 与 fsErr(action, "%s", err) 逐字一致
+// （"fs <action>: <原因>"），但保留错误链（errors.Is/As 可达）——pod 侧据此把
+// ENOENT 归类成 not_found 而非一律上报 internal（2026-10-07）。
+// 非操作类错误（参数缺失、语义拒绝等）仍用 fsErr。
+func fsOpErr(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &opError{action: action, err: err}
+}
+
+type opError struct {
+	action string
+	err    error
+}
+
+func (e *opError) Error() string {
+	if e.action == "" {
+		return "fs: " + e.err.Error()
+	}
+	return "fs " + e.action + ": " + e.err.Error()
+}
+
+func (e *opError) Unwrap() error { return e.err }

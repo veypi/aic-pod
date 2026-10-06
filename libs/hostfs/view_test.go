@@ -53,6 +53,31 @@ func TestAIFileOperationsUseNativeView(t *testing.T) {
 	}
 }
 
+// TestViewErrorsEchoCallerPath fs 报错回显调用者给的完整路径：pod 侧 os.Root 系调用
+// 只报根内相对名（"statat fsedit-nope: no such file or directory"），平台 fs 工具把
+// 它原样给 AI，AI 无法据此纠偏（2026-10-07 实测走设备 fs read 复现）。
+func TestViewErrorsEchoCallerPath(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	root := f.fs.roots["home"].Path
+	env := &fsx.Env{FS: f.fs.View(ctx, f.caller), Workdir: filepath.ToSlash(root)}
+	missing := filepath.ToSlash(filepath.Join(root, "no-such-dir", "no-such.txt"))
+	for _, action := range []string{"read", "ls", "edit"} {
+		args := map[string]any{"action": action, "path": missing}
+		if action == "edit" {
+			args["edits"] = []map[string]string{{"oldText": "x", "newText": "y"}}
+		}
+		raw, _ := json.Marshal(args)
+		_, err := fsx.RunFS(ctx, env, raw)
+		if err == nil {
+			t.Fatalf("%s(%s) err = nil; want not-exist error", action, missing)
+		}
+		if !strings.Contains(err.Error(), missing) {
+			t.Fatalf("%s 报错未回显调用者完整路径 %s：%v", action, missing, err)
+		}
+	}
+}
+
 func TestViewRejectsStaleWrite(t *testing.T) {
 	f := setup(t)
 	path := filepath.ToSlash(filepath.Join(f.fs.roots["home"].Path, "note.txt"))

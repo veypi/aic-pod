@@ -2,12 +2,49 @@ package fsx
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
 )
+
+// writeOutcome / editOutcome 是 write/edit 的结构化返回（v3 约定：
+// 成功极简、失败详尽；path 等请求侧已知信息不回显；Content 为 JSON
+// 文档——parse it, do not regex）。
+type writeOutcome struct {
+	OK    bool   `json:"ok"`
+	Lines int    `json:"lines"`
+	Bytes int    `json:"bytes"`
+	V     string `json:"v"`
+}
+
+type editOutcome struct {
+	OK      bool          `json:"ok"`
+	Applied int           `json:"applied"`
+	V       string        `json:"v,omitempty"` // 写后内容版本（无落盘则无）
+	Errors  []editFailure `json:"errors,omitempty"`
+}
+
+// editFailure 是单条 edit 的失败诊断：成功集合 = 全集减去 errors 的 i。
+type editFailure struct {
+	I      int    `json:"i"` // 1-based 条目序号
+	Reason string `json:"reason"`
+	// ambiguous：全部命中行号
+	Matches []int `json:"matches,omitempty"`
+	// not-found：最近似候选（归一化命中或行级相似）
+	Nearest *editNearest `json:"nearest,omitempty"`
+	// 可选修复提示（如双重编码 hint）
+	Hint string `json:"hint,omitempty"`
+}
+
+func marshalOutcome(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return `{"ok":false,"reason":"internal-marshal-error"}`
+	}
+	return string(data)
+}
 
 // fsWrite 实现 write（§4.3）：content 必填，整文件覆写；父目录不存在自动创建。
 func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
@@ -19,7 +56,7 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	abs, err := env.Resolve(p.Path)
 	if err != nil {
-		return nil, fsErr("write", "%s", err)
+		return nil, fsOpErr("write", err)
 	}
 	if err := env.CheckPath("fs", abs); err != nil {
 		return nil, err
@@ -29,19 +66,16 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	content := *p.Content
 	if err := env.FS.MkdirAll(path.Dir(abs), 0o755); err != nil {
-		return nil, fsErr("write", "%s", err)
+		return nil, fsOpErr("write", err)
 	}
-
-	lines := countLines(content)
-	r := newResult("write", abs)
-	r.set("lines", lines)
-	r.set("bytes", len(content))
-
 	if err := env.FS.WriteFile(abs, []byte(content), 0o644); err != nil {
-		return nil, fsErr("write", "%s", err)
+		return nil, fsOpErr("write", err)
 	}
-	r.Content = fmt.Sprintf("wrote file: %s (%d lines, %d bytes)", abs, lines, len(content))
-	r.Attrs["mode"] = "overwrite"
+	lines := countLines(content)
+	r := newResult("write", "")
+	r.Content = marshalOutcome(writeOutcome{OK: true, Lines: lines, Bytes: len(content), V: contentVersion(content)})
+	r.set("ok", true)
+	r.set("lines", lines)
 	return r, nil
 }
 
@@ -79,14 +113,14 @@ func doubleEncodingHint(content, oldText string) string {
 	if decoded == oldText || !strings.Contains(content, decoded) {
 		return ""
 	}
-	return ` (hint: oldText contains literal "\u003c"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters)`
+	return `oldText contains literal "\u003c"-style escapes from double JSON encoding; decoded form matches the file, resend with actual characters`
 }
 
-// fsEdit 实现 edit（§4.4）：edits 数组逐个顺序应用——每个 edit 基于前一个
-// 应用后的当前内容匹配，oldText 必须唯一；单个 edit 失败（找不到/多匹配/
-// 参数非法）不阻塞其余 edit——**部分成功语义**：成功的保留，失败的按
-// `edit[i]: 原因` 在结果中报告（不提供 replaceAll）。全部失败时整组报错、
-// 不写文件。
+// fsEdit 实现 edit（§4.4，v3 结构化返回）：edits 数组逐个顺序应用——每个
+// edit 基于前一个应用后的当前内容匹配，oldText 必须唯一（部分成功语义：
+// 成功的保留并落盘，失败的进 errors 附诊断）。edit 级失败（not-found /
+// ambiguous / 参数非法）不走 error 通道——全部失败也返回 {"ok":false}
+// 且不写盘；error 仅操作性失败（文件不存在/非文本/权限/JSON 非法）。
 func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if p.Path == "" {
 		return nil, fsErr("edit", "path is required")
@@ -96,7 +130,7 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	abs, err := env.Resolve(p.Path)
 	if err != nil {
-		return nil, fsErr("edit", "%s", err)
+		return nil, fsOpErr("edit", err)
 	}
 	if err := env.CheckPath("fs", abs); err != nil {
 		return nil, err
@@ -106,7 +140,7 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	data, err := env.FS.ReadFile(abs)
 	if err != nil {
-		return nil, fsErr("edit", "%s", err)
+		return nil, fsOpErr("edit", err)
 	}
 	if !isTextContent(data) {
 		return nil, fsErr("edit", "%s is not a text file", abs)
@@ -114,50 +148,60 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	content := string(data)
 
 	// 逐个顺序应用（§4.4）：后一个 edit 匹配的是前一个应用后的内容。
-	// 失败条目记录序号与原因，不阻塞其余 edit（部分成功语义）。
+	// 失败条目进 failures（附诊断），不阻塞其余 edit。
+	dg := newEditDiagnoser(content)
 	applied := 0
-	failed := make([]string, 0)
+	var failures []editFailure
 	for i, e := range p.Edits {
-		idx := fmt.Sprintf("edit[%d]", i+1)
+		n := i + 1
 		if e.OldText == "" {
-			failed = append(failed, idx+": oldText is required")
+			failures = append(failures, editFailure{I: n, Reason: "empty-oldText"})
 			continue
 		}
 		if e.NewText == e.OldText {
-			failed = append(failed, idx+": newText must be different from oldText")
+			failures = append(failures, editFailure{I: n, Reason: "identical-old-new"})
 			continue
 		}
 		first := strings.Index(content, e.OldText)
 		if first < 0 {
-			failed = append(failed, idx+": oldText not found in file"+doubleEncodingHint(content, e.OldText))
+			f := editFailure{I: n, Reason: "not-found"}
+			if nx := dg.nearest(e.OldText); nx != nil {
+				f.Nearest = nx
+			}
+			if h := doubleEncodingHint(content, e.OldText); h != "" {
+				f.Hint = h
+			}
+			failures = append(failures, f)
 			continue
 		}
-		if n := strings.Count(content, e.OldText); n > 1 {
-			failed = append(failed, fmt.Sprintf(
-				"%s: oldText matches %d locations; provide more surrounding context to make it unique", idx, n))
+		if strings.Count(content, e.OldText) > 1 {
+			failures = append(failures, editFailure{I: n, Reason: "ambiguous", Matches: dg.matchLines(e.OldText)})
 			continue
 		}
 		content = content[:first] + e.NewText + content[first+len(e.OldText):]
 		applied++
+		// 内容已变：诊断器重建（派生数据作废；归一化管线懒构建，重建廉价）。
+		dg = newEditDiagnoser(content)
 	}
+
+	r := newResult("edit", "")
 	if applied == 0 {
-		// 单 edit 失败直接报原因；多 edit 全失败汇总报（都不写文件）
-		if len(failed) == 1 {
-			return nil, fsErr("edit", "%s", failed[0])
-		}
-		return nil, fsErr("edit", "no edits applied: %s", strings.Join(failed, "; "))
+		// 全失败：不落盘，返回 ok:false + 全量诊断。
+		r.Content = marshalOutcome(editOutcome{OK: false, Applied: 0, Errors: failures})
+		r.set("ok", false)
+		r.set("edits", 0)
+		r.set("edits_failed", len(failures))
+		return r, nil
 	}
 	if err := env.FS.WriteFile(abs, []byte(content), 0o644); err != nil {
-		return nil, fsErr("edit", "%s", err)
+		return nil, fsOpErr("edit", err)
 	}
-	r := newResult("edit", abs)
-	if len(failed) == 0 {
-		r.Content = fmt.Sprintf("updated file: %s (%d edits)", abs, len(p.Edits))
-	} else {
-		r.Content = fmt.Sprintf("updated file: %s (%d/%d edits applied; failed: %s)",
-			abs, applied, len(p.Edits), strings.Join(failed, "; "))
-		r.set("edits_failed", len(failed))
-	}
+	out := editOutcome{OK: len(failures) == 0, Applied: applied, V: contentVersion(content), Errors: failures}
+	r.Content = marshalOutcome(out)
+	r.set("ok", out.OK)
 	r.set("edits", applied)
+	if len(failures) > 0 {
+		r.set("edits_failed", len(failures))
+	}
 	return r, nil
 }
