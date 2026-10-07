@@ -2,12 +2,12 @@
 
 package hostfs
 
-import hosts "github.com/veypi/aic-pod/protocol/fs"
+import "github.com/veypi/aic-pod/protocol"
 
 func renameNoReplace(from int, src string, to int, dst string) error {
-	return hosts.Fail("unsupported", "Atomic no-replace move is unavailable")
+	return protocol.FSFail("unsupported", "Atomic no-replace move is unavailable")
 }
 
 func renameReplace(from int, src string, to int, dst string) error {
-	return hosts.Fail("unsupported", "Atomic move is unavailable")
+	return protocol.FSFail("unsupported", "Atomic move is unavailable")
 }
