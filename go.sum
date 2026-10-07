@@ -144,8 +144,12 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/veypi/vbox v0.2.0 h1:Kk/dWEqdPTiofJX02hkh3+kcb8vjEKmHQY2ePTz5n7s=
 github.com/veypi/vbox v0.2.0/go.mod h1:uuXB3IBu0NAXt+h34qYHqvPYQqNtSvQJskTY7uhDSZk=
+github.com/veypi/vbox v0.3.0 h1:hSceqzHEWqOfbY4gy5F0VylsxL6N4vWIDxOTikWK04M=
+github.com/veypi/vbox v0.3.0/go.mod h1:uuXB3IBu0NAXt+h34qYHqvPYQqNtSvQJskTY7uhDSZk=
 github.com/veypi/vigo v0.7.6 h1:ptitu/hORqCA1VftQczUGGrcE9zuEgBInsGzTb482Yo=
 github.com/veypi/vigo v0.7.6/go.mod h1:PZH8oc0rTLWCkjTaOGQEDw93ZvcKKGGhgrtDWUbsO2U=
+github.com/veypi/vigo v0.7.7 h1:NjHM9/GL2lYFtrceUwakIrdA6NaF5VQjCMqeVCT37s8=
+github.com/veypi/vigo v0.7.7/go.mod h1:PZH8oc0rTLWCkjTaOGQEDw93ZvcKKGGhgrtDWUbsO2U=
 github.com/veypi/vsh v0.2.0 h1:bvgboiYCJoQ+uyYbNU7ZUfYemtn8+lytdHWpFAG4lyc=
 github.com/veypi/vsh v0.2.0/go.mod h1:I/lhg316dSlhsY1ovIvIc0XlI5T94s7bGGefWOx5byk=
 github.com/veypi/vsh/contrib/awk v0.1.0 h1:wMBMdCP95llsOftOgl82L9R6U+eJxy6r4netFtIqKvk=

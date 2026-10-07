@@ -5,8 +5,31 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.9.0 — 2026-10-08
 
+本版包含 v0.8.5 之后（含 v0.8.5 本身——其标签从未推送、GitHub 无对应 Release）的全部变更；
+破坏性条目见下（四仓架构精简、vsh/MCP 执行边界收敛、exec 日志惰性落盘）。
+
+- **cloud 合成身份文件与规则表动态行拒绝原因（2026-10-08）**：①`UFSAdapterConfig.SysFiles` /
+  `CloudFSConfig.SysFiles`（绝对路径 → 内容）是 jail 与规则表之外的**唯一显式读例外**：命中路径的
+  `Open`/`OpenFile`（非写意图）/`Stat`/`Lstat`/`Realpath` 由本层合成内容作答（不落 backing、不落盘、
+  固定 mtime），写仍走 gate 硬拒。用途：内建命令的身份解析（`ls -l` 的用户/组名、`~user` 展开）按
+  设计会读 `/etc/passwd`、`/etc/group`——此前每次都产生一条越界拒绝回显（噪声、用户可见）且身份
+  永远解析不出来；虚拟计算机的身份属平台，内容由 aic 侧 `fs.CloudSysFiles(uid)` 合成（见 aic 仓
+  CHANGELOG）。②规则表拒绝文案接 `vbox.Decision.Reason`（动态行 `Rule.Resolve` 的判定理由）：
+  `ruleDeniedText` 有 Reason 用 Reason、无则沿用「越界硬拒绝；如需访问请 grant fs …」——公开包
+  （发布物、grant 不可授）与本人私有包（写需 grant）的指引不再混为一谈。依赖 vbox v0.3.0
+  （动态行 + OS 沙箱计划拒启动态行）。测试：`TestCloudFSSysFilesReadOnly`、
+  `TestCloudFSDynamicRuleReason`。
+- **MCP 服务空闲有效期（`mcp.servers.<alias>.idle_timeout`，2026-10-08）**：`mcpx.Config` 新增可选 `idle_timeout`（Go duration，如 `30m`；空 = 随 Pod 常驻，非法或非正值在启动校验时报错并 fail-closed）。`mcpx.Manager` 新增空闲回收：只对配置了有效期的服务生效，扫描周期 = 最短有效期/4（0.25s..30s）；最后一次使用（取到连接**或**在途请求结束）后超过有效期无调用则取消该实例（先从表里摘除，期间新调用直接建新连接），下次调用重新懒启动；在途请求算活跃，长调用不被从中间砍断；回收与 Close/Restart 一样是控制行为，连接结束/退出码不进故障日志（记一条 `idle timeout reached` 生命周期日志）。`Manager.Touch(name)` 供不经过 MCP session 的持用方续期。**内置 browser/CUA 默认 `30m`**（`host.DefaultIdleTimeout`）；所有者的同名配置仍整体替换默认项（含该有效期）。内置 browser 的 MCP 前端退出不会结束上游 daemon，故 host 通过新增 `Options.Expired` 钩子在空闲回收后调上游 `agent-browser close --all` 关掉自己的 daemon（受管浏览器随之关闭；所有者覆盖的 browser 项自管 daemon，Pod 不代管）；UI 实时画面挂载期间按分钟 `Touch`（画面通道只转发上游 WebSocket，不刷新会被误回收）。测试：空闲回收换新进程、在途长调用存活、Touch 续期、非法 idle_timeout 拒绝；`docs/hosts-tools.md` / `design.md` / `release-architecture.md` 同步。生效需重启设备。
+- **exec 日志惰性落盘（破坏性契约收敛，2026-10-07 用户裁定）**：stdout/stderr 日志不再随执行预建空文件——新增 `libs/execution/spill.go` 的 `LogSpiller`（内存缓冲 ≤ 引擎采集上限 8 MiB/1 MiB，溢出或强制才建文件，Write/Spill/Close 并发安全）；仅截断（NATS 行预览 1000/100 行或引擎采集超限）或执行晚于响应（转后台/RTC 等待超时/断连保留/容量取消）才落盘。**attrs 的 `output`/`error_output` 仅在文件存在时出现（有路径 ⟺ 有更多内容）**；同步完成且未截断的执行不产生文件、不挂日志键（本机历史 49.2% 的日志文件是空文件、stderr 97.4% 为空）。引擎采集截断未落盘 = 明确报错（tee 在采集截断后仍写 writer，文件恒全量）。同时删除 FS 写审计（`ExecResult.Writes` 与 stderr 日志审计行）——审计留痕在原始 tool message。契约同步：`docs/nats.md`（aic 仓）、工具描述、hosts-tools §3.1/§3.2 注释。测试：spill_test 六例（小输出不触盘/溢出全量/强制续写/Close 后补建/并发竞争/失败粘性），unified_test 小输出无文件 + 行截断落盘断言；生效需重启设备。
+
+- **README 拆语言 + 新增 AGENTS.md（文档，2026-10-07）**：`README.md` 保持中文（仓库主入口），
+  英文版移入 `README.en.md`（两份顶部互相引用、内容同步，仓库内无旧节名引用）；
+  新增 `AGENTS.md` 收纳 AI/贡献者向内容：仓库地图、构建与验证口径、不变量（沙箱 fail-closed、
+  `nosandbox` 单独审批、三域判定式、不监听本地端口、协议版本面与 `protocol/tool` 动作面、
+  版本号唯一来源 `cfg/config.go`、browser/cua 透传上游）与文档语言约定。`docs/*.md` 仍为
+  中文规范文档。
 - **fs edit/write 结构化返回与失败诊断（pod 侧，2026-10-07）**：`libs/fsx` 的 write/edit 结果 Content 改为 JSON 文档——成功极简（write `{ok,lines,bytes,v}` / edit `{ok,applied,v}`，不回显请求侧已知的 path）、失败详尽（`{ok:false,applied,errors:[{i,reason,matches?,nearest?,hint?}]}`）；edit 级失败（not-found/ambiguous/empty-oldText/identical-old-new）不再走 error 通道，全失败不写盘。新增 `edit_diagnose.go`（ambiguous 给全部命中行号；not-found 给近似定位：归一化子串命中 kind=normalized + 行级 bigram Dice kind=similar，阈值 0.6，>1MB 文件或 <8 字节短锚跳过；归一化管线移植自 vsh codingtools edit_diff.go，只服务诊断、不参与改写）、`contentVersion`（FNV-1a 64 内容版本，为并发校验铺垫）、首个 fsx 测试 `write_test.go`。三端同步见 aic 仓 CHANGELOG「未发布」同名条目（page_fs.js JS 等价实现 + 工具描述）。
 - **fs 报错可定位性与归类收敛 + Windows 盘符形路径修复（2026-10-07）**：①报错回显调用者路径——hostfs `fileView` 的 Stat/Open/ReadDir/WriteFile/Create/MkdirAll/RemoveAll/Rename 用 `echoPath` 把 os.Root 的根内相对名（`internal: fs read: statat fsedit-nope: …`）改写为调用者传入的绝对路径（配套 vigo `contrib/ufs/local.go` 同样回显）。②`libs/fsx` 新增 `fsOpErr`（文案与旧 `fsErr(action,"%s",err)` 逐字一致、但保留错误链），28 处 FS 操作错误站点迁移；新增 `libs/host/fs_error.go` 的 `fsFault`：ENOENT→not_found、EACCES/EPERM→permission_denied、其余 PathError→filesystem_error（此前一律上报 internal），`handleFS` 接线。③`fsx.Env.Resolve` 拆出 `resolve(p, windows)`：Windows 下先按 `protocol.NormalizeHostPath` 收口盘符形（`C:`/`C:/…`/`C:\…`/`/C:/…`）为规范形 `/c/…`——此前盘符形被当相对名拼到 Workdir 下，切段残留 `C:` 段 → `invalid_argument: Invalid path segment`（win 实测 `fs ls C:/Users/v`）。测试：`TestEnvResolveWindowsDrivePath`、`TestFSOpErrMatchesErrText`、hostfs `TestViewErrorsEchoCallerPath`、host `TestFSFault*`；darwin/linux/windows 三平台 build OK。**生效需重启设备 aic-pod（Desktop 壳随 `make backend-bin` 重建）。**
 
@@ -27,8 +50,10 @@
 - **vsh/MCP 执行边界收敛：skillrun 与 uiscript 删除（破坏性，2026-10-05）**：①设备不再有 skill 包机制——`libs/skillrun`（provider 注册 / cli manifest / 包下载安装 / service 生命周期）、`libs/uiscript`、`protocol/hosts_tools` 全删，pod 不再依赖 aic-skills；技能是云端静态内容，CLI/脚本原生执行，有状态软件改由独立 MCP 服务提供。②新增 `libs/mcpx`（官方 MCP Go SDK v1.7.0）：stdio/HTTP 连接、懒启动与 session 复用、进程由 vbox 托管；`cfg.Options` 增 `mcp.servers`（command/url/cwd/env/disabled/no_sandbox），内置 browser/CUA 默认项可被显式配置整体替换。③新增 `mcp` vsh command（`libs/host/mcp.go`：tools/describe/call/read，门为 exec 规则 `mcp.<alias>`；JSON 参数经 stdin，`--json` 输出完整结果，工具失败非零退出）。④协议升版 `hosts_nats/3`、`hosts_rtc/3`（DataChannel `aic-tools`），新增传输无关的 `protocol/tool` 请求契约（Request{protocol,request_id,action,exec|fs|cancel_id}），exec 只传完整脚本、原生 fs 经同一 action 面。⑤browser 改由 Pod 启动官方 `agent-browser mcp --tools core,tabs` 0.38.2（不再 Go 自管 Chrome/CDP），CUA 同改官方 `cua-driver mcp`；UI 实时画面经同 peer 的 `aic-browser` 通道双向转发上游 WebSocket（`libs/host/browser_stream.go`，Pod 只分片、不解析工具）；image_data 编解码回到 `libs/imageutil`（不再引 aic-skills sdk）。⑥构建与分发：Makefile/CLI 直接用 `go build`（去掉 cmd/build overlay），Desktop 新增 agent-browser 运行时同步与打包 extraResources（`desktop/agent-browser.json` + `sync-agent-browser.mjs`），cua 许可证随上游发行包复制（删仓库固定副本 `desktop/cua-LICENSE.md`），browser/CUA 运行依赖由 Desktop 分发或 CLI 用户按技能说明安装。⑦文档：hosts-tools.md / design.md / hosts-vsh-redesign.md / release-architecture.md / README 重写为现行边界。
 - **skill-packages 迁出至 aic-skills 专仓（破坏性）**：官方 skill 包源码（browser/cua/hello 整包）与 provider 依赖的契约包（protocol/skillproc、protocol/ui、libs/cliargs）移入 aic-skills 仓（Go module，`sdk/go` 自包含、不反向依赖 pod）；skillrun/uiscript 改 import github.com/veypi/aic-skills（go.mod replace ../aic-skills，go.work 接线）；libs/fsx/image.go 保留 pod 侧（read 管线），provider 侧副本在 sdk/go/fsx。Makefile browser-zip/cua-bin 与 desktop 打包链路（before-pack/electron-builder/check-asar）路径改道 ../aic-skills。
 - **三仓评审清理**：① libs/fsx 的 image_data 编解码/600KB 阈值/viewable 格式判定改引 aic-skills `sdk/go/fsx` 单一实现（read 管线保留 imageResult 形态；三处逐字重复消除）；② 残留指针：Makefile「skillpackages embed 输入」注释、docs/design.md 的 skill-packages 路径、go.mod 失效文档指针（vsh/docs/design.md）；③ CI `go test ./protocol/ui`（包已迁 sdk/go/ui）改 `go test ./libs/uiscript`。
+- **核心命令集扩展（cloud 与设备一致）**：`libs/execution` 的 `NewRegistry()` 在 vsh 默认 registry 之上再注册 `awk` 与 `html-to-markdown`（此前只有 `jq`），两端命令面一致；`go.mod` 新增两个 contrib 模块的 require + `replace`（`../vsh/contrib/...`），vsh 依赖经 MVS 提升到 v0.2.0。设备侧 `Discoverable` 增加 `html-to-markdown`（`jq`/`awk` 属通用命令，不在 `commands` 展示面重复列出）；`docs/hosts-tools.md` 补命令面说明。
+- **修复：协议合包残留让 `go mod tidy` 长期失败**：`libs/hostfs/native_move_other.go` 仍 import 已删除的 `libs/proto` 时代包 `protocol/fs`——该文件构建约束是 `!linux && !darwin && !windows`，所以 `go build` 一直不报错、而 tidy（扫全平台）必失败；改为 `protocol.FSFail` 后 freebsd 交叉编译通过、tidy 恢复（顺带把 require 归位到直接依赖块）。几处指向已删模块/文档的注释同步修正。
 
-## v0.8.5 — 2026-10-01
+## v0.8.5 — 2026-10-01（未发布：标签未推送，内容并入 v0.9.0）
 
 - **hosts-vsh-redesign 落地（阶段 1-7，破坏性）**：exec 只接收完整 vsh 脚本；browser/cua/bg/grant 为 vsh 指令；协议升 hosts_tools/2 + hosts_nats/2 + hosts_rtc/2（无旧协议兼容入口）；审批事实收敛为布尔 grant_approved（数字等级删除）；规则表三域有序表 + vbox first-wins matcher；execwait 统一外层（前台等待/超时转后台/双流日志）；vcore 与旧 wire 面物理删除。契约 docs/hosts-vsh-redesign.md + docs/hosts-tools.md。
 - **Windows 虚拟根语义（F7 解除）**：vbox canonical 全局统一 /c/ 规范形（废除 C:/ 盘符形）+ 引擎装配 hostCanonical——win exec 建会话被拒问题消除。2026-09-29 win 实测：建会话/写工作区/管道/重定向/jq/变量/127/规则门（/c/ 形报错 + grant 引导）/builtin deny/native curl.exe/bg/grant status 全通。
