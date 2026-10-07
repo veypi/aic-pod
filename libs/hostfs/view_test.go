@@ -62,6 +62,11 @@ func TestViewErrorsEchoCallerPath(t *testing.T) {
 	root := f.fs.roots["home"].Path
 	env := &fsx.Env{FS: f.fs.View(ctx, f.caller), Workdir: filepath.ToSlash(root)}
 	missing := filepath.ToSlash(filepath.Join(root, "no-such-dir", "no-such.txt"))
+	// 回显的形态 = 设备解析后的路径：Windows 下 fsx.Env.Resolve 先把盘符形
+	// （C:/…）收口为设备规范形 /c/…（protocol.NormalizeHostPath，2026-10-07
+	// win 盘符形修复），hostfs 回显的就是这个形态——仍是可直接回填、可定位
+	// 的路径；POSIX 路径经同一归一不变。
+	want := protocol.NormalizeHostPath(missing)
 	for _, action := range []string{"read", "ls", "edit"} {
 		args := map[string]any{"action": action, "path": missing}
 		if action == "edit" {
@@ -72,8 +77,8 @@ func TestViewErrorsEchoCallerPath(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s(%s) err = nil; want not-exist error", action, missing)
 		}
-		if !strings.Contains(err.Error(), missing) {
-			t.Fatalf("%s 报错未回显调用者完整路径 %s：%v", action, missing, err)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s 报错未回显调用者完整路径 %s：%v", action, want, err)
 		}
 	}
 }
