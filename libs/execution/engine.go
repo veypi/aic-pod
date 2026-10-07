@@ -31,11 +31,12 @@ import (
 
 	vshcore "github.com/veypi/vsh"
 	"github.com/veypi/vsh/commands"
+	"github.com/veypi/vsh/contrib/awk"
+	"github.com/veypi/vsh/contrib/htmltomarkdown"
 	"github.com/veypi/vsh/contrib/jq"
 	gbfs "github.com/veypi/vsh/fs"
 	vshnet "github.com/veypi/vsh/network"
 	vshpolicy "github.com/veypi/vsh/policy"
-	"github.com/veypi/vsh/trace"
 )
 
 // limits 定稿（已拍板）。
@@ -197,6 +198,8 @@ type ExecRequest struct {
 
 // ExecResult 执行结果：stdout/stderr 采集串 + exit_code，仅此而已。
 // 预览截断、attrs、日志文件都是调用方（exec 接入层）的职责，不在引擎。
+// （2026-10-07：进程内文件写审计 Writes 已删除——审计留痕在原始 tool
+// message，stderr 日志不再追加审计行。）
 type ExecResult struct {
 	ExitCode        int
 	Stdout          string
@@ -204,8 +207,6 @@ type ExecResult struct {
 	StdoutTruncated bool
 	StderrTruncated bool
 	Duration        time.Duration
-	// Writes 是本次执行的进程内文件写路径审计（trace file.mutation）。
-	Writes []string
 }
 
 // Exec 执行脚本（panic 隔离：引擎 panic 不带崩 pod 进程）。
@@ -273,12 +274,6 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 		StderrTruncated: result.StderrTruncated,
 		Duration:        result.Duration,
 	}
-	// FS 写审计（进程内文件写路径记录）。
-	for _, ev := range result.Events {
-		if ev.Kind == trace.EventFileMutation && ev.File != nil {
-			res.Writes = append(res.Writes, ev.File.Path)
-		}
-	}
 	return res, nil
 }
 
@@ -292,10 +287,21 @@ func baseSessionKey(key string) string {
 }
 
 // NewRegistry assembles the supported core command set before platform and skill commands.
+//
+// 核心集 = vsh 默认 registry（sed/grep/cut/sort… 等 118 个内建）+ 三个可选命令：
+// jq、awk、html-to-markdown。三者都是纯 Go、无宿主接触面——文件读写走
+// Invocation.FS，awk 的 system()/管道走 Invocation.Exec（嵌套执行仍过规则表），
+// 环境只读 Invocation.Env；cloud（aic）与设备（pod）共用本函数，两端命令面一致。
 func NewRegistry() (*commands.Registry, error) {
 	reg := vshcore.DefaultRegistry()
-	if err := jq.Register(reg); err != nil {
-		return nil, err
+	for _, register := range []func(commands.CommandRegistry) error{
+		jq.Register,
+		awk.Register,
+		htmltomarkdown.Register,
+	} {
+		if err := register(reg); err != nil {
+			return nil, err
+		}
 	}
 	return reg, nil
 }

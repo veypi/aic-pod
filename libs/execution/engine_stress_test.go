@@ -2,7 +2,7 @@ package execution
 
 // engine_stress_test.go 是 todo 4.1.8 的稳定性基线：连续 500 次 exec 无
 // 泄漏（goroutine/FD/RSS 前后对比）、Session P95 记录数值、并发满载下
-// bg list/wait/kill 仍可用。数值写入 vsh/docs/todo.md 验收记录。
+// bg list/wait/kill 仍可用。数值记录见 vsh 仓历史文档（那份平台集成进度表已在 vsh 0.2.0 清理时移除）。
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func snapshotStats() stressStats {
 
 // TestEngineStability500 连续 500 次 exec：短脚本 + 管道组合，逐次计时；
 // 收尾 GC 后对比 goroutine/FD/RSS；P95 与资源增量 t.Logf 记录（验收数值
-// 转抄 vsh/docs/todo.md 4.1.8）。泄漏断言取宽松阈值（防回归，不测抖动）。
+// 转抄平台集成期的验收记录（4.1.8）。泄漏断言取宽松阈值（防回归，不测抖动）。
 func TestEngineStability500(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short 模式跳过 500 次稳定性测量")

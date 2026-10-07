@@ -243,14 +243,10 @@ func TestManagedSFTPTransfersAndRules(t *testing.T) {
 			t.Fatalf("%s: %+v", script, r)
 		}
 		if script == "scp fixture:uploaded downloaded" {
-			found := false
-			for _, p := range r.Writes {
-				if strings.HasSuffix(p, "/downloaded") {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("download missing from fs write audit: %+v", r)
+			// 下载落盘在下方统一校验内容（进程内写审计 Writes 已删除，
+			// 2026-10-07）。
+			if _, err := os.Stat(filepath.Join(work, "downloaded")); err != nil {
+				t.Fatalf("download missing: %v", err)
 			}
 		}
 	}

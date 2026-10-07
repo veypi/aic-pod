@@ -10,18 +10,23 @@ require (
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/vbox v0.0.0
+	github.com/veypi/vbox v0.2.0
 	github.com/veypi/vigo v0.7.6
-	github.com/veypi/vsh v0.0.38
-	github.com/veypi/vsh/contrib/jq v0.0.0
+	github.com/veypi/vsh v0.2.0
+	github.com/veypi/vsh/contrib/awk v0.1.0
+	github.com/veypi/vsh/contrib/htmltomarkdown v0.1.0
+	github.com/veypi/vsh/contrib/jq v0.1.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/image v0.44.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/text v0.40.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/JohannesKaufmann/dom v0.2.0 // indirect
+	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0 // indirect
 	github.com/alicebob/miniredis/v2 v2.36.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -73,7 +78,6 @@ require (
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/mysql v1.6.0 // indirect
@@ -83,12 +87,4 @@ require (
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
-)
-
-// vsh/vbox 为本地姊妹仓（go.work 接线；replace 供非 workspace 构建——
-// Docker/CI 构建前需先发布或拷贝两仓）。
-replace (
-	github.com/veypi/vbox => ../vbox
-	github.com/veypi/vsh => ../vsh
-	github.com/veypi/vsh/contrib/jq => ../vsh/contrib/jq
 )

@@ -420,24 +420,6 @@ func TestEngineLogTeeSplit(t *testing.T) {
 	}
 }
 
-func TestEngineWriteAudit(t *testing.T) {
-	t.Parallel()
-	e := newTestEngine(t)
-	res, err := e.Exec(context.Background(), ExecRequest{SessionKey: "s1", Script: "echo x > audit-me.txt"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, w := range res.Writes {
-		if strings.HasSuffix(w, "audit-me.txt") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("write audit missing: %v", res.Writes)
-	}
-}
-
 func TestShellQuoteRoundtrip(t *testing.T) {
 	t.Parallel()
 	e := newTestEngine(t)

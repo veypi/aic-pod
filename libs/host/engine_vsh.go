@@ -73,10 +73,11 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 				return c.perms.execAllowed(execution.SessionFromContext(ctx), "skill")
 			}},
 
-			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令与已装包命令。
+			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令、已装包命令，
+			// 外加名字不自明的 contrib 命令（html-to-markdown；jq/awk 属通用命令不列）。
 			Discoverable: func(name string) bool {
 				switch name {
-				case "commands", "bg", "grant", "mcp", "skill", "ssh", "scp", "sftp":
+				case "commands", "bg", "grant", "mcp", "skill", "ssh", "scp", "sftp", "html-to-markdown":
 					return true
 				}
 				return false
@@ -140,11 +141,12 @@ func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vbox.Pol
 // Adopt 转后台，RTC 超时返回 deadline_exceeded 不转 bg）。输出契约：NATS
 // （AI 消费）content=stdout 前 1000 行预览（截断置 truncated）；RTC 直连
 // 成功时全量 content+attrs（无 truncated 标记），完整输出超限或恢复失败
-// 明确报错。attrs 恒含
-// action/output/error_output，完成时含 exit_code（stderr 预览按需），转
-// 后台含 background/id。日志 = .exec/{short}.stdout.log / .stderr.log 双流
-// 全量；FS 写审计追加进 stderr 日志（不污染 stdout 契约）；日志创建失败
-// 是明确错误（不静默降级）。
+// 明确报错。attrs 恒含 action，完成时含 exit_code（stderr 预览按需），转
+// 后台含 background/id；output/error_output 仅在日志文件存在时出现。
+// 日志 = .exec/{short}.stdout.log / .stderr.log 双流全量、惰性落盘——
+// 仅截断（行预览/引擎采集超限）或执行晚于响应（转后台/等待超时/断连保
+// 留/容量取消）才创建文件：有路径 ⟺ 有更多内容；同步完成且未截断的执
+// 行不产生文件。日志创建失败是明确错误（不静默降级）。
 func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID string, p *protocol.ExecPayload) (*protocol.Output, error) {
 	if p == nil || strings.TrimSpace(p.Script) == "" {
 		return nil, protocol.Fail("invalid_argument", "exec: script is required")
@@ -164,19 +166,10 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	if err := c.ensureSessionWorkDir(sid); err != nil {
 		return nil, protocol.Fail("internal", err.Error())
 	}
+	// 惰性落盘（§2.5）：构造不触碰文件系统，溢出/强制时才建文件。
 	logOut, logErr := c.execLogPaths(sid, reqID)
-	if err := os.MkdirAll(filepath.Dir(logOut), 0o700); err != nil {
-		return nil, protocol.Fail("internal", "exec: prepare log: "+err.Error())
-	}
-	outFile, err := os.Create(logOut)
-	if err != nil {
-		return nil, protocol.Fail("internal", "exec: open log: "+err.Error())
-	}
-	errFile, err := os.Create(logErr)
-	if err != nil {
-		_ = outFile.Close()
-		return nil, protocol.Fail("internal", "exec: open log: "+err.Error())
-	}
+	outSpill := execution.NewLogSpiller(logOut, execution.MaxStdoutBytes)
+	errSpill := execution.NewLogSpiller(logErr, execution.MaxStderrBytes)
 
 	inherited := os.Environ()
 	if !p.NoSandbox && !c.options().NoSandbox {
@@ -211,8 +204,8 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		GrantApproved: caller.GrantApproved,
 		NoSandbox:     p.NoSandbox,
 		Stdin:         stdin,
-		Stdout:        outFile,
-		Stderr:        errFile,
+		Stdout:        outSpill,
+		Stderr:        errSpill,
 		Timeout:       c.options().ExecTimeout,
 	}, wait, execution.TaskMeta{
 		Owner: caller.Subject, Session: sid, RequestID: reqID, ConnectionID: caller.ConnectionID,
@@ -220,13 +213,21 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		// 转后台（bg）只服务 NATS/AI 通道；RTC 直连等待超时返回
 		// ErrWaitElapsed——执行继续、不产生 bg 记录。
 	}, !caller.Direct, func(res *execution.ExecResult) {
-		logs = closeExecLogs(outFile, errFile, res)
+		logs = closeExecLogs(outSpill, errSpill, res)
 	})
 
-	attrs := map[string]string{"action": "exec", "output": logOut, "error_output": logErr}
+	attrs := map[string]string{"action": "exec"}
+	// spillLogs 在执行晚于响应返回的分支强制落盘并挂出日志地址（响应发出
+	// 后执行仍可能续写——路径必须先存在且持续可写）。
+	spillLogs := func() {
+		if err := errors.Join(outSpill.Spill(), errSpill.Spill()); err == nil {
+			attrs["output"], attrs["error_output"] = logOut, logErr
+		}
+	}
 	if errors.Is(outcome.Err, execution.ErrWaitElapsed) {
 		// RTC 直连等待超时：执行继续（前台记录保留——cancel(request_id)
 		// 与 DisconnectTools 仍可终止）；日志在实际结束时关闭。
+		spillLogs()
 		return &protocol.Output{
 			Content: fmt.Sprintf("execution still running; output: %s（cancel(request_id) 可终止）", logOut),
 			Attrs:   attrs,
@@ -236,6 +237,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		// 超时转 bg：同一记录标记 bg（任务继续，独立墙钟）；日志文件在
 		// 执行结束时关闭。后台执行的取消走任务表 Kill/CancelByRequest，
 		// DisconnectTools 只取消前台执行（断线/停止等待不是取消）。
+		spillLogs()
 		attrs["background"] = "true"
 		attrs["id"] = outcome.Task.ID
 		return &protocol.Output{
@@ -248,6 +250,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	// 时关闭；错误响应仍携带本次执行已创建的日志地址（Reply 保留
 	// Result）。错误码用资源类 overloaded（与连接/页面/排队上限同码）。
 	if errors.Is(outcome.Err, execution.ErrCapacity) {
+		spillLogs()
 		err := protocol.Fail("overloaded", "exec: "+outcome.Err.Error())
 		if outcome.Result == nil {
 			return &protocol.Output{Attrs: attrs}, err
@@ -257,17 +260,30 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	// 调用方 ctx 结束（传输断连/前台预算到期，§2.6）：断线不是取消——
 	// 停止等待但执行继续（前台记录保留），日志在实际执行结束时关闭。
 	if errors.Is(outcome.Err, context.Canceled) || errors.Is(outcome.Err, context.DeadlineExceeded) {
+		spillLogs()
 		if outcome.Result == nil {
 			return &protocol.Output{Attrs: attrs}, outcome.Err
 		}
 		return execResultResponse(outcome.Result, attrs, caller.Direct), outcome.Err
 	}
-	// 前台完成（审计与日志关闭已由完成回调处理）。
+	// 前台完成（日志关闭已由完成回调处理）：执行已终结，部分产出只活
+	// 在日志里——错误响应保留其地址（Reply 保留 Result）。
 	if outcome.Err != nil {
 		if outcome.Result == nil {
+			_ = outSpill.Spill()
+			_ = errSpill.Spill()
+			if outSpill.Spilled() {
+				attrs["output"] = logOut
+			}
+			if errSpill.Spilled() {
+				attrs["error_output"] = logErr
+			}
 			return &protocol.Output{Attrs: attrs}, protocol.Fail("internal", "exec: "+outcome.Err.Error())
 		}
 		// 执行完成但引擎层报错：结果与错误一并带出（Reply 保留 Result）。
+		if err := settleExecLogs(attrs, logOut, logErr, outSpill, errSpill, outcome.Result, !caller.Direct); err != nil {
+			return &protocol.Output{Attrs: attrs}, err
+		}
 		res, outputErr := completedExecResultResponse(outcome.Result, attrs, caller.Direct, logs)
 		if outputErr != nil {
 			return res, outputErr
@@ -278,36 +294,73 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	if res == nil {
 		return nil, protocol.Fail("internal", "exec: no result")
 	}
+	if err := settleExecLogs(attrs, logOut, logErr, outSpill, errSpill, res, !caller.Direct); err != nil {
+		return &protocol.Output{Attrs: attrs}, err
+	}
 	return completedExecResultResponse(res, attrs, caller.Direct, logs)
 }
 
-// execLogSnapshot records stream lengths before FS audit lines are appended.
-// Completion publishes it only after both logs have closed.
+// settleExecLogs 同步完成收口：落盘失败的执行明确报错；引擎采集截断的
+// 流必须在执行中已溢出落盘（tee 在采集截断后仍写 writer——未落盘 = 输
+// 出尾部丢失，明确报错不静默）；NATS 行预览截断的流补建文件（全量在
+// 内存）。attrs 按「文件存在」挂载 output/error_output。
+func settleExecLogs(attrs map[string]string, logOut, logErr string, outSpill, errSpill *execution.LogSpiller, res *execution.ExecResult, natsPreview bool) error {
+	if err := errors.Join(outSpill.Err(), errSpill.Err()); err != nil {
+		return protocol.Fail("internal", "exec: write log: "+err.Error())
+	}
+	if res.StdoutTruncated && !outSpill.Spilled() {
+		return protocol.Fail("internal", "exec: stdout capture truncated without log spill")
+	}
+	if res.StderrTruncated && !errSpill.Spilled() {
+		return protocol.Fail("internal", "exec: stderr capture truncated without log spill")
+	}
+	if natsPreview {
+		if _, cut := headLines(res.Stdout, 1000); cut {
+			if err := outSpill.Spill(); err != nil {
+				return protocol.Fail("internal", "exec: spill log: "+err.Error())
+			}
+		}
+		if _, cut := headLines(res.Stderr, 100); cut {
+			if err := errSpill.Spill(); err != nil {
+				return protocol.Fail("internal", "exec: spill log: "+err.Error())
+			}
+		}
+	}
+	if outSpill.Spilled() {
+		attrs["output"] = logOut
+	}
+	if errSpill.Spilled() {
+		attrs["error_output"] = logErr
+	}
+	return nil
+}
+
+// execLogSnapshot records stream lengths of truncated streams at close.
+// Completion publishes it only after both spillers have closed.
 type execLogSnapshot struct {
 	stdoutBytes int64
 	stderrBytes int64
 	err         error
 }
 
-func closeExecLogs(stdout, stderr *os.File, res *execution.ExecResult) execLogSnapshot {
+func closeExecLogs(stdout, stderr *execution.LogSpiller, res *execution.ExecResult) execLogSnapshot {
 	var logs execLogSnapshot
 	if res != nil {
 		for _, stream := range []struct {
-			file      *os.File
+			sp        *execution.LogSpiller
 			truncated bool
 			size      *int64
 		}{{stdout, res.StdoutTruncated, &logs.stdoutBytes}, {stderr, res.StderrTruncated, &logs.stderrBytes}} {
 			if stream.truncated {
-				info, err := stream.file.Stat()
+				size, err := stream.sp.Size()
 				if err != nil {
 					logs.err = errors.Join(logs.err, err)
 				} else {
-					*stream.size = info.Size()
+					*stream.size = size
 				}
 			}
 		}
 	}
-	auditWrites(stderr, res)
 	logs.err = errors.Join(logs.err, stdout.Close(), stderr.Close())
 	return logs
 }
@@ -368,7 +421,8 @@ func completedExecResultResponse(res *execution.ExecResult, attrs map[string]str
 }
 
 // execResultResponse 构造响应（§3.1 统一输出形状）：attrs 恒含
-// action/output/error_output/exit_code。输出策略按通道分：
+// action/exit_code；output/error_output 由调用方在日志文件存在时挂载。
+// 输出策略按通道分：
 //   - NATS（AI 消费）：有界预览——content=stdout 前 1000 行、attrs.stderr
 //     前 100 行；任一截断（行/引擎采集）置 truncated，全量经
 //     attrs.output/error_output 日志读取。
@@ -394,18 +448,6 @@ func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcF
 		attrs["truncated"] = "true"
 	}
 	return &protocol.Output{Content: content, Attrs: attrs}
-}
-
-// auditWrites 把 FS 写审计追加进 stderr 日志（诊断信息——不污染 stdout
-// 日志的 --json/管道契约；与执行输出同档持久）。
-func auditWrites(errLog *os.File, res *execution.ExecResult) {
-	if res == nil || len(res.Writes) == 0 {
-		return
-	}
-	fmt.Fprintf(errLog, "\n# vsh fs writes (%d):\n", len(res.Writes))
-	for _, w := range res.Writes {
-		fmt.Fprintf(errLog, "#   %s\n", w)
-	}
 }
 
 // headLines 截取前 n 行；发生截取时返回 truncated=true。

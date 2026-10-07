@@ -43,13 +43,13 @@ func TestExecNativeEnvironment(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := callTool(t, c, context.Background(), testCaller(), execRequest(tc.script, 30000))
-			attrs := execAttrs(t, r)
-			if attrs["exit_code"] != "0" {
+			res := decoded[protocol.Output](t, r.Result)
+			if res.Attrs["exit_code"] != "0" {
 				t.Fatalf("exec: %+v", r)
 			}
-			data, err := os.ReadFile(attrs["output"])
-			if err != nil || string(data) != tc.want {
-				t.Fatalf("stdout=%q, err=%v; want %q", data, err, tc.want)
+			// 小输出同步完成不落盘（惰性落盘）：stdout 全量 = content。
+			if res.Content != tc.want {
+				t.Fatalf("stdout=%q; want %q", res.Content, tc.want)
 			}
 		})
 	}
@@ -120,7 +120,8 @@ func TestExecScriptForeground(t *testing.T) {
 	cfg.Global = cfg.NewOptions()
 	t.Cleanup(func() { cfg.Global = saved })
 	c, _ := testClient(t)
-	r := callTool(t, c, context.Background(), testCaller(), execRequest("echo hello-vsh", 30000))
+	req := execRequest("echo hello-vsh", 30000)
+	r := callTool(t, c, context.Background(), testCaller(), req)
 	if r.Error != nil {
 		t.Fatal(r.Error)
 	}
@@ -131,17 +132,46 @@ func TestExecScriptForeground(t *testing.T) {
 	if res.Attrs["exit_code"] != "0" || res.Attrs["action"] != "exec" {
 		t.Fatalf("attrs = %v", res.Attrs)
 	}
-	// 双流日志落盘（§2.5）：stdout 全量在 output 路径。
-	logOut, logErr := res.Attrs["output"], res.Attrs["error_output"]
-	if logOut == "" || logErr == "" {
-		t.Fatalf("missing log paths: %v", res.Attrs)
+	// 惰性落盘（§2.5，2026-10-07）：同步完成且未截断的执行不建文件，
+	// attrs 不挂 output/error_output（有路径 ⟺ 有更多内容）。
+	if res.Attrs["output"] != "" || res.Attrs["error_output"] != "" {
+		t.Fatalf("small sync output must not spill logs: %v", res.Attrs)
+	}
+	logOut, logErr := c.execLogPaths("s1", req.ID)
+	if _, err := os.Stat(logOut); !os.IsNotExist(err) {
+		t.Fatalf("stdout log must not exist: %v", err)
+	}
+	if _, err := os.Stat(logErr); !os.IsNotExist(err) {
+		t.Fatalf("stderr log must not exist: %v", err)
+	}
+}
+
+// 行预览截断（>1000 行）：同步完成也补建全量日志，attrs 挂 output；
+// 未截断的 stderr 不建文件（有路径 ⟺ 有更多内容）。
+func TestExecScriptLineTruncationSpills(t *testing.T) {
+	saved := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	t.Cleanup(func() { cfg.Global = saved })
+	c, _ := testClient(t)
+	req := execRequest("awk 'BEGIN{for(i=0;i<1500;i++) print \"line-\" i}'", 30000)
+	r := callTool(t, c, context.Background(), testCaller(), req)
+	if r.Error != nil {
+		t.Fatal(r.Error)
+	}
+	res := decoded[protocol.Output](t, r.Result)
+	if res.Attrs["truncated"] != "true" || strings.Count(res.Content, "\n") != 1000 {
+		t.Fatalf("expected truncated 1000-line preview: attrs=%v content-lines=%d", res.Attrs, strings.Count(res.Content, "\n"))
+	}
+	logOut := res.Attrs["output"]
+	if logOut == "" {
+		t.Fatalf("truncated stdout must spill: %v", res.Attrs)
 	}
 	data, err := os.ReadFile(logOut)
-	if err != nil || !strings.Contains(string(data), "hello-vsh") {
-		t.Fatalf("stdout log = %q, %v", data, err)
+	if err != nil || !strings.Contains(string(data), "line-1499\n") || strings.Count(string(data), "\n") != 1500 {
+		t.Fatalf("stdout log must hold full output: bytes=%d err=%v", len(data), err)
 	}
-	if _, err := os.Stat(logErr); err != nil {
-		t.Fatalf("stderr log missing: %v", err)
+	if res.Attrs["error_output"] != "" {
+		t.Fatalf("empty stderr must not spill: %v", res.Attrs)
 	}
 }
 
@@ -413,8 +443,10 @@ func TestDisconnectToolsCancelsForeground(t *testing.T) {
 	if strings.Contains(res.Content, "SURVIVED") {
 		t.Fatal("脚本在断连清理后仍跑完")
 	}
-	if res.Attrs["output"] == "" || res.Attrs["error_output"] == "" {
-		t.Fatalf("missing log paths: %v", res.Attrs)
+	// 取消即终结：响应晚于执行结束到达，无续写——未截断不建日志（130 =
+	// 取消语义；部分输出经 content/stderr 预览携带）。
+	if res.Attrs["exit_code"] != "130" {
+		t.Fatalf("canceled exit: %v", res.Attrs)
 	}
 	waitRunDone(t, c, req.ID)
 }
@@ -457,11 +489,8 @@ func TestExecScriptForegroundCancel(t *testing.T) {
 	if strings.Contains(res.Content, "SURVIVED") {
 		t.Fatal("脚本在 cancel 后仍跑完")
 	}
-	logOut, logErr := res.Attrs["output"], res.Attrs["error_output"]
-	if logOut == "" || logErr == "" {
-		t.Fatalf("missing log paths: %v", res.Attrs)
-	}
-	if _, err := os.Stat(logOut); err != nil {
-		t.Fatalf("stdout log missing: %v", err)
+	// 取消即终结：未截断的部分输出不建日志文件（130 = 取消语义）。
+	if res.Attrs["exit_code"] != "130" {
+		t.Fatalf("canceled exit: %v", res.Attrs)
 	}
 }

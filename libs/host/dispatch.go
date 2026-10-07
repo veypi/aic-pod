@@ -35,7 +35,8 @@ func (c *Client) sessionWorkDir(sid string) string {
 }
 
 // execLogPaths 返回会话执行日志路径对 .exec/{short}.stdout.log / .stderr.log
-// （hosts-vsh-redesign §3.2：stdout/stderr 分别全量持久化）。短名 =
+// （hosts-vsh-redesign §3.2 双流日志；惰性落盘——仅截断或执行晚于响应才
+// 由 LogSpiller 创建，本函数只负责命名）。短名 =
 // sha256(sid + "\x00" + id) 前 6 字节（12 hex）——同会话内唯一、可复现。
 func (c *Client) execLogPaths(sid, id string) (string, string) {
 	sum := sha256.Sum256([]byte(sid + "\x00" + id))

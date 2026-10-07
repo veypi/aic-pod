@@ -67,30 +67,26 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	}
 }
 
-func TestCompletedExecResultRestoresStderrBeforeAudit(t *testing.T) {
+// RTC 全量恢复：截断流从本次执行已关闭的日志补全；恢复不改引擎结果；
+// 日志内容 = 纯执行输出（审计行已随 Writes 一并删除，2026-10-07）。
+func TestCompletedExecResultRestoresStreams(t *testing.T) {
 	t.Parallel()
-	stdout, err := os.Create(filepath.Join(t.TempDir(), "stdout.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr.log"))
-	if err != nil {
-		_ = stdout.Close()
-		t.Fatal(err)
-	}
+	dir := t.TempDir()
+	stdout := execution.NewLogSpiller(filepath.Join(dir, "stdout.log"), 4)
+	stderr := execution.NewLogSpiller(filepath.Join(dir, "stderr.log"), 4)
 	outText, errText := `{"ok":true}`, "complete diagnostic\n"
-	if _, err := stdout.WriteString(outText); err != nil {
+	if _, err := stdout.Write([]byte(outText)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stderr.WriteString(errText); err != nil {
+	if _, err := stderr.Write([]byte(errText)); err != nil {
 		t.Fatal(err)
 	}
 	res := &execution.ExecResult{
 		ExitCode: 42, Stdout: outText[:4], Stderr: errText[:4],
-		StdoutTruncated: true, StderrTruncated: true, Writes: []string{"/created.txt"},
+		StdoutTruncated: true, StderrTruncated: true,
 	}
 	logs := closeExecLogs(stdout, stderr, res)
-	attrs := map[string]string{"action": "exec", "output": stdout.Name(), "error_output": stderr.Name()}
+	attrs := map[string]string{"action": "exec", "output": filepath.Join(dir, "stdout.log"), "error_output": filepath.Join(dir, "stderr.log")}
 	got, err := completedExecResultResponse(res, attrs, true, logs)
 	if err != nil {
 		t.Fatal(err)
@@ -101,9 +97,8 @@ func TestCompletedExecResultRestoresStderrBeforeAudit(t *testing.T) {
 	if !res.StdoutTruncated || res.Stdout != outText[:4] || !res.StderrTruncated || res.Stderr != errText[:4] {
 		t.Fatal("recovery mutated the engine result")
 	}
-	audit, err := os.ReadFile(stderr.Name())
-	if err != nil || !strings.Contains(string(audit), "# vsh fs writes") || !strings.HasPrefix(string(audit), errText) {
-		t.Fatalf("stderr audit log = %q, %v", audit, err)
+	if log, err := os.ReadFile(attrs["error_output"]); err != nil || string(log) != errText {
+		t.Fatalf("stderr log = %q, %v（日志必须只含执行输出）", log, err)
 	}
 }
 
