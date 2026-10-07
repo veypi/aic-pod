@@ -3,7 +3,7 @@ package fsx
 // edit_diagnose.go — edit 失败诊断（P0）：ambiguous 给命中行号列表；
 // not-found 给最近似候选（行号 + 该处真实文本 + 相似度）。
 //
-// 归一化管线移植自 vsh contrib/codingtools（edit_diff.go），仅作诊断用途，
+// 归一化管线移植自 pi-mono 的工具实现（曾随 vsh contrib/codingtools 分发，该模块已在 vsh 0.2.0 移除），仅作诊断用途，
 // 不参与编辑应用（P3 fuzzy 应用复用本管线）。三端对齐：page_fs.js 为 JS
 // 等价实现（NFKC 用原生 String.prototype.normalize）。
 
@@ -213,7 +213,7 @@ func bigramDice(a, b string) float64 {
 	return 2 * float64(overlap) / float64(len(ra)+len(rb)-2)
 }
 
-// ---- 归一化管线（移植自 codingtools edit_diff.go；CRLF/CR 归一为 LF） ----
+// ---- 归一化管线（移植自 pi-mono edit_diff；CRLF/CR 归一为 LF） ----
 
 type fuzzySegment struct {
 	output    string
@@ -223,7 +223,7 @@ type fuzzySegment struct {
 	outEnd    int
 }
 
-// fuzzyMatchReplacer 智能标点/空白归一表（与 codingtools 一致）。
+// fuzzyMatchReplacer 智能标点/空白归一表（与上游 pi-mono 实现一致）。
 // 全部用 \u 转义书写：特殊空白/标点字符经文件传输易被静默归一。
 var fuzzyMatchReplacer = strings.NewReplacer(
 	"\u2018", "'",

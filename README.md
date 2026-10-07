@@ -1,33 +1,40 @@
 # aic-pod
 
-设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/hosts-tools.md)。技能是云端静态内容；browser/CUA 随 Pod 内置，默认注册并按需启动。
+**把一台真实的机器接到模型后面。** aic-pod 是 AIC 平台的设备端客户端：它通过 NATS
+WebSocket 主动连出去，把本机能力（命令执行 / 文件操作 / 浏览器自动化 / 原生 GUI 自动化 /
+ssh·scp 转发）注册为 LLM 可调用的工具。本机不监听任何端口。
 
-Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/hosts-tools.md#browser-运行环境)。
-
-AIC Pod 客户端 — 部署在 PC/服务器上，通过 NATS WebSocket 连接 AIC 平台，把本机能力
-（命令执行 / 文件操作 / 浏览器自动化 / 原生 GUI 自动化 / ssh·scp 转发）注册为 LLM 可调用的工具。
+**中文** | [English](README.en.md)
 
 | 客户端 | 形态 | 核心能力 |
-|---|---|---|
-| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser（Go + Chrome）、cua（原生 GUI 自动化） |
+| --- | --- | --- |
+| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser、cua（原生 GUI 自动化） |
 | **cli** | 单二进制 `aic` | exec（沙箱 + 三域授权，含 browser/cua/ssh/scp）、fs |
 
-安全模型见 [docs/host_sandbox.md](docs/host_sandbox.md)，架构见 [docs/design.md](docs/design.md)，
-版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/hosts-tools.md)。
+技能是云端静态内容；browser/CUA 随 Pod 内置，默认注册并按需启动。
+
+Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，
+并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/hosts-tools.md#browser-运行环境)。
+
+- 安全模型：[docs/host_sandbox.md](docs/host_sandbox.md)
+- 架构：[docs/design.md](docs/design.md)
+- 工具与 MCP：[docs/hosts-tools.md](docs/hosts-tools.md)
+- 版本变更：[CHANGELOG.md](CHANGELOG.md)
 
 ## 配置
 
 CLI 与 Desktop 共享同一份配置文件：`os.UserConfigDir()/aic/config.yaml`
-（macOS: `~/Library/Application Support/aic/config.yaml`），任一端的修改
-（编辑文件 / 页面绑定）另一端启动即生效。
+（macOS: `~/Library/Application Support/aic/config.yaml`），任一端的修改（编辑文件 /
+页面绑定）另一端启动即生效。
 
 解析由 vigo/flags 承担：`AutoRegister` 声明字段，`ConfigFile` 声明文件，`Parse` 统一合并，
 优先级：**显式 flag > 环境变量 > 配置文件 > 结构体默认**。
 
-配置读取允许容错：未知字段忽略，错误字段使用默认值并保留其他有效字段；
-文件无法读取或 YAML 整体损坏时使用默认配置启动，仍可用 `aic config get|set` 修复。
-读取时不覆盖原文件，只有保存配置时才写回。
-设置面（`aic config`）与启动读取共用 `flags` 的解析/原子写，只负责设备参数的业务校验。
+配置读取允许容错：未知字段忽略，错误字段使用默认值并保留其他有效字段；文件无法读取或
+YAML 整体损坏时使用默认配置启动，仍可用 `aic config get|set` 修复。读取时不覆盖原文件，
+只有保存配置时才写回。设置面（`aic config`）与启动读取共用 `flags` 的解析/原子写，
+只负责设备参数的业务校验。
 
 | 环境变量 | CLI flag | 配置键 | 默认值 | 说明 |
 |---|---|---|---|---|
@@ -75,9 +82,9 @@ desktop 设置窗经 Electron IPC spawn 同一套子命令；保存后重启后�
 
 ```bash
 aic                                  # 连接运行（config.yaml 里 key 非空则自动连接平台）
-aic config get | config set           # 读写本机设置（JSON 走 stdin/stdout）
-aic bind | unbind                     # 绑定/解绑平台凭证（凭证走 stdin）
-aic -key "<key>"               # 临时参数覆盖
+aic config get | config set          # 读写本机设置（JSON 走 stdin/stdout）
+aic bind | unbind                    # 绑定/解绑平台凭证（凭证走 stdin）
+aic -key "<key>"                     # 临时参数覆盖
 # 查看全部参数：aic -h
 ```
 
@@ -133,7 +140,9 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-browser 与 cua 默认直接启动官方 agent-browser 0.38.2 和 cua-driver 0.33.2 的 MCP 模式，首次调用懒启动，后续共享连接。所有工具名称、参数和结果遵循上游。Desktop 附带 Chrome 与两套官方原生程序；独立 CLI 按技能说明安装运行依赖。
+browser 与 cua 默认直接启动官方 agent-browser 0.38.2 和 cua-driver 0.33.2 的 MCP 模式，
+首次调用懒启动，后续共享连接。所有工具名称、参数和结果遵循上游。Desktop 附带 Chrome 与
+两套官方原生程序；独立 CLI 按技能说明安装运行依赖。
 
 ```sh
 mcp tools browser
@@ -144,7 +153,8 @@ mcp tools cua
 
 ## 构建
 
-普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 MCP manager。上游工具作为独立进程运行，Desktop 打包时附带固定版本依赖。云端技能内容位于 aic-skills。
+普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 MCP manager。上游工具作为
+独立进程运行，Desktop 打包时附带固定版本依赖。云端技能内容位于 aic-skills。
 
 产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
 
@@ -166,7 +176,12 @@ desktop 打包前自动同步内置 cua-driver（`desktop/cua.json` 固定版本
 `npm run cua-sync -- --asset <已下载资产>`。
 
 **发版流程**：推送 tag `v*` 触发 CI（`.github/workflows/build.yml`）构建 desktop 全平台 +
-cli 全平台 并创建 GitHub Release；版本号只改 `cfg/config.go`（带 `v` 前缀），`desktop/package.json` 由 `make desktop-version`
-从 git describe 自动同步。
+cli 全平台 并创建 GitHub Release；版本号只改 `cfg/config.go`（带 `v` 前缀），`desktop/package.json`
+由 `make desktop-version` 从 git describe 自动同步。
 
-依赖：Node 22+（Electron/electron-builder）、Go（后端二进制 `make backend-bin`）、`go-winres`（windows cli 资源）。
+依赖：Node 22+（Electron/electron-builder）、Go（后端二进制 `make backend-bin`）、
+`go-winres`（windows cli 资源）。
+
+## 许可
+
+MIT（[LICENSE](LICENSE)）。

@@ -37,10 +37,13 @@ jobs:
           cache-dependency-path: desktop/package-lock.json
       - name: Install npm dependencies
         run: npm ci --prefix desktop
-      - name: Test UI protocol
+      - name: Test protocol, fs layer and desktop shell
         run: |
-          go test ./libs/uiscript
+          go test ./protocol ./libs/fsx
           npm test --prefix desktop
+      - name: Test exec engine (unix runners)
+        if: runner.os != 'Windows'
+        run: go test ./libs/execution
       - name: Test native files and authorization config
         run: go test ./libs/hostfs ./cfg
       - name: Build
