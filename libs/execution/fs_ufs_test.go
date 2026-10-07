@@ -159,6 +159,115 @@ func TestCloudFSEtcWriteDenied(t *testing.T) {
 	_ = ctx
 }
 
+// 合成系统身份文件（SysFiles）：读与元数据由平台内容作答，写照旧硬拒、
+// 不落 backing——/etc 其余路径语义不变（回归 2026-10-08：ls -l 的身份解析
+// 每次产生越界拒绝回显）。
+func TestCloudFSSysFilesReadOnly(t *testing.T) {
+	t.Parallel()
+	backing, err := ufs.NewLocalFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := vbox.NewFSRuleSet(nil, vbox.EffDeny)
+	const content = "u1:x:1000:1000:u1:/u/u1:/bin/sh\n"
+	fsys, err := NewCloudFS(CloudFSConfig{
+		UserRoot: "/u/u1",
+		Backing:  backing,
+		Rules:    func() vbox.FSRuleSet { return rules },
+		SysFiles: map[string][]byte{"/etc/passwd": []byte(content)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// 读放行且内容为平台合成值。
+	f, err := fsys.Open(ctx, "/etc/passwd")
+	if err != nil {
+		t.Fatalf("sysfile read = %v, want open", err)
+	}
+	data, err := io.ReadAll(f)
+	f.Close()
+	if err != nil || string(data) != content {
+		t.Fatalf("sysfile content = %q %v, want %q", data, err, content)
+	}
+	// 元数据（stat/lstat/realpath）放行——否则命令的词法解析先挂。
+	fi, err := fsys.Stat(ctx, "/etc/passwd")
+	if err != nil || fi.IsDir() || fi.Size() != int64(len(content)) {
+		t.Fatalf("sysfile stat = %+v %v", fi, err)
+	}
+	if _, err := fsys.Lstat(ctx, "/etc/passwd"); err != nil {
+		t.Fatalf("sysfile lstat = %v", err)
+	}
+	if abs, err := fsys.Realpath(ctx, "/etc/passwd"); err != nil || abs != "/etc/passwd" {
+		t.Fatalf("sysfile realpath = %q %v", abs, err)
+	}
+	// 句柄只读：内容写了也不生效。
+	f, err = fsys.Open(ctx, "/etc/passwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, werr := f.Write([]byte("x")); !errors.Is(werr, stdfs.ErrPermission) {
+		t.Fatalf("sysfile write = %v, want EPERM", werr)
+	}
+	f.Close()
+	// 写路径照旧硬拒（写意图的 OpenFile 不路由到合成层），且不落 backing。
+	if err := writeFile(t, fsys, "/etc/passwd", "x"); !errors.Is(err, ErrOutsideJail) {
+		t.Fatalf("/etc/passwd write = %v, want ErrOutsideJail", err)
+	}
+	if _, err := backing.Stat("/etc/passwd"); !errors.Is(err, stdfs.ErrNotExist) {
+		t.Fatalf("sysfile must not land anywhere: %v", err)
+	}
+	// 未列入 SysFiles 的 /etc 路径语义不变（照旧越界拒）。
+	if _, err := fsys.Open(ctx, "/etc/shadow"); !errors.Is(err, ErrOutsideJail) {
+		t.Fatalf("/etc/shadow read = %v, want ErrOutsideJail", err)
+	}
+}
+
+// 动态行（Resolve）的拒绝原因直达报错文案（2026-10-08）：调用方不再对公开包
+// 给出「请 grant」的错误指引——真实情形（发布物不可写且不可授）只有回调知道。
+func TestCloudFSDynamicRuleReason(t *testing.T) {
+	t.Parallel()
+	backing, err := ufs.NewLocalFS(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := vbox.NewFSRuleSet([]vbox.Rule{
+		{Pattern: "/skills", Effect: vbox.EffDeny, Class: vbox.ClassCfg,
+			Resolve: func(string, vbox.FileOp) vbox.Resolution {
+				return vbox.Resolution{Handled: true, Effect: vbox.EffDeny, Reason: "公开包是发布物：任何人不允许改写，grant 也不可授"}
+			}},
+	}, vbox.EffDeny)
+	fsys, err := NewCloudFS(CloudFSConfig{
+		UserRoot:  "/u/u1",
+		JailExtra: []string{"/skills"},
+		Backing:   backing,
+		Rules:     func() vbox.FSRuleSet { return rules },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = writeFile(t, fsys, "/skills/pub1/SKILL.md", "x")
+	if !errors.Is(err, ErrRuleDenied) {
+		t.Fatalf("err = %v, want ErrRuleDenied", err)
+	}
+	if !strings.Contains(err.Error(), "公开包是发布物") {
+		t.Fatalf("报错未带上动态行原因: %v", err)
+	}
+	// 静态行/兜底的统一文案仍在（报错引导 grant）。
+	static := vbox.NewFSRuleSet(nil, vbox.EffDeny)
+	fsys2, err := NewCloudFS(CloudFSConfig{
+		UserRoot: "/u/u1", Backing: backing,
+		Rules: func() vbox.FSRuleSet { return static },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = writeFile(t, fsys2, "/u/u1/denied.txt", "x")
+	if !errors.Is(err, ErrRuleDenied) || !strings.Contains(err.Error(), "grant fs") {
+		t.Fatalf("静态拒绝文案 = %v, want 含 grant fs", err)
+	}
+}
+
 func TestCloudFSRemoveRmdirSemantics(t *testing.T) {
 	t.Parallel()
 	fsys, backing := newCloudAdapter(t)

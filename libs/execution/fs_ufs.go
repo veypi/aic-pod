@@ -48,6 +48,14 @@ type UFSAdapterConfig struct {
 	// 目录同语义（跨 exec 持久、过配额闸门、随会话目录清理）。
 	// 目标必须落在 jail 根内且被便利 rw 根覆盖，否则门会拒。
 	Aliases map[string]string
+	// SysFiles 合成只读系统文件（cloud = /etc/passwd、/etc/group）：jail 与
+	// 规则表之外的**唯一显式读例外**——命中路径的读与元数据直接由本层
+	// 合成内容作答（不进 backing、不落盘），写仍照旧走 gate 硬拒。
+	// 存在理由：内建命令的身份解析（ls -l 的用户/组名、~user 展开）按设计
+	// 去读 /etc/passwd 与 /etc/group，这是软失败调用——没有这层例外时每次
+	// 都产生一条越界拒绝回显（噪声，用户可见），且身份永远解析不出来。
+	// 虚拟计算机的身份属于平台（不是宿主机的 /etc），因此由调用方合成。
+	SysFiles map[string][]byte
 }
 
 // ufsAdapter 把 ufs.FS 适配为引擎 gbfs.FileSystem，并在进程内执行
@@ -60,6 +68,7 @@ type ufsAdapter struct {
 	mem           *gbfs.MemoryFS
 	memPrefix     []string
 	aliases       map[string]string
+	sysFiles      map[string][]byte
 	mu            sync.Mutex
 	cwd           string
 }
@@ -76,6 +85,7 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 		mem:           gbfs.NewMemory(),
 		memPrefix:     cfg.MemPrefixes,
 		aliases:       cfg.Aliases,
+		sysFiles:      cfg.SysFiles,
 		cwd:           "/",
 	}
 	for _, j := range cfg.JailRoots {
@@ -115,12 +125,16 @@ type CloudFSConfig struct {
 	// Aliases 路径别名（/tmp → /u/{uid}/.sessions/{sid}/tmp），见
 	// UFSAdapterConfig.Aliases。
 	Aliases map[string]string
+	// SysFiles 合成只读系统文件（/etc/passwd、/etc/group；内容由 aic 按
+	// 会话身份合成），见 UFSAdapterConfig.SysFiles。
+	SysFiles map[string][]byte
 }
 
 // CloudMemPrefixes cloud 内存层伪系统目录（per-exec，用完即弃，UFS 零污染）。
 // 导出供 aic 预检使用（F1：字面写目标落内存层前缀 = 运行期放行、永不落
 // UFS，预检不应拦）。/etc 不在此列——写 /etc 与 host 同语义，吃规则表
-// 硬拒；/tmp 由 Aliases 重定向到会话空间（跨 exec 持久、过配额闸门）。
+// 硬拒（SysFiles 只为 /etc/passwd、/etc/group 开放**读**，写同样硬拒）；
+// /tmp 由 Aliases 重定向到会话空间（跨 exec 持久、过配额闸门）。
 var CloudMemPrefixes = []string{"/dev", "/proc"}
 
 // NewCloudFS cloud：UFS 直通 + 系统目录内存层 + 用户根 jail + vbox 规则表门。
@@ -142,6 +156,7 @@ func NewCloudFS(cfg CloudFSConfig) (gbfs.FileSystem, error) {
 		JailRoots:   append([]string{cfg.UserRoot}, cfg.JailExtra...),
 		MemPrefixes: CloudMemPrefixes,
 		Aliases:     cfg.Aliases,
+		SysFiles:    cfg.SysFiles,
 	})
 }
 
@@ -178,6 +193,13 @@ func (a *ufsAdapter) isMem(abs string) bool {
 		}
 	}
 	return false
+}
+
+// sysFileData 取合成只读系统文件内容（UFSAdapterConfig.SysFiles：jail 与
+// 规则表之外的唯一显式读例外；命中 = 内容由本层作答）。
+func (a *ufsAdapter) sysFileData(abs string) ([]byte, bool) {
+	data, ok := a.sysFiles[abs]
+	return data, ok
 }
 
 // resolveMemSymlinks 解析内存层路径中的 symlink（F4，2026-09-24 实测修复：
@@ -259,9 +281,19 @@ func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 	}
 	d := rules.MatchPath(target, op)
 	if !d.Allow {
-		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s（越界硬拒绝；如需访问请 grant fs %s）", ErrRuleDenied, abs, abs)}
+		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s", ErrRuleDenied, ruleDeniedText(abs, d.Reason))}
 	}
 	return nil
+}
+
+// ruleDeniedText 规则表拒绝的报错正文：动态行（Resolve）给了 Reason 就用它
+// （只有回调知道真实情形，如「公开包不可写且 grant 不可授」与「我的私有包写需
+// grant」的区别——对公开包给「请 grant」是错误指引）；静态行沿用统一文案。
+func ruleDeniedText(abs, reason string) string {
+	if reason != "" {
+		return reason
+	}
+	return fmt.Sprintf("%s（越界硬拒绝；如需访问请 grant fs %s）", abs, abs)
 }
 
 // gateMeta 元数据读的 jail 放宽（2026-09-24 实测修复；2026-10-05 补 jail 根本身）：
@@ -314,6 +346,9 @@ func (a *ufsAdapter) inJail(abs string) bool {
 func (a *ufsAdapter) Open(ctx context.Context, name string) (gbfs.File, error) {
 	abs := a.resolve(name)
 	abs = a.resolveMemSymlinks(ctx, abs, true)
+	if data, ok := a.sysFileData(abs); ok {
+		return newSysFile(abs, data), nil
+	}
 	if a.isMem(abs) {
 		return a.mem.Open(ctx, abs)
 	}
@@ -333,10 +368,13 @@ func (a *ufsAdapter) Open(ctx context.Context, name string) (gbfs.File, error) {
 func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm stdfs.FileMode) (gbfs.File, error) {
 	abs := a.resolve(name)
 	abs = a.resolveMemSymlinks(ctx, abs, true)
+	writeIntent := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0
+	if data, ok := a.sysFileData(abs); ok && !writeIntent {
+		return newSysFile(abs, data), nil
+	}
 	if a.isMem(abs) {
 		return a.mem.OpenFile(ctx, abs, flag, perm)
 	}
-	writeIntent := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0
 	op := vbox.OpRead
 	if writeIntent {
 		op = vbox.OpWrite
@@ -387,6 +425,9 @@ func (a *ufsAdapter) OpenFile(ctx context.Context, name string, flag int, perm s
 func (a *ufsAdapter) Stat(ctx context.Context, name string) (stdfs.FileInfo, error) {
 	abs := a.resolve(name)
 	abs = a.resolveMemSymlinks(ctx, abs, true)
+	if data, ok := a.sysFileData(abs); ok {
+		return sysFileInfo{name: abs, size: int64(len(data))}, nil
+	}
 	if a.isMem(abs) {
 		return a.mem.Stat(ctx, abs)
 	}
@@ -398,6 +439,9 @@ func (a *ufsAdapter) Stat(ctx context.Context, name string) (stdfs.FileInfo, err
 
 func (a *ufsAdapter) Lstat(ctx context.Context, name string) (stdfs.FileInfo, error) {
 	abs := a.resolve(name)
+	if data, ok := a.sysFileData(abs); ok {
+		return sysFileInfo{name: abs, size: int64(len(data))}, nil
+	}
 	if a.isMem(abs) {
 		return a.mem.Lstat(ctx, abs)
 	}
@@ -441,6 +485,9 @@ func (a *ufsAdapter) Readlink(ctx context.Context, name string) (string, error) 
 func (a *ufsAdapter) Realpath(ctx context.Context, name string) (string, error) {
 	abs := a.resolve(name)
 	abs = a.resolveMemSymlinks(ctx, abs, true)
+	if _, ok := a.sysFileData(abs); ok {
+		return abs, nil
+	}
 	if a.isMem(abs) {
 		return a.mem.Realpath(ctx, abs)
 	}
@@ -623,8 +670,10 @@ func (a *ufsAdapter) gateResolved(abs string, op vbox.FileOp) error {
 	if !a.inJail(abs) {
 		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: ErrOutsideJail}
 	}
-	if a.rules != nil && !a.rules().MatchPath(abs, op).Allow {
-		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: grant fs %s", ErrRuleDenied, abs)}
+	if a.rules != nil {
+		if d := a.rules().MatchPath(abs, op); !d.Allow {
+			return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s", ErrRuleDenied, ruleDeniedText(abs, d.Reason))}
+		}
 	}
 	return nil
 }
@@ -672,6 +721,91 @@ type roFile struct {
 func (f roFile) Write([]byte) (int, error) {
 	return 0, &stdfs.PathError{Op: "write", Path: f.name, Err: stdfs.ErrPermission}
 }
+
+// sysFile 是合成只读系统文件句柄（内容来自平台，不落任何 backing）：读成功、
+// 写永远 EPERM（写意图的 OpenFile 根本不路由到这里，会落到 gate 硬拒）。
+type sysFile struct {
+	name   string
+	data   []byte
+	off    int64
+	closed bool
+}
+
+func newSysFile(name string, data []byte) *sysFile {
+	return &sysFile{name: name, data: append([]byte(nil), data...)}
+}
+
+func (f *sysFile) Read(p []byte) (int, error) {
+	if f.closed {
+		return 0, &stdfs.PathError{Op: "read", Path: f.name, Err: stdfs.ErrClosed}
+	}
+	if f.off >= int64(len(f.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[f.off:])
+	f.off += int64(n)
+	return n, nil
+}
+
+func (f *sysFile) Write([]byte) (int, error) {
+	return 0, &stdfs.PathError{Op: "write", Path: f.name, Err: stdfs.ErrPermission}
+}
+
+func (f *sysFile) Seek(offset int64, whence int) (int64, error) {
+	if f.closed {
+		return 0, &stdfs.PathError{Op: "seek", Path: f.name, Err: stdfs.ErrClosed}
+	}
+	var next int64
+	switch whence {
+	case io.SeekStart:
+		next = offset
+	case io.SeekCurrent:
+		next = f.off + offset
+	case io.SeekEnd:
+		next = int64(len(f.data)) + offset
+	default:
+		return 0, &stdfs.PathError{Op: "seek", Path: f.name, Err: stdfs.ErrInvalid}
+	}
+	if next < 0 {
+		return 0, &stdfs.PathError{Op: "seek", Path: f.name, Err: stdfs.ErrInvalid}
+	}
+	f.off = next
+	return next, nil
+}
+
+func (f *sysFile) Close() error {
+	f.closed = true
+	return nil
+}
+
+func (f *sysFile) Stat() (stdfs.FileInfo, error) {
+	return sysFileInfo{name: f.name, size: int64(len(f.data))}, nil
+}
+
+// sysFileModTime 合成文件的固定 mtime（内容随平台发布变化，不用 now——
+// 每次 exec 同一文件 mtime 稳定，ls -l 不乱跳）。
+var sysFileModTime = time.Unix(1700000000, 0)
+
+// sysFileInfo 合成只读系统文件的最小 FileInfo。
+type sysFileInfo struct {
+	name string
+	size int64
+}
+
+func (s sysFileInfo) Name() string {
+	if idx := strings.LastIndex(s.name, "/"); idx >= 0 {
+		return s.name[idx+1:]
+	}
+	return s.name
+}
+func (s sysFileInfo) Size() int64          { return s.size }
+func (s sysFileInfo) Mode() stdfs.FileMode { return 0o644 }
+func (s sysFileInfo) ModTime() time.Time   { return sysFileModTime }
+func (s sysFileInfo) IsDir() bool          { return false }
+func (s sysFileInfo) Sys() any             { return nil }
+
+// 接口断言：合成文件实现引擎 FS 文件契约。
+var _ gbfs.File = (*sysFile)(nil)
 
 // bufferedWriteFile 读改写回退文件：装载现有内容到内存缓冲，Write 按光标
 // 覆盖/追加，Close 时 WriteFile 整写回 backing。
