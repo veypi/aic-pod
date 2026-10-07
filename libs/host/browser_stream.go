@@ -49,6 +49,7 @@ func (c *Client) streamBrowser(parent context.Context, caller protocol.Caller, i
 	defer cancel()
 	stop := context.AfterFunc(lifetime, cancel)
 	defer stop()
+	go c.keepBrowserAlive(ctx)
 	ws, _, err := websocket.Dial(ctx, fmt.Sprintf("ws://127.0.0.1:%d/?pacing=ack&maxFps=15", port), nil)
 	if err != nil {
 		return fmt.Errorf("Browser stream: %w", err)
@@ -90,6 +91,28 @@ func (c *Client) streamBrowser(parent context.Context, caller protocol.Caller, i
 		}
 		if err = send(raw); err != nil {
 			return err
+		}
+	}
+}
+
+// keepBrowserAlive 在 UI 实时画面挂载期间周期性刷新内置 browser 服务的空闲
+// 截止时间：画面通道只转发上游 daemon 的 WebSocket，不经过 MCP session，
+// 不刷新的话看着画面也会被空闲回收（默认 30m）。守护进程早已不在时 Touch
+// 是空操作，不会把服务重新拉起。
+func (c *Client) keepBrowserAlive(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.mcpMu.RLock()
+			manager := c.mcpServices
+			c.mcpMu.RUnlock()
+			if manager != nil {
+				manager.Touch("browser")
+			}
 		}
 	}
 }

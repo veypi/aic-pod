@@ -19,7 +19,7 @@ Pod 是设备执行端，负责身份验证、原生命令、文件服务、官�
 
 AI 使用 exec/vsh：普通 CLI 原生调用，有状态工具使用 `mcp call <server> <tool> --input JSON`。UI 经 RTC execCall 调用同一 mcp command，读取命令的 JSON stdout；没有 UI MCP 客户端。exec/fs 直接进入现有执行器和文件服务；没有平台 MCP server 或平台工具副本。文件 HTTP proxy 只转发原生 fs 请求。
 
-本地 MCP stdio 进程按设备配置懒启动并共享，HTTP 服务用标准 Streamable HTTP 连接。服务不属于首次调用的会话，不随某次 shell 的 cwd/env 改变；单次取消只取消请求。配置或设备权限更新时重建连接；关闭 Pod 回收服务。bg 只管理普通执行任务。
+本地 MCP stdio 进程按设备配置懒启动并共享，HTTP 服务用标准 Streamable HTTP 连接。服务不属于首次调用的会话，不随某次 shell 的 cwd/env 改变；单次取消只取消请求。配置或设备权限更新时重建连接；关闭 Pod 回收服务。带 `idle_timeout` 的服务空闲到期也被回收（在途请求算活跃），下次调用重新懒启动；内置 browser 到期时用自己的上游 CLI 一并关闭 daemon。bg 只管理普通执行任务。
 
 权限来自可信传输身份和本地规则（cfg 授权字段；设置修改重启生效，permanent grant 即时生效——候选完整编译校验 → 原子保存 → 原子发布基表）。`mcp.<alias>` 是服务调用门，内置桌面服务以 Pod 设备权限运行；第三方进程默认使用设备沙箱。原生 fs 规则不能隔离浏览器/桌面操作；browser 显式文件参数由上游 filesystem-root 检查。临时会话 grant 不改变共享进程的启动权限。
 

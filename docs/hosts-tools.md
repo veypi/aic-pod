@@ -27,15 +27,20 @@ mcp:
     local:
       command: /absolute/path/custom-server
       cwd: /absolute/workdir
+      idle_timeout: 30m  # 可选：空闲有效期，缺省空 = 随 Pod 常驻
     remote:
       url: https://service.example/mcp
 ```
 
-browser/CUA 默认配置无需手写：分别直接启动官方 `agent-browser mcp --tools core,tabs` 与 `cua-driver mcp`，复用现有 stdio manager。Desktop 分发运行依赖；独立 CLI 按技能说明安装上游软件。显式配置同名项会完整替换默认项，不继承内置权限；`disabled: true` 无需填写 command。其他启用的服务 command 与 url 二选一；cwd 必须绝对路径。可设 disabled:true 或进程 no_sandbox:true。配置只由设备所有者维护，不从技能或工具参数加载。当前远程 HTTP 使用设备网络规则、不继承 shell env、不跟随重定向；没有 OAuth/token 管理器。
+browser/CUA 默认配置无需手写：分别直接启动官方 `agent-browser mcp --tools core,tabs` 与 `cua-driver mcp`，复用现有 stdio manager。两项内置服务默认 30m `idle_timeout`（内置默认值改动只在本仓）；显式配置同名项会整体替换默认项，包括该默认有效期，不继承内置权限。Desktop 分发运行依赖；独立 CLI 按技能说明安装上游软件。`disabled: true` 无需填写 command。其他启用的服务 command 与 url 二选一；cwd 必须绝对路径。可设 disabled:true 或进程 no_sandbox:true。配置只由设备所有者维护，不从技能或工具参数加载。当前远程 HTTP 使用设备网络规则、不继承 shell env、不跟随重定向；没有 OAuth/token 管理器。
 
 stdio 服务懒启动并复用一个 SDK session。进程由 vbox 负责；manager 只拥有配置与连接。一次取消不关闭服务；退出后的下一次显式调用可重新建连，失败写操作不自动重放。服务或启动权限配置更新时关闭旧连接，撤销相关临时服务授权。
 
+`idle_timeout` 是每个服务条目的空闲有效期：服务启动或最后一次使用（取连接或在途请求结束）后经过该时长无任何调用即被回收，下次调用重新懒启动；在途请求算活跃，调用即续期，缺省空值表示随 Pod 常驻。回收是控制行为，不写故障日志（记一条生命周期日志）。内置 browser 的 MCP 连接与上游 daemon 分离——到期时显式用上游 CLI 关闭它自己的 daemon（连同受管浏览器），彻底释放资源；所有者覆盖的 browser 项自管 daemon，Pod 不代管。UI 实时画面挂载期间按分钟刷新 browser 的空闲截止时间（画面通道不经过 MCP session），避免观看中被回收。
+
 调用门为 exec 规则 `mcp.<alias>`。内置 browser/CUA 以 Pod 设备权限运行，以访问 Chrome 私有状态和系统桌面；第三方服务默认受沙箱约束。进程 cwd/env/沙箱固定；按调用 session 获得的临时文件权限不扩展常驻进程沙箱。服务授权是设备能力授权，原生 fs 规则不会隔离浏览器或桌面操作。browser 默认用上游 `--filesystem-root` 限制显式文件参数为 Pod 工作目录；其余业务权限由上游服务负责。原生 exec 的 nosandbox 需可信审批；第三方 MCP 的 no_sandbox 只能由设备所有者在配置中设置。
+
+exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`mcp`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`skill`）与端侧指令（`browser`/`cua`）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令，常见命令不重复列出。
 
 ## 结果与边界
 

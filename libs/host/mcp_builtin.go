@@ -9,8 +9,13 @@ import (
 	"github.com/veypi/aic-pod/libs/mcpx"
 )
 
+// DefaultIdleTimeout 是内置 browser/CUA 服务的默认空闲有效期。
+const DefaultIdleTimeout = "30m"
+
 // Defaults launch upstream executables directly. Owner entries replace them in
 // full; this code neither registers tools nor changes their arguments/results.
+// 内置服务默认 30m 空闲有效期（idle_timeout），避免浏览器/桌面驱动长期常驻；
+// 所有者显式配置同名项时整体替换默认项，包括该默认有效期。
 func mcpServers(configured map[string]mcpx.Config, workDir string) (map[string]mcpx.Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -30,7 +35,7 @@ func mcpServers(configured map[string]mcpx.Config, workDir string) (map[string]m
 		}
 		return ""
 	}
-	browser := mcpx.Config{Command: "agent-browser", Args: []string{"mcp", "--tools", "core,tabs"}, NoSandbox: true, Cwd: workDir,
+	browser := mcpx.Config{Command: "agent-browser", Args: []string{"mcp", "--tools", "core,tabs"}, NoSandbox: true, Cwd: workDir, IdleTimeout: DefaultIdleTimeout,
 		Env: map[string]string{
 			"AGENT_BROWSER_SESSION":    "aic",
 			"AGENT_BROWSER_SOCKET_DIR": filepath.Join(home, ".aic", "browser", "runtime"),
@@ -65,7 +70,7 @@ func mcpServers(configured map[string]mcpx.Config, workDir string) (map[string]m
 	if chrome != "" {
 		browser.Env["AGENT_BROWSER_EXECUTABLE_PATH"] = chrome
 	}
-	cua := mcpx.Config{Command: "cua-driver", Args: []string{"mcp"}, NoSandbox: true,
+	cua := mcpx.Config{Command: "cua-driver", Args: []string{"mcp"}, NoSandbox: true, IdleTimeout: DefaultIdleTimeout,
 		Env: map[string]string{"CUA_DRIVER_RS_UPDATE_CHECK": "false", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false"}}
 	if explicit := os.Getenv("AIC_CUA_DRIVER_PATH"); explicit != "" {
 		cua.Command = explicit

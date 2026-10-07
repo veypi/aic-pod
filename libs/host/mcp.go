@@ -20,7 +20,7 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	if err != nil {
 		return err
 	}
-	manager, err := mcpx.NewManager(servers, mcpx.Options{Authorize: c.authorizeMCP, HTTPClient: c.mcpHTTP(), Processes: c.procs, Logf: c.logf, Policy: func(cfg mcpx.Config) vbox.Policy {
+	manager, err := mcpx.NewManager(servers, mcpx.Options{Authorize: c.authorizeMCP, HTTPClient: c.mcpHTTP(), Processes: c.procs, Logf: c.logf, Expired: c.mcpExpired, Policy: func(cfg mcpx.Config) vbox.Policy {
 		return c.nativePolicy(context.Background(), cfg.Cwd, cfg.Command)
 	}})
 	if err != nil {
@@ -45,6 +45,19 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	c.mcpServices = manager
 	c.mcpMu.Unlock()
 	return nil
+}
+
+// mcpExpired 在服务因空闲有效期被回收后释放其进程之外的资源：内置 browser
+// 的 MCP 前端退出不会结束上游 daemon，需显式关掉受管浏览器；所有者覆盖的
+// browser 项自管 daemon，不在此列。
+func (c *Client) mcpExpired(name string) {
+	if name != "browser" {
+		return
+	}
+	c.mcpMu.RLock()
+	config := c.browserConfig
+	c.mcpMu.RUnlock()
+	c.closeBrowser(config)
 }
 
 func (c *Client) mcpSession(ctx context.Context, server string) (*mcp.ClientSession, error) {

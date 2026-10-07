@@ -1,5 +1,9 @@
 // Package mcpx connects configured MCP services. Skills and installation are
 // deliberately outside this package.
+//
+// 连接生命周期：服务在首次调用时懒启动，之后复用同一 SDK session；
+// 配置 idle_timeout 的服务在最后一次使用后空闲超时被回收（在途请求算使用），
+// 下一次调用重新懒启动。
 package mcpx
 
 import (
@@ -29,6 +33,24 @@ type Config struct {
 	URL       string            `json:"url,omitempty" yaml:"url,omitempty"`
 	Disabled  bool              `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 	NoSandbox bool              `json:"no_sandbox,omitempty" yaml:"no_sandbox,omitempty"`
+	// IdleTimeout 空闲有效期（如 "30m"）：服务启动或最后一次使用后经过该时长
+	// 无任何调用即被回收，下次调用重新懒启动。空 = 永不过期（服务随 Pod 存活）。
+	IdleTimeout string `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
+}
+
+// IdleDuration 返回解析后的空闲有效期：0 表示不过期。
+func (c Config) IdleDuration() (time.Duration, error) {
+	if c.IdleTimeout == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.IdleTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("not a duration: %q", c.IdleTimeout)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("must be positive: %q", c.IdleTimeout)
+	}
+	return d, nil
 }
 
 type Settings struct {
@@ -64,6 +86,9 @@ func (c Config) Validate(alias string) error {
 			return fmt.Errorf("mcp %s: invalid environment", alias)
 		}
 	}
+	if _, err := c.IdleDuration(); err != nil {
+		return fmt.Errorf("mcp %s: invalid idle_timeout: %w", alias, err)
+	}
 	return nil
 }
 
@@ -73,14 +98,20 @@ type Options struct {
 	Policy     func(Config) vbox.Policy
 	HTTPClient *http.Client
 	Logf       func(string, ...any)
+	// Expired 在服务因空闲有效期被回收后调用（进程已结束）。调用方据此释放
+	// 服务进程之外的资源（如内置 browser 的常驻 daemon）。
+	Expired func(name string)
 }
 
 type instance struct {
-	ready   chan struct{}
-	done    chan struct{}
-	cancel  context.CancelFunc
-	session *mcp.ClientSession
-	err     error
+	ready    chan struct{}
+	done     chan struct{}
+	cancel   context.CancelFunc
+	session  *mcp.ClientSession
+	err      error
+	idle     time.Duration // 0 = 不过期
+	used     time.Time     // 最后一次使用（取到 session 或在途请求结束）
+	inflight int           // 在途请求数：>0 时不回收
 }
 
 type Manager struct {
@@ -89,8 +120,10 @@ type Manager struct {
 	cancel    context.CancelFunc
 	configs   map[string]Config
 	instances map[string]*instance
+	launched  map[string]bool // 曾经启动过（Started；空闲回收不撤销）
 	options   Options
 	closed    bool
+	reapEvery time.Duration // 空闲扫描周期，0 = 无服务配置有效期
 }
 
 func NewManager(configs map[string]Config, options Options) (*Manager, error) {
@@ -114,11 +147,42 @@ func NewManager(configs map[string]Config, options Options) (*Manager, error) {
 		options.Logf = func(string, ...any) {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{ctx: ctx, cancel: cancel, configs: copy, instances: map[string]*instance{}, options: options}, nil
+	m := &Manager{ctx: ctx, cancel: cancel, configs: copy, instances: map[string]*instance{}, launched: map[string]bool{}, options: options, reapEvery: reapEvery(copy)}
+	if m.reapEvery > 0 {
+		go m.reap()
+	}
+	return m, nil
+}
+
+// reapEvery 返回空闲扫描周期：最短有效期的四分之一，钳在 0.25s..30s（有效期为
+// 分钟级时即“到期后半个扫描周期内回收”）；没有任何配置有效期时返回 0（不扫描）。
+func reapEvery(configs map[string]Config) time.Duration {
+	shortest := time.Duration(0)
+	for _, cfg := range configs {
+		d, err := cfg.IdleDuration()
+		if err != nil || d <= 0 {
+			continue
+		}
+		if shortest == 0 || d < shortest {
+			shortest = d
+		}
+	}
+	if shortest == 0 {
+		return 0
+	}
+	every := shortest / 4
+	if every < 250*time.Millisecond {
+		every = 250 * time.Millisecond
+	}
+	if every > 30*time.Second {
+		every = 30 * time.Second
+	}
+	return every
 }
 
 // Session shares a device-owned connection. The request context only controls
 // waiting for readiness; it never owns the service process or its environment.
+// 每次取到连接都刷新空闲截止时间，因此调用即续期。
 func (m *Manager) Session(ctx context.Context, name string) (*mcp.ClientSession, error) {
 	m.mu.Lock()
 	if m.closed {
@@ -140,9 +204,13 @@ func (m *Manager) Session(ctx context.Context, name string) (*mcp.ClientSession,
 	}
 	if i == nil {
 		lifetime, cancel := context.WithCancel(m.ctx)
-		i = &instance{ready: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
+		idle, _ := cfg.IdleDuration()
+		i = &instance{ready: make(chan struct{}), done: make(chan struct{}), cancel: cancel, idle: idle, used: time.Now()}
 		m.instances[name] = i
+		m.launched[name] = true
 		go m.connect(lifetime, name, cfg, i)
+	} else {
+		i.used = time.Now()
 	}
 	m.mu.Unlock()
 	select {
@@ -173,19 +241,23 @@ func (m *Manager) connect(ctx context.Context, name string, cfg Config, i *insta
 	defer stop()
 	startup, cancel := context.WithTimeout(ctx, 20*time.Second)
 	client := mcp.NewClient(&mcp.Implementation{Name: "aic", Version: "1"}, nil)
-	if m.options.Authorize != nil {
-		client.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+	// 每个入站请求都在共享连接上留一次活动痕迹：空闲回收据此判定，长调用
+	// 在途时不会被误回收。授权门保持不变。
+	client.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			m.beginRequest(i)
+			defer m.endRequest(i)
+			if m.options.Authorize != nil {
 				switch method {
 				case "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read":
 					if err := m.options.Authorize(ctx, name, method, req.GetParams()); err != nil {
 						return nil, err
 					}
 				}
-				return next(ctx, method, req)
 			}
-		})
-	}
+			return next(ctx, method, req)
+		}
+	})
 	session, err := client.Connect(startup, transport, nil)
 	cancel()
 	if err != nil {
@@ -295,11 +367,92 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	}
 }
 
-// Started reports whether this manager ever launched the named service.
+// Started reports whether this manager ever launched the named service. Idle
+// release forgets the running connection but not the launch history.
 func (m *Manager) Started(name string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.instances[name] != nil
+	return m.launched[name]
+}
+
+// Touch refreshes the idle deadline of a started service. Callers that hold the
+// service's upstream resources without issuing MCP requests (UI live views) use
+// it to keep the service alive for as long as the attachment lasts; a service
+// that was never started is not started by Touch.
+func (m *Manager) Touch(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if i := m.instances[name]; i != nil {
+		select {
+		case <-i.done:
+		default:
+			i.used = time.Now()
+		}
+	}
+}
+
+func (m *Manager) beginRequest(i *instance) {
+	m.mu.Lock()
+	i.inflight++
+	m.mu.Unlock()
+}
+
+func (m *Manager) endRequest(i *instance) {
+	m.mu.Lock()
+	if i.inflight > 0 {
+		i.inflight--
+	}
+	i.used = time.Now()
+	m.mu.Unlock()
+}
+
+// reap stops services that have been idle beyond their configured timeout.
+func (m *Manager) reap() {
+	ticker := time.NewTicker(m.reapEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case now := <-ticker.C:
+			type released struct {
+				name string
+				i    *instance
+			}
+			var expired []released
+			m.mu.Lock()
+			for name, i := range m.instances {
+				if i.idle <= 0 || i.inflight > 0 || now.Sub(i.used) < i.idle {
+					continue
+				}
+				select {
+				case <-i.done: // 连接已自行结束，Session 会替换
+					continue
+				default:
+				}
+				// 先从表里摘除：期间的新调用直接建新连接，不会拿到将被关闭的 session。
+				delete(m.instances, name)
+				expired = append(expired, released{name: name, i: i})
+			}
+			m.mu.Unlock()
+			for _, r := range expired {
+				m.expire(r.name, r.i)
+			}
+		}
+	}
+}
+
+// expire 结束一个已摘除的空闲实例：主动取消属控制行为，连接结束不记故障
+// 日志；回收本身记一条可见的生命周期日志。
+func (m *Manager) expire(name string, i *instance) {
+	if i == nil {
+		return
+	}
+	i.cancel()
+	m.options.Logf("mcp %s: idle timeout reached; service released after %s", name, i.idle)
+	if m.options.Expired != nil {
+		m.options.Expired(name)
+	}
 }
 
 func (m *Manager) Close() error {
