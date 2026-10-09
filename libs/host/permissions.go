@@ -358,36 +358,102 @@ func (p *permissionState) execAllowed(sid, name string) bool {
 	return cfg.CommandAllowed(p.base.execMode, rows, name)
 }
 
+// sandboxWritableProbe 是「该路径能否在 OS 沙箱内被授为可写根」的探测入口
+// （默认 vbox.CheckFSGrantTarget，非 Windows 平台恒 nil）。两个调用点：grant fs
+// 的回执警告（grant.go）、grant status 的 rw 行标注（本文件）；测试用它注入
+// 「授不上」的结果。探测自身先做存在性判断、再做一次对象打开（vbox 侧 os.Stat +
+// CreateFile），调用方不需要重复形态预检。
+var sandboxWritableProbe = vbox.CheckFSGrantTarget
+
+// writeRootProbeLimit 限制一次 grant status 的探测路径数：每次探测要开一次对象
+// 句柄，而 rw 行可能指向已不可达的网络共享（CreateFile 会一路阻塞到 SMB 超时）。
+// 规则表远超这个量级时只探前面的路径，其余在末尾统一说明。
+var writeRootProbeLimit = 32
+
+// writeRootProbeCache 是一次 grant status 内的探测缓存：同一路径只探一次，且总
+// 探测路径数不超过 writeRootProbeLimit（超出的记进 skipped，由调用方汇总说明）。
+type writeRootProbeCache struct {
+	notes   map[string]string
+	skipped map[string]bool
+}
+
+func newWriteRootProbeCache() *writeRootProbeCache {
+	return &writeRootProbeCache{notes: map[string]string{}, skipped: map[string]bool{}}
+}
+
+// note 标注一条 rw 行在 OS 沙箱内是否真的可写：不可写时返回一行提示，可写 /
+// 无法判定（不存在、通配）返回空串。口径与 vbox 的可写根派生一致：剥 /** 后缀、
+// 跳过含通配的模式——只有这些行会变成 OS 层可写根。降级是安静的，这条标注就是
+// 它的可发现性渠道（另两条是 vbox 的 write-root 日志与 grant fs 的警告）。
+func (c *writeRootProbeCache) note(row vbox.Rule) string {
+	if row.Effect != vbox.EffRW {
+		return ""
+	}
+	p := strings.TrimSuffix(row.Pattern, "/**")
+	if p == "" || strings.ContainsAny(p, "*?") {
+		return ""
+	}
+	if note, ok := c.notes[p]; ok {
+		return note
+	}
+	if len(c.notes) >= writeRootProbeLimit {
+		c.skipped[p] = true
+		return ""
+	}
+	note := ""
+	if err := sandboxWritableProbe(vbox.HostPathToOS(p)); err != nil {
+		note = " [沙箱内不可写: " + err.Error() + "]"
+	}
+	c.notes[p] = note
+	return note
+}
+
+// skippedNote 汇总本次因上限而未探测的 rw 行（没有则返回空串）。
+func (c *writeRootProbeCache) skippedNote() string {
+	if len(c.skipped) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n  (另有 %d 条 rw 行未做沙箱可写性探测：单次上限 %d)", len(c.skipped), writeRootProbeLimit)
+}
+
 // grantStatus 是 grant status 的执行体：四域姿态 + 规则表 + 会话级
-// 临时授权（只读，不要求 grant_approved）。单锁一致快照。
+// 临时授权（只读，不要求 grant_approved）。单锁一致快照：锁内只取快照，格式化
+// （含 rw 行的沙箱可写性探测——要开对象句柄，可能撞上不可达的网络路径）一律在
+// 锁外，探测的等待不该按住读锁、挡住并发的 grant/publish。
 func (p *permissionState) grantStatus(sessionKey string) string {
+	type netDomain struct {
+		name string
+		open bool
+		rows vbox.NetRuleSet
+	}
+
 	p.mu.RLock()
-	defer p.mu.RUnlock()
 	base := p.base
-	var b strings.Builder
-	// exec 域（policy/deny/allow 三键 + 会话级 cmd 授权）
-	fmt.Fprintf(&b, "exec_policy: %s", base.execMode)
-	fmt.Fprintf(&b, "\nexec_rules (%d): %s", len(base.execRules), strings.Join(base.execRules, " "))
 	var session []string
 	if g := p.grants[sessionKey]; g != nil {
 		session = append(session, g.cmd...)
 	}
-	sort.Strings(session)
-	fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
-	fmt.Fprintf(&b, "\n\nfs_policy: %s", policyName(base.fsOpen))
 	fsRows := p.fsSnapshotLocked(sessionKey, nil).Rules
-	fmt.Fprintf(&b, "\nfs_rules (%d, first match wins):", len(fsRows))
-	for i, row := range fsRows {
-		fmt.Fprintf(&b, "\n  %d. %s:%s [%s]", i+1, row.Effect, row.Pattern, row.Class)
-	}
-	for _, domain := range []struct {
-		name string
-		open bool
-		rows vbox.NetRuleSet
-	}{
+	domains := []netDomain{
 		{"net", base.netOpen, p.netSnapshotLocked(sessionKey)},
 		{"ssh", base.sshOpen, p.sshSnapshotLocked(sessionKey)},
-	} {
+	}
+	p.mu.RUnlock()
+
+	sort.Strings(session)
+	var b strings.Builder
+	// exec 域（policy/deny/allow 三键 + 会话级 cmd 授权）
+	fmt.Fprintf(&b, "exec_policy: %s", base.execMode)
+	fmt.Fprintf(&b, "\nexec_rules (%d): %s", len(base.execRules), strings.Join(base.execRules, " "))
+	fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
+	fmt.Fprintf(&b, "\n\nfs_policy: %s", policyName(base.fsOpen))
+	fmt.Fprintf(&b, "\nfs_rules (%d, first match wins):", len(fsRows))
+	probes := newWriteRootProbeCache()
+	for i, row := range fsRows {
+		fmt.Fprintf(&b, "\n  %d. %s:%s [%s]%s", i+1, row.Effect, row.Pattern, row.Class, probes.note(row))
+	}
+	b.WriteString(probes.skippedNote())
+	for _, domain := range domains {
 		fmt.Fprintf(&b, "\n\n%s_policy: %s\n%s_rules (first match wins):", domain.name, policyName(domain.open), domain.name)
 		for i, row := range domain.rows.Rules {
 			effect := "deny"

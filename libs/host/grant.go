@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/veypi/aic-pod/protocol"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -28,6 +29,12 @@ func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 	if err = vbox.ValidateFSGrantTarget(abs); err != nil {
 		return "", fmt.Errorf("exec grant fs: %w", err)
 	}
+	// 沙箱内可写性探测（**只警告，不拒绝**）：目录属主不是当前用户时（典型
+	// Administrators/SYSTEM 而当前用户只有 Modify），能力 SID 的 ACE 落不下去
+	// ——授权本身仍然成立（进程内 fs 工具用宿主令牌写，不需要 WRITE_DAC），
+	// 但 spawn 出来的子进程在沙箱内写该目录会被拒。在授权这一刻就告知，别把
+	// 问题埋到之后每一次 exec 上（vbox 侧已按根降级，不会再打死 exec）。
+	sandboxErr := sandboxWritableProbe(abs)
 	scope := "session"
 	if permanent {
 		if err = c.persistGrant("fs", abs); err != nil {
@@ -37,7 +44,38 @@ func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 	} else {
 		c.perms.grantFS(sid, abs)
 	}
-	return fmt.Sprintf("granted fs write access: %s (scope=%s)", abs, scope), nil
+	return grantFSResult(abs, scope, sandboxErr), nil
+}
+
+// grantFSResult 组装 grant fs 的成功回执；sandboxErr 非 nil 表示该目录在 OS
+// 沙箱内授不上写权限（仅警告：授权已生效，工具层可用）。
+func grantFSResult(abs, scope string, sandboxErr error) string {
+	msg := fmt.Sprintf("granted fs write access: %s (scope=%s)", abs, scope)
+	if sandboxErr == nil {
+		return msg
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n  warn: 该目录在沙箱内授不上写权限（spawn 的子进程写会被拒；vsh fs 工具不受影响）：%v", msg, sandboxErr)
+	b.WriteString("\n  原因：通常是没有 WRITE_DAC——目录属主是 Administrators/SYSTEM，当前用户只有 Modify（Modify 不含改安全描述符的权限）")
+	b.WriteString("\n  处置（需管理员，任选其一）：")
+	if who := currentUserName(); who != "" {
+		// 注意不能对路径用 %q：Go 会转义反斜杠（C:\\models\\llama），用户复制即错。
+		fmt.Fprintf(&b, "\n    1) icacls \"%s\" /setowner \"%s\"            （把属主改成当前用户）", abs, who)
+		fmt.Fprintf(&b, "\n    2) icacls \"%s\" /grant \"%s:(OI)(CI)F\"    （只给当前用户完全控制）", abs, who)
+	} else {
+		b.WriteString("\n    把该目录的属主或完全控制交给当前用户")
+	}
+	b.WriteString("\n  不要用 Authenticated Users（*S-1-5-11）：那等于把完全控制（含改 ACL）给所有已认证主体")
+	return b.String()
+}
+
+// currentUserName 返回当前宿主用户名（icacls 可直接使用的形式）；取不到返回空串。
+func currentUserName() string {
+	u, err := user.Current()
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.Username
 }
 
 func (c *Client) grantTarget(sid, domain, target string, permanent bool) (string, error) {

@@ -1,6 +1,7 @@
 package host
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,5 +242,72 @@ func TestPermsGrantStatus(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("grant status missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestPermsGrantStatusMarksUngrantableWriteRoot：grant status 标注在 OS 沙箱内
+// 授不上写权限的 rw 行（降级不静默——另一条渠道是 vbox 的 write-root 日志）。
+func TestPermsGrantStatusMarksUngrantableWriteRoot(t *testing.T) {
+	withGlobal(t, func(o *cfg.Options) {
+		o.FsPolicy = cfg.PolicyDeny
+		o.FsRules = []string{"rw:/opt/bad", "rw:/data/*/keep"}
+	})
+	p := newTestPerms(t, t.TempDir())
+	orig := sandboxWritableProbe
+	defer func() { sandboxWritableProbe = orig }()
+	probed := map[string]int{}
+	sandboxWritableProbe = func(abs string) error {
+		probed[abs]++
+		if abs == "/opt/bad" {
+			return errors.New("Access is denied.")
+		}
+		return nil
+	}
+	out := p.grantStatus("s1")
+	if !strings.Contains(out, "rw:/opt/bad [cfg] [沙箱内不可写: Access is denied.]") {
+		t.Fatalf("grant status missing sandbox marker:\n%s", out)
+	}
+	if probed["/opt/bad"] != 1 {
+		t.Fatalf("probe calls for /opt/bad = %d, want 1", probed["/opt/bad"])
+	}
+	// 含通配的 rw 行不进 OS 层可写根：不探测、不标注。
+	if probed["/data/*/keep"] != 0 {
+		t.Fatalf("glob row must not be probed: %v", probed)
+	}
+	if strings.Contains(out, "rw:/data/*/keep [cfg] [") {
+		t.Fatalf("glob row must not be annotated:\n%s", out)
+	}
+}
+
+// TestWriteRootProbeCacheLimit：探测缓存的三条约定——同一路径只探一次、通配与非
+// rw 行不探、总路径数有上限（超出的记进 skippedNote，由 grant status 汇总说明）。
+// 缓存已移出权限读锁：探测的等待不挡并发的 grant/publish。
+func TestWriteRootProbeCacheLimit(t *testing.T) {
+	origProbe, origLimit := sandboxWritableProbe, writeRootProbeLimit
+	defer func() { sandboxWritableProbe = origProbe; writeRootProbeLimit = origLimit }()
+	writeRootProbeLimit = 2
+	var probed []string
+	sandboxWritableProbe = func(abs string) error { probed = append(probed, abs); return nil }
+	c := newWriteRootProbeCache()
+	for _, row := range []vbox.Rule{
+		{Pattern: "/opt/a", Effect: vbox.EffRW},
+		{Pattern: "/opt/a", Effect: vbox.EffRW}, // 同一路径：只探一次
+		{Pattern: "/opt/b", Effect: vbox.EffRW},
+		{Pattern: "/opt/c", Effect: vbox.EffRW},      // 超上限：不探，只记 skipped
+		{Pattern: "/opt/d/**", Effect: vbox.EffRW},   // 剥 /** 后无通配：算可写根，同样超上限
+		{Pattern: "/opt/*/keep", Effect: vbox.EffRW}, // 真正的通配：永不成为可写根
+		{Pattern: "/opt/ro", Effect: vbox.EffRO},
+	} {
+		_ = c.note(row)
+	}
+	if len(probed) != 2 {
+		t.Fatalf("probe limit not honored: %v", probed)
+	}
+	note := c.skippedNote()
+	if !strings.Contains(note, "另有 2 条") || !strings.Contains(note, "单次上限 2") {
+		t.Fatalf("skipped note missing or mismatched: %q", note)
+	}
+	if empty := newWriteRootProbeCache().skippedNote(); empty != "" {
+		t.Fatalf("empty cache must not emit a note: %q", empty)
 	}
 }

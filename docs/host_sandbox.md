@@ -52,6 +52,15 @@ grant 默认修改当前会话规则，--permanent 经校验、原子保存后�
 - Linux 继续使用 bubblewrap 后端，处理只读/可写挂载、拒绝范围及网络隔离。
 - Windows 继续使用受限令牌和 ACL 后端；无法表达的文件或网络约束明确失败。
 
+可写根的可落实性是唯一除外的方向：某个 `rw` 根授不上 ACL（典型：目录属主是
+`Administrators`/`SYSTEM` 而当前用户只有 `Modify`——Modify 不含 WRITE_DAC）时，该根在沙箱内
+降级为只读（更严方向，不会放权），日志按目录告警一次（vbox 的
+`write-root unavailable in sandbox`），其余可写根与本次 exec 照常；每次 spawn 仍重试授权，
+ACL 修好或目录重建后自动恢复。反方向的失败（deny 目标落不下、令牌/私有临时目录不可用）
+仍然拒绝执行。授权侧可在 `grant fs` 那一刻用 `vbox.CheckFSGrantTarget`（原生态路径）预判：
+回执带警告但仍然生效——进程内 fs 工具用宿主令牌写、不需要 WRITE_DAC，且目标还可能是
+尚未创建的合法授权；`grant status` 对这类 `rw` 行标注 `[沙箱内不可写: …]`。
+
 此处描述目标保证，不表示三个平台已经通过新规则的实测。Windows 文件服务自身的句柄检查、版本条件和原子提交继续由 hostfs 负责，不用原生进程沙箱替代。
 
 nosandbox 是请求级显式选项，由发送端批准后进入可信执行上下文；只有物理 host 支持。它使本次原生进程脱离进程级隔离，不承诺该进程继续服从 fs/net 拒绝表；进程内服务和身份检查仍有效。Browser/CUA 的固定驱动调用不是脚本可伪造的免沙箱标记。

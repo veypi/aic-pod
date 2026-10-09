@@ -5,6 +5,29 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **可写根的沙箱授权失败降级为逐根（Windows，2026-10-10，依赖 vbox v0.3.1）**：起因是
+  会话内 `grant fs C:\models\llama` 把该目录加进沙箱可写根，而它属主是
+  `BUILTIN\Administrators`、当前用户只有 `Authenticated Users:(M)`（Modify 不含
+  WRITE_DAC），能力 SID 的 ACE 写不上去——原先 vbox 的 `planConfined` 把任一可写根授权
+  失败当成致命错误返回，于是**每一次 spawn 外部进程**都失败（builtin 命令不受影响：
+  它们不 spawn），且错误只说 `sandbox: grant workspace <dir>`，看不出是哪一环。vbox
+  v0.3.1 改为逐根降级：授不上的根在沙箱内只读（失败方向恒为更严）+ 每目录一条
+  `write-root unavailable in sandbox` 日志，其余可写根与 exec 照常；deny ACE、令牌、
+  私有临时目录的失败仍 fatal。本仓配套三处可发现性：①`grant fs` 在授权那一刻用新增的
+  `vbox.CheckFSGrantTarget(abs)` 探测（`READ_CONTROL|WRITE_DAC` 试开对象，无副作用），
+  授不上时回执追加警告——**只警告不拒绝**：授权本身仍然有效（进程内 fs 工具用宿主令牌
+  写，不需要 WRITE_DAC），且探测失败也可能是“目录尚未创建”的合法授权；警告带原因与
+  处置（`icacls /setowner` 优先，明确不建议给 Authenticated Users 完全控制）。
+  ②`grant status` 对这类 rw 行标注 `[沙箱内不可写: …]`（口径与 vbox 的可写根派生一致：
+  剥 `/**`、跳通配；同一路径只探测一次，且探测在权限读锁之外、单次上限 32 条——每次探测
+  要开一次对象句柄，不可达的网络路径会阻塞到 SMB 超时，不该按在读锁里、也不该拖住命令）。③`docs/host_sandbox.md` §4 记录该方向例外。
+  测试：`TestGrantFSResultSandboxWarning`、`TestGrantFSProbeFailureKeepsGrant`、
+  `TestPermsGrantStatusMarksUngrantableWriteRoot`；vbox 侧用例见其 CHANGELOG。
+  平台面：`CheckFSGrantTarget` 在 darwin/linux 恒 nil（unix 在挂载/profile 层落实可写根，
+  不存在“能不能授上”这一前置条件；已知不对称见 vbox 函数注释）。生效需重建设备 pod。
+
 ## v0.9.0 — 2026-10-08
 
 本版包含 v0.8.5 之后（含 v0.8.5 本身——其标签从未推送、GitHub 无对应 Release）的全部变更；

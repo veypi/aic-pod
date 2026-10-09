@@ -1,11 +1,14 @@
 package host
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/vbox"
 )
 
 // grantTarget 域路由与 temp 授权（不触盘——permanent 落盘路径见
@@ -119,5 +122,49 @@ func TestPersistGrantInvalidCandidateKeepsBase(t *testing.T) {
 	}
 	if c.perms.sshAllowed("s1", "10.0.0.9:22") {
 		t.Fatal("failed persist published partial rules")
+	}
+}
+
+// TestGrantFSResultSandboxWarning：普通回执不变；沙箱内授不上时附加警告
+// （带原因与处置），但不把「授权已生效」改成失败。
+func TestGrantFSResultSandboxWarning(t *testing.T) {
+	clean := grantFSResult(`C:\models\llama`, "session", nil)
+	if clean != `granted fs write access: C:\models\llama (scope=session)` {
+		t.Fatalf("clean grant message changed: %q", clean)
+	}
+	got := grantFSResult(`C:\models\llama`, "permanent", errors.New("Access is denied."))
+	for _, want := range []string{
+		`granted fs write access: C:\models\llama (scope=permanent)`,
+		"warn:", "Access is denied.", "WRITE_DAC", "Modify", "setowner", "*S-1-5-11",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning missing %q:\n%s", want, got)
+		}
+	}
+	// 处置命令必须是可直接复制的原生态路径（%q 会把反斜杠转义成 C:\\models\\llama）。
+	if strings.Contains(got, "setowner") && !strings.Contains(got, `icacls "C:\models\llama" /setowner "`) {
+		t.Fatalf("icacls hint must carry the raw path:\n%s", got)
+	}
+}
+
+// TestGrantFSProbeFailureKeepsGrant：探测失败 ≠ 授权失败——目录属主是
+// Administrators 时沙箱内授不上写，但进程内 fs 工具层仍然可用（用宿主令牌写，
+// 不需要 WRITE_DAC），所以 grant 照常生效，只附带警告。
+func TestGrantFSProbeFailureKeepsGrant(t *testing.T) {
+	dir := t.TempDir()
+	withGlobal(t, func(o *cfg.Options) { o.FsPolicy = cfg.PolicyDeny })
+	c := &Client{perms: newTestPerms(t, "")}
+	orig := sandboxWritableProbe
+	defer func() { sandboxWritableProbe = orig }()
+	sandboxWritableProbe = func(string) error { return errors.New("Access is denied.") }
+	msg, err := c.grantFS("s1", dir, false)
+	if err != nil {
+		t.Fatalf("probe failure must not reject the grant: %v", err)
+	}
+	if !strings.Contains(msg, "warn:") {
+		t.Fatalf("missing sandbox warning: %q", msg)
+	}
+	if d := c.perms.fsSnapshot("s1").Match(filepath.Join(dir, "x.txt"), vbox.OpWrite); !d.Allow {
+		t.Fatal("grant not applied despite probe failure")
 	}
 }
