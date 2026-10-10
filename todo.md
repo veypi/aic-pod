@@ -1,6 +1,6 @@
 # TODO：vsh、权限与宿主协议迁移
 
-更新：2026-09-29。依据 [hosts-vsh-redesign.md](docs/hosts-vsh-redesign.md) 制定。阶段 1-7 已实施；阶段 7 联调与真实平台验收已完成（darwin+win 在线实测，linux 未覆盖；遗留 2 处缺陷待修复，报告见会话目录 stage7-acceptance-report.md）。设计有冲突时以该文档为准；实现和对应验收都通过后才勾选。
+更新：2026-10-10。依据 [hosts-vsh-redesign.md](docs/hosts-vsh-redesign.md) 制定。阶段 1-7 已实施；阶段 7 联调与真实平台验收已完成（darwin+win+linux 容器在线实测；阶段 7 遗留的两处执行缺陷已修毕并反向验证，报告见会话目录 stage7-acceptance-report.md）。设计有冲突时以该文档为准；实现和对应验收都通过后才勾选。
 
 ## 范围与顺序
 

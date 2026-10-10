@@ -77,7 +77,7 @@ type Client struct {
 	files           *hostfs.FS
 	bytes           *hostfs.Bytes
 	initErr         error
-	rtcSvc          *rtc.Service // hosts_rtc/2 直连服务
+	rtcSvc          *rtc.Service // hosts_rtc/3 直连服务
 	logf            func(string, ...any)
 }
 

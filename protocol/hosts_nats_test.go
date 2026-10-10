@@ -9,7 +9,7 @@ func execReq() Request {
 	return Request{Protocol: NatsProtocol, ID: "req", Action: ActionExec, Exec: &ExecPayload{Script: "echo hello"}}
 }
 
-// hosts_nats/2：签名覆盖完整请求（含 grant_approved 标记与脚本正文）——
+// hosts_nats/3：签名覆盖完整请求（含 grant_approved 标记与脚本正文）——
 // 篡改任一字段验签必失败（hosts-vsh-redesign §4.2）。
 func TestSignatureBindsEveryExecutionField(t *testing.T) {
 	subject, _ := NatsSubject("u1", "h1")

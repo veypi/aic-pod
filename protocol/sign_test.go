@@ -67,5 +67,5 @@ func TestNonceUnique(t *testing.T) {
 	}
 }
 
-// （hosts_nats/2：ToolRequest 逐字段签名机制已删除——hosts_nats 信封对完整
+// （hosts_nats/3：ToolRequest 逐字段签名机制已删除——hosts_nats 信封对完整
 // 请求做 HMAC，覆盖 grant_approved 标记；见 protocol/hosts_nats/types_test.go。）

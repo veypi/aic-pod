@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestNatsToolsAuthentication 锁定 NATS 可信转发边界（hosts_nats/2）：
+// TestNatsToolsAuthentication 锁定 NATS 可信转发边界（hosts_nats/3）：
 // 验签（含 grant_approved 防篡改）、路由、nonce 去重、归属；RTC 与 NATS
 // 同一分发实现。
 func TestNatsToolsAuthentication(t *testing.T) {

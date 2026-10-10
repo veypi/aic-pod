@@ -15,7 +15,7 @@ import (
 
 // handleMsg 处理一条入站消息：rtc.in 信令路由到 RTC 服务（不参与验签流程——
 // 信令身份由 NATS 权限模型保证，DataChannel 使用绑定 DTLS 证书的短期票据）；
-// 其余按工具请求处理（hosts_nats/2）：验签 → deadline 过期拒绝 → nonce
+// 其余按工具请求处理（hosts_nats/3）：验签 → deadline 过期拒绝 → nonce
 // 窗口去重 → 分发（不再重新分类审批，grant_approved 随签名信封入可信上下文）。
 func (c *Client) handleMsg(msg *nats.Msg) {
 	if strings.HasSuffix(msg.Subject, ".tools.req") {

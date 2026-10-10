@@ -71,7 +71,7 @@ func testClient(t *testing.T) (*Client, string) {
 	return c, c.kTool
 }
 
-// signedCall 经 NATS 可信通道下发请求（hosts_nats/2：grantApproved 是签名
+// signedCall 经 NATS 可信通道下发请求（hosts_nats/3：grantApproved 是签名
 // 信封内的审批事实，随信封进可信调用上下文）。
 func signedCall(t *testing.T, c *Client, req protocol.Request, grantApproved bool, origin, scope string) protocol.Response {
 	t.Helper()

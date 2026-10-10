@@ -117,7 +117,7 @@ func (c *Client) dispatch(ctx context.Context, caller protocol.Caller, r protoco
 	return protocol.Reply(r.Protocol, r.ID, v, err)
 }
 
-// HandleNATS 是 NATS 工具请求入口（hosts_nats/2 可信转发）：验签 → 身份 →
+// HandleNATS 是 NATS 工具请求入口（hosts_nats/3 可信转发）：验签 → 身份 →
 // nonce 去重 → 分发。granted_level 纵深检查已删除；grant_approved 随签名
 // 信封进入可信调用上下文。
 func (c *Client) HandleNATS(ctx context.Context, subject string, data []byte) protocol.Response {
