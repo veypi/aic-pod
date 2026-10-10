@@ -16,6 +16,9 @@ import (
 // （aic-pod/libs/execution/cmds.go），本包只承接已解析的域+目标。
 // M3c：DenyHit 拒批已废（temp 行插表头可覆盖 deny——「用户点就点了」）。
 func TestRunGrantTarget(t *testing.T) {
+	// deny 姿态在 windows 上过不了平台能力闸（netgate_test.go）；本测与平台
+	// 能力无关，钉死 darwin。
+	pinNativeNetPlatform(t, "darwin")
 	withGlobal(t, func(o *cfg.Options) {
 		o.NetPolicy = cfg.PolicyDeny
 		o.NetRules = []string{"deny:bad.com:22"}

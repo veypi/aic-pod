@@ -129,10 +129,11 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 	}
 }
 
-// nativePolicy 组合当次配置与会话授权，供原生与 skill 进程共用。
+// nativePolicy 组合当次配置与会话授权，供原生与 skill 进程共用。net 域用
+// 原生快照（剔除 tool-only 行——它们仅工具层执行，内核不落地）。
 func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vbox.Policy {
 	sid := execution.SessionFromContext(ctx)
-	return vbox.Policy{FS: c.perms.fsSnapshotForNative(sid, workdir, cmd), Net: c.perms.netSnapshot(sid)}
+	return vbox.Policy{FS: c.perms.fsSnapshotForNative(sid, workdir, cmd), Net: c.perms.netSnapshotForNative(sid)}
 }
 
 // --- exec 动作的统一外层（§2.4 前台等待/超时登记 + §2.5 统一日志） ---

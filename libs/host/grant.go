@@ -92,7 +92,32 @@ func (c *Client) grantTarget(sid, domain, target string, permanent bool) (string
 	} else {
 		c.perms.grantNet(sid, entry, domain == "ssh")
 	}
-	return fmt.Sprintf("granted %s access: %s (scope=%s)", domain, entry.String(), scope), nil
+	msg := fmt.Sprintf("granted %s access: %s (scope=%s)", domain, entry.String(), scope)
+	return msg + c.nativeNetNote(sid, domain, entry), nil
+}
+
+// nativeNetNote 是 grant net 的原生落地回执（对齐 grant fs 的沙箱可写性警告）：
+// 授权恒生效于工具层（curl/MCP）；若该行在本平台原生沙箱内被吸收（目标在
+// deny 姿态下本不可达）或整表无法落实，在回执中说明，不埋到之后的 exec 上。
+// ssh 域不进原生沙箱，不标注。
+func (c *Client) nativeNetNote(sid, domain string, e vbox.Entry) string {
+	if domain != "net" {
+		return ""
+	}
+	snap := c.perms.netSnapshotForNative(sid)
+	landings, err := vbox.CheckNetPolicy(nativeNetPlatform, snap)
+	if err != nil {
+		return fmt.Sprintf("\n  warn: 本平台（%s）原生沙箱无法落实当前 net 规则表: %v；本次授权仅工具层生效", nativeNetPlatform, err)
+	}
+	for _, l := range landings {
+		if l.Rule.Allow && l.Rule.HostPort == e.String() {
+			if !l.Landed && !l.Noop {
+				return fmt.Sprintf("\n  note: 原生沙箱内不生效（%s）；工具层（curl/MCP）照常", l.Reason)
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // persistGrant 将归一化后的允许行放到 <域>_rules 表头并去重：
