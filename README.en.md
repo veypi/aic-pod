@@ -1,9 +1,26 @@
 # aic-pod
 
-**Put a real machine behind your model.** aic-pod is the device-side client of the AIC
-platform: it connects out over NATS WebSocket and registers the host's abilities — command
-execution, file operations, browser automation, native GUI automation, ssh/scp forwarding —
-as tools an LLM can call. It listens on no local port.
+**Put a real machine behind your model.**
+
+[![Release](https://img.shields.io/github/v/release/veypi/aic-pod?color=blue)](https://github.com/veypi/aic-pod/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.27-00ADD8)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#)
+
+<!-- Demo asset slot: drop your 30s GIF on this line -->
+
+aic-pod is the device-side client of the AIC platform: it connects out over NATS WebSocket
+and registers the host's abilities — command execution, file operations, browser automation,
+native GUI automation, ssh/scp forwarding — as tools an LLM can call. **It listens on no
+local port.**
+
+It lets a model *act* on your own machine — really run commands, really read and write files,
+really drive a browser and native UI. That is why a large share of this codebase is about
+keeping that power on a leash:
+
+- **Outbound only** — no inbound listener, no public IP, no firewall holes.
+- **Sandbox that fails closed** — macOS Seatbelt / Linux bubblewrap / Windows restricted token; with no usable backend the command is refused, never run bare.
+- **Three-domain authorization + human approval** — fs / net / ssh each carry their own stance and allow-list; a no-sandbox request escalates to separate human approval.
 
 [中文](README.md) | **English**
 
@@ -19,6 +36,21 @@ browser/CUA are built into the Pod — registered by default and started on dema
 The browser runs a real Chrome in the background with a consistent UA, Client Hints,
 automation markers and window size, and reuses a dedicated profile; details in
 [Browser runtime](docs/hosts-tools.md#browser-运行环境).
+
+## Quick start
+
+```bash
+# 1) Get a binding credential (KEY, shown once) from https://ivec.ai
+# 2) Download the client for your platform from Releases (desktop app or CLI binary)
+aic -key "<your-key>"      # CLI: connect and start taking tasks
+```
+
+```bash
+# Or turn a server into an execution node with Docker
+docker run -d --name aic-pod -e KEY="<your-key>" veypi/aic-pod:latest
+```
+
+## Further reading
 
 - Security model: [docs/host_sandbox.md](docs/host_sandbox.md)
 - Architecture: [docs/design.md](docs/design.md)

@@ -1,8 +1,24 @@
 # aic-pod
 
-**把一台真实的机器接到模型后面。** aic-pod 是 AIC 平台的设备端客户端：它通过 NATS
-WebSocket 主动连出去，把本机能力（命令执行 / 文件操作 / 浏览器自动化 / 原生 GUI 自动化 /
-ssh·scp 转发）注册为 LLM 可调用的工具。本机不监听任何端口。
+**把一台真实的机器接到模型后面。**
+
+[![Release](https://img.shields.io/github/v/release/veypi/aic-pod?color=blue)](https://github.com/veypi/aic-pod/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.27-00ADD8)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#)
+
+<!-- 演示位：录好的 30 秒 GIF 替换这一行 -->
+
+aic-pod 是 AIC 平台的设备端客户端：它通过 NATS WebSocket 主动连出去，把本机能力
+（命令执行 / 文件操作 / 浏览器自动化 / 原生 GUI 自动化 / ssh·scp 转发）注册为 LLM
+可调用的工具。**本机不监听任何端口。**
+
+它让模型在你自己的机器上**动手**——真的执行命令、真的读写文件、真的操作浏览器和原生界面。
+所以这个项目相当一部分代码，花在「怎么保证它不乱来」上：
+
+- **只有出站连接**：不接受入站连接，不需要公网 IP，不用开防火墙。
+- **沙箱 fail-closed**：macOS Seatbelt / Linux bubblewrap / Windows 受限令牌；没有可用后端时**拒绝执行，绝不裸跑**。
+- **三域授权 + 人工审批**：fs / net / ssh 各域独立立场与显式白名单；免沙箱请求单独提级人工审批。
 
 **中文** | [English](README.en.md)
 
@@ -16,6 +32,21 @@ ssh·scp 转发）注册为 LLM 可调用的工具。本机不监听任何端口
 
 Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，
 并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/hosts-tools.md#browser-运行环境)。
+
+## 快速开始
+
+```bash
+# 1) 在 https://ivec.ai 的设备页获取绑定凭证（KEY，仅展示一次）
+# 2) 从 Releases 下载对应平台的客户端（desktop 安装包，或 CLI 单二进制）
+aic -key "<你的 KEY>"      # CLI：连接平台并开始接受任务
+```
+
+```bash
+# 或者用 Docker 把一台服务器变成执行节点
+docker run -d --name aic-pod -e KEY="<你的 KEY>" veypi/aic-pod:latest
+```
+
+## 延伸阅读
 
 - 安全模型：[docs/host_sandbox.md](docs/host_sandbox.md)
 - 架构：[docs/design.md](docs/design.md)
