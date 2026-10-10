@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.9.1 — 2026-10-10
 
 - **可写根的沙箱授权失败降级为逐根（Windows，2026-10-10，依赖 vbox v0.3.1）**：起因是
   会话内 `grant fs C:\models\llama` 把该目录加进沙箱可写根，而它属主是
