@@ -28,6 +28,13 @@
   平台面：`CheckFSGrantTarget` 在 darwin/linux 恒 nil（unix 在挂载/profile 层落实可写根，
   不存在“能不能授上”这一前置条件；已知不对称见 vbox 函数注释）。生效需重建设备 pod。
 
+- **桌面端退出前把 cookie 刷到盘（2026-10-10）**：Chromium 对 cookie 是批量延迟写盘，进程在
+  写盘前被强杀时，最近一次刷新（平台每次刷新都轮换 refresh token）的 `Set-Cookie` 会丢——
+  下次启动拿旧 token 去刷新，服务端只能判重放。`desktop/main.js` 的 `before-quit` 改为
+  `session.defaultSession.cookies.flushStore()` 落盘后再退出（上限 1.5s，失败/超时也照常退出，
+  不阻塞关窗）；强杀（SIGKILL/任务管理器）拦不住，只能减少面。平台侧配套见 vbase v1.6.0
+  （上一代 jti 在当代被使用前仍可换发）。
+
 ## v0.9.0 — 2026-10-08
 
 本版包含 v0.8.5 之后（含 v0.8.5 本身——其标签从未推送、GitHub 无对应 Release）的全部变更；

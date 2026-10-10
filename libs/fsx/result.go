@@ -117,16 +117,37 @@ func detectMIME(data []byte, path string) string {
 
 // ---- 错误构造（格式锁定，§2.3/§5.4） ----
 
-// fsErr 构造 fs 错误：消息为 fs {action}: {原因}（§2.3 格式锁定；
-// action 空时退化为 fs: {原因}）。批次 2 错误模型收敛：ExecError/ApprovalError
-// 历史包装已删（无生产者与消费者），具体错误在所属实现构造，跨进程统一由
-// Fault 表达。
+// codedError 是带 Fault 码的 fs 错误：Error() 保持 §2.3 锁定文案
+// "fs {action}: {原因}"（三端逐字一致），FaultCode() 供 pod 侧 protocol.AsFault
+// 归类——参数/语义类拒绝是调用方可自纠的预期结果，不该落 internal 兜底
+// （2026-10-10：rg context 越界曾报 "internal: fs rg: ..."）。
+type codedError struct {
+	code string
+	msg  string
+}
+
+func (e *codedError) Error() string     { return e.msg }
+func (e *codedError) FaultCode() string { return e.code }
+
+// fsErr 构造 fs 参数/语义错误（码 invalid_argument）：消息为 fs {action}: {原因}
+// （§2.3 格式锁定；action 空时退化为 fs: {原因}）。批次 2 错误模型收敛：
+// ExecError/ApprovalError 历史包装已删（无生产者与消费者），具体错误在所属实现
+// 构造，跨进程统一由 Fault 表达。
 func fsErr(action, format string, args ...any) error {
+	return codedErr("invalid_argument", action, format, args...)
+}
+
+// fsUnsupportedErr 同 fsErr，码为 unsupported（能力/开关类拒绝，非参数问题）。
+func fsUnsupportedErr(action, format string, args ...any) error {
+	return codedErr("unsupported", action, format, args...)
+}
+
+func codedErr(code, action, format string, args ...any) error {
 	reason := fmt.Sprintf(format, args...)
 	if action == "" {
-		return fmt.Errorf("fs: %s", reason)
+		return &codedError{code: code, msg: "fs: " + reason}
 	}
-	return fmt.Errorf("fs %s: %s", action, reason)
+	return &codedError{code: code, msg: "fs " + action + ": " + reason}
 }
 
 // fsOpErr 包装底层 FS/OS 操作的错误：Error() 与 fsErr(action, "%s", err) 逐字一致

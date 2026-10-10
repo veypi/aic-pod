@@ -104,7 +104,24 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => focusMain())
   app.whenReady().then(start).catch(failStartup)
   app.on('activate', () => focusMain()) // mac Dock 图标点击
-  app.on('before-quit', () => { quitting = true })
+  app.on('before-quit', (event) => { quitFlushingCookies(event) })
+}
+
+// 退出前把 cookie 刷到盘（2026-10-10）：Chromium 对 cookie 是批量延迟写盘，容器/进程在
+// 写盘前被杀时，最近一次刷新（vbase 每次刷新都轮换 refresh token）的 Set-Cookie 会丢——
+// 下一次启动拿旧 token 去刷新，服务端按重放处置。平台侧已放宽（上一代 jti 可重试），
+// 这里补客户端一层：优雅退出必须把 cookie 落到磁盘（强杀/SIGKILL 拦不住，只能减少面）。
+let cookieFlushStarted = false
+function quitFlushingCookies(event) {
+  if (cookieFlushStarted) { quitting = true; return }
+  cookieFlushStarted = true
+  event.preventDefault()
+  const finish = () => { quitting = true; app.quit() }
+  const timer = setTimeout(finish, 1500)
+  const done = () => { clearTimeout(timer); finish() }
+  try {
+    session.defaultSession.cookies.flushStore().then(done, done)
+  } catch (e) { done() }
 }
 
 // ---- 后端子进程回收（will-quit → SIGTERM → Go 优雅退出） ----

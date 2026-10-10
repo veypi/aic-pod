@@ -36,7 +36,8 @@ type fsParams struct {
 	Pattern string `json:"pattern,omitempty"`
 	// 文件名 glob（basename，include OR 语义；! 前缀 = 排除 glob；不支持 **）
 	Glob []string `json:"glob,omitempty"`
-	// rg：context = 命中行上下各 N 行上下文（grep -C 语义，0-10 默认 0）。
+	// rg：context = 命中行上下各 N 行上下文（grep -C 语义，默认 0；越界钳制到 [0,10]，
+	// 不报错）。
 	Context *int `json:"context,omitempty"`
 }
 
@@ -59,7 +60,7 @@ func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) 
 		return nil, fsErr("", "action is required (supported: read, write, edit, ls, rg)")
 	}
 	if env.FS == nil {
-		return nil, fsErr(p.Action, "file service is not enabled")
+		return nil, fsUnsupportedErr(p.Action, "file service is not enabled")
 	}
 	switch p.Action {
 	case "read":
@@ -74,7 +75,7 @@ func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) 
 		return fsRg(ctx, env, &p)
 	case "cp", "mv", "rm":
 		// 壳层动作下线（D11/v4.1）：引导 exec 内建（引擎 90 内建承接）。
-		return nil, fsErr(p.Action, "%s", "fs 不再提供 "+p.Action+"——壳层动作（cp/mv/rm）请用 exec（如 `exec cp a b`）；fs 只保留结构化读写编辑（read/write/edit/ls/rg）")
+		return nil, fsUnsupportedErr(p.Action, "%s", "fs 不再提供 "+p.Action+"——壳层动作（cp/mv/rm）请用 exec（如 `exec cp a b`）；fs 只保留结构化读写编辑（read/write/edit/ls/rg）")
 	}
 	return nil, fsErr("", "%s", "unknown action "+p.Action+" (supported: read, write, edit, ls, rg)")
 }

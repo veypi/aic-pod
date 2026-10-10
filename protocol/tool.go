@@ -84,6 +84,13 @@ type Fault struct {
 
 func (f *Fault) Error() string     { return f.Code + ": " + f.Message }
 func Fail(code, msg string) *Fault { return &Fault{Code: code, Message: msg} }
+
+// Coded 是可选错误接口：错误自报 Fault 码，AsFault 在没有现成 *Fault 时据此
+// 归类。没有它，调用方参数类错误（如 fs rg context 越界）只能落 internal 兜底，
+// 字面像平台内部故障、实际是调用方可自纠的请求问题（2026-10-10 定）。
+// 码取自平台既有词表（invalid_argument / unsupported / ...）。
+type Coded interface{ FaultCode() string }
+
 func AsFault(err error) *Fault {
 	var f *Fault
 	if errors.As(err, &f) {
@@ -98,6 +105,11 @@ func AsFault(err error) *Fault {
 	}
 	if errors.Is(err, io.EOF) {
 		return Fail("end_of_stream", "Stream ended")
+	}
+	// 自报码优先于 internal 兜底（Error() 文案原样进 Message，不改写）。
+	var coded Coded
+	if errors.As(err, &coded) && coded.FaultCode() != "" {
+		return Fail(coded.FaultCode(), err.Error())
 	}
 	return Fail("internal", err.Error())
 }

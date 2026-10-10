@@ -58,6 +58,26 @@ const rgMaxLimit = 200
 // rgMaxContext 是 context 参数上限（等价 grep -C 的 N）。
 const rgMaxContext = 10
 
+// clampInt 把 v 钳制到 [lo, hi]。
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// clampNote 把钳制事实写进结果 attrs：仅请求值越界时写入实际生效值，
+// 模型据此知道参数被收窄（无钳制则不出现该键）。
+func clampNote(r *Result, key string, requested *int, applied int) {
+	if r == nil || requested == nil || *requested == applied {
+		return
+	}
+	r.set(key, applied)
+}
+
 // rgMaxLineBytes 是匹配行内容的单行字节上限（§2.5：minified/单行超长文件
 // 命中时防止单行输出撑爆总预算；超限 rune 安全截断并追加标记）。
 const rgMaxLineBytes = 4 << 10 // 4KB
@@ -191,21 +211,17 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 			return nil, fsErr("rg", "glob %q is not supported on this environment (restricted: no '**')", g)
 		}
 	}
-	// limit：全局输出行数上限（命中+上下文行同池；默认 50，上限 200）
+	// limit：全局输出行数上限（命中+上下文行同池；默认 50，上限 200）。
+	// 越界钳制执行而非报错（2026-10-10）：模型多要几行不值得浪费一个回合；
+	// 实际生效值仅在钳制发生时回显在结果 attrs（clampNote）。
 	limit := rgDefaultLimit
 	if p.Limit != nil {
-		if *p.Limit < 1 || *p.Limit > rgMaxLimit {
-			return nil, fsErr("rg", "limit must be between 1 and %d, got %d", rgMaxLimit, *p.Limit)
-		}
-		limit = *p.Limit
+		limit = clampInt(*p.Limit, 1, rgMaxLimit)
 	}
-	// context：命中行上下各 N 行（默认 0，上限 10）
+	// context：命中行上下各 N 行（默认 0，上限 10）。同样越界钳制。
 	rgCtx := 0
 	if p.Context != nil {
-		if *p.Context < 0 || *p.Context > rgMaxContext {
-			return nil, fsErr("rg", "context must be between 0 and %d, got %d", rgMaxContext, *p.Context)
-		}
-		rgCtx = *p.Context
+		rgCtx = clampInt(*p.Context, 0, rgMaxContext)
 	}
 
 	target := env.Workdir
@@ -218,7 +234,9 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		if rgCtx > 0 {
 			return nil, fsErr("rg", "context is only valid for content search (pattern is required)")
 		}
-		return rgFiles(ctx, env, target, p.Glob, p.All, limit, p.Depth)
+		res, err := rgFiles(ctx, env, target, p.Glob, p.All, limit, p.Depth)
+		clampNote(res, "limit", p.Limit, limit)
+		return res, err
 	}
 
 	for _, re := range rgUnsupportedPatterns {
@@ -256,13 +274,19 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	// 候选文件集：单文件直搜（显式路径不受 glob 过滤，也不做 minified 跳过——
 	// 用户显式指定文件即明确意图）；目录递归按字节序遍历（minified 默认跳过）。
 	var candidates []string
+	var res *Result
 	if !info.IsDir() {
 		candidates = []string{abs}
-		return rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, true)
-	} else if err := rgWalk(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }); err != nil {
-		return nil, fsOpErr("rg", err)
+		res, err = rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, true)
+	} else {
+		if werr := rgWalk(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }); werr != nil {
+			return nil, fsOpErr("rg", werr)
+		}
+		res, err = rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, p.All)
 	}
-	return rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, p.All)
+	clampNote(res, "limit", p.Limit, limit)
+	clampNote(res, "context", p.Context, rgCtx)
+	return res, err
 }
 
 // hasUpper 报告 pattern 是否含大写字母（smart case 判定）。
