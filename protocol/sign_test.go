@@ -55,6 +55,10 @@ func TestParseDeviceCredential(t *testing.T) {
 	if dc.Credential != want {
 		t.Errorf("credential = %q, want %q", dc.Credential, want)
 	}
+	// 上线形态 AuthToken = 前三段 JWT（第 4 段 secret 不出设备）
+	if dc.AuthToken != strings.Join(strings.Split(want, ".")[:3], ".") {
+		t.Errorf("auth token = %q", dc.AuthToken)
+	}
 
 	// 负例：缺段 / 缺 uid / 缺 ver / 非 static
 	for _, bad := range []string{

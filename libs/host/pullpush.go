@@ -3,9 +3,9 @@ package host
 // pullpush.go — pull/push vsh 命令（host-only 接线）：设备 ↔ 平台云盘文件传输，
 // 走 /fs/cloud HTTP 面（device-key-migration：替代已删除的 NATS fetch 分块通道）。
 //
-// 凭证纪律：Bearer 由 pod 进程内 HTTP client 注入——不写沙箱子进程 env、
-// 不随命令参数回显。护栏：平台地址非 loopback 且为 http:// 时拒绝发送凭证
-//（防明文泄露）。
+// 凭证纪律：Bearer（凭证前 3 段 JWT，第 4 段 secret 不出设备）由 pod 进程内
+// HTTP client 注入——不写沙箱子进程 env、不随命令参数回显。护栏：平台地址
+// 非 loopback 且为 http:// 时拒绝发送凭证（防明文泄露）。
 //
 // 落盘/读取一律经 inv.FS（vsh 策略与 jail 自动生效）；pull 目录 = 一次
 // ?depth=5 递归 JSON 列表 + 逐文件 GET（覆盖语义同 curl -o：PUT 即截断写）；
@@ -218,7 +218,7 @@ func (c *Client) cmdPull(ctx context.Context, inv *commands.Invocation) error {
 	if err != nil {
 		return commands.Exitf(inv, 2, "pull: %v", err)
 	}
-	cfs, err := newCloudFS(c.options().Host, c.credential)
+	cfs, err := newCloudFS(c.options().Host, c.authToken)
 	if err != nil {
 		return commands.Exitf(inv, 2, "pull: %v", err)
 	}
@@ -277,7 +277,7 @@ func (c *Client) cmdPush(ctx context.Context, inv *commands.Invocation) error {
 	if err != nil {
 		return commands.Exitf(inv, 2, "push: %v", err)
 	}
-	cfs, err := newCloudFS(c.options().Host, c.credential)
+	cfs, err := newCloudFS(c.options().Host, c.authToken)
 	if err != nil {
 		return commands.Exitf(inv, 2, "push: %v", err)
 	}

@@ -28,9 +28,13 @@ type DeviceCredential struct {
 	HostID string // 复合串首段
 	UID    string // JWT payload uid
 	Ver    uint64 // JWT payload ver（凭证代次，subject 代次段）
-	Secret string // 第 4 段 client_secret（HKDF 根）
-	// Credential 是原样四段凭证（NATS CONNECT token / HTTP Bearer 用它）。
+	Secret string // 第 4 段 client_secret（HKDF 根）——永不上 wire
+	// Credential 是原样四段凭证（本地持有，不落网络）。
 	Credential string
+	// AuthToken 是上线形态 = 前 3 段 JWT（NATS CONNECT token / HTTP Bearer）。
+	// 服务端 SplitCredential 本来就忽略第 4 段，secret 不出设备——保住旧 e1.
+	// 体系「密钥永不传输」的性质（2026-10-12 review 收口）。
+	AuthToken string
 }
 
 // ParseDeviceCredential 解析复合凭证串；不验签（见上）。各段合法性在此
@@ -71,5 +75,6 @@ func ParseDeviceCredential(composite string) (*DeviceCredential, error) {
 	return &DeviceCredential{
 		HostID: hostID, UID: uid, Ver: claims.Version,
 		Secret: parts[3], Credential: credential,
+		AuthToken: strings.Join(parts[:3], "."),
 	}, nil
 }

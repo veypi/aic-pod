@@ -68,13 +68,14 @@ type Client struct {
 	hostID          string
 	uid             string
 	credVer         uint64
-	credential      string // vbase 四段凭证（NATS CONNECT token / HTTP Bearer 原样使用）
+	authToken       string // 凭证前 3 段 JWT（NATS CONNECT token / HTTP Bearer 上线形态；第 4 段 secret 不出设备）
 	secret          string // 凭证第 4 段（HKDF 根：K_tool / RTC 票据）
 	replay          *replayCache
 	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
 	perms           *permissionState // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
 	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
 	sshRun          sshProcessRunner // nil uses the managed native process runner
+	gitRun          sshProcessRunner // nil uses the managed native process runner（managed git 传输）
 	rtcMu           sync.RWMutex
 	files           *hostfs.FS
 	bytes           *hostfs.Bytes
@@ -133,7 +134,7 @@ func New(opts Options) *Client {
 		c.hostID = dc.HostID
 		c.uid = dc.UID
 		c.credVer = dc.Ver
-		c.credential = dc.Credential
+		c.authToken = dc.AuthToken
 		c.secret = dc.Secret
 		c.kTool, _ = protocol.DeriveKTool(dc.Secret, dc.HostID)
 	}
@@ -181,11 +182,11 @@ func (c *Client) connect() error {
 	natsURL := ResolveNATSURL(c.options().Host)
 	opts := []nats.Option{
 		nats.Name("aic-host-" + c.hostID),
-		// 设备凭证 = vbase 静态秘钥（device-key-migration）：CONNECT token 原样
-		// 发四段 credential（前 3 段 JWT 参与认证，第 4 段被 SplitCredential 忽略）；
+		// 设备凭证 = vbase 静态秘钥（device-key-migration）：CONNECT token 只发
+		// 前 3 段 JWT（服务端 SplitCredential 忽略第 4 段——secret 不出设备）；
 		// 撤销/换代 = 平台删行或 reset，每连接查库即时生效。
 		nats.TokenHandler(func() string {
-			return dc.Credential
+			return dc.AuthToken
 		}),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
