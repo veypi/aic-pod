@@ -1,69 +1,73 @@
 package protocol
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
-// 固定向量：锁定 HKDF 派生与 canonical 输入的位级一致性（双端零漂移）。
-// 修改派生参数或 canonical 结构必须同步更新本文件，并视为协议变更。
+// unsignedJWT 造一枚不签名的三段 JWT 形态串（pod 侧解析不验签——
+// 签名密钥在平台；这里只测解析形态，伪造串在平台侧必然被拒）。
+func unsignedJWT(claims map[string]any) string {
+	payload, _ := json.Marshal(claims)
+	return base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." +
+		base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+// 固定向量：锁定 HKDF 派生的位级一致性（双端零漂移）。
+// 修改派生参数必须同步更新本文件，并视为协议变更。
 
 const (
 	vecSecret = "dGVzdC1zZWNyZXQtMDEyMzQ1Njc4OWFiY2RlZg"
 	vecHostID = "host_vec01"
-	vecUID    = "u_vec"
 )
 
-func TestDeriveKeysVector(t *testing.T) {
-	kc, ks, kt, err := DeriveKeys(vecSecret, vecHostID)
+func TestDeriveKToolVector(t *testing.T) {
+	kt, err := DeriveKTool(vecSecret, vecHostID)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if kc != vecKConnect {
-		t.Errorf("K_connect = %q, want %q", kc, vecKConnect)
-	}
-	if ks != vecKServer {
-		t.Errorf("K_server = %q, want %q", ks, vecKServer)
 	}
 	if kt != vecKTool {
 		t.Errorf("K_tool = %q, want %q", kt, vecKTool)
 	}
-	if _, _, _, err := DeriveKeys("", vecHostID); err == nil {
+	if _, err := DeriveKTool("", vecHostID); err == nil {
 		t.Error("empty secret want error")
 	}
-	if _, _, _, err := DeriveKeys(vecSecret, ""); err == nil {
+	if _, err := DeriveKTool(vecSecret, ""); err == nil {
 		t.Error("empty hostID want error")
 	}
 }
 
-func TestConnectTokenVector(t *testing.T) {
-	token := GenerateConnectToken(vecHostID, vecUID, "v0.3.0", "cli", "nas-01",
-		1767225600000, "BBBBBBBBBBBBBBBBBBBBBB", vecKConnect)
-	if token != vecConnectToken {
-		t.Errorf("token = %q, want %q", token, vecConnectToken)
-	}
-	ct, err := ParseConnectToken(token)
+func TestParseDeviceCredential(t *testing.T) {
+	composite := ComposeDeviceCredential("host32hex", unsignedJWT(map[string]any{
+		"uid": "u_vec", "sub": "u_vec", "ver": 3, "type": "static", "mod": "limited",
+	})+".secret42")
+	dc, err := ParseDeviceCredential(composite)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ct.HostID != vecHostID || ct.UnixMS != 1767225600000 || ct.Nonce != "BBBBBBBBBBBBBBBBBBBBBB" {
-		t.Errorf("parsed = %+v", ct)
+	if dc.HostID != "host32hex" || dc.UID != "u_vec" || dc.Ver != 3 || dc.Secret != "secret42" {
+		t.Errorf("parsed = %+v", dc)
 	}
-	if ct.EnvInfo != `{"agent_version":"v0.3.0","device_name":"nas-01","device_type":"cli"}` {
-		t.Errorf("env_info = %q", ct.EnvInfo)
+	// 认证用 credential = 原样四段（不含 host_id 前缀）
+	want := strings.TrimPrefix(composite, "host32hex.")
+	if dc.Credential != want {
+		t.Errorf("credential = %q, want %q", dc.Credential, want)
 	}
-	if _, err := ParseConnectToken("e1.only.two"); err == nil {
-		t.Error("bad token want error")
-	}
-}
 
-func TestNonceUnique(t *testing.T) {
-	a, err1 := NewNonce()
-	b, err2 := NewNonce()
-	if err1 != nil || err2 != nil {
-		t.Fatal(err1, err2)
-	}
-	if a == b || len(a) != 22 {
-		t.Errorf("nonces = %q %q", a, b)
+	// 负例：缺段 / 缺 uid / 缺 ver / 非 static
+	for _, bad := range []string{
+		"no-separator",
+		"host.only.two",
+		"host." + unsignedJWT(map[string]any{"uid": "u", "ver": 1, "type": "access"}) + ".s", // 非 static
+		"host." + unsignedJWT(map[string]any{"ver": 1, "type": "static"}) + ".s",             // 缺 uid
+		"host." + unsignedJWT(map[string]any{"uid": "u", "type": "static"}) + ".s",           // 缺 ver
+		"host." + unsignedJWT(map[string]any{"uid": "u", "ver": 1, "type": "static"}),        // 缺 secret 段
+	} {
+		if _, err := ParseDeviceCredential(bad); err == nil {
+			t.Errorf("bad credential %q want error", bad)
+		}
 	}
 }
 

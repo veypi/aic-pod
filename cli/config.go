@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/protocol"
 )
 
 // 子命令实现：`aic config get|set` / `aic bind` / `aic unbind`（2026-09-22 去本地
@@ -62,6 +63,8 @@ func runConfigSet() error {
 }
 
 // runBind 保存平台凭证（stdin 纯文本）；绑定生效由调用方重启后端完成。
+// 格式 = <host_id>.<vbase 四段 credential>（device-key-migration）；
+// 保存前做形态校验（fail fast——旧 e1. 四段格式与乱贴在此明确报错）。
 func runBind() error {
 	b, err := readStdin()
 	if err != nil {
@@ -70,6 +73,9 @@ func runBind() error {
 	cred := strings.TrimSpace(string(b))
 	if cred == "" {
 		return errors.New("credential is empty (pass it on stdin)")
+	}
+	if _, err := protocol.ParseDeviceCredential(cred); err != nil {
+		return fmt.Errorf("invalid device credential (expect <host_id>.<credential> from the platform device page): %w", err)
 	}
 	o, err := cfg.LoadFile()
 	if err != nil {

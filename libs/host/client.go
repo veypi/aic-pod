@@ -36,7 +36,7 @@ type Options struct {
 	MCP         mcpx.Settings
 	Transfers   hostfs.TransferConfig
 	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
-	Key         string        // "<host_id>.<cred_ver>.<secret>.<uid>"（必填）
+	Key         string        // 设备凭证复合串 "<host_id>.<vbase 四段 credential>"（必填，平台设备页签发）
 	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
 	DeviceName  string        // 展示名称，默认 hostname
 	DeviceType  string        // 客户端类型（cli/desktop/...），默认 cli
@@ -68,6 +68,8 @@ type Client struct {
 	hostID          string
 	uid             string
 	credVer         uint64
+	credential      string // vbase 四段凭证（NATS CONNECT token / HTTP Bearer 原样使用）
+	secret          string // 凭证第 4 段（HKDF 根：K_tool / RTC 票据）
 	replay          *replayCache
 	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
 	perms           *permissionState // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
@@ -127,11 +129,13 @@ func New(opts Options) *Client {
 		logf:   logf,
 	}
 
-	if parts := strings.SplitN(opts.Key, ".", 4); len(parts) == 4 {
-		c.hostID = parts[0]
-		c.uid = parts[3]
-		_, _, c.kTool, _ = protocol.DeriveKeys(parts[2], parts[0])
-		_, _ = fmt.Sscanf(parts[1], "%d", &c.credVer)
+	if dc, err := protocol.ParseDeviceCredential(opts.Key); err == nil {
+		c.hostID = dc.HostID
+		c.uid = dc.UID
+		c.credVer = dc.Ver
+		c.credential = dc.Credential
+		c.secret = dc.Secret
+		c.kTool, _ = protocol.DeriveKTool(dc.Secret, dc.HostID)
 	}
 	// 会话区根 = {StateDir}/sessions：与 permissionState 会话便利根
 	// 同路径（生产此前从不赋值 → sessionWorkDir 退 Temp 兜底，「会话区」分裂
@@ -167,19 +171,9 @@ func (c *Client) connect() error {
 	if c.initErr != nil {
 		return c.initErr
 	}
-	parts := strings.SplitN(c.options().Key, ".", 4)
-	if len(parts) != 4 {
-		return fmt.Errorf("invalid credential key")
-	}
-	var credVer uint64
-	if _, err := fmt.Sscanf(parts[1], "%d", &credVer); err != nil || credVer == 0 {
-		return fmt.Errorf("invalid credential key version")
-	}
-	secret := parts[2]
-
-	kConnect, _, _, err := protocol.DeriveKeys(secret, c.hostID)
+	dc, err := protocol.ParseDeviceCredential(c.options().Key)
 	if err != nil {
-		return fmt.Errorf("derive keys: %w", err)
+		return fmt.Errorf("invalid device credential: %w", err)
 	}
 
 	c.logf("starting aic-host v%s [%s/%s] (host=%s)", c.options().Version, c.options().DeviceType, c.options().DeviceName, c.hostID)
@@ -187,9 +181,11 @@ func (c *Client) connect() error {
 	natsURL := ResolveNATSURL(c.options().Host)
 	opts := []nats.Option{
 		nats.Name("aic-host-" + c.hostID),
+		// 设备凭证 = vbase 静态秘钥（device-key-migration）：CONNECT token 原样
+		// 发四段 credential（前 3 段 JWT 参与认证，第 4 段被 SplitCredential 忽略）；
+		// 撤销/换代 = 平台删行或 reset，每连接查库即时生效。
 		nats.TokenHandler(func() string {
-			return protocol.GenerateConnectToken(c.hostID, c.uid, c.options().Version, c.options().DeviceType, c.options().DeviceName,
-				clockNowMS(), mustNonce(), kConnect)
+			return dc.Credential
 		}),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
@@ -227,7 +223,7 @@ func (c *Client) connect() error {
 		}
 	}
 
-	// 链前对时：连接 token 与后续请求时效窗口都以平台时间为基准
+	// 链前对时：后续请求信封 deadline 换算以平台时间为基准
 	c.syncClock()
 
 	nc, err := nats.Connect(natsURL, opts...)
@@ -305,11 +301,7 @@ func (c *Client) startRTC() error {
 	if c.rtcSvc != nil {
 		return nil
 	}
-	parts := strings.SplitN(c.options().Key, ".", 4)
-	if len(parts) != 4 {
-		return fmt.Errorf("invalid device credential")
-	}
-	key, err := protocol.RtcDirectKey(parts[2], parts[0])
+	key, err := protocol.RtcDirectKey(c.secret, c.hostID)
 	if err != nil {
 		return err
 	}

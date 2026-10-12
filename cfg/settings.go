@@ -196,10 +196,11 @@ func expandHome(p string) string {
 }
 
 // BoundHostID 从凭证首段解析 host_id（与连接状态无关）。
+// 凭证形态（device-key-migration）：<host_id>.<vbase 四段 credential>——首段切割。
 func BoundHostID(credential string) string {
-	parts := strings.Split(strings.TrimSpace(credential), ".")
-	if len(parts) == 4 {
-		return parts[0]
+	hostID, _, ok := strings.Cut(strings.TrimSpace(credential), ".")
+	if !ok {
+		return ""
 	}
-	return ""
+	return hostID
 }

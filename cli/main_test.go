@@ -139,11 +139,17 @@ func TestConfigSetRejectsBadValues(t *testing.T) {
 	}
 }
 
+// testDeviceCred 是合法形态的设备凭证复合串（JWT 段不签名——bind 只做形态校验）。
+const testDeviceCred = "ab62a0c624f2496b8e7cf8f63c735d1d." +
+	"eyJhbGciOiJIUzI1NiJ9." +
+	"eyJ1aWQiOiJ1MSIsInN1YiI6InUxIiwidmVyIjoxLCJ0eXBlIjoic3RhdGljIiwibW9kIjoibGltaXRlZCJ9." +
+	"c2ln.c2VjcmV0"
+
 // TestBindUnbindRoundTrip：bind 写入凭证（含 host_id 解析），unbind 清空凭证。
 func TestBindUnbindRoundTrip(t *testing.T) {
 	isolateConfigDir(t)
 	writeRawConfig(t, "host: https://ivec-ai.com\n")
-	const cred = "ab62a0c624f2496b8e7cf8f63c735d1d.aabbccdd.1700000000.0123456789abcdef"
+	const cred = testDeviceCred
 	out := capture(t, func() error { return withStdin(t, cred+"\n", runBind) })
 	var resp struct {
 		OK     bool   `json:"ok"`
@@ -180,7 +186,7 @@ func TestSaveLandsDespiteLegacyOrBrokenFile(t *testing.T) {
 		t.Run(fmt.Sprintf("config%d", index), func(t *testing.T) {
 			isolateConfigDir(t)
 			writeRawConfig(t, body)
-			const cred = "ab62a0c624f2496b8e7cf8f63c735d1d.aabbccdd.1700000000.0123456789abcdef"
+			const cred = testDeviceCred
 			capture(t, func() error { return withStdin(t, cred+"\n", runBind) })
 			bound, err := cfg.LoadFile()
 			if err != nil || bound.Key != cred {

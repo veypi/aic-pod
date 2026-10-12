@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -57,14 +56,6 @@ func (c *Client) ensureSessionWorkDir(sid string) error {
 
 func deviceInfo() *protocol.DeviceInfo {
 	return &protocol.DeviceInfo{OS: runtime.GOOS, Arch: runtime.GOARCH, NumCPU: runtime.NumCPU()}
-}
-
-func mustNonce() string {
-	n, err := protocol.NewNonce()
-	if err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return n
 }
 
 type wsURL struct {

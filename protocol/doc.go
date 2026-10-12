@@ -16,10 +16,12 @@
 //   - rtc_ticket.go：RTC 直连票据（RtcTicket/SignRtcTicket/VerifyRtcTicket/
 //     RtcDirectKey/NormalizeFingerprint 与租约常量）。
 //   - rtc_signal.go：NATS 上的 RTC 信令信封（RtcSignal 与种类常量）。
-//   - subject.go：NATS subject 构造（conn/caps/presence/rtc/fetch 族）与
+//   - subject.go：NATS subject 构造（conn/caps/presence/rtc 族）与
 //     工具名常量。
-//   - sign.go：host 连接凭证（ConnectToken/HostConnectInfo/DeriveKeys/
-//     GenerateConnectToken/ParseConnectToken）。
+//   - sign.go：工具请求签名根（DeriveKTool/HMACSHA256——HKDF 公式锁定，
+//     sign_vectors_test.go）。
+//   - device_cred.go：设备凭证复合串（ComposeDeviceCredential/
+//     ParseDeviceCredential——vbase 四段 credential + host_id 前缀）。
 //   - caps.go：设备能力声明（Caps/DeviceInfo/FSCaps/MgmtCaps/TransportCaps
 //     与版本协商）。
 //   - path.go：路径可解析层（ResolvePath/NormalizeHostPath/SplitDriveRoot/

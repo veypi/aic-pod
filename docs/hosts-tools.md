@@ -40,7 +40,7 @@ stdio 服务懒启动并复用一个 SDK session。进程由 vbox 负责；manag
 
 调用门为 exec 规则 `mcp.<alias>`。内置 browser/CUA 以 Pod 设备权限运行，以访问 Chrome 私有状态和系统桌面；第三方服务默认受沙箱约束。进程 cwd/env/沙箱固定；按调用 session 获得的临时文件权限不扩展常驻进程沙箱。服务授权是设备能力授权，原生 fs 规则不会隔离浏览器或桌面操作。browser 默认用上游 `--filesystem-root` 限制显式文件参数为 Pod 工作目录；其余业务权限由上游服务负责。原生 exec 的 nosandbox 需可信审批；第三方 MCP 的 no_sandbox 只能由设备所有者在配置中设置。
 
-exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`mcp`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`skill`）与端侧指令（`browser`/`cua`）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令，常见命令不重复列出。
+exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`mcp`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`pull`/`push`）与端侧指令（`browser`/`cua`）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令，常见命令不重复列出。（2026-10-12：`skill` 命令在设备端退役——包/文件拉取改用 `pull`，走 /fs/cloud HTTP 面。）
 
 ## 结果与边界
 
