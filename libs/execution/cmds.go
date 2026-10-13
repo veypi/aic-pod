@@ -40,6 +40,9 @@ type PlatformDeps struct {
 	Skill SkillDeps
 	// SSH is host-only. Nil implementations are never registered on cloud/page.
 	SSH SSHDeps
+	// Pull/Push 设备↔平台云盘文件传输（host-only；/fs/cloud HTTP 面 + 设备凭证，
+	// device-key-migration：替代已删除的 NATS fetch 通道）。nil 不注册（cloud/page）。
+	Pull, Push commands.CommandFunc
 }
 
 type SSHDeps struct {
@@ -57,7 +60,7 @@ type SkillDeps struct {
 }
 
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
-// send_user / skill。全部自带 help 文本（--help/-h 或无参数子命令自答）。
+// send_user / skill / ssh 族 / pull / push。全部自带 help 文本（--help/-h 或无参数子命令自答）。
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	list := []commands.Command{commands.DefineCommand("commands", deps.cmdCommands)}
 	add := func(name string, fn commands.CommandFunc) { list = append(list, commands.DefineCommand(name, fn)) }
@@ -81,6 +84,7 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 		run  commands.CommandFunc
 	}{
 		{"ssh", deps.SSH.SSH}, {"scp", deps.SSH.SCP}, {"sftp", deps.SSH.SFTP},
+		{"pull", deps.Pull}, {"push", deps.Push},
 	} {
 		if c.run != nil {
 			add(c.name, c.run)

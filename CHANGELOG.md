@@ -5,6 +5,30 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## Unreleased
+
+- **managed git（A-MVP，2026-10-11；设计见 docs/managed-git.md）**：host 的 `git` 命令中，ssh 传输类子命令（clone/fetch/pull/push/ls-remote，remote 为 ssh 形态）由 pod 侧 NoSandbox 执行，ssh 私钥与 `~/.ssh` 始终留在沙箱外；日常 git 不再需要 `grant fs ~/.ssh` 或 nosandbox。授权复用 ssh 域（`grant ssh host:port`，与 managed ssh 同一审批）。一次性 GIT_SSH wrapper 丢弃 git 推导的全部 ssh 实参并钉回授权目标（`url.insteadOf`/`core.sshCommand` 无法改变拨号目标）；只信任系统 `/usr/bin/git`；`core.hooksPath=/dev/null`、`GIT_TERMINAL_PROMPT=0`、最小环境。选项白名单 fail-closed（拒绝 `-c/--config`、`--upload-pack/--receive-pack/--exec`、`--template`、push 的 `-f/--mirror/+refspec`、`--all/--multiple/--recurse-submodules`、`--edit`）。`git pull` 等缺省 remote 先按分支配置解析后显式传入，保证授权的 host 即拨号的 host。https/本地路径/Windows 本期交还原生路径。测试：`gitcmd_test.go`、`git_test.go` 单元全绿；`git_integration_test.go`（loopback sshd）需在非受限环境重跑。
+
+- **凭证上线形态只发前 3 段 JWT（2026-10-12 review 收口）**：`ParseDeviceCredential` 新增 `AuthToken`（前 3 段）；NATS CONNECT token 与 pull/push 的 HTTP Bearer 改用它——服务端 `SplitCredential` 本就忽略第 4 段，`client_secret`（HKDF 根）自此不出设备，恢复 e1. 体系「密钥永不传输」的性质。
+
+- **设备凭证迁进 vbase 静态秘钥 + pull/push 取代 NATS fetch（device-key-migration，2026-10-12；breaking：需在平台设备页重新绑定）**：
+  config `key` 改存复合凭证 `<host_id>.<vbase 四段 credential>`（平台创建/重置设备时下发，仅显示一次；`aic bind` 做形态校验 fail fast）。
+  - **连接**：NATS CONNECT token 不再每次现签（e1. HMAC proof/nonce/时钟窗全删）——TokenHandler 直发四段 credential；撤销/换代由平台删行/reset 即时生效（重连即拒）。时钟同步保留（信封 deadline 换算仍用）。
+  - **K_tool/RTC 不变**：HKDF 根从 config 第 3 段 secret 改为凭证第 4 段 client_secret（`DeriveKTool` 公式锁定不变；`DeriveKeys` 三向派生与 K_connect/K_server 删除）。`ParseDeviceCredential` 本地解码 JWT payload 取 uid/ver（不验签——篡改过不了平台认证）。
+  - **pull/push 新命令**（`libs/host/pullpush.go`）：设备 ↔ 平台云盘走 `/fs/cloud` HTTP 面——`pull <云端路径> [本地路径]`（文件流式落盘覆盖写；目录一次 `?depth=5` 递归列表 + 逐文件 GET）；`push <本地路径> <云端路径>`（目录 v1 拒绝，先打包）。Bearer 由 pod 进程注入不进沙箱 env；非 loopback 的 http:// 拒绝发凭证；exec 规则门 `pull`/`push`（默认开，`grant cmd` 可收）。落盘/读取经 inv.FS（jail/规则表生效）。**host 端 `skill` 命令与 NATS fetch 分块通道删除**（包装载改用 `pull /skills/{id}/history/{v}.zip`；cloud 端 skill 命令不变）。
+  - 测试：`protocol` 复合凭证解析矩阵 + K_tool 向量锁定；`libs/host/pullpush_test.go` httptest 回放（流式/覆盖/目录递归/目录拒绝/Bearer 注入/明文护栏/exec 规则门）；cli bind 形态校验。platform 侧配套见 aic CHANGELOG（callout/范围门/版本门禁挪 caps）。**生效需重建 pod 并重新绑定设备凭证。**
+
+- **curl 大文件下载改为流式落盘，响应上限交配置（2026-10-12，依赖 vsh 侧未发布改动）**：
+  此前设备端 NetClient 固定 64 MiB 响应上限，且 `curl -o` 先把整份响应缓冲进内存再单次写盘
+  ——超过 64 MiB 的下载直接失败，内存占用又随文件大小线性涨。现在：①`NetClientConfig.MaxResponseBytes`
+  改为纯配置项，`<= 0` = 不限制（设备端缺省即不限制，内存路径与流式路径同口径），只有
+  使用方显式设限才生效（cloud 侧设 `64 << 20`）；②`curl -o` 走 `req.Sink` 逐块落盘
+  （响应体不驻留内存），失败（含 `-f` 与中途配额拒绝）删半截文件。配额语义随之更紧：
+  云端 QuotaFS 现在在跨线的那一块被拒时中断下载（此前单次整写可一次跨过配额，overshoot
+  上限 = 响应上限）。测试：`netclient_stream_test.go`（流式投递、缺省下 70 MiB 流式下载
+  成功、显式上限跨线中止）；`TestQuotaBypassCurlDownload` 改为流式口径（首块跨线计入
+  用量后中止、不留半截文件、后续写锁死）。生效需重建 pod（vsh 改动一并构建）。
+
 ## v0.9.1 — 2026-10-10
 
 - **可写根的沙箱授权失败降级为逐根（Windows，2026-10-10，依赖 vbox v0.3.1）**：起因是

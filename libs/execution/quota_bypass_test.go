@@ -156,9 +156,9 @@ func TestQuotaBypassRedirectAppend(t *testing.T) {
 	}
 }
 
-// curl -o 大文件：写盘必经 backing 闸门——整写计入用量、超限后的后续写
-// 锁死。（curl 实现是全量缓冲响应后单次整写：「跨过配额的那次写放行」是
-// QuotaFS 文档化语义，单次跨线体积上限 = MaxResponseBytes。）
+// curl -o 大文件：写盘必经 backing 闸门——流式逐块落盘（响应体不驻留内存），
+// 跨过配额的那次写按 QuotaFS 语义放行、下一块即被拒：下载中途失败、半截文件
+// 删除、用量可见；此后所有写锁死。
 func TestQuotaBypassCurlDownload(t *testing.T) {
 	t.Parallel()
 	base, err := ufs.NewLocalFS(t.TempDir())
@@ -178,14 +178,22 @@ func TestQuotaBypassCurlDownload(t *testing.T) {
 		SessionKey: "quota", Timeout: time.Minute,
 		Script: "curl -o /u/u1/big.bin " + srv.URL,
 	})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("首个跨线写按语义放行：err=%v exit=%d stderr=%s", err, res.ExitCode, res.Stderr)
+	if err == nil && res.ExitCode == 0 {
+		t.Fatal("512KiB 下载在 4KiB 配额下成功——闸门被绕过")
 	}
-	// 闸门可见：整写计入用量（未过闸门的写不会出现在计数里）。
-	if got := q.usage(); got != int64(len(body)) {
-		t.Fatalf("curl 落盘未过闸门计数：usage=%d want=%d", got, len(body))
+	if res != nil && !strings.Contains(strings.ToLower(res.Stderr), "quota") {
+		t.Fatalf("报错应含配额语义：stderr=%s", res.Stderr)
 	}
-	// 超限锁死：后续任何写失败且报错含配额语义。
+	// 闸门可见：跨线的那个写块计入用量（未过闸门的写不会出现在计数里）。
+	used := q.usage()
+	if used <= 0 || used > 4096+64*1024 {
+		t.Fatalf("用量不在「首块跨线」范围内：usage=%d", used)
+	}
+	// 半截文件删除：失败不留残缺体（残缺体比没有更坑调用方）。
+	if _, statErr := base.Stat("/u/u1/big.bin"); statErr == nil {
+		t.Fatal("被中止的 curl 下载不应留半截文件")
+	}
+	// 超限锁死：后续拼写立即失败且不落盘。
 	res, err = e.Exec(context.Background(), ExecRequest{
 		SessionKey: "quota", Timeout: time.Minute,
 		Script: "curl -o /u/u1/big2.bin " + srv.URL,
@@ -196,7 +204,7 @@ func TestQuotaBypassCurlDownload(t *testing.T) {
 	if _, statErr := base.Stat("/u/u1/big2.bin"); statErr == nil {
 		t.Fatal("被拒的 curl 写不应落盘")
 	}
-	t.Logf("curl 跨线写计入 usage=%d（配额 4096），后续写已锁死", q.usage())
+	t.Logf("curl 流式逐块写：首块跨线计入 usage=%d（配额 4096）后中止，后续写已锁死", q.usage())
 }
 
 // tar 解包：归档内每个成员的写都过闸门，配额用尽即中止，不得解全。

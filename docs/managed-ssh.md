@@ -1,5 +1,7 @@
 # 托管 SSH
 
+关联：[managed-git](managed-git.md)（同一信任模型的 git 传输收编）、[host 沙箱](host_sandbox.md)。
+
 host 的 vsh 平台命令提供 `ssh`、`scp`、`sftp`。cloud/page 不注册这些能力。
 三者使用系统 OpenSSH 客户端完成认证和加密；文件传输通过
 `ssh -s sftp` 的二进制管道和 `github.com/pkg/sftp` 完成，本地文件由 pod 的

@@ -22,6 +22,15 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 	if reservedSSHNative(name) {
 		return commands.Exitf(inv, 126, "%s: native SSH command is reserved; use managed ssh/scp/sftp and grant ssh host:port", resolvedPath)
 	}
+	// managed git：ssh 传输类子命令由 pod 侧受管执行（授权在 ssh 域，不经
+	// cmd 域——本地子命令 managedGit 返回 false，继续走下面的 cmd 闸）。
+	// 注意：受管路径只按解析名触发，执行体恒为 trustedGitBinary（系统
+	// git），resolvedPath 指向的同名伪造二进制不会被 pod 侧运行。
+	if name == "git" && c.perms != nil {
+		if handled, err := c.managedGit(ctx, inv); handled {
+			return err
+		}
+	}
 	if !c.execAllowed(execution.SessionFromContext(ctx), name) {
 		return commands.Exitf(inv, 126, "%s: command denied by exec rules (grant cmd %s)", resolvedPath, name)
 	}

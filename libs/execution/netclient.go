@@ -16,11 +16,11 @@ import (
 	vshnet "github.com/veypi/vsh/network"
 )
 
-// NetClient 默认值（重定向上限/超时/响应上限）。
+// NetClient 默认值（重定向上限/超时）。响应体大小上限不是默认值，而是引入方的
+// 配置项：MaxResponseBytes <= 0 = 不限制（设备端默认），cloud 侧显式设 64 MiB。
 const (
-	DefaultNetMaxRedirects     = 10
-	DefaultNetTimeout          = 10 * time.Minute
-	DefaultNetMaxResponseBytes = MaxFileBytes // 64 MiB
+	DefaultNetMaxRedirects = 10
+	DefaultNetTimeout      = 10 * time.Minute
 )
 
 // NetAudit 网络审计记录（URL/状态/大小/耗时——验收 5）。
@@ -45,10 +45,12 @@ type NetClientConfig struct {
 	// OnResponseSize 下载配额预检（cloudenv.go:116 Fetcher 迁移）：响应
 	// Content-Length > 0 时读体前调用；返回非 nil 即断流。nil = 不预检
 	//（写盘路径仍由 FS backing 的 QuotaFS 逐块闸门兜底——curl -o 不绕配额）。
-	OnResponseSize   func(size int64) error
-	MaxRedirects     int           // ≤0 = DefaultNetMaxRedirects
-	Timeout          time.Duration // ≤0 = DefaultNetTimeout（req.Timeout 优先）
-	MaxResponseBytes int64         // ≤0 = DefaultNetMaxResponseBytes
+	OnResponseSize func(size int64) error
+	MaxRedirects   int           // ≤0 = DefaultNetMaxRedirects
+	Timeout        time.Duration // ≤0 = DefaultNetTimeout（req.Timeout 优先）
+	// MaxResponseBytes > 0 = 单个响应体字节上限；≤0 = 不限制。流式（req.Sink）
+	// 与内存两条路同口径：流式路径超限即中止（已写部分保留给调用方处理）。
+	MaxResponseBytes int64
 	// AllowPrivate 放行私网/环回目标（host 端 LAN 访问是合法场景——2.4.3：
 	// 私网阻断仅 cloud SSRF 防护；host 网络策略全走 Rules 表）。默认 false=阻断。
 	AllowPrivate bool
@@ -72,8 +74,8 @@ func NewNetClient(cfg NetClientConfig) *NetClient {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultNetTimeout
 	}
-	if cfg.MaxResponseBytes <= 0 {
-		cfg.MaxResponseBytes = DefaultNetMaxResponseBytes
+	if cfg.MaxResponseBytes < 0 {
+		cfg.MaxResponseBytes = 0 // 负值与 0 同义：不限制
 	}
 	return &NetClient{cfg: cfg}
 }
@@ -102,7 +104,7 @@ func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Respon
 		audit.Status = resp.StatusCode
 		audit.URL = current
 		if !isRedirectStatus(resp.StatusCode) || !req.FollowRedirects {
-			data, rerr := c.readBody(resp, current)
+			data, streamed, written, rerr := c.deliverBody(req, resp)
 			_ = resp.Body.Close()
 			cancel()
 			if rerr != nil {
@@ -110,14 +112,19 @@ func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Respon
 				c.emit(audit)
 				return nil, rerr
 			}
-			audit.Bytes = int64(len(data))
+			audit.Bytes = written
+			if !streamed {
+				audit.Bytes = int64(len(data))
+			}
 			c.emit(audit)
 			return &vshnet.Response{
-				StatusCode: resp.StatusCode,
-				Status:     resp.Status,
-				Headers:    flattenHeaders(resp.Header),
-				Body:       data,
-				URL:        current,
+				StatusCode:   resp.StatusCode,
+				Status:       resp.Status,
+				Headers:      flattenHeaders(resp.Header),
+				Body:         data,
+				URL:          current,
+				Streamed:     streamed,
+				BytesWritten: written,
 			}, nil
 		}
 		loc := resp.Header.Get("Location")
@@ -250,21 +257,36 @@ func (c *NetClient) checkTarget(ctx context.Context, rawURL string) error {
 	return nil
 }
 
-// readBody 配额预检 + 响应上限截断读。
-func (c *NetClient) readBody(resp *http.Response, rawURL string) ([]byte, error) {
+// deliverBody 投递响应体：先做下载配额预检，再按 req.Sink 分两条路——流式
+// （边收边写，内存占用与响应体大小无关；-o 下载走这条）或内存整体读。
+func (c *NetClient) deliverBody(req *vshnet.Request, resp *http.Response) (data []byte, streamed bool, written int64, err error) {
 	if resp.ContentLength > 0 && c.cfg.OnResponseSize != nil {
 		if err := c.cfg.OnResponseSize(resp.ContentLength); err != nil {
-			return nil, err
+			return nil, false, 0, err
 		}
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, c.cfg.MaxResponseBytes+1))
+	if req.Sink != nil {
+		if req.OnResponse != nil {
+			req.OnResponse(resp.StatusCode, resp.Status, flattenHeaders(resp.Header))
+		}
+		n, serr := vshnet.CopyResponseBody(req.Sink, resp.Body, c.cfg.MaxResponseBytes, resp.ContentLength)
+		if serr != nil {
+			return nil, true, n, serr
+		}
+		return nil, true, n, nil
+	}
+	var reader io.Reader = resp.Body
+	if c.cfg.MaxResponseBytes > 0 {
+		reader = io.LimitReader(resp.Body, c.cfg.MaxResponseBytes+1)
+	}
+	data, err = io.ReadAll(reader)
 	if err != nil {
-		return nil, err
+		return nil, false, 0, err
 	}
-	if int64(len(data)) > c.cfg.MaxResponseBytes {
-		return nil, &vshnet.ResponseTooLargeError{MaxBytes: c.cfg.MaxResponseBytes}
+	if c.cfg.MaxResponseBytes > 0 && int64(len(data)) > c.cfg.MaxResponseBytes {
+		return nil, false, 0, &vshnet.ResponseTooLargeError{MaxBytes: c.cfg.MaxResponseBytes}
 	}
-	return data, nil
+	return data, false, 0, nil
 }
 
 func (c *NetClient) emit(a NetAudit) {

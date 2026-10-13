@@ -59,6 +59,8 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		},
 		Network: execution.NewNetClient(execution.NetClientConfig{
 			AllowPrivate: true, // host LAN 合法（私网阻断仅 cloud）
+			// MaxResponseBytes 缺省 = 0 = 不限制：设备端下载大文件走流式 -o，
+			// 内存占用与文件大小无关（磁盘与沙箱 fs 规则自行兜底）。
 			Rules: func(ctx context.Context) vbox.NetRuleSet {
 				return c.perms.netSnapshot(execution.SessionFromContext(ctx))
 			},
