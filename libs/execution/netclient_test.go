@@ -199,3 +199,75 @@ func TestNetClientAuditFields(t *testing.T) {
 		t.Fatalf("audit fields incomplete: %+v", a)
 	}
 }
+
+// TestNetClientProxyHonoredWhenEnabled：UseProxy 开启时请求拨向代理服务器
+// （http 代理收到绝对 URI 请求行），审计记录代理地址；AllowPrivate 放行
+// 环回代理（host 端配置）。
+func TestNetClientProxyHonoredWhenEnabled(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var proxyURI string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxyURI = r.RequestURI
+		mu.Unlock()
+		fmt.Fprintln(w, "via-proxy")
+	}))
+	defer proxy.Close()
+
+	var audits []NetAudit
+	c := NewNetClient(NetClientConfig{
+		UseProxy:     true,
+		AllowPrivate: true, // host 端姿态；代理 127.0.0.1 是环回
+		Audit:        func(a NetAudit) { audits = append(audits, a) },
+	})
+	resp, err := c.Do(context.Background(), &vshnet.Request{
+		Method:   "GET",
+		URL:      "http://example.com/ok",
+		ProxyURL: proxy.URL,
+	})
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	if got := strings.TrimSpace(string(resp.Body)); got != "via-proxy" {
+		t.Fatalf("Body = %q, want via-proxy", got)
+	}
+	mu.Lock()
+	uri := proxyURI
+	mu.Unlock()
+	if uri != "http://example.com/ok" {
+		t.Fatalf("proxy RequestURI = %q, want absolute URI http://example.com/ok", uri)
+	}
+	if len(audits) != 1 || audits[0].Proxy != proxy.URL {
+		t.Fatalf("audit proxy not recorded: %+v", audits)
+	}
+}
+
+// TestNetClientProxyIgnoredWhenDisabled：默认关闭时代理设置被忽略，直连目标。
+func TestNetClientProxyIgnoredWhenDisabled(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "backend")
+	}))
+	defer server.Close()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("proxy server must not be used when UseProxy is off")
+	}))
+	defer proxy.Close()
+
+	c := NewNetClient(NetClientConfig{
+		Resolver:    fakeResolver{},
+		DialContext: hijackDial(server),
+	})
+	resp, err := c.Do(context.Background(), &vshnet.Request{
+		Method:   "GET",
+		URL:      "http://example.com/ok",
+		ProxyURL: proxy.URL,
+	})
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	if got := strings.TrimSpace(string(resp.Body)); got != "backend" {
+		t.Fatalf("Body = %q, want backend", got)
+	}
+}

@@ -32,6 +32,7 @@ type NetAudit struct {
 	Duration time.Duration
 	Blocked  bool   // 被策略/私网阻断
 	Reason   string // 阻断/错误原因
+	Proxy    string // 实际使用的代理 URL；空 = 直连
 }
 
 // NetClientConfig cloud NetClient 装配（唯一网络权威；网络不触发审批）。
@@ -54,6 +55,10 @@ type NetClientConfig struct {
 	// AllowPrivate 放行私网/环回目标（host 端 LAN 访问是合法场景——2.4.3：
 	// 私网阻断仅 cloud SSRF 防护；host 网络策略全走 Rules 表）。默认 false=阻断。
 	AllowPrivate bool
+	// UseProxy 允许请求经代理（req.ProxyURL，curl 由 -x/会话环境变量解析）。
+	// 默认 false = 忽略。cloud 必须 false：代理使 dial 目标变为代理服务器，
+	// 绕过私网阻断（SSRF 防护失效）；host 端 AllowPrivate 已放行，可开启。
+	UseProxy bool
 	// DialContext/Resolver 测试注入；nil = 系统默认。
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	Resolver    interface {
@@ -84,6 +89,9 @@ func NewNetClient(cfg NetClientConfig) *NetClient {
 func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Response, error) {
 	start := time.Now()
 	audit := NetAudit{Method: req.Method, URL: req.URL}
+	if c.cfg.UseProxy {
+		audit.Proxy = req.ProxyURL
+	}
 	defer func() { audit.Duration = time.Since(start) }()
 
 	current := req.URL
@@ -179,6 +187,16 @@ func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL strin
 			var d net.Dialer
 			return d.DialContext(ctx, network, addr)
 		},
+	}
+	if c.cfg.UseProxy && req.ProxyURL != "" {
+		// 走代理时 dial 目标变为代理服务器本身（其上私网/环回检查仍生效）；
+		// 目标 host 的规则表复核不受影响（checkTarget 按原始 URL 逐跳过门）。
+		proxyURL, perr := vshnet.ParseProxyURL(req.ProxyURL)
+		if perr != nil {
+			cancel()
+			return nil, nil, perr
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{

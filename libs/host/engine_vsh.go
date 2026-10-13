@@ -59,6 +59,9 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		},
 		Network: execution.NewNetClient(execution.NetClientConfig{
 			AllowPrivate: true, // host LAN 合法（私网阻断仅 cloud）
+			// UseProxy：设备端尊重 curl -x/会话环境变量（HTTPS_PROXY 等）——
+			// 用户自己的网络，代理是合法场景（跨境 git/下载）；cloud 关闭。
+			UseProxy: true,
 			// MaxResponseBytes 缺省 = 0 = 不限制：设备端下载大文件走流式 -o，
 			// 内存占用与文件大小无关（磁盘与沙箱 fs 规则自行兜底）。
 			Rules: func(ctx context.Context) vbox.NetRuleSet {
