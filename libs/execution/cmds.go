@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -49,11 +48,10 @@ type SSHDeps struct {
 	SSH, SCP, SFTP commands.CommandFunc
 }
 
-// SkillDeps operates on static content; downloads never execute or register it.
+// SkillDeps operates on static content; loading never executes or registers it.
 type SkillDeps struct {
 	Search func(context.Context, string, string, int) (string, error)
 	Load   func(context.Context, string, string) (string, error)
-	Fetch  func(context.Context, string, string, string) ([]byte, error)
 	Fork   func(context.Context, string, string) (string, error)
 	// Allow 命令准入薄检查（host 接线 exec 域规则门）：nil = 放行（cloud）。
 	Allow func(context.Context) bool
@@ -90,7 +88,7 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 			add(c.name, c.run)
 		}
 	}
-	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Fetch != nil || deps.Skill.Fork != nil {
+	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Fork != nil {
 		add("skill", deps.cmdSkill)
 	}
 	for _, cmd := range list {
@@ -363,11 +361,10 @@ const sendUserHelp = `usage: send_user <消息...> — 给用户发一条通知�
 const skillHelp = `usage:
  skill search [query] [--limit N]
  skill load <ref>
- skill download <ref> --output <archive.zip> [--version v]
  skill fork <ref>
 
-Download saves static content to an explicit new file. Follow SKILL.md to install
-software separately. Fork creates an editable cloud copy.`
+Load returns static content; follow SKILL.md to install software separately.
+Fork creates an editable cloud copy.`
 
 // cmdSkill skill 注册中心与设备包管理（v6：skills 独立工具废除，动词归 vsh）。
 func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) error {
@@ -376,7 +373,7 @@ func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) er
 		return nil
 	}
 	if len(inv.Args) == 0 {
-		return commands.Exitf(inv, 2, "usage: skill <search|load|download|fork>（--help 查看详情）")
+		return commands.Exitf(inv, 2, "usage: skill <search|load|fork>（--help 查看详情）")
 	}
 	if d.Skill.Allow != nil && !d.Skill.Allow(ctx) {
 		return commands.Exitf(inv, 126, "skill: command denied by exec rules（grant cmd skill 申请）")
@@ -422,55 +419,6 @@ func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) er
 			return commands.Exitf(inv, 1, "skill load: %s", err)
 		}
 		fmt.Fprintln(inv.Stdout, text)
-		return nil
-	case "download":
-		if d.Skill.Fetch == nil {
-			return commands.Exitf(inv, 1, "skill download: unavailable")
-		}
-		version, dest, ref := "", "", ""
-		for n := 0; n < len(rest); n++ {
-			switch rest[n] {
-			case "--version", "--output":
-				if n+1 >= len(rest) {
-					return commands.Exitf(inv, 2, "skill download: missing option value")
-				}
-				if rest[n] == "--version" {
-					version = rest[n+1]
-				} else {
-					dest = rest[n+1]
-				}
-				n++
-			default:
-				if ref != "" {
-					return commands.Exitf(inv, 2, "skill download: expected one reference")
-				}
-				ref = rest[n]
-			}
-		}
-		if ref == "" || dest == "" {
-			return commands.Exitf(inv, 2, "skill download <ref> --output <archive.zip> [--version v]")
-		}
-		data, err := d.Skill.Fetch(ctx, sid, ref, version)
-		if err != nil {
-			return commands.Exitf(inv, 1, "skill download: %s", err)
-		}
-		if inv.FS == nil {
-			return commands.Exitf(inv, 1, "skill download: filesystem unavailable")
-		}
-		f, err := inv.FS.OpenFile(ctx, dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return commands.Exitf(inv, 1, "skill download: %s", err)
-		}
-		_, err = f.Write(data)
-		closeErr := f.Close()
-		if err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			_ = inv.FS.Remove(ctx, dest, false)
-			return commands.Exitf(inv, 1, "skill download: %s", err)
-		}
-		fmt.Fprintln(inv.Stdout, dest)
 		return nil
 	case "fork":
 		if d.Skill.Fork == nil {
