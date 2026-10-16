@@ -312,6 +312,11 @@ func (c *Client) blenderDoctor(ctx context.Context, inv *commands.Invocation) er
 
 // ---- launch ----
 
+// blenderReadyTimeout 是 launch 等 addon 握手的上限。实测冷启动到握手 ~1s
+// （Blender 5.2 / Windows 4K），这里留的是余量：磁盘冷缓存、装完 Blender 第一次
+// 跑都更慢，但超过这个数基本就是挂载真失败了。
+const blenderReadyTimeout = 60 * time.Second
+
 func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) error {
 	if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), "blender"); err != nil {
 		return commands.Exitf(inv, 126, "%s", err)
@@ -389,14 +394,15 @@ func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) er
 	}
 	status["pid"] = cmd.Process.Pid
 	_ = cmd.Process.Release()
-	// 轮询握手（GUI 冷启动 + addon 挂载，给足 20s）：ping 通了才算数——
-	// 只 dial 端口会被 9866 上的无关占用者骗出假成功。
-	probe, err := vtools.NewTCP(addr)
+	// 轮询握手（GUI 冷启动 + addon 挂载，给足 blenderReadyTimeout）：ping 通了
+	// 才算数——只 dial 端口会被 9866 上的无关占用者骗出假成功；探测必须带
+	// token（addon 强制认证首行，裸连接只会拿到 auth failed，永远等不到成功）。
+	probe, err := vtools.NewTCP(addr, vtools.WithToken(token))
 	if err != nil {
 		return commands.Exitf(inv, 1, "blender launch: %s", err)
 	}
 	defer probe.Close()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(blenderReadyTimeout)
 	for time.Now().Before(deadline) {
 		if _, err := probe.Call(ctx, "ping", map[string]any{}); err == nil {
 			status["ok"] = true
@@ -412,7 +418,7 @@ func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) er
 	}
 	status["error"] = "timeout waiting for " + addr
 	writeStatus()
-	fmt.Fprintf(out, "blender 已启动但 addon 20s 未就绪（addon 挂载失败？详见 %s）\n", statusFile)
+	fmt.Fprintf(out, "blender 已启动但 addon %s 未就绪（addon 挂载失败？先 blender doctor 复查，详见 %s）\n", blenderReadyTimeout, statusFile)
 	return &commands.ExitError{Code: 1}
 }
 

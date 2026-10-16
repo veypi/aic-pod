@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **blender launch 就绪探测补 token（2026-10-16 真机验收修复）**：launch 拉起 GUI 后轮询 ping 的 probe 漏了 `vtools.WithToken`——addon 已强制认证首行，裸连接只会拿到 `auth failed`，于是冷启动必然等满超时并报「addon 未就绪」（实测 addon ~1s 就通了，紧接着 `blender doctor` L3 ✓）。probe 改带 token；等待上限提为 `blenderReadyTimeout = 60s`（实测冷启动到握手 ~1s，余量留给首次启动/磁盘冷缓存），超时文案补「先 `blender doctor` 复查」指引。
+
 - **四次评审修复·第四批（2026-10-16）**：`mcp add/remove` 同步刷新内存配置（`ownerConfigured` 判定源）——原只落盘不刷新，同进程内 add 了内置同名覆盖项后 remove 被误判「内置服务不可移除」。
 
 - **vtools/tcp v1 增可选认证握手（2026-10-16 安全修复）**：协议规范化（docs/host-vtools.md §1.1）——服务端可要求连接首行为 `{"auth":"<token>"}`，验证通过回 `{"ok":true}`，失败回 `{"ok":false}` 并断连；要求认证的服务端对首行非 auth 的连接一律拒绝（挡住浏览器页面发往 localhost 的 HTTP/WebSocket 报文）。`vtools.NewTCP` 增 `WithToken`；`mcpx.Config` 增 `token` 字段（仅 tcp 形态），`mcp add --tcp` 支持 `--token`。**blender addon 自此强制握手**：token 取 env `AIC_BLENDER_TOKEN`（launch 透传）→ `$HOME/.aic/blender/bridge_token`（0600，O_EXCL 先建者赢，pod 与 addon 共读）——修复回环无认证暴露 `execute_code`（进程内任意 Python）的缺口。配套 addon 重写见 aic-skills 仓。
