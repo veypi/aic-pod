@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **ssh 域内建放行 `github.com:22`**（2026-10-16）：git over ssh 是最高频托管 ssh 目标，不再要求每会话 `grant ssh github.com:22`。内建行排在快照表尾（temp grant → cfg 规则 → 内建 → policy 默认），首命中语义下所有者 `deny:github.com:22` 配置行仍可压过它。与 net 域内建 `localhost:*` 同一机制（`libs/host/permissions.go`）。
+
 - **vtools：通用工具服务注册（2026-10-16；设计 docs/host-vtools.md）**：MCP 只是一种协议。任何协议适配成 `libs/vtools.Provider`（Tools/Call）后注册为 vsh 根命令——`<alias> <tool> [--flag value]... [--input JSON|-] [--json]`（标量 schema 自动映射同名 flag；无参=工具目录；`<tool> --help`=按 inputSchema 渲染参数表）。`mcp` 命令退化为管理面（`list/add/remove/start/stop/restart` + `tools/describe/call/read` 调试直通）：add/remove 走 exec 规则门 `grant cmd mcp`，`--persist` 写 config.yaml。`libs/mcpx` Manager 增 `Add/Remove/Status` 与 reap 周期动态重算；`libs/vtools` 含 MCP 适配器与 TCP 样例协议（vtools/tcp v1 行分隔 JSON，配置形态 `url: tcp://host:port`）。可选 `Streamer` 接口 = RTC 流通道泛化（`rtc.Config.Browser` 字段改为 `Streams func(label)` 按 DataChannel 标签现查登记表；原 browserChannel 泛化为 stream.go 的 streamChannel，多流通道并存）。vsh `commands.Registry` 新增 `Unregister`。前端 `BrowserStream` 通道标签参数化（options.channel，默认 `aic-browser`）。
 
 - **技能包 cli/ 维度（内置服务数据化）**：browser/cua/blender 的默认服务项不再硬编码于 Go——aic-skills 对应包的 `cli/manifest.json` 声明（kind/别名/程序解析/stream 通道；blender 另带私有扩展 verbs 生命周期动词），pod 经 aicskills embed 装载（`libs/host/packs.go`；`mcp_builtin.go` 删除）。**新增内置 blender 服务**：`blender` vsh 命令直连 GUI Blender（addon 说 vtools/tcp v1，源码在 aic-skills/blender/cli/）——生命周期动词 `doctor/launch/install` + 分级报错（blender_not_installed → blender_not_running → addon_not_connected，附安装指引）+ 五工具（ping/get_scene_info/get_object_info/execute_code/get_viewport_screenshot）。调用门 exec 规则 `mcp.blender`；doctor 只读免门。内置服务不可 `mcp remove`（禁用走配置 disabled:true）。

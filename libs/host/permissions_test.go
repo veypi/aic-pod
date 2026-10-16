@@ -216,6 +216,26 @@ func TestPermsNetSSHGrantsAndBuiltin(t *testing.T) {
 	}
 }
 
+// ssh 内建 github.com:22 放行：deny 姿态下开箱即用；所有者 cfg deny 行
+// 首命中压过内建。
+func TestPermsSSHBuiltinGitHub(t *testing.T) {
+	withGlobal(t, func(o *cfg.Options) {
+		o.SshPolicy = cfg.PolicyDeny
+	})
+	p := newTestPerms(t, "")
+	if !p.sshAllowed("s1", "github.com:22") {
+		t.Fatal("builtin github.com:22 allow missing")
+	}
+	if p.sshAllowed("s1", "gitlab.com:22") {
+		t.Fatal("builtin allow overbroad")
+	}
+	cfg.Global.SshRules = []string{"deny:github.com:22"}
+	publishGlobal(t, p)
+	if p.sshAllowed("s1", "github.com:22") {
+		t.Fatal("owner cfg deny did not override builtin allow")
+	}
+}
+
 // 工作区元数据保护：.git/.aws 存在即 ro（git 命令豁免）。
 func TestPermsSnapshotForNativeMetadata(t *testing.T) {
 	withGlobal(t, func(o *cfg.Options) { o.FsPolicy = cfg.PolicyOpen })

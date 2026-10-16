@@ -58,8 +58,13 @@ type permissionState struct {
 	invalid                       error // 启动配置无效：工具 fail-closed
 }
 
-// netBuiltin 是 net 域内建放行（本机回环；ssh 域无内建条目）。
+// netBuiltin 是 net 域内建放行（本机回环）。
 var netBuiltin = []vbox.NetRule{{HostPort: "localhost:*", Allow: true}}
+
+// sshBuiltin 是 ssh 域内建放行：github.com:22（git over ssh 是最高频托管
+// ssh 目标，免每会话 grant）。排在快照表尾——所有者的 cfg deny 行首命中
+// 仍可压过它。
+var sshBuiltin = []vbox.NetRule{{HostPort: "github.com:22", Allow: true}}
 
 // nativeNetPlatform 是原生沙箱能力校验用的平台标识（默认本机；测试可注入）。
 // net 规则的「内核能否落实」按平台分流（vbox.CheckNetPolicy），配置期校验与
@@ -375,6 +380,7 @@ func (p *permissionState) sshSnapshotLocked(sid string) vbox.NetRuleSet {
 		}
 	}
 	rows = append(rows, p.base.sshRules...)
+	rows = append(rows, sshBuiltin...)
 	return vbox.NetRuleSet{Rules: rows, Default: p.base.sshOpen}
 }
 

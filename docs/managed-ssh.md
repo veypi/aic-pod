@@ -115,6 +115,13 @@ KnownHostsCommand 等）显式报错。不会删除不支持的跳板配置后�
 ssh 域范围仍为 host+port，不限制远端 user、命令或远端路径。域名规则表达域名
 身份，不锁定 DNS 解析 IP。已建立连接不因后续规则变化自动断开，需 cancel/bg kill。
 
+**内建放行 `github.com:22`（2026-10-16）**：git over ssh 是最高频托管 ssh 目标，
+免每会话 `grant ssh github.com:22`。威胁模型需明确：托管 ssh 使用所有者密钥，
+因此任何 AI 会话默认即可对所有者**有写权限的任何 GitHub 仓库**执行 push（含
+force push、删分支），无需逐次审批。排表顺序为 temp grant → cfg 规则 → 内建，
+首命中语义下所有者 `ssh_rules` 加 `deny:github.com:22` 可压过内建收回该放行。
+与 net 域内建 `localhost:*` 同一机制（`libs/host/permissions.go`）。
+
 直接原生执行按 basename 拒绝 `ssh/scp/sftp/slogin/ssh-copy-id/ssh-keyscan`，
 不受 exec allow 或 nosandbox 豁免。`grant cmd` 对这些名字提示改用 ssh 域。
 vsh 内建 env/xargs/timeout/bash 的子执行回到引擎；外部原生解释器、Git/rsync
