@@ -317,6 +317,14 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 			return commands.Exitf(inv, 1, "mcp add: 已生效但落盘失败: %s", err)
 		}
 	}
+	// 内存配置同步刷新：ownerConfigured 据此判定「所有者显式配置」（不加会
+	// 同进程旧值——add 了内置同名覆盖项后 remove 仍被误判成内置不可移除）。
+	c.optsMu.Lock()
+	if c.opts.MCP.Servers == nil {
+		c.opts.MCP.Servers = map[string]mcpx.Config{}
+	}
+	c.opts.MCP.Servers[alias] = config
+	c.optsMu.Unlock()
 	fmt.Fprintf(inv.Stdout, "added %s（%s）\n", alias, map[bool]string{true: "persisted", false: "进程级，重启失效"}[persist])
 	return nil
 }
@@ -363,6 +371,10 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 			return commands.Exitf(inv, 1, "mcp remove: 已生效但落盘失败: %s", err)
 		}
 	}
+	// 同 add：内存配置同步摘除（ownerConfigured 判定源）。
+	c.optsMu.Lock()
+	delete(c.opts.MCP.Servers, alias)
+	c.optsMu.Unlock()
 	fmt.Fprintf(inv.Stdout, "removed %s\n", alias)
 	return nil
 }

@@ -282,6 +282,41 @@ func TestVtoolsDiscoverable(t *testing.T) {
 	}
 }
 
+// mcp add/remove 同步刷新内存配置（ownerConfigured 判定源）：add 内置同名
+// 覆盖项后，同进程 remove 不再被「内置服务不可移除」误判（原只落盘不刷新，
+// ownerConfigured 恒为启动快照）。
+func TestMCPAddRemoveBuiltinOverrideSameProcess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true,
+		MCP: mcpx.Settings{Servers: map[string]mcpx.Config{
+			"blender": {URL: "tcp://127.0.0.1:1", Disabled: true}, // 所有者禁用内置
+		}}})
+	c.hostID = "host_1"
+	c.uid = "owner"
+	c.kTool = "test-key"
+	c.sessionRoot = t.TempDir()
+	if c.initErr != nil {
+		t.Fatal(c.initErr)
+	}
+	if c.services.Has("blender") {
+		t.Fatal("disabled 内置不应登记")
+	}
+	var out strings.Builder
+	inv := func() *commands.Invocation { return &commands.Invocation{Stdout: &out} }
+	if err := c.mcpAdd(context.Background(), inv(), []string{"blender", "--tcp", "127.0.0.1:9866"}); err != nil {
+		t.Fatalf("add 覆盖项: %v", err)
+	}
+	if !c.services.Has("blender") {
+		t.Fatal("add 后未登记")
+	}
+	if err := c.mcpRemove(context.Background(), inv(), []string{"blender"}); err != nil {
+		t.Fatalf("同进程 remove 所有者覆盖项被误判: %v", err)
+	}
+	if c.services.Has("blender") {
+		t.Fatal("remove 后仍在")
+	}
+}
+
 // 配置里 disabled 的 TCP 条目也要在 mcp list 曝光（原既不 registered 也不
 // rejected，「禁用了 TCP 服务」在任何清单都不可见）。
 func TestMCPListShowsDisabledTCP(t *testing.T) {
