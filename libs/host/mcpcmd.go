@@ -22,7 +22,7 @@ const mcpManageHelp = `usage:
   mcp list [--json]                       服务清单（配置态 + 运行态）
   mcp add <alias> [--cwd DIR] [--env K=V]... [--idle DUR] [--persist] <command> [args...]
   mcp add <alias> --url <http(s)-url> [--persist]
-  mcp add <alias> --tcp <host:port> [--persist]      （vtools/tcp 行分隔 JSON 协议）
+  mcp add <alias> --tcp <host:port> [--token STR] [--persist]  （vtools/tcp 行分隔 JSON 协议）
   mcp remove <alias> [--persist]
   mcp start <alias>                       预连接（登记在 add/启动时已完成；连接本来懒惰）
   mcp stop <alias>                        断开当前连接（下次调用自动重连）
@@ -188,10 +188,10 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 
 func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []string) error {
 	var (
-		alias, rawURL, rawTCP, cwd, idle string
-		env                              = map[string]string{}
-		persist                          bool
-		positional                       []string
+		alias, rawURL, rawTCP, cwd, idle, token string
+		env                                   = map[string]string{}
+		persist                               bool
+		positional                            []string
 	)
 	for n := 0; n < len(args); n++ {
 		a := args[n]
@@ -237,6 +237,12 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 				return commands.Exitf(inv, 2, "mcp add: --env requires K=V")
 			}
 			env[k] = val
+		case "--token":
+			v, err := value()
+			if err != nil {
+				return commands.Exitf(inv, 2, "mcp add: %s", err)
+			}
+			token = v
 		case "--persist":
 			persist = true
 		default:
@@ -262,7 +268,7 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 		if cwd != "" || len(env) > 0 {
 			return commands.Exitf(inv, 2, "mcp add: --cwd/--env 仅对 command 形态有效")
 		}
-		config = mcpx.Config{URL: "tcp://" + rawTCP}
+		config = mcpx.Config{URL: "tcp://" + rawTCP, Token: token}
 	case rawURL != "":
 		if len(positional) != 1 {
 			return commands.Exitf(inv, 2, "mcp add: --url 与 command 互斥")
@@ -270,10 +276,16 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 		if cwd != "" || len(env) > 0 {
 			return commands.Exitf(inv, 2, "mcp add: --cwd/--env 仅对 command 形态有效")
 		}
+		if token != "" {
+			return commands.Exitf(inv, 2, "mcp add: --token 仅对 --tcp 形态有效")
+		}
 		config = mcpx.Config{URL: rawURL, IdleTimeout: idle}
 	default:
 		if len(positional) < 2 {
 			return commands.Exitf(inv, 2, "mcp add: 需要 <command>（或 --url/--tcp）")
+		}
+		if token != "" {
+			return commands.Exitf(inv, 2, "mcp add: --token 仅对 --tcp 形态有效")
 		}
 		config = mcpx.Config{Command: positional[1], Args: positional[2:], Cwd: cwd, Env: env, IdleTimeout: idle}
 	}

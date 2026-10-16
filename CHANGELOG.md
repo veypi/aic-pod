@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **vtools/tcp v1 增可选认证握手（2026-10-16 安全修复）**：协议规范化（docs/host-vtools.md §1.1）——服务端可要求连接首行为 `{"auth":"<token>"}`，验证通过回 `{"ok":true}`，失败回 `{"ok":false}` 并断连；要求认证的服务端对首行非 auth 的连接一律拒绝（挡住浏览器页面发往 localhost 的 HTTP/WebSocket 报文）。`vtools.NewTCP` 增 `WithToken`；`mcpx.Config` 增 `token` 字段（仅 tcp 形态），`mcp add --tcp` 支持 `--token`。**blender addon 自此强制握手**：token 取 env `AIC_BLENDER_TOKEN`（launch 透传）→ `$HOME/.aic/blender/bridge_token`（0600，O_EXCL 先建者赢，pod 与 addon 共读）——修复回环无认证暴露 `execute_code`（进程内任意 Python）的缺口。配套 addon 重写见 aic-skills 仓。
+
 - **四次评审修复·第二批（2026-10-16 交叉 review）**：RTC 流发送锁改 per-label（原全局 streamSend 单锁下，一个拥塞通道可把其余流通道阻塞到 30s 超时）；`blenderProvider` 地址改构造时钉死（原 `Addr()` 每次现算读 env，与 `sync.Once` 钉在首次调用的真实拨号地址可能不一致；AIC_BLENDER_PORT 改动自此明确需重启 pod，帮助文案已注明）；`mcp list` 补曝光配置里 `disabled: true` 的 TCP 条目（原既不 registered 也不 rejected，禁用状态完全不可见）。
 
 - **四次评审修复·第一批（2026-10-16 交叉 review）**：`TestManagedGitDeniedWithoutGrant` 适配 ssh 内建放行（改用非内建主机 gitlab.com 验拒绝路径），新增 `TestManagedGitBuiltinDeniedByOwnerRule`（所有者 `deny:github.com:22` 压过内建）；vtools 命令面区分裸 flag 与显式 `--flag=`——string 参数的空串终于能传入（原两者同映射 `raw==""`，空串永远被拒）；`registerBuiltinPacks` 改单包失败记日志跳过（原 return err → initErr，内嵌包撞名/坏清单会打挂整机），alias 排序注册消除 map 迭代序不确定性；`mcp` 帮助与 `docs/host-vtools.md` 补「内置含 blender」与「手改 config.yaml 需重启 pod」。

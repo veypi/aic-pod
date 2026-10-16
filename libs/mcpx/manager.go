@@ -33,6 +33,8 @@ type Config struct {
 	URL       string            `json:"url,omitempty" yaml:"url,omitempty"`
 	Disabled  bool              `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 	NoSandbox bool              `json:"no_sandbox,omitempty" yaml:"no_sandbox,omitempty"`
+	// Token vtools/tcp 认证握手令牌（仅 tcp 形态）：拨号后首行发 {"auth":token}。
+	Token string `json:"token,omitempty" yaml:"token,omitempty"`
 	// IdleTimeout 空闲有效期（如 "30m"）：服务启动或最后一次使用后经过该时长
 	// 无任何调用即被回收，下次调用重新懒启动。空 = 永不过期（服务随 Pod 存活）。
 	IdleTimeout string `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
@@ -85,6 +87,9 @@ func (c Config) Validate(alias string) error {
 	}
 	if (c.Command == "") == (c.URL == "") {
 		return fmt.Errorf("mcp %s: configure exactly one of command or url", alias)
+	}
+	if c.Token != "" && !c.IsTCP() {
+		return fmt.Errorf("mcp %s: token 仅对 tcp 形态有效（vtools/tcp 认证握手）", alias)
 	}
 	if c.Cwd != "" && !filepath.IsAbs(c.Cwd) {
 		return fmt.Errorf("mcp %s: cwd must be absolute", alias)

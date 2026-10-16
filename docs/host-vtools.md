@@ -40,8 +40,27 @@ type Streamer interface {                    // 可选：实时流（见 §4）
  （懒启动/空闲回收/授权中间件都在 mcpx，行为与 mcp call 一致；resolve 每次
  调用现取连接，管理器重建对已注册命令透明）。`PreviewImages` 复用
  `mcpx.PreviewToolImages`。
-- `vtools.NewTCP(host:port)`：vtools/tcp v1 行分隔 JSON 协议样例
- （`{"id":N,"method":"tools"|"call",...}`），证明接口与 MCP 解耦。
+- `vtools.NewTCP(host:port, ...WithToken)`：vtools/tcp v1 行分隔 JSON 协议
+ （见 §1.1），证明接口与 MCP 解耦。
+
+### 1.1 vtools/tcp v1 协议规范（第三方 TCP 扩展按此实现）
+
+通用轻量协议，不是某个服务的私有格式。`mcp add <alias> --tcp host:port` 即可
+接入任何按本节实现的服务。
+
+- **帧**：行分隔 JSON（UTF-8，单条 ≤16 MiB），一连接复用，应答按 `id` 对回。
+- **可选认证握手**（服务端可要求）：连接后客户端首行必须是
+ `{"auth":"<token>"}`；验证通过回 `{"ok":true}` 进入正常应答，失败回
+ `{"ok":false,"error":"…"}` 并立即断连。**要求认证的服务端对首行非合法
+ auth 的连接同样拒绝**——这同时挡住浏览器页面发往 localhost 的
+ HTTP/WebSocket 报文（它们的首行不是该 JSON）。pod 侧配置：`mcp.servers.<alias>.token`
+ 或 `mcp add --tcp ... --token`。
+- **方法**：`{"id":N,"method":"tools"}` → `{"id":N,"tools":[{"name,
+ description,inputSchema}]}`；`{"id":N,"method":"call","name":T,"arguments":{…}}`
+ → `{"id":N,"result":…}`（工具级失败加 `"isError":true`，结果保留）或
+ `{"id":N,"error":"…"}`（协议级失败）。
+- **断连语义**：连接断开使全部在途请求失败；客户端下次调用自动重拨（含重握手）。
+- 参考实现：客户端 `libs/vtools/tcp.go`；服务端 `aic-skills/blender/cli/aic_blender_bridge.py`。
 - **会话键（会话级临时授权的查找键）由 `Options.SessionOf` 注入**：命令路径取
  host 的 `execution.SessionFromContext(ctx)`，流通道开门取 `caller.Origin`
 （peer ctx 不携带会话）。本层不假设会话键挂在 ctx 上的形式，也不反向依赖执行层。
@@ -79,7 +98,7 @@ mcp list [--json]                       配置态 + 运行态（manager.Status +
                                         mcp remove 可摘除该记录）
 mcp add <alias> [--cwd D][--env K=V]... [--idle DUR] [--persist] <command> [args...]
 mcp add <alias> --url <http(s)-url> [--persist]
-mcp add <alias> --tcp <host:port> [--persist]     （落盘形态 url = tcp://host:port）
+mcp add <alias> --tcp <host:port> [--token STR] [--persist]   （落盘形态 url = tcp://host:port [+ token]）
 mcp remove <alias> [--persist]
 mcp start|stop|restart <alias>          start = 预连接；stop = 断连不摘命令
 mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样保留）
@@ -124,6 +143,11 @@ verbs 声明生命周期动词，非通用维度），程序源码随包入库�
  （自定义命令分发后透传 `Registry.RunTool`），分级报错
   blender_not_installed → blender_not_running → addon_not_connected 是产品
   功能。addon 源码 = `aic-skills/blender/cli/aic_blender_bridge.py`。
+  **addon 强制 vtools/tcp 认证握手**（§1.1）：token 取 env `AIC_BLENDER_TOKEN`
+ （launch 拉起时透传）→ `$HOME/.aic/blender/bridge_token`（0600，O_EXCL
+  先建者赢，pod 与 addon 共读）。威胁模型：防浏览器页面/跨用户本机进程
+  直连回环驱动 `execute_code`（进程内任意 Python）；同 uid 恶意本机进程
+  能读 token 文件，不在此模型内。
 - 用户第三方包的设备安装链路（拉取 + 审批 + 注册）是 v2——manifest 格式与
   注册机制已按容纳它设计。
 

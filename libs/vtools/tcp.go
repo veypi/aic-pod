@@ -11,7 +11,13 @@ import (
 	"time"
 )
 
-// TCP 行分隔 JSON 协议（vtools/tcp v1）——非 MCP 协议的样例适配器：
+// TCP 行分隔 JSON 协议（vtools/tcp v1）——面向 TCP 工具服务的通用轻量协议，
+// 非某个服务的私有格式；第三方 TCP 扩展按本节实现即可接入（mcp add --tcp）：
+//
+//	可选认证握手（服务端可要求）：连接后客户端首行必须是 {"auth":"<token>"}；
+//	验证通过服务端回 {"ok":true} 进入正常应答，失败回 {"ok":false,"error":"…"}
+//	并立即断连。要求认证的服务端对首行非 auth 的连接同样拒绝——浏览器页面
+//	发往 localhost 的 HTTP/WebSocket 报文因此无法驱动工具调用。
 //
 //	→ {"id":1,"method":"tools"}
 //	← {"id":1,"tools":[{"name":"echo","description":"…","inputSchema":{…}}]}
@@ -19,9 +25,10 @@ import (
 //	← {"id":2,"result":…,"isError":false}   或   {"id":2,"error":"…"}
 //
 // 一条连接懒建立并复用；读循环按 id 分发；连接断开使全部在途请求失败，
-// 下次调用自动重拨。调用方 ctx 只控制等待，不持有连接。
+// 下次调用自动重拨（含重握手）。调用方 ctx 只控制等待，不持有连接。
 type TCPProvider struct {
-	addr string
+	addr  string
+	token string // 非空 = 拨号后先跑认证首行
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -41,13 +48,26 @@ type tcpOutcome struct {
 	err error
 }
 
+// TCPOption 是 NewTCP 的可选配置。
+type TCPOption func(*TCPProvider)
+
+// WithToken 启用协议的可选认证握手：拨号后首行发 {"auth":token}，收到
+// {"ok":true} 才进入请求应答。
+func WithToken(token string) TCPOption {
+	return func(p *TCPProvider) { p.token = token }
+}
+
 // NewTCP 构造 TCP 适配器（addr = host:port）。
-func NewTCP(addr string) (*TCPProvider, error) {
+func NewTCP(addr string, opts ...TCPOption) (*TCPProvider, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil || host == "" || port == "" {
 		return nil, fmt.Errorf("vtools tcp: invalid address %q (want host:port)", addr)
 	}
-	return &TCPProvider{addr: addr, pending: map[int]chan tcpOutcome{}}, nil
+	p := &TCPProvider{addr: addr, pending: map[int]chan tcpOutcome{}}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p, nil
 }
 
 func (p *TCPProvider) Tools(ctx context.Context) ([]Tool, error) {
@@ -102,8 +122,14 @@ func (p *TCPProvider) roundtrip(ctx context.Context, req map[string]any) (*tcpRe
 			p.mu.Unlock()
 			return nil, fmt.Errorf("vtools tcp %s: dial: %w", p.addr, err)
 		}
+		rd := bufio.NewReader(conn)
+		if err := p.handshake(conn, rd); err != nil {
+			_ = conn.Close()
+			p.mu.Unlock()
+			return nil, err
+		}
 		p.conn = conn
-		go p.readLoop(conn)
+		go p.readLoop(conn, rd)
 	}
 	p.nextID++
 	id := p.nextID
@@ -141,8 +167,41 @@ func (p *TCPProvider) roundtrip(ctx context.Context, req map[string]any) (*tcpRe
 	}
 }
 
-func (p *TCPProvider) readLoop(conn net.Conn) {
-	scanner := bufio.NewScanner(conn)
+// handshake 执行可选认证首行（WithToken 配置时）：发 {"auth":token}，收
+// {"ok":true} 才算通。握手与 readLoop 共用一个 bufio.Reader——认证应答
+// 行之后同批到达的字节不能被握手私下吞掉。
+func (p *TCPProvider) handshake(conn net.Conn, rd *bufio.Reader) error {
+	if p.token == "" {
+		return nil
+	}
+	line, _ := json.Marshal(map[string]string{"auth": p.token})
+	if _, err := conn.Write(append(line, '\n')); err != nil {
+		return fmt.Errorf("vtools tcp %s: auth write: %w", p.addr, err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	reply, err := rd.ReadBytes('\n')
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return fmt.Errorf("vtools tcp %s: auth reply: %w", p.addr, err)
+	}
+	var ack struct {
+		OK  bool   `json:"ok"`
+		Err string `json:"error"`
+	}
+	if err := json.Unmarshal(reply, &ack); err != nil {
+		return fmt.Errorf("vtools tcp %s: auth reply is not valid JSON", p.addr)
+	}
+	if !ack.OK {
+		if ack.Err == "" {
+			ack.Err = "rejected"
+		}
+		return fmt.Errorf("vtools tcp %s: auth rejected: %s", p.addr, ack.Err)
+	}
+	return nil
+}
+
+func (p *TCPProvider) readLoop(conn net.Conn, rd *bufio.Reader) {
+	scanner := bufio.NewScanner(rd)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	for scanner.Scan() {
 		var rep struct {

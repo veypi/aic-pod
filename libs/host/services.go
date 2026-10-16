@@ -91,7 +91,7 @@ func (c *Client) registerService(name string, cfg mcpx.Config) error {
 	}
 	var p vtools.Provider
 	if cfg.IsTCP() {
-		tcp, err := vtools.NewTCP(strings.TrimPrefix(cfg.URL, "tcp://"))
+		tcp, err := vtools.NewTCP(strings.TrimPrefix(cfg.URL, "tcp://"), vtools.WithToken(cfg.Token))
 		if err != nil {
 			return fmt.Errorf("vtools %s: %w", name, err)
 		}

@@ -16,8 +16,9 @@ import (
 	"github.com/veypi/vsh/commands"
 )
 
-// fakeBlenderAddon 是 vtools/tcp v1 的假 addon：tools 回两条目录，ping 回握手，
-// echo 回显 arguments（覆盖 flag 映射经自定义命令透传到 Provider 的链路）。
+// fakeBlenderAddon 是 vtools/tcp v1 的假 addon：接受任意 auth 握手首行
+//（pod 侧总带 token），tools 回两条目录，ping 回握手，echo 回显 arguments
+//（覆盖 flag 映射经自定义命令透传到 Provider 的链路）。
 // 返回关闭函数：断 listener 与全部已接受连接（模拟 Blender 退出）。
 func fakeBlenderAddon(t *testing.T) (addr string, closeAll func()) {
 	t.Helper()
@@ -60,16 +61,24 @@ func fakeBlenderAddon(t *testing.T) (addr string, closeAll func()) {
 				defer conn.Close()
 				scanner := bufio.NewScanner(conn)
 				scanner.Buffer(make([]byte, 64<<10), 16<<20)
+				first := true
 				for scanner.Scan() {
 					var req struct {
 						ID        int            `json:"id"`
 						Method    string         `json:"method"`
 						Name      string         `json:"name"`
 						Arguments map[string]any `json:"arguments"`
+						Auth      string         `json:"auth"`
 					}
 					if json.Unmarshal(scanner.Bytes(), &req) != nil {
 						continue
 					}
+					if first && req.Auth != "" {
+						first = false
+						_, _ = conn.Write([]byte("{\"ok\":true}\n"))
+						continue
+					}
+					first = false
 					rep := map[string]any{"id": req.ID}
 					switch {
 					case req.Method == "tools":
@@ -222,6 +231,80 @@ func TestRegisterPackServiceFailureIsolated(t *testing.T) {
 	if c.services.Has("bogus") || c.services.Has("badaddr") {
 		t.Fatal("登记失败的包留下了服务")
 	}
+}
+
+// addon 认证接线：provider 的 token 来自 $HOME/.aic/blender/bridge_token
+//（与 addon 共读）；token 不对时握手被拒（错误经翻译层透出）。
+func TestBlenderProviderAuth(t *testing.T) {
+	c, _ := testClient(t)
+	_ = c
+	home, _ := os.UserHomeDir()
+	token := "tok-fixture-1"
+	dir := filepath.Join(home, ".aic", "blender")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bridge_token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addr := startTCPAuthFixtureForBlender(t, token)
+	m := &packManifest{Service: packService{URL: "tcp://" + addr}}
+	p := newBlenderProvider(m)
+	if _, err := p.Call(context.Background(), "ping", map[string]any{}); err != nil {
+		t.Fatalf("正确 token 握手失败: %v", err)
+	}
+	// token 不匹配：握手被拒
+	if err := os.WriteFile(filepath.Join(dir, "bridge_token"), []byte("wrong\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p2 := newBlenderProvider(m)
+	if _, err := p2.Call(context.Background(), "ping", map[string]any{}); err == nil {
+		t.Fatal("错误 token 未被拒")
+	}
+}
+
+// startTCPAuthFixtureForBlender 是要求认证握手的假 addon（vtools/tcp v1 §1.1）。
+func startTCPAuthFixtureForBlender(t *testing.T, token string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				scanner := bufio.NewScanner(conn)
+				if !scanner.Scan() {
+					return
+				}
+				var hello struct {
+					Auth string `json:"auth"`
+				}
+				if json.Unmarshal(scanner.Bytes(), &hello) != nil || hello.Auth != token {
+					_, _ = conn.Write([]byte(`{"ok":false,"error":"auth failed"}` + "\n"))
+					return
+				}
+				_, _ = conn.Write([]byte(`{"ok":true}` + "\n"))
+				for scanner.Scan() {
+					var req struct {
+						ID int `json:"id"`
+					}
+					if json.Unmarshal(scanner.Bytes(), &req) != nil {
+						continue
+					}
+					rep, _ := json.Marshal(map[string]any{"id": req.ID, "result": map[string]any{"ok": true}})
+					_, _ = conn.Write(append(rep, '\n'))
+				}
+			}()
+		}
+	}()
+	return listener.Addr().String()
 }
 
 // blenderProvider 地址在构造时钉死：之后改 AIC_BLENDER_PORT 不影响已登记

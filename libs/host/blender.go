@@ -7,9 +7,12 @@ package host
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -58,6 +61,52 @@ func blenderAddr(m *packManifest) string {
 	return addr
 }
 
+// blenderBridgeToken 是 addon 的认证 token（vtools/tcp 握手首行，协议见
+// libs/vtools/tcp.go）：env AIC_BLENDER_TOKEN 优先，否则
+// $HOME/.aic/blender/bridge_token（0600，O_EXCL 先建者赢）。pod 与 addon
+//（Blender 进程内）读同一文件——人工 install 路径没有 env 透传通道。
+// 威胁模型：防浏览器页面/跨用户本机进程直连 127.0.0.1:9866 驱动 execute_code；
+// 同 uid 的恶意本机进程能读该文件，不在此模型内。
+func blenderBridgeToken() (string, error) {
+	if v := os.Getenv("AIC_BLENDER_TOKEN"); v != "" {
+		return v, nil
+	}
+	dir, err := cfg.StateDir()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "blender", "bridge_token")
+	if data, err := os.ReadFile(path); err == nil {
+		if tok := strings.TrimSpace(string(data)); tok != "" {
+			return tok, nil
+		}
+	}
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(raw)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			data, rerr := os.ReadFile(path) // 并发创建：读赢家
+			if rerr != nil {
+				return "", rerr
+			}
+			return strings.TrimSpace(string(data)), nil
+		}
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(tok + "\n"); err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
 // blenderProvider TCP 适配 + 错误翻译：拨号失败 = Blender 没在跑（分级 L2）。
 // 地址在构造时钉死（AIC_BLENDER_PORT 覆盖此时读取，之后改动需重启 pod 生效）——
 // Addr() 与真实拨号地址必须同源，否则登记层的「同址不重登记」判定会失真。
@@ -78,7 +127,12 @@ func (b *blenderProvider) Addr() string { return b.addr }
 
 func (b *blenderProvider) provider() (vtools.Provider, error) {
 	b.once.Do(func() {
-		b.inner, b.err = vtools.NewTCP(b.addr)
+		token, terr := blenderBridgeToken()
+		if terr != nil {
+			b.err = terr
+			return
+		}
+		b.inner, b.err = vtools.NewTCP(b.addr, vtools.WithToken(token))
 	})
 	if b.err != nil {
 		return nil, b.err
@@ -237,7 +291,11 @@ func (c *Client) blenderDoctor(ctx context.Context, inv *commands.Invocation) er
 	_ = conn.Close()
 	fmt.Fprintf(out, "L2 ✓ addon 端口连通（%s）\n", addr)
 	// L3：握手（addon 版本与协议对得上才数）
-	tcp, err := vtools.NewTCP(addr)
+	token, err := blenderBridgeToken()
+	if err != nil {
+		return commands.Exitf(inv, 1, "blender doctor: token: %s", err)
+	}
+	tcp, err := vtools.NewTCP(addr, vtools.WithToken(token))
 	if err != nil {
 		return commands.Exitf(inv, 1, "blender doctor: %s", err)
 	}
@@ -266,7 +324,11 @@ func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) er
 	lc := m.Lifecycle
 	addr := blenderAddr(m)
 	// 幂等：addon 已在服务就直接返回
-	tcp, err := vtools.NewTCP(addr)
+	token, err := blenderBridgeToken()
+	if err != nil {
+		return commands.Exitf(inv, 1, "blender launch: token: %s", err)
+	}
+	tcp, err := vtools.NewTCP(addr, vtools.WithToken(token))
 	if err == nil {
 		if _, err := tcp.Call(ctx, "ping", map[string]any{}); err == nil {
 			fmt.Fprintf(out, "blender 已在运行（%s）\n", addr)
@@ -308,9 +370,10 @@ func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) er
 	}
 	// 拉起 GUI（桌面应用，与 browser/cua 同口径不经沙箱；detached，不随 pod 退出）
 	cmd := spawnDetached(exe, "--python", bootPath)
+	cmd.Env = append(os.Environ(), "AIC_BLENDER_TOKEN="+token)
 	if lc.PortEnv != "" {
 		if v := os.Getenv(lc.PortEnv); v != "" {
-			cmd.Env = append(os.Environ(), lc.PortEnv+"="+v)
+			cmd.Env = append(cmd.Env, lc.PortEnv+"="+v)
 		}
 	}
 	status := map[string]any{"exe": exe, "boot": bootPath, "addr": addr, "at": time.Now().Format(time.RFC3339)}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -221,6 +222,90 @@ func TestTCPCloseFailsInflight(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("in-flight call hung after Close")
+	}
+}
+
+// startTCPAuthFixture 是要求认证握手的服务端：首行必须是 {"auth":token}，
+// 通过回 {"ok":true}；否则回 {"ok":false,...} 并断连（含「首行是 HTTP 报文」
+// 的浏览器直连场景——无法驱动工具调用）。
+func startTCPAuthFixture(t *testing.T, token string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				scanner := bufio.NewScanner(conn)
+				if !scanner.Scan() {
+					return
+				}
+				var hello struct {
+					Auth string `json:"auth"`
+				}
+				if json.Unmarshal(scanner.Bytes(), &hello) != nil || hello.Auth != token {
+					_, _ = conn.Write([]byte(`{"ok":false,"error":"auth failed"}` + "\n"))
+					return
+				}
+				_, _ = conn.Write([]byte(`{"ok":true}` + "\n"))
+				for scanner.Scan() {
+					var req struct {
+						ID     int    `json:"id"`
+						Method string `json:"method"`
+					}
+					if json.Unmarshal(scanner.Bytes(), &req) != nil {
+						continue
+					}
+					rep, _ := json.Marshal(map[string]any{"id": req.ID, "result": map[string]any{"ok": true}})
+					_, _ = conn.Write(append(rep, '\n'))
+				}
+			}()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+func TestTCPAuthHandshake(t *testing.T) {
+	addr := startTCPAuthFixture(t, "s3cret")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// 正确 token：握手后正常调用
+	p, err := NewTCP(addr, WithToken("s3cret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if _, err := p.Call(ctx, "ping", map[string]any{}); err != nil {
+		t.Fatalf("auth + call: %v", err)
+	}
+	// 错误 token：被拒
+	bad, err := NewTCP(addr, WithToken("wrong"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bad.Close()
+	if _, err := bad.Call(ctx, "ping", map[string]any{}); err == nil || !strings.Contains(err.Error(), "auth rejected") {
+		t.Fatalf("wrong token must be rejected: %v", err)
+	}
+	// 无 token：服务端要求认证，握手缺省 = 首行请求被拒
+	plain, err := NewTCP(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if _, err := plain.Call(ctx, "ping", map[string]any{}); err == nil {
+		t.Fatal("token-less client must fail against auth-required server")
+	}
+	// 握手失败后能重拨重试（failConn 不钉死）
+	if _, err := bad.Call(ctx, "ping", map[string]any{}); err == nil {
+		t.Fatal("retry with wrong token must still fail")
 	}
 }
 
