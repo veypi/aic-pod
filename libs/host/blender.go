@@ -238,7 +238,8 @@ const blenderHelp = `usage:
   blender install                把 addon 写进 Blender addons 目录（人工启用路径）
   blender <tool> [flags]         工具调用（<tool> --help 看参数表）
 
-工具面：ping / get_scene_info / get_object_info / execute_code / get_viewport_screenshot。
+工具面：ping / get_scene_info / get_object_info / execute_code / get_viewport_screenshot / render。
+细节（脚本工作流、看图两条路、实测坑）以 aic-skills/blender 的 SKILL.md 为准。
 长渲染/批量几何走 exec 原生无头（grant cmd blender 后 blender -b --python …）。
 AIC_BLENDER_PORT / AIC_BLENDER_EXE 改动需重启 pod 生效（地址在登记时钉死）。`
 

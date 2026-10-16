@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **blender 工具面跟到 addon 0.3.0（2026-10-16）**：`blender --help` 的工具清单补 `render`（渲一帧 PNG 落盘，支持临时机位/引擎/采样/裁剪面并渲完还原）与 `execute_code --file` 提示，细节指向 aic-skills 手册。addon 与手册本体在 aic-skills 仓（blender 0.2.1→0.3.0），pod 经内嵌包分发，**需重建 pod 才生效**。
+
 - **blender launch 就绪探测补 token（2026-10-16 真机验收修复）**：launch 拉起 GUI 后轮询 ping 的 probe 漏了 `vtools.WithToken`——addon 已强制认证首行，裸连接只会拿到 `auth failed`，于是冷启动必然等满超时并报「addon 未就绪」（实测 addon ~1s 就通了，紧接着 `blender doctor` L3 ✓）。probe 改带 token；等待上限提为 `blenderReadyTimeout = 60s`（实测冷启动到握手 ~1s，余量留给首次启动/磁盘冷缓存），超时文案补「先 `blender doctor` 复查」指引。
 
 - **四次评审修复·第四批（2026-10-16）**：`mcp add/remove` 同步刷新内存配置（`ownerConfigured` 判定源）——原只落盘不刷新，同进程内 add 了内置同名覆盖项后 remove 被误判「内置服务不可移除」。
