@@ -55,7 +55,7 @@ func newFixture(t *testing.T, gate Gate) (*Registry, *fakeProvider) {
 		},
 		result: map[string]any{"ok": true},
 	}
-	r := NewRegistry(commands.NewRegistry(), gate, nil)
+	r := NewRegistry(commands.NewRegistry(), Options{Gate: gate})
 	if err := r.Register("echo", p); err != nil {
 		t.Fatal(err)
 	}
@@ -91,12 +91,31 @@ func TestCommandCatalog(t *testing.T) {
 }
 
 func TestCommandGateDeny(t *testing.T) {
-	r, _ := newFixture(t, func(context.Context, string) error {
+	r, _ := newFixture(t, func(context.Context, string, string) error {
 		return fmt.Errorf("denied by exec rules; request grant cmd mcp.echo")
 	})
 	_, _, err := run(t, r, "echo", "ping")
 	if exitCode(err) != 126 || !strings.Contains(err.Error(), "denied by exec rules") {
 		t.Fatalf("gate: %v", err)
+	}
+}
+
+// 命令路径的会话键来自注入的 Options.SessionOf（vtools 不反向依赖执行层）：
+// 键取错会让会话级 grant cmd 在锁死的设备上静默失效。
+func TestCommandGateSessionFromSessionOf(t *testing.T) {
+	var got string
+	r := NewRegistry(commands.NewRegistry(), Options{
+		Gate:      func(_ context.Context, session, _ string) error { got = session; return nil },
+		SessionOf: func(context.Context) string { return "s-42" },
+	})
+	if err := r.Register("echo", &fakeProvider{result: map[string]any{"ok": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := run(t, r, "echo", "ping"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "s-42" {
+		t.Fatalf("gate session = %q, want Options.SessionOf", got)
 	}
 }
 
@@ -115,6 +134,27 @@ func TestCommandFlagMapping(t *testing.T) {
 	}
 	if got := p.calls[1].args["maybe"]; got != "yo" {
 		t.Fatalf("nullable string: %+v", got)
+	}
+}
+
+// --flag= 显式空串必须能传给 string 参数（解析层曾把 --flag= 与裸 flag
+// 同映射为 raw==""，空串永远传不进去）；裸 --flag 仍报错。
+func TestCommandEmptyStringFlag(t *testing.T) {
+	r, p := newFixture(t, nil)
+	if _, _, err := run(t, r, "echo", "echo", "--text="); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := p.calls[0].args["text"]; !ok || got != "" {
+		t.Fatalf("--text= 应传空串: %+v", p.calls[0].args)
+	}
+	if _, _, err := run(t, r, "echo", "echo", "--maybe="); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.calls[1].args["maybe"]; got != "" {
+		t.Fatalf("--maybe= 应传空串: %+v", p.calls[1].args)
+	}
+	if _, _, err := run(t, r, "echo", "echo", "--text"); exitCode(err) != 2 || !strings.Contains(err.Error(), "requires a value") {
+		t.Fatalf("裸 string flag 仍应报错: %v", err)
 	}
 }
 
@@ -182,10 +222,14 @@ func TestCommandCallErrorRendersResult(t *testing.T) {
 	}
 }
 
-func TestCommandPreviewUnsupported(t *testing.T) {
-	r, _ := newFixture(t, nil)
+// --image-preview 支持性检查必须先于调用（不支持的 Provider 不应真跑工具）。
+func TestCommandPreviewPrecheckBeforeCall(t *testing.T) {
+	r, p := newFixture(t, nil)
 	if _, _, err := run(t, r, "echo", "ping", "--image-preview", "1280x720"); exitCode(err) != 2 || !strings.Contains(err.Error(), "不支持 --image-preview") {
 		t.Fatalf("preview gate: %v", err)
+	}
+	if len(p.calls) != 0 {
+		t.Fatalf("unsupported preview still executed the tool: %+v", p.calls)
 	}
 }
 
@@ -272,6 +316,19 @@ func (s *fakeStreamer) Stream(context.Context, protocol.Caller, <-chan []byte, f
 	return nil
 }
 
+// RegisterCustom 的 cmd.Name() 必须等于 alias（vsh 以 Name 为键、Unregister
+// 按 alias 摘，不一致会永久驻留）。
+func TestRegistryCustomNameMismatch(t *testing.T) {
+	r, _ := newFixture(t, nil)
+	cmd := commands.DefineCommand("other-name", func(context.Context, *commands.Invocation) error { return nil })
+	if err := r.RegisterCustom("svc", &fakeProvider{}, cmd); err == nil {
+		t.Fatal("name mismatch accepted")
+	}
+	if r.Has("svc") {
+		t.Fatal("rejected RegisterCustom left an entry")
+	}
+}
+
 // stream channel 标签撞名即拒（登记侧防护；Unregister 只摘自己的映射）。
 func TestRegistryStreamChannelCollision(t *testing.T) {
 	r, _ := newFixture(t, nil)
@@ -308,7 +365,8 @@ func TestRegistryStreamChannelCollision(t *testing.T) {
 
 func TestRegistryStreamHandler(t *testing.T) {
 	gated := false
-	r, _ := newFixture(t, func(context.Context, string) error { gated = true; return nil })
+	var gateSession string
+	r, _ := newFixture(t, func(_ context.Context, session, _ string) error { gated = true; gateSession = session; return nil })
 	s := &fakeStreamer{channel: "aic-echo"}
 	if err := r.RegisterStream("echo", s); err != nil {
 		t.Fatal(err)
@@ -317,11 +375,16 @@ func TestRegistryStreamHandler(t *testing.T) {
 	if !ok {
 		t.Fatal("stream channel not registered")
 	}
-	if err := relay(context.Background(), protocol.Caller{}, nil, nil); err != nil {
+	if err := relay(context.Background(), protocol.Caller{Origin: "s1"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !gated {
 		t.Fatal("stream open bypassed the gate")
+	}
+	// 流通道开门的会话键 = caller.Origin（peer ctx 不携带会话；用错键会让
+	// 会话级 grant cmd 在锁死设备上静默失效）
+	if gateSession != "s1" {
+		t.Fatalf("stream gate session = %q, want caller.Origin", gateSession)
 	}
 	if _, ok := r.StreamHandler("aic-other"); ok {
 		t.Fatal("unknown channel resolved")

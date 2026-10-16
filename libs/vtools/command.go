@@ -100,11 +100,12 @@ func (d *schemaDoc) required(name string) bool {
 	return false
 }
 
-// convertFlag 把 flag 原文按 schema 类型转换；raw 为空串 = 裸 flag（仅布尔合法）。
-func convertFlag(name, raw string, prop schemaProp) (any, error) {
+// convertFlag 把 flag 原文按 schema 类型转换。explicit 区分「--flag=」
+//（显式空值）与裸 flag：string 类型的显式空串合法，裸 flag 仅布尔合法。
+func convertFlag(name, raw string, explicit bool, prop schemaProp) (any, error) {
 	switch typ := scalarType(prop.Type); typ {
 	case "boolean":
-		if raw == "" {
+		if raw == "" && !explicit {
 			return true, nil
 		}
 		v, err := strconv.ParseBool(raw)
@@ -131,8 +132,8 @@ func convertFlag(name, raw string, prop schemaProp) (any, error) {
 		}
 		return v, nil
 	case "string":
-		if raw == "" {
-			return nil, fmt.Errorf("flag --%s requires a value（空串用 --%s=''）", name, name)
+		if raw == "" && !explicit {
+			return nil, fmt.Errorf("flag --%s requires a value（空串写 --%s=）", name, name)
 		}
 		return raw, nil
 	default:
@@ -255,7 +256,8 @@ func (r *Registry) commandFunc(alias string) commands.CommandFunc {
 // 自定义命令（生命周期动词）在动词分发后把原始参数透传到这里。
 func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias string) error {
 	if r.gate != nil {
-		if err := r.gate(ctx, alias); err != nil {
+		// 会话键取自注入的 SessionOf（host = execution.SessionFromContext）。
+		if err := r.gate(ctx, r.sessionOf(ctx), alias); err != nil {
 			return commands.Exitf(inv, 126, "%s", err)
 		}
 	}
@@ -274,10 +276,11 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 		jsonOut    bool
 		preview    string
 		help       bool
-		flagValues = map[string]string{}
-		flagNames  []string
+		flagValues   = map[string]string{}
+		flagExplicit = map[string]bool{} // 显式给值（--flag=v / --flag v / --flag=）vs 裸 flag
+		flagNames    []string
 	)
-	recordFlag := func(name, value string) error {
+	recordFlag := func(name, value string, explicit bool) error {
 		if name == "" {
 			return fmt.Errorf("invalid flag")
 		}
@@ -285,6 +288,7 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 			flagNames = append(flagNames, name)
 		}
 		flagValues[name] = value
+		flagExplicit[name] = explicit
 		return nil
 	}
 	args := inv.Args
@@ -310,16 +314,16 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 		case strings.HasPrefix(a, "--"):
 			body := strings.TrimPrefix(a, "--")
 			if i := strings.IndexByte(body, '='); i >= 0 {
-				if err := recordFlag(body[:i], body[i+1:]); err != nil {
+				if err := recordFlag(body[:i], body[i+1:], true); err != nil {
 					return commands.Exitf(inv, 2, "%s: %s", alias, err)
 				}
 			} else if n+1 < len(args) && !strings.HasPrefix(args[n+1], "--") {
-				if err := recordFlag(body, args[n+1]); err != nil {
+				if err := recordFlag(body, args[n+1], true); err != nil {
 					return commands.Exitf(inv, 2, "%s: %s", alias, err)
 				}
 				n++
 			} else {
-				if err := recordFlag(body, ""); err != nil {
+				if err := recordFlag(body, "", false); err != nil {
 					return commands.Exitf(inv, 2, "%s: %s", alias, err)
 				}
 			}
@@ -407,12 +411,23 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 				sort.Strings(mappable)
 				return commands.Exitf(inv, 2, "%s: unknown flag --%s（可映射: %s；其余走 --input）", alias, name, strings.Join(mappable, " "))
 			}
-			value, err := convertFlag(name, flagValues[name], prop)
+			value, err := convertFlag(name, flagValues[name], flagExplicit[name], prop)
 			if err != nil {
 				return commands.Exitf(inv, 2, "%s: %s", alias, err)
 			}
 			callArgs[name] = value
 		}
+	}
+
+	// --image-preview 的支持性检查必须先于调用：不支持的 Provider 不能先真跑
+	// 完工具（副作用已落地）再报错。
+	var previewer ImagePreviewer
+	if preview != "" {
+		pv, ok := p.(ImagePreviewer)
+		if !ok {
+			return commands.Exitf(inv, 2, "%s: 该服务不支持 --image-preview", alias)
+		}
+		previewer = pv
 	}
 
 	result, err := p.Call(ctx, tool, callArgs)
@@ -427,10 +442,6 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 		return commands.Exitf(inv, 1, "%s: %s", alias, err)
 	}
 	if preview != "" {
-		previewer, ok := p.(ImagePreviewer)
-		if !ok {
-			return commands.Exitf(inv, 2, "%s: 该服务不支持 --image-preview", alias)
-		}
 		if result, err = previewer.PreviewImages(result, preview); err != nil {
 			return commands.Exitf(inv, 1, "%s: %s", alias, err)
 		}

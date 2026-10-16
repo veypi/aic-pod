@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
@@ -336,11 +337,40 @@ func TestManagedGitFallthrough(t *testing.T) {
 	}
 }
 
+// TestManagedGitDeniedWithoutGrant 用非内建主机验证拒绝路径（github.com:22
+// 已是 ssh 域内建放行，见 permissions.go sshBuiltin，不能再用它验拒绝）。
 func TestManagedGitDeniedWithoutGrant(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed git 未接入 windows")
 	}
 	c, wd := gitTestClient(t)
+	var out, errOut strings.Builder
+	inv := &commands.Invocation{
+		Args: []string{"clone", "git@gitlab.com:veypi/aic.git"},
+		Cwd:  wd, Stdout: &out, Stderr: &errOut,
+	}
+	handled, err := c.managedGit(context.Background(), inv)
+	if !handled {
+		t.Fatal("ssh 传输未接管")
+	}
+	if code, _ := commands.ExitCode(err); code != 126 {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	if !strings.Contains(errOut.String(), "grant ssh gitlab.com:22") {
+		t.Fatalf("拒绝文案缺 grant 指引: %q", errOut.String())
+	}
+}
+
+// TestManagedGitBuiltinDeniedByOwnerRule 内建放行 github.com:22 可被所有者
+// cfg deny 行压过（排表 temp grant → cfg 规则 → 内建，首命中）。
+func TestManagedGitBuiltinDeniedByOwnerRule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed git 未接入 windows")
+	}
+	withGlobal(t, nil)
+	c, wd := gitTestClient(t)
+	cfg.Global.SshRules = []string{"deny:github.com:22"}
+	publishGlobal(t, c.perms)
 	var out, errOut strings.Builder
 	inv := &commands.Invocation{
 		Args: []string{"clone", "git@github.com:veypi/aic.git"},
@@ -351,7 +381,7 @@ func TestManagedGitDeniedWithoutGrant(t *testing.T) {
 		t.Fatal("ssh 传输未接管")
 	}
 	if code, _ := commands.ExitCode(err); code != 126 {
-		t.Fatalf("code=%d err=%v", code, err)
+		t.Fatalf("所有者 deny 未压过内建放行: code=%d err=%v", code, err)
 	}
 	if !strings.Contains(errOut.String(), "grant ssh github.com:22") {
 		t.Fatalf("拒绝文案缺 grant 指引: %q", errOut.String())

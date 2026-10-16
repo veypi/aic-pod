@@ -10,6 +10,7 @@ import (
 
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/libs/vtools"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -32,7 +33,8 @@ const mcpManageHelp = `usage:
 （<alias> 无参列工具目录，<alias> <tool> --help 看参数表）。
 add/remove 引入新能力/改配置，需要 exec 规则放行：grant cmd mcp。
 --persist 写 config.yaml（重启后仍在）；不带则进程级，重启失效。
-内置 browser/cua 不可经 remove 移除（要禁用请在配置文件设 disabled: true）。`
+内置 browser/cua/blender 不可经 remove 移除（要禁用请在配置文件设 disabled: true）。
+手改 config.yaml 需重启 pod 生效；运行期增删请用 mcp add/remove（--persist 才落盘）。`
 
 func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
 	args := inv.Args
@@ -62,7 +64,7 @@ func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
 		if len(rest) != 1 {
 			return commands.Exitf(inv, 2, "usage: mcp %s <alias>", op)
 		}
-		if err := c.mcpGate(ctx, rest[0]); err != nil {
+		if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), rest[0]); err != nil {
 			return commands.Exitf(inv, 126, "%s", err)
 		}
 		return c.mcpStartStop(ctx, inv, op, rest[0])
@@ -103,6 +105,7 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 	}
 	rows := []mcpListRow{}
 	seen := map[string]bool{}
+	rejected := c.serviceRejections()
 	if manager := c.mcpManager(); manager != nil {
 		for _, s := range manager.Status() {
 			seen[s.Name] = true
@@ -115,16 +118,37 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 			case s.Starting:
 				state = "starting"
 			}
-			rows = append(rows, mcpListRow{Name: s.Name, Kind: "mcp", State: state, Idle: s.IdleTimeout, Inflight: s.Inflight, Err: s.Err})
+			errText := s.Err
+			// 管理器有条目但命令面登记失败（撞名/地址无效）：rejected 优先
+			if rej, bad := rejected[s.Name]; bad {
+				state, errText = "rejected", rej.reason
+			}
+			rows = append(rows, mcpListRow{Name: s.Name, Kind: "mcp", State: state, Idle: s.IdleTimeout, Inflight: s.Inflight, Err: errText})
 		}
 	}
-	// TCP 条目不走连接管理器：已登记即“registered”（连接懒惰）。
+	// TCP 条目不走连接管理器：已登记即“registered”。kind 按 provider 实际
+	// 类型标（manager 失配时不误标 tcp）。
 	if c.services != nil {
 		for _, alias := range c.services.Aliases() {
-			if !seen[alias] {
-				rows = append(rows, mcpListRow{Name: alias, Kind: "tcp", State: "registered"})
+			if seen[alias] {
+				continue
 			}
+			kind := "tcp"
+			if p, ok := c.services.Lookup(alias); ok {
+				if _, isMCP := p.(*vtools.MCPProvider); isMCP {
+					kind = "mcp"
+				}
+			}
+			rows = append(rows, mcpListRow{Name: alias, Kind: kind, State: "registered"})
 		}
+	}
+	// 登记失败的条目：配置还在、命令面没有（TCP 形态不进管理器，这里补行；
+	// MCP 形态已在上面按 rejected 覆盖）。
+	for name, rej := range rejected {
+		if seen[name] {
+			continue
+		}
+		rows = append(rows, mcpListRow{Name: name, Kind: rej.kind, State: "rejected", Err: rej.reason})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	if jsonOut {
@@ -223,10 +247,16 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 		if idle != "" {
 			return commands.Exitf(inv, 2, "mcp add: --idle 对 TCP 服务无效（连接懒惰，无空闲回收）")
 		}
-		config = mcpx.Config{URL: "tcp://" + rawTCP, IdleTimeout: idle}
+		if cwd != "" || len(env) > 0 {
+			return commands.Exitf(inv, 2, "mcp add: --cwd/--env 仅对 command 形态有效")
+		}
+		config = mcpx.Config{URL: "tcp://" + rawTCP}
 	case rawURL != "":
 		if len(positional) != 1 {
 			return commands.Exitf(inv, 2, "mcp add: --url 与 command 互斥")
+		}
+		if cwd != "" || len(env) > 0 {
+			return commands.Exitf(inv, 2, "mcp add: --cwd/--env 仅对 command 形态有效")
 		}
 		config = mcpx.Config{URL: rawURL, IdleTimeout: idle}
 	default:
@@ -252,12 +282,11 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 			return commands.Exitf(inv, 1, "mcp add: %s", err)
 		}
 	}
-	c.registerService(alias, config)
-	if !c.services.Has(alias) {
+	if err := c.registerService(alias, config); err != nil {
 		if manager != nil {
 			_ = manager.Remove(ctx, alias) // 回滚：不留「管理器有、命令面没有」的半登记状态
 		}
-		return commands.Exitf(inv, 1, "mcp add: %s 注册 vsh 命令失败（撞名或配置无效），已回滚", alias)
+		return commands.Exitf(inv, 1, "mcp add: %s，已回滚", err)
 	}
 	if persist {
 		if err := c.persistMCPServer(alias, &config); err != nil {
@@ -296,7 +325,10 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 		}
 	}
 	if c.services == nil || !c.services.Has(alias) {
-		if !persist {
+		// 登记失败的条目（mcp list 的 rejected 行）：摘掉曝光记录；否则是未知服务
+		if _, rejected := c.serviceRejections()[alias]; rejected {
+			c.clearServiceRejection(alias)
+		} else if !persist {
 			return commands.Exitf(inv, 1, "mcp remove: unknown service %q", alias)
 		}
 	} else {

@@ -7,6 +7,12 @@
 
 ## Unreleased
 
+- **四次评审修复·第一批（2026-10-16 交叉 review）**：`TestManagedGitDeniedWithoutGrant` 适配 ssh 内建放行（改用非内建主机 gitlab.com 验拒绝路径），新增 `TestManagedGitBuiltinDeniedByOwnerRule`（所有者 `deny:github.com:22` 压过内建）；vtools 命令面区分裸 flag 与显式 `--flag=`——string 参数的空串终于能传入（原两者同映射 `raw==""`，空串永远被拒）；`registerBuiltinPacks` 改单包失败记日志跳过（原 return err → initErr，内嵌包撞名/坏清单会打挂整机），alias 排序注册消除 map 迭代序不确定性；`mcp` 帮助与 `docs/host-vtools.md` 补「内置含 blender」与「手改 config.yaml 需重启 pod」。
+
+- **三次评审修复（2026-10-16 交叉 review 收口）**：服务 alias 命名空间收口——登记失败（撞平台命令名/地址无效）不再只进日志：`mcp list` 以 `state=rejected` + 原因曝光，`mcp remove` 可摘除该记录；`vtools.Gate` 的会话键改由 `Options.SessionOf` 注入（host 传 `execution.SessionFromContext`），去掉 vtools→execution 的反向依赖；换型/换址判定改按 `vtools.AddrProvider` 接口，`blenderProvider`（TCP 后端包装）不再被误判成非 TCP 服务；契约同步 `docs/host-vtools.md`。
+
+- **二次评审修复（2026-10-16 交叉 review）**：装配顺序对调——平台命令先于服务登记占位（原顺序下 config.yaml 里服务 alias 撞平台命令名会在平台命令注册处炸 initErr，整机 Connect 失败离线）；`vtools.Gate` 增显式 session 参数——流通道开门传 `caller.Origin`（原用 peer ctx 取会话恒为空串，锁死设备 `exec_policy: deny` 下实时画面被开门误拒、relay 内的正确复查无机会执行）；`registerService` 补 TCP↔MCP 换型重登记（原漏判 TCP→MCP，旧 TCP provider 钉旧地址继续服务）并返回 error（`mcp add` 报错透出真实原因）；`RegisterStream` 换标签先摘旧映射；`RegisterCustom` 断言 `cmd.Name() == alias`；`--image-preview` 支持性检查前移到调用前（不支持的 Provider 不再先真跑工具）；`mcp add --tcp/--url` 拒收静默丢弃的 `--cwd/--env`；`mcp list` kind 按 provider 实际类型标注；`StreamHandler` 条目判空加固。
+
 - **评审修复（2026-10-16 code review）**：`vtools.TCPProvider` 连接代际竞态——`fail` 改 `failConn` 身份校验，Close/断线后旧 readLoop 的迟到收尾不再误杀重拨的新连接，Close 自身使在途请求立即失败（原只能等 ctx 超时）；vtools 登记表 stream channel 标签撞名即拒（原静默覆盖，且 Unregister 会误删他人映射）；技能包版本目录「取最新」改自然序（字典序下 Blender 4.10 < 4.2 会选错）；`mcpx.ErrUnknownService` 哨兵错误替代字符串匹配；`mcp add --tcp` 拒收无效的 `--idle`；工具参数表标注被命令面保留字（--json/--input/--image-preview/--help）遮蔽的同名参数。
 
 - **ssh 域内建放行 `github.com:22`**（2026-10-16）：git over ssh 是最高频托管 ssh 目标，不再要求每会话 `grant ssh github.com:22`。内建行排在快照表尾（temp grant → cfg 规则 → 内建 → policy 默认），首命中语义下所有者 `deny:github.com:22` 配置行仍可压过它。与 net 域内建 `localhost:*` 同一机制（`libs/host/permissions.go`）。

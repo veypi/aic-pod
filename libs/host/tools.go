@@ -27,20 +27,22 @@ func (c *Client) initTools() {
 		return
 	}
 	// vtools 登记表先于 configureMCP 创建：服务（MCP/TCP）登记为 vsh 根命令。
-	c.services = vtools.NewRegistry(reg, c.mcpGate, c.logf)
-	c.initErr = c.configureMCP(c.options().MCP)
-	if c.initErr != nil {
-		return
-	}
-	// 内嵌技能包的非 MCP 服务（blender：TCP 通道 + 生命周期动词）。
-	c.initErr = c.registerBuiltinPacks()
-	if c.initErr != nil {
-		return
-	}
+	// SessionOf 注入执行层的会话键取法（vtools 不反向依赖 execution）。
+	c.services = vtools.NewRegistry(reg, vtools.Options{Gate: c.mcpGate, SessionOf: execution.SessionFromContext, Logf: c.logf})
+	// 平台命令先占位（RegisterGuarded 撞名即拒）：之后服务登记撞名只会被
+	// 拒并记日志跳过；反过来（服务先登记）会让撞名的平台命令注册失败、
+	// initErr 直接打挂整机（Connect 返回 initErr）。
 	c.vsh.engine, c.initErr = c.buildVSHEngine(reg)
 	if c.initErr != nil {
 		return
 	}
+	c.initErr = c.configureMCP(c.options().MCP)
+	if c.initErr != nil {
+		return
+	}
+	// 内嵌技能包的非 MCP 服务（blender：TCP 通道 + 生命周期动词）。单包失败
+	// 只记日志跳过，不占 initErr（撞名/坏包不能打挂整机）。
+	c.registerBuiltinPacks()
 }
 
 // DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务继续，

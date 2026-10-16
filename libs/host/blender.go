@@ -14,11 +14,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/vtools"
 	"github.com/veypi/vsh/commands"
 )
@@ -69,6 +71,10 @@ func newBlenderProvider(m *packManifest) *blenderProvider {
 	return &blenderProvider{addr: func() string { return blenderAddr(m) }}
 }
 
+// Addr 返回 addon 端点（vtools.AddrProvider）：登记层据此判定已登记服务是不是
+// 同一个 TCP 端点（换型/换址即摘除重登记）。
+func (b *blenderProvider) Addr() string { return b.addr() }
+
 func (b *blenderProvider) provider() (vtools.Provider, error) {
 	b.once.Do(func() {
 		b.inner, b.err = vtools.NewTCP(b.addr())
@@ -110,46 +116,64 @@ func (b *blenderProvider) Call(ctx context.Context, tool string, args map[string
 
 // registerBuiltinPacks 注册内嵌包里的非 MCP 服务（当前 = blender 的 TCP 通道
 // + 生命周期动词）。所有者 mcp.servers.<alias> 同名配置整体替换内置项。
-func (c *Client) registerBuiltinPacks() error {
+// 单包失败只记日志跳过（与 syncServiceRegistrations 同口径）：内嵌包的 alias
+// 撞名/kind 非法/地址无效都不能拖垮整机。alias 排序后注册——同 channel
+// 撞名时先到先得，排序保证结果与 map 迭代顺序无关。
+func (c *Client) registerBuiltinPacks() {
 	packs, err := builtinPacks()
 	if err != nil {
-		return err
+		c.logf("builtin packs unavailable（内嵌服务不登记，pod 照常运行）: %v", err)
+		return
 	}
-	for alias, m := range packs {
+	aliases := make([]string, 0, len(packs))
+	for alias := range packs {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		m := packs[alias]
 		if m.Service.Kind == "mcp-stdio" {
 			continue // configureMCP 已覆盖
 		}
 		if c.ownerConfigured(alias) || c.services.Has(alias) {
 			continue
 		}
-		switch m.Service.Kind {
-		case "tcp":
-			var p vtools.Provider
-			cmd := commands.Command(nil)
-			// verbs 是 blender 包的私有扩展（契约已收窄，不是通用 manifest 维度）
-			if len(m.Verbs) > 0 && alias == "blender" {
-				p = newBlenderProvider(m)
-				cmd = commands.DefineCommand(alias, c.blenderCommand(alias))
-			} else {
-				tcp, err := vtools.NewTCP(blenderAddr(m))
-				if err != nil {
-					return fmt.Errorf("pack %s: %w", alias, err)
-				}
-				p = tcp
-			}
-			if cmd != nil {
-				err = c.services.RegisterCustom(alias, p, cmd)
-			} else {
-				err = c.services.Register(alias, p)
-			}
+		if err := c.registerPackService(alias, m); err != nil {
+			c.logf("%v", err)
+		}
+	}
+}
+
+// registerPackService 登记单个内嵌包的非 MCP 服务。
+func (c *Client) registerPackService(alias string, m *packManifest) error {
+	switch m.Service.Kind {
+	case "tcp":
+		var p vtools.Provider
+		cmd := commands.Command(nil)
+		// verbs 是 blender 包的私有扩展（契约已收窄，不是通用 manifest 维度）
+		if len(m.Verbs) > 0 && alias == "blender" {
+			p = newBlenderProvider(m)
+			cmd = commands.DefineCommand(alias, c.blenderCommand(alias))
+		} else {
+			tcp, err := vtools.NewTCP(blenderAddr(m))
 			if err != nil {
 				return fmt.Errorf("pack %s: %w", alias, err)
 			}
-		default:
-			return fmt.Errorf("pack %s: unknown service kind %q", alias, m.Service.Kind)
+			p = tcp
 		}
+		var err error
+		if cmd != nil {
+			err = c.services.RegisterCustom(alias, p, cmd)
+		} else {
+			err = c.services.Register(alias, p)
+		}
+		if err != nil {
+			return fmt.Errorf("pack %s: %w", alias, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("pack %s: unknown service kind %q", alias, m.Service.Kind)
 	}
-	return nil
 }
 
 const blenderHelp = `usage:
@@ -229,7 +253,7 @@ func (c *Client) blenderDoctor(ctx context.Context, inv *commands.Invocation) er
 // ---- launch ----
 
 func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) error {
-	if err := c.mcpGate(ctx, "blender"); err != nil {
+	if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), "blender"); err != nil {
 		return commands.Exitf(inv, 126, "%s", err)
 	}
 	out := inv.Stdout
@@ -330,7 +354,7 @@ func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) er
 // ---- install ----
 
 func (c *Client) blenderInstall(ctx context.Context, inv *commands.Invocation) error {
-	if err := c.mcpGate(ctx, "blender"); err != nil {
+	if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), "blender"); err != nil {
 		return commands.Exitf(inv, 126, "%s", err)
 	}
 	out := inv.Stdout

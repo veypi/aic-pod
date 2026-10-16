@@ -21,6 +21,15 @@ type ImagePreviewer interface {              // 可选：--image-preview（MCP �
     PreviewImages(result any, size string) (any, error)
 }
 
+type AddrProvider interface {                // 可选：有明确 TCP 端点（换型/换址判定用）
+    Addr() string                            // TCPProvider、以及宿主在它之上的包装
+}
+
+type Gate func(ctx, session, alias string) error  // 调用门：session = 会话键（见下）
+type Options struct {                        // 登记表装配：Gate / SessionOf / Logf
+    SessionOf func(context.Context) string   // 命令路径取会话键（host 注入；见下）
+}
+
 type Streamer interface {                    // 可选：实时流（见 §4）
     StreamChannel() string                   // RTC DataChannel 标签，如 "aic-browser"
     Stream(ctx, caller, input <-chan []byte, send func([]byte) error) error
@@ -33,12 +42,24 @@ type Streamer interface {                    // 可选：实时流（见 §4）
  `mcpx.PreviewToolImages`。
 - `vtools.NewTCP(host:port)`：vtools/tcp v1 行分隔 JSON 协议样例
  （`{"id":N,"method":"tools"|"call",...}`），证明接口与 MCP 解耦。
+- **会话键（会话级临时授权的查找键）由 `Options.SessionOf` 注入**：命令路径取
+ host 的 `execution.SessionFromContext(ctx)`，流通道开门取 `caller.Origin`
+（peer ctx 不携带会话）。本层不假设会话键挂在 ctx 上的形式，也不反向依赖执行层。
 
 ## 2. 注册进 vsh
 
 - 每个服务 alias 经 `RegisterGuarded` 注册一个根命令；**撞名即拒**（不覆盖
  内建/平台命令），缺席摘除用新增的 `Registry.Unregister`（在途调用持有
  Command 引用自然跑完；实现 `io.Closer` 的 Provider 顺带关闭）。
+- **平台命令先占位**：装配顺序 = vsh registry（内建 118）→ 平台命令
+（`RegisterPlatformCommands`）→ 服务登记。所以 alias 撞平台命令名（`mcp`
+`ssh` `grant` `bg` `commands` `pull` `push` `skill` …）或内建名只会 **拒给该
+服务**（记日志 + `mcp list` 显示 `rejected`），不会把平台命令注册顶掉、更不
+ 会让引擎初始化失败。反过来的顺序会让整机 `initErr` 离线，勿回退。
+- 换型/换址判定按 `AddrProvider` 接口（不是具体类型断言）：已登记服务与配置
+ 同为 TCP 端点且地址一致才不重登记；`blenderProvider` 这类包装也算 TCP。
+- 命令路径的会话键由 `Options.SessionOf` 注入（host = `execution.SessionFromContext`）；
+ 流通道开门用 `caller.Origin`。两者同源，vtools 不反向依赖执行层。
 - 命令形态：`<alias> <tool> [--flag value]... [--input JSON|-] [--json]
  [--image-preview WxH]`；无参 = 工具目录；`<alias> <tool> --help` 按
  inputSchema 渲染参数表。
@@ -53,7 +74,9 @@ type Streamer interface {                    // 可选：实时流（见 §4）
 ## 3. mcp 命令 = 管理面
 
 ```
-mcp list [--json]                       配置态 + 运行态（manager.Status + 登记表）
+mcp list [--json]                       配置态 + 运行态（manager.Status + 登记表；
+                                        被拒登记以 state=rejected + error 曝光，
+                                        mcp remove 可摘除该记录）
 mcp add <alias> [--cwd D][--env K=V]... [--idle DUR] [--persist] <command> [args...]
 mcp add <alias> --url <http(s)-url> [--persist]
 mcp add <alias> --tcp <host:port> [--persist]     （落盘形态 url = tcp://host:port）
@@ -66,8 +89,9 @@ mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样�
  引导，与 skill 命令同形）；`start/stop/restart` 要求 `mcp.<alias>` 已授权；
  `list` 只读放行。
 - `--persist` 写 config.yaml `mcp.servers`（cfg.LoadFile→改→cfg.Save，原子写
- 0600）；不带 = 进程级，重启失效。内置 browser/cua 不可 remove（禁用走配置
- `disabled: true`）。`no_sandbox` 只能所有者手改配置。
+ 0600）；不带 = 进程级，重启失效。内置 browser/cua/blender 不可 remove（禁用
+ 走配置 `disabled: true`）。`no_sandbox` 只能所有者手改配置。
+ 反向注意：手改 config.yaml 需重启 pod 生效（无运行期重载）。
 - 配置文件里 `url = tcp://host:port` 的条目由 vtools 接管（不进 mcpx.Manager）；
  `mcpx.Config.Validate` 接受 tcp scheme。
 

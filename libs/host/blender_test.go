@@ -203,3 +203,23 @@ func TestBlenderGate(t *testing.T) {
 		t.Fatalf("doctor must be gate-exempt: %+v", out)
 	}
 }
+
+// 内嵌包登记失败只记日志跳过，不拖垮整机（回归：原 registerBuiltinPacks
+// return err → initErr → Connect 失败，坏包/撞名会让 pod 整机离线）。
+func TestRegisterPackServiceFailureIsolated(t *testing.T) {
+	c, _ := testClient(t)
+	bad := &packManifest{Alias: "bogus", Service: packService{Kind: "bogus"}}
+	if err := c.registerPackService("bogus", bad); err == nil {
+		t.Fatal("unknown service kind accepted")
+	}
+	badAddr := &packManifest{Alias: "badaddr", Service: packService{Kind: "tcp", URL: "tcp://bad addr"}}
+	if err := c.registerPackService("badaddr", badAddr); err == nil {
+		t.Fatal("invalid tcp addr accepted")
+	}
+	if c.initErr != nil {
+		t.Fatalf("坏包污染 initErr: %v", c.initErr)
+	}
+	if c.services.Has("bogus") || c.services.Has("badaddr") {
+		t.Fatal("登记失败的包留下了服务")
+	}
+}
