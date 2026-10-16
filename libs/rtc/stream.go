@@ -3,10 +3,10 @@ package rtc
 import (
 	"context"
 	"encoding/binary"
-	"github.com/veypi/aic-pod/protocol"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
+	"github.com/veypi/aic-pod/protocol"
 )
 
 // StreamRelay transports upstream stream messages (e.g. the browser daemon's

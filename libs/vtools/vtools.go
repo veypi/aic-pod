@@ -51,6 +51,14 @@ type ImagePreviewer interface {
 	PreviewImages(result any, size string) (any, error)
 }
 
+// AddrProvider 是有明确 TCP 端点地址的 Provider（TCPProvider，以及宿主在它
+// 之上包装的 Provider 如 blender）。登记层据此判定「已登记的服务是不是同一个
+// TCP 端点」——换型或换址即摘除重登记；按接口而非具体类型判定，包装形态
+// （blenderProvider）不会被误认成非 TCP 服务。
+type AddrProvider interface {
+	Addr() string
+}
+
 // StreamRelay 是流的转发执行体：消息边界保持的双向纯转发（input = 前端
 // 发来的消息；send = 向前端投递），与 Call 的连接相互独立。
 type StreamRelay func(ctx context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error
@@ -75,30 +83,51 @@ func (s StreamerFunc) Stream(ctx context.Context, caller protocol.Caller, input 
 }
 
 // Gate 是调用门：每次命令执行 / 流通道开启前检查（host 接线 exec 规则
-// mcp.<alias>）。nil = 放行。
-type Gate func(ctx context.Context, alias string) error
+// mcp.<alias>）。session = 会话键（会话级 temp 授权的查找键）：命令路径取
+// Options.SessionOf(ctx)；流通道路径传 caller.Origin——peer ctx 派生自
+// Background，不携带会话，直接用 ctx 取会让会话 grant 在开门处静默失效。
+// nil = 放行。
+type Gate func(ctx context.Context, session, alias string) error
 
 type entry struct {
 	provider Provider
 	streamer Streamer
 }
 
+// Options 是登记表的装配参数。
+type Options struct {
+	// Gate 是调用门（命令执行 / 流通道开启前检查）。nil = 放行。
+	Gate Gate
+	// SessionOf 从命令执行上下文取会话键（host 注入 execution.SessionFromContext）：
+	// 会话键是会话级临时授权的查找键，本层不假设它以什么形式挂在 ctx 上。
+	// nil = 命令路径恒空串（无会话级授权区分）。
+	SessionOf func(context.Context) string
+	Logf      func(string, ...any)
+}
+
 // Registry 是服务登记表：vsh 命令注册与 RTC 流通道查询共用这一处。
 type Registry struct {
-	cmds *commands.Registry
-	gate Gate
-	logf func(string, ...any)
+	cmds      *commands.Registry
+	gate      Gate
+	sessionOf func(context.Context) string
+	logf      func(string, ...any)
 
 	mu       sync.RWMutex
 	entries  map[string]*entry
 	channels map[string]string // stream channel label → alias
 }
 
-func NewRegistry(cmds *commands.Registry, gate Gate, logf func(string, ...any)) *Registry {
-	if logf == nil {
-		logf = func(string, ...any) {}
+func NewRegistry(cmds *commands.Registry, opts Options) *Registry {
+	if opts.Logf == nil {
+		opts.Logf = func(string, ...any) {}
 	}
-	return &Registry{cmds: cmds, gate: gate, logf: logf, entries: map[string]*entry{}, channels: map[string]string{}}
+	if opts.SessionOf == nil {
+		opts.SessionOf = func(context.Context) string { return "" }
+	}
+	return &Registry{
+		cmds: cmds, gate: opts.Gate, sessionOf: opts.SessionOf, logf: opts.Logf,
+		entries: map[string]*entry{}, channels: map[string]string{},
+	}
 }
 
 // Register 把服务登记为 vsh 根命令（撞名即拒，绝不静默覆盖内建或平台命令）。
@@ -109,10 +138,14 @@ func (r *Registry) Register(alias string, p Provider) error {
 }
 
 // RegisterCustom 同 Register，但命令面由调用方提供（如 blender 的生命周期
-// 动词：分发后把剩余参数透传给 Registry.RunTool）。
+// 动词：分发后把剩余参数透传给 Registry.RunTool）。cmd.Name() 必须等于
+// alias——vsh registry 以 Name 为键、Unregister 按 alias 摘，不一致会驻留。
 func (r *Registry) RegisterCustom(alias string, p Provider, cmd commands.Command) error {
 	if cmd == nil {
 		return fmt.Errorf("vtools %s: custom command is nil", alias)
+	}
+	if cmd.Name() != alias {
+		return fmt.Errorf("vtools %s: custom command name %q does not match alias", alias, cmd.Name())
 	}
 	return r.register(alias, p, cmd)
 }
@@ -170,6 +203,11 @@ func (r *Registry) RegisterStream(alias string, s Streamer) error {
 	}
 	if occupant, taken := r.channels[s.StreamChannel()]; taken && occupant != alias {
 		return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, s.StreamChannel(), occupant)
+	}
+	// 换标签：先摘本条目的旧映射——只写不删会让旧标签残留（不可复用，
+	// 且开启时静默挂到新 streamer）。
+	if e.streamer != nil && r.channels[e.streamer.StreamChannel()] == alias {
+		delete(r.channels, e.streamer.StreamChannel())
 	}
 	e.streamer = s
 	r.channels[s.StreamChannel()] = alias
@@ -251,7 +289,10 @@ func (r *Registry) StreamHandler(label string) (StreamRelay, bool) {
 	alias, ok := r.channels[label]
 	var s Streamer
 	if ok {
-		s = r.entries[alias].streamer
+		// channels 与 entries 同一把写锁维护（不变量）；判空是防御
+		if e := r.entries[alias]; e != nil {
+			s = e.streamer
+		}
 	}
 	r.mu.RUnlock()
 	if !ok || s == nil {
@@ -259,7 +300,8 @@ func (r *Registry) StreamHandler(label string) (StreamRelay, bool) {
 	}
 	return func(ctx context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error {
 		if r.gate != nil {
-			if err := r.gate(ctx, alias); err != nil {
+			// 流通道开门：会话键取 caller.Origin（peer ctx 不携带会话）
+			if err := r.gate(ctx, caller.Origin, alias); err != nil {
 				return err
 			}
 		}

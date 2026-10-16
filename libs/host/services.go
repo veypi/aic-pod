@@ -7,7 +7,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/aic-pod/libs/vtools"
@@ -19,9 +18,11 @@ import (
 
 // mcpGate 是工具命令与流通道的调用门：exec 规则 mcp.<alias>（与原
 // mcpSession 门同一条规则，授权语义不变——grant cmd mcp.<alias> 放行该
-// 服务的全部工具与流）。
-func (c *Client) mcpGate(ctx context.Context, alias string) error {
-	if !c.execAllowed(execution.SessionFromContext(ctx), "mcp."+alias) {
+// 服务的全部工具与流）。session = 会话键（会话级 temp 授权的查找键）：
+// 命令路径传 SessionFromContext(ctx)，流通道路径传 caller.Origin（peer
+// ctx 不携带会话，取错键会让会话 grant 在锁死设备上静默失效）。
+func (c *Client) mcpGate(_ context.Context, session, alias string) error {
+	if !c.execAllowed(session, "mcp."+alias) {
 		return fmt.Errorf("mcp.%s: denied by exec rules; request grant cmd mcp.%s", alias, alias)
 	}
 	return nil
@@ -53,23 +54,38 @@ func (c *Client) serviceRegistered(name string) bool {
 	return c.services != nil && c.services.Has(name)
 }
 
-// registerService 登记单个服务为 vsh 根命令（禁用/撞名跳过并记日志）。
-// configureMCP 的全量同步与 mcp add 的单条登记共用此入口。同名已登记时：
-// MCP 适配器经 mcpResolve 现取连接（管理器重建透明）不动；TCP 条目的地址
-// 钉在 provider 上，配置变了摘除重登记。
-func (c *Client) registerService(name string, cfg mcpx.Config) {
+// tcpAddr 报告已登记 Provider 的 TCP 端点（非 TCP 形态 = false）。按接口判定
+// 而非具体类型：宿主在 TCPProvider 之上还有包装（blenderProvider），断言
+// *TCPProvider 会把它们误认成非 TCP 服务。
+func tcpAddr(p vtools.Provider) (string, bool) {
+	ap, ok := p.(vtools.AddrProvider)
+	if !ok {
+		return "", false
+	}
+	return ap.Addr(), true
+}
+
+// registerService 登记单个服务为 vsh 根命令并返回失败原因（禁用 = 无事发生）。
+// 同名已登记时按「已登记 provider 的形态 vs 新配置形态」判定：
+// MCP→MCP 不动（适配器经 mcpResolve 现取连接，管理器重建透明）；TCP→同址 TCP
+// 不动；其余（TCP↔MCP 换型、TCP 换址）摘除重登记——TCP 端点钉在 provider
+// 实例上，不能留着旧地址继续服务。
+func (c *Client) registerService(name string, cfg mcpx.Config) error {
 	hub := c.services
-	if hub == nil || cfg.Disabled {
-		return
+	if hub == nil {
+		return fmt.Errorf("vtools %s: registry unavailable", name)
+	}
+	if cfg.Disabled {
+		return nil
 	}
 	if hub.Has(name) {
-		if !cfg.IsTCP() {
-			return
-		}
-		if p, ok := hub.Lookup(name); ok {
-			if tcp, isTCP := p.(*vtools.TCPProvider); isTCP && tcp.Addr() == strings.TrimPrefix(cfg.URL, "tcp://") {
-				return // 地址没变
-			}
+		existing, _ := hub.Lookup(name)
+		addr, existingTCP := tcpAddr(existing)
+		switch {
+		case cfg.IsTCP() && existingTCP && addr == strings.TrimPrefix(cfg.URL, "tcp://"):
+			return nil // 同一 TCP 端点
+		case !cfg.IsTCP() && !existingTCP:
+			return nil // MCP→MCP
 		}
 		hub.Unregister(name)
 	}
@@ -77,28 +93,34 @@ func (c *Client) registerService(name string, cfg mcpx.Config) {
 	if cfg.IsTCP() {
 		tcp, err := vtools.NewTCP(strings.TrimPrefix(cfg.URL, "tcp://"))
 		if err != nil {
-			c.logf("vtools %s: %v", name, err)
-			return
+			return fmt.Errorf("vtools %s: %w", name, err)
 		}
 		p = tcp
 	} else {
 		p = vtools.MCP(c.mcpResolve(name))
 	}
 	if err := hub.Register(name, p); err != nil {
-		c.logf("vtools %s: %v", name, err)
+		return fmt.Errorf("vtools %s: %w", name, err)
 	}
+	return nil
 }
 
 // syncServiceRegistrations 全量同步服务集合（启动/配置更新时调用）：新增注册、
 // 禁用或消失的摘除；已登记的同名服务不动（MCP 适配器经 mcpResolve 现取连接，
 // 管理器重建对其透明）。内置 browser 的实时画面通道随配置状态挂上/摘除。
+// 登记失败的服务（撞名/地址无效）不影响其余服务，被拒清单随之从头重算。
 func (c *Client) syncServiceRegistrations(servers map[string]mcpx.Config) {
 	hub := c.services
 	if hub == nil {
 		return
 	}
+	c.resetServiceRejections()
 	for name, cfg := range servers {
-		c.registerService(name, cfg)
+		// 撞名（平台命令/内建）或配置无效：跳过该服务，记日志 + mcp list 曝光
+		if err := c.registerService(name, cfg); err != nil {
+			c.logf("%v", err)
+			c.recordServiceRejection(name, cfg, err)
+		}
 	}
 	for _, alias := range hub.Aliases() {
 		cfg, ok := servers[alias]
@@ -122,6 +144,53 @@ func (c *Client) syncServiceRegistrations(servers map[string]mcpx.Config) {
 	} else {
 		hub.UnregisterStream("browser")
 	}
+}
+
+// serviceRejection 是一次登记失败的服务（配置里的 alias 撞平台命令名、地址
+// 无效等）：命令面没有它但配置还在——mcp list 以 state=rejected 曝光，避免
+// 「配了却没有」只存在于 pod 日志。
+type serviceRejection struct {
+	kind   string // mcp | tcp（按配置形态）
+	reason string
+}
+
+// recordServiceRejection 记下一次被拒的服务登记。
+func (c *Client) recordServiceRejection(name string, cfg mcpx.Config, err error) {
+	kind := "mcp"
+	if cfg.IsTCP() {
+		kind = "tcp"
+	}
+	c.mcpMu.Lock()
+	defer c.mcpMu.Unlock()
+	if c.mcpRejected == nil {
+		c.mcpRejected = map[string]serviceRejection{}
+	}
+	c.mcpRejected[name] = serviceRejection{kind: kind, reason: err.Error()}
+}
+
+// clearServiceRejection 摘除一条被拒记录（配置里的条目被移除时）。
+func (c *Client) clearServiceRejection(name string) {
+	c.mcpMu.Lock()
+	defer c.mcpMu.Unlock()
+	delete(c.mcpRejected, name)
+}
+
+// resetServiceRejections 清空被拒清单（全量同步开头重算）。
+func (c *Client) resetServiceRejections() {
+	c.mcpMu.Lock()
+	defer c.mcpMu.Unlock()
+	c.mcpRejected = map[string]serviceRejection{}
+}
+
+// serviceRejections 返回被拒清单快照。
+func (c *Client) serviceRejections() map[string]serviceRejection {
+	c.mcpMu.RLock()
+	defer c.mcpMu.RUnlock()
+	out := make(map[string]serviceRejection, len(c.mcpRejected))
+	for name, rej := range c.mcpRejected {
+		out[name] = rej
+	}
+	return out
 }
 
 // persistMCPServer 持久化服务条目（config=nil 表示删除）：只写 config.yaml，

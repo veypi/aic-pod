@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/libs/vtools"
 	"github.com/veypi/aic-pod/protocol"
 )
 
@@ -134,7 +137,8 @@ func TestVtoolsGates(t *testing.T) {
 	}
 }
 
-// mcp add --tcp 拒收 --idle（TCP 连接懒惰，无空闲回收，收了只会静默误导）。
+// mcp add --tcp 拒收 --idle（TCP 连接懒惰，无空闲回收，收了只会静默误导）；
+// --cwd/--env 仅对 command 形态有效（--tcp/--url 形态下收了会被静默丢弃）。
 func TestMcpAddTCPRejectsIdle(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
@@ -145,6 +149,115 @@ func TestMcpAddTCPRejectsIdle(t *testing.T) {
 	out := decoded[protocol.Output](t, r.Result)
 	if out.Attrs["exit_code"] != "2" || !strings.Contains(out.Attrs["stderr"], "--idle") {
 		t.Fatalf("tcp --idle must be rejected: %+v", out)
+	}
+	r = callTool(t, c, context.Background(), testCaller(), execRequest("mcp add foo --tcp 127.0.0.1:9866 --env A=B", 30000))
+	out = decoded[protocol.Output](t, r.Result)
+	if out.Attrs["exit_code"] != "2" || !strings.Contains(out.Attrs["stderr"], "--cwd/--env") {
+		t.Fatalf("tcp --env must be rejected: %+v", out)
+	}
+}
+
+// 服务 alias 撞平台命令名（ssh/grant/…）：平台命令先占位，服务被拒登记并记
+// 日志，pod 照常初始化（回归：原装配顺序服务先登记，撞名的平台命令注册失败
+// → initErr → Connect 返回错误，整机离线）。
+func TestServiceAliasCollisionWithPlatformCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true,
+		MCP: mcpx.Settings{Servers: map[string]mcpx.Config{"ssh": {Command: "echo", NoSandbox: true}}}})
+	c.hostID = "host_1"
+	c.uid = "owner"
+	c.kTool = "test-key"
+	c.sessionRoot = t.TempDir()
+	if c.initErr != nil {
+		t.Fatalf("colliding service alias bricked init: %v", c.initErr)
+	}
+	if c.services.Has("ssh") {
+		t.Fatal("colliding service must be skipped")
+	}
+	// 平台命令 ssh 仍是内建那个（usage 类退出码，而非 127 未注册）
+	r := callTool(t, c, context.Background(), testCaller(), execRequest("ssh", 30000))
+	out := decoded[protocol.Output](t, r.Result)
+	if out.Attrs["exit_code"] == "127" {
+		t.Fatalf("platform command shadowed by service: %+v", out)
+	}
+	// 被拒条目要在 mcp list 里可见（rejected），不能只留在 pod 日志：命令面
+	// 没有它、但配置还在，用户看 list 就知道「配了却没生效」及其原因。
+	r = callTool(t, c, context.Background(), testCaller(), execRequest("mcp list --json", 30000))
+	out = decoded[protocol.Output](t, r.Result)
+	var rows []struct{ Name, Kind, State, Error string }
+	if err := json.Unmarshal([]byte(out.Content), &rows); err != nil {
+		t.Fatalf("mcp list --json: %v (%q)", err, out.Content)
+	}
+	found := false
+	for _, row := range rows {
+		if row.Name == "ssh" {
+			found = true
+			if row.State != "rejected" || row.Error == "" {
+				t.Fatalf("rejected alias must be surfaced: %+v", row)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("rejected alias missing from mcp list: %s", out.Content)
+	}
+}
+
+// registerService 换型判定：TCP↔MCP 互转必须摘除重登记（原实现漏判
+// TCP→MCP，旧 TCP provider 钉旧地址继续服务）；同型 MCP/同址 TCP 不动。
+func TestRegisterServiceTypeSwitch(t *testing.T) {
+	c, _ := testClient(t)
+	lookup := func() vtools.Provider {
+		p, ok := c.services.Lookup("sw")
+		if !ok {
+			t.Fatal("service not registered")
+		}
+		return p
+	}
+	if err := c.registerService("sw", mcpx.Config{URL: "tcp://127.0.0.1:9866"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, isTCP := lookup().(*vtools.TCPProvider); !isTCP {
+		t.Fatal("tcp config must register a TCPProvider")
+	}
+	// TCP → MCP：重登记为 MCP 适配器
+	if err := c.registerService("sw", mcpx.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, isMCP := lookup().(*vtools.MCPProvider); !isMCP {
+		t.Fatal("TCP→MCP switch must re-register as MCPProvider")
+	}
+	// MCP → TCP：重登记回 TCP
+	if err := c.registerService("sw", mcpx.Config{URL: "tcp://127.0.0.1:9866"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, isTCP := lookup().(*vtools.TCPProvider); !isTCP {
+		t.Fatal("MCP→TCP switch must re-register as TCPProvider")
+	}
+
+	// TCP 后端的包装 provider（blenderProvider）：地址按接口判定，不断言具体
+	// 类型——否则它会被当成「非 TCP」，换成 MCP 配置时留在原地继续服务旧端点。
+	wrapped := &blenderProvider{addr: func() string { return "127.0.0.1:9866" }}
+	if err := c.services.Register("bl", wrapped); err != nil {
+		t.Fatal(err)
+	}
+	blLookup := func() vtools.Provider {
+		p, ok := c.services.Lookup("bl")
+		if !ok {
+			t.Fatal("wrapped service not registered")
+		}
+		return p
+	}
+	if err := c.registerService("bl", mcpx.Config{URL: "tcp://127.0.0.1:9866"}); err != nil {
+		t.Fatal(err)
+	}
+	if blLookup() != vtools.Provider(wrapped) {
+		t.Fatal("same TCP endpoint must keep the wrapping provider")
+	}
+	if err := c.registerService("bl", mcpx.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, isMCP := blLookup().(*vtools.MCPProvider); !isMCP {
+		t.Fatal("TCP-backed wrapper → MCP config must re-register as MCPProvider")
 	}
 }
 

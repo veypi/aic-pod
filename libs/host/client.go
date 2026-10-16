@@ -61,6 +61,9 @@ type Client struct {
 	// services 是 vtools 服务登记表（工具命令注册 + RTC 流通道查询）；
 	// initTools 时创建一次（先于 configureMCP），此后字段不再变。
 	services *vtools.Registry
+	// mcpRejected 是配置里登记失败的服务（撞名/地址无效）：命令面没有它但配置
+	// 还在，mcp list 以 state=rejected 曝光，避免只留在 pod 日志。mcpMu 保护。
+	mcpRejected map[string]serviceRejection
 
 	optsMu          sync.RWMutex
 	opts            Options
