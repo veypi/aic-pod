@@ -3,6 +3,7 @@ package mcpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -313,8 +314,8 @@ func TestManagerAddRemove(t *testing.T) {
 	if got := manager.Status(); len(got) != 0 {
 		t.Fatalf("status after remove: %+v", got)
 	}
-	if err := manager.Remove(ctx, "fixture"); err == nil {
-		t.Fatal("removing an unknown service must fail")
+	if err := manager.Remove(ctx, "fixture"); !errors.Is(err, ErrUnknownService) {
+		t.Fatalf("removing an unknown service must fail with ErrUnknownService: %v", err)
 	}
 	// 重新登记同名服务并照常调用
 	if err := manager.Add("fixture", fixture); err != nil {

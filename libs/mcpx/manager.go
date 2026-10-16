@@ -59,6 +59,9 @@ type Settings struct {
 
 var aliasPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
+// ErrUnknownService 是操作不存在服务条目的哨兵错误（调用方 errors.Is 判定）。
+var ErrUnknownService = errors.New("unknown service")
+
 // ValidateAlias 校验服务别名（配置校验与运行期登记共用同一规则）。
 func ValidateAlias(alias string) error {
 	if !aliasPattern.MatchString(alias) {
@@ -201,7 +204,7 @@ func (m *Manager) Remove(ctx context.Context, name string) error {
 	m.mu.Lock()
 	if _, exists := m.configs[name]; !exists {
 		m.mu.Unlock()
-		return fmt.Errorf("mcp %s: unknown service", name)
+		return fmt.Errorf("mcp %s: %w", name, ErrUnknownService)
 	}
 	delete(m.configs, name)
 	i := m.instances[name]
@@ -473,7 +476,7 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	_, exists := m.configs[name]
 	m.mu.Unlock()
 	if !exists {
-		return fmt.Errorf("mcp %s: unknown service", name)
+		return fmt.Errorf("mcp %s: %w", name, ErrUnknownService)
 	}
 	if i == nil {
 		return nil

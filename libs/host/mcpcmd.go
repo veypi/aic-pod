@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -219,6 +220,9 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 		if rawURL != "" || len(positional) != 1 {
 			return commands.Exitf(inv, 2, "mcp add: --tcp 与 --url/command 互斥")
 		}
+		if idle != "" {
+			return commands.Exitf(inv, 2, "mcp add: --idle 对 TCP 服务无效（连接懒惰，无空闲回收）")
+		}
 		config = mcpx.Config{URL: "tcp://" + rawTCP, IdleTimeout: idle}
 	case rawURL != "":
 		if len(positional) != 1 {
@@ -287,7 +291,7 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 	}
 	manager := c.mcpManager()
 	if manager != nil {
-		if err := manager.Remove(ctx, alias); err != nil && !strings.Contains(err.Error(), "unknown service") {
+		if err := manager.Remove(ctx, alias); err != nil && !errors.Is(err, mcpx.ErrUnknownService) {
 			return commands.Exitf(inv, 1, "mcp remove: %s", err)
 		}
 	}

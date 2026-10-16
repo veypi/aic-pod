@@ -16,6 +16,10 @@ import (
 // maxInputBytes 是 --input 的体积上限（与 mcp call 原约定一致）。
 const maxInputBytes = 1 << 20
 
+// reservedFlags 是命令面保留 flag：工具 schema 里的同名属性无法经 flag 传递
+// （--json/--input/--image-preview/--help 先被命令面消费），只能走 --input。
+var reservedFlags = map[string]bool{"json": true, "input": true, "image-preview": true, "help": true, "h": true}
+
 func aliasUsage(alias string) string {
 	return `usage:
   ` + alias + `                          列出该服务的工具目录
@@ -178,6 +182,9 @@ func renderToolHelp(inv *commands.Invocation, alias string, tool Tool) {
 		fmt.Fprintf(&b, "  --%s (%s)", name, schemaTypeText(prop.Type))
 		if doc.required(name) {
 			b.WriteString(" 必填")
+		}
+		if reservedFlags[name] {
+			b.WriteString("（保留 flag 名，此参数请走 --input）")
 		}
 		if prop.Default != nil {
 			raw, err := json.Marshal(prop.Default)
@@ -390,6 +397,9 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 			if !ok {
 				mappable := make([]string, 0, len(schema.Properties))
 				for pname, pprop := range schema.Properties {
+					if reservedFlags[pname] {
+						continue // 保留名被命令面消费，列出来只会误导
+					}
 					if scalarType(pprop.Type) != "" {
 						mappable = append(mappable, "--"+pname)
 					}

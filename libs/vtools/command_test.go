@@ -189,6 +189,34 @@ func TestCommandPreviewUnsupported(t *testing.T) {
 	}
 }
 
+// 命令面保留 flag（--json/--input/--image-preview/--help）遮蔽同名工具参数：
+// 参数表给出提示，unknown-flag 的可映射清单不列保留名。
+func TestCommandReservedFlagShadowed(t *testing.T) {
+	r, _ := newFixture(t, nil)
+	p2 := &fakeProvider{tools: []Tool{{Name: "cfg", InputSchema: json.RawMessage(`{
+	  "type": "object",
+	  "properties": {"json": {"type": "string"}, "text": {"type": "string"}}
+	}`)}}}
+	if err := r.Register("cfg", p2); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := run(t, r, "cfg", "cfg", "--help")
+	if err != nil || !strings.Contains(out, "保留 flag 名") {
+		t.Fatalf("tool help must mark reserved names: %q %v", out, err)
+	}
+	_, _, err = run(t, r, "cfg", "cfg", "--nope", "1")
+	if exitCode(err) != 2 || !strings.Contains(err.Error(), "--text") || strings.Contains(err.Error(), "--json ") {
+		t.Fatalf("mappable list must exclude reserved names: %v", err)
+	}
+	// 保留名参数走 --input 照常到达
+	if _, _, err := run(t, r, "cfg", "cfg", "--input", `{"json":"v"}`); err != nil {
+		t.Fatal(err)
+	}
+	if got := p2.calls[0].args["json"]; got != "v" {
+		t.Fatalf("reserved-named arg via --input: %+v", p2.calls[0].args)
+	}
+}
+
 // ---- Registry 生命周期 ----
 
 func TestRegistryLifecycle(t *testing.T) {
@@ -223,6 +251,17 @@ func TestRegistryLifecycle(t *testing.T) {
 	}
 }
 
+type streamProvider struct {
+	fakeProvider
+	channel string
+}
+
+func (s *streamProvider) StreamChannel() string { return s.channel }
+
+func (s *streamProvider) Stream(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error {
+	return nil
+}
+
 type fakeStreamer struct {
 	channel string
 }
@@ -231,6 +270,40 @@ func (s *fakeStreamer) StreamChannel() string { return s.channel }
 
 func (s *fakeStreamer) Stream(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error {
 	return nil
+}
+
+// stream channel 标签撞名即拒（登记侧防护；Unregister 只摘自己的映射）。
+func TestRegistryStreamChannelCollision(t *testing.T) {
+	r, _ := newFixture(t, nil)
+	if err := r.RegisterStream("echo", &fakeStreamer{channel: "aic-echo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register("other", &fakeProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	// RegisterStream 抢占他人标签即拒
+	if err := r.RegisterStream("other", &fakeStreamer{channel: "aic-echo"}); err == nil {
+		t.Fatal("channel takeover accepted")
+	}
+	// Provider 自带 Streamer 撞标签也拒
+	if err := r.Register("third", &streamProvider{channel: "aic-echo"}); err == nil {
+		t.Fatal("register with taken channel accepted")
+	}
+	if r.Has("third") {
+		t.Fatal("rejected registration left an entry")
+	}
+	// 标签仍属 echo
+	if _, ok := r.StreamHandler("aic-echo"); !ok {
+		t.Fatal("original channel mapping lost")
+	}
+	r.Unregister("echo")
+	if _, ok := r.StreamHandler("aic-echo"); ok {
+		t.Fatal("channel survived owner Unregister")
+	}
+	// 摘除后标签可重用
+	if err := r.RegisterStream("other", &fakeStreamer{channel: "aic-echo"}); err != nil {
+		t.Fatalf("channel reuse after unregister: %v", err)
+	}
 }
 
 func TestRegistryStreamHandler(t *testing.T) {

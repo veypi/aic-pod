@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -74,18 +75,21 @@ func (p *TCPProvider) Call(ctx context.Context, tool string, args map[string]any
 	return result, nil
 }
 
+// errClosed 是主动断连（Close/重登记）时 fail 在途请求的错误。
+var errClosed = errors.New("vtools tcp: connection closed")
+
 // Addr 返回配置地址（登记条目与配置比对用）。
 func (p *TCPProvider) Addr() string { return p.addr }
 
-// Close 断开连接（在途请求由 readLoop 的 fail 收尾）；下次调用自动重拨。幂等。
+// Close 断开连接并使全部在途请求立即失败；下次调用自动重拨。幂等。
 func (p *TCPProvider) Close() error {
 	p.mu.Lock()
 	conn := p.conn
-	p.conn = nil // 立即摘除：窗口期内的下一次调用直接重拨，而不是写到已关闭连接
 	p.mu.Unlock()
-	if conn != nil {
-		return conn.Close()
+	if conn == nil {
+		return nil
 	}
+	p.failConn(conn, errClosed)
 	return nil
 }
 
@@ -116,8 +120,9 @@ func (p *TCPProvider) roundtrip(ctx context.Context, req map[string]any) (*tcpRe
 	_, werr := conn.Write(data)
 	p.mu.Unlock()
 	if werr != nil {
-		p.fail(fmt.Errorf("vtools tcp %s: write: %w", p.addr, werr))
-		return nil, werr
+		err := fmt.Errorf("vtools tcp %s: write: %w", p.addr, werr)
+		p.failConn(conn, err)
+		return nil, err
 	}
 	select {
 	case <-ctx.Done():
@@ -159,20 +164,24 @@ func (p *TCPProvider) readLoop(conn net.Conn) {
 	if err == nil {
 		err = fmt.Errorf("vtools tcp %s: connection closed", p.addr)
 	}
-	p.fail(err)
+	p.failConn(conn, err)
 }
 
-// fail 断开连接并使全部在途请求失败；之后的调用重拨。
-func (p *TCPProvider) fail(err error) {
+// failConn 断开指定代际的连接并使全部在途请求失败。身份不符（Close/断线后
+// 已重拨新连接）时不动：旧 readLoop 的迟到收尾不能误杀新一代连接。不变量：
+// pending 条目必属于当前 p.conn（代际切换时旧连接的 pending 已在此 drain），
+// 故身份匹配即可整体失败。
+func (p *TCPProvider) failConn(conn net.Conn, err error) {
 	p.mu.Lock()
-	conn := p.conn
+	if p.conn != conn {
+		p.mu.Unlock()
+		return
+	}
 	p.conn = nil
 	pending := p.pending
 	p.pending = map[int]chan tcpOutcome{}
 	p.mu.Unlock()
-	if conn != nil {
-		_ = conn.Close()
-	}
+	_ = conn.Close()
 	for _, ch := range pending {
 		ch <- tcpOutcome{err: err}
 	}

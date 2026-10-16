@@ -134,6 +134,20 @@ func TestVtoolsGates(t *testing.T) {
 	}
 }
 
+// mcp add --tcp 拒收 --idle（TCP 连接懒惰，无空闲回收，收了只会静默误导）。
+func TestMcpAddTCPRejectsIdle(t *testing.T) {
+	saved := cfg.Global
+	cfg.Global = cfg.NewOptions()
+	cfg.Global.ExecPolicy, cfg.Global.NetPolicy = cfg.PolicyOpen, cfg.PolicyOpen
+	t.Cleanup(func() { cfg.Global = saved })
+	c, _ := testClient(t)
+	r := callTool(t, c, context.Background(), testCaller(), execRequest("mcp add foo --tcp 127.0.0.1:9866 --idle 1m", 30000))
+	out := decoded[protocol.Output](t, r.Result)
+	if out.Attrs["exit_code"] != "2" || !strings.Contains(out.Attrs["stderr"], "--idle") {
+		t.Fatalf("tcp --idle must be rejected: %+v", out)
+	}
+}
+
 // commands 展示面包含已登记的服务 alias（动态 Discoverable）。
 func TestVtoolsDiscoverable(t *testing.T) {
 	saved := cfg.Global

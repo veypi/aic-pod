@@ -102,7 +102,8 @@ func NewRegistry(cmds *commands.Registry, gate Gate, logf func(string, ...any)) 
 }
 
 // Register 把服务登记为 vsh 根命令（撞名即拒，绝不静默覆盖内建或平台命令）。
-// 重复登记同一 alias 即拒——更新配置先 Unregister 再 Register。
+// 重复登记同一 alias 即拒——更新配置先 Unregister 再 Register。stream channel
+// 标签同样撞名即拒（与命令名同一原则）。
 func (r *Registry) Register(alias string, p Provider) error {
 	return r.register(alias, p, nil)
 }
@@ -123,11 +124,23 @@ func (r *Registry) register(alias string, p Provider, custom commands.Command) e
 	if p == nil {
 		return fmt.Errorf("vtools %s: provider is nil", alias)
 	}
-	r.mu.RLock()
-	_, exists := r.entries[alias]
-	r.mu.RUnlock()
-	if exists {
+	var streamer Streamer
+	if s, ok := p.(Streamer); ok {
+		streamer = s
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.entries[alias]; exists {
 		return fmt.Errorf("vtools %s: service already registered", alias)
+	}
+	if streamer != nil {
+		label := streamer.StreamChannel()
+		if label == "" {
+			return fmt.Errorf("vtools %s: streamer requires a channel label", alias)
+		}
+		if occupant, taken := r.channels[label]; taken {
+			return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, label, occupant)
+		}
 	}
 	cmd := custom
 	if cmd == nil {
@@ -136,16 +149,10 @@ func (r *Registry) register(alias string, p Provider, custom commands.Command) e
 	if err := r.cmds.RegisterGuarded(cmd); err != nil {
 		return fmt.Errorf("vtools %s: command name is taken: %w", alias, err)
 	}
-	e := &entry{provider: p}
-	if s, ok := p.(Streamer); ok {
-		e.streamer = s
+	r.entries[alias] = &entry{provider: p, streamer: streamer}
+	if streamer != nil {
+		r.channels[streamer.StreamChannel()] = alias
 	}
-	r.mu.Lock()
-	r.entries[alias] = e
-	if e.streamer != nil {
-		r.channels[e.streamer.StreamChannel()] = alias
-	}
-	r.mu.Unlock()
 	return nil
 }
 
@@ -161,6 +168,9 @@ func (r *Registry) RegisterStream(alias string, s Streamer) error {
 	if s == nil || s.StreamChannel() == "" {
 		return fmt.Errorf("vtools %s: streamer requires a channel label", alias)
 	}
+	if occupant, taken := r.channels[s.StreamChannel()]; taken && occupant != alias {
+		return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, s.StreamChannel(), occupant)
+	}
 	e.streamer = s
 	r.channels[s.StreamChannel()] = alias
 	return nil
@@ -174,7 +184,10 @@ func (r *Registry) UnregisterStream(alias string) {
 	if !ok || e.streamer == nil {
 		return
 	}
-	delete(r.channels, e.streamer.StreamChannel())
+	// 只摘自己的映射（撞名已在登记侧拒绝，这里是防御）
+	if r.channels[e.streamer.StreamChannel()] == alias {
+		delete(r.channels, e.streamer.StreamChannel())
+	}
 	e.streamer = nil
 }
 
@@ -186,7 +199,7 @@ func (r *Registry) Unregister(alias string) {
 	e, ok := r.entries[alias]
 	if ok {
 		delete(r.entries, alias)
-		if e.streamer != nil {
+		if e.streamer != nil && r.channels[e.streamer.StreamChannel()] == alias {
 			delete(r.channels, e.streamer.StreamChannel())
 		}
 	}

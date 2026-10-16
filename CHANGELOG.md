@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **评审修复（2026-10-16 code review）**：`vtools.TCPProvider` 连接代际竞态——`fail` 改 `failConn` 身份校验，Close/断线后旧 readLoop 的迟到收尾不再误杀重拨的新连接，Close 自身使在途请求立即失败（原只能等 ctx 超时）；vtools 登记表 stream channel 标签撞名即拒（原静默覆盖，且 Unregister 会误删他人映射）；技能包版本目录「取最新」改自然序（字典序下 Blender 4.10 < 4.2 会选错）；`mcpx.ErrUnknownService` 哨兵错误替代字符串匹配；`mcp add --tcp` 拒收无效的 `--idle`；工具参数表标注被命令面保留字（--json/--input/--image-preview/--help）遮蔽的同名参数。
+
 - **ssh 域内建放行 `github.com:22`**（2026-10-16）：git over ssh 是最高频托管 ssh 目标，不再要求每会话 `grant ssh github.com:22`。内建行排在快照表尾（temp grant → cfg 规则 → 内建 → policy 默认），首命中语义下所有者 `deny:github.com:22` 配置行仍可压过它。与 net 域内建 `localhost:*` 同一机制（`libs/host/permissions.go`）。
 
 - **vtools：通用工具服务注册（2026-10-16；设计 docs/host-vtools.md）**：MCP 只是一种协议。任何协议适配成 `libs/vtools.Provider`（Tools/Call）后注册为 vsh 根命令——`<alias> <tool> [--flag value]... [--input JSON|-] [--json]`（标量 schema 自动映射同名 flag；无参=工具目录；`<tool> --help`=按 inputSchema 渲染参数表）。`mcp` 命令退化为管理面（`list/add/remove/start/stop/restart` + `tools/describe/call/read` 调试直通）：add/remove 走 exec 规则门 `grant cmd mcp`，`--persist` 写 config.yaml。`libs/mcpx` Manager 增 `Add/Remove/Status` 与 reap 周期动态重算；`libs/vtools` 含 MCP 适配器与 TCP 样例协议（vtools/tcp v1 行分隔 JSON，配置形态 `url: tcp://host:port`）。可选 `Streamer` 接口 = RTC 流通道泛化（`rtc.Config.Browser` 字段改为 `Streams func(label)` 按 DataChannel 标签现查登记表；原 browserChannel 泛化为 stream.go 的 streamChannel，多流通道并存）。vsh `commands.Registry` 新增 `Unregister`。前端 `BrowserStream` 通道标签参数化（options.channel，默认 `aic-browser`）。

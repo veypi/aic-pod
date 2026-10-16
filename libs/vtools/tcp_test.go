@@ -154,6 +154,76 @@ func TestTCPCallContextCancel(t *testing.T) {
 	}
 }
 
+// 旧代际 readLoop 的迟到收尾不能误杀 Close 后重拨的新连接（回归：fail 曾
+// 无条件摘除当前连接——Close 置 nil → 重拨 → 旧 readLoop 退出时把新连接关掉）。
+func TestTCPStaleFailDoesNotKillNewConn(t *testing.T) {
+	f := startTCPFixture(t)
+	p, err := NewTCP(f.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := p.Tools(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	old := p.conn
+	p.mu.Unlock()
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 重拨新一代并确认可用
+	if _, err := p.Tools(ctx); err != nil {
+		t.Fatalf("redial: %v", err)
+	}
+	// 旧连接的迟到 failConn 必须空转
+	p.failConn(old, errors.New("stale readloop exit"))
+	if _, err := p.Call(ctx, "echo", map[string]any{"text": "alive"}); err != nil {
+		t.Fatalf("new connection killed by stale fail: %v", err)
+	}
+}
+
+// Close 使在途请求立即失败（不再等调用方 ctx 超时）。
+func TestTCPCloseFailsInflight(t *testing.T) {
+	f := startTCPFixture(t)
+	p, err := NewTCP(f.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() { // hang 永不应答；ctx 无超时
+		_, err := p.Call(context.Background(), "hang", map[string]any{})
+		errCh <- err
+	}()
+	// 等请求真正发出（进入 pending）
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		n := len(p.pending)
+		p.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("request never went in-flight")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("in-flight call survived Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight call hung after Close")
+	}
+}
+
 func TestTCPInvalidAddress(t *testing.T) {
 	for _, addr := range []string{"", "nohost", "127.0.0.1:", ":9999", "a:b:c"} {
 		if _, err := NewTCP(addr); err == nil {

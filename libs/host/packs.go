@@ -271,6 +271,42 @@ func mcpServers(configured map[string]mcpx.Config, workDir string) (map[string]m
 	return servers, nil
 }
 
+// naturalLess 自然序比较：连续数字段按数值比（前导零段长度决胜保确定性），
+// 其余字节序。版本目录「取最新」用（字典序下 "4.10" < "4.2" 会选错）。
+func naturalLess(a, b string) bool {
+	digit := func(c byte) bool { return c >= '0' && c <= '9' }
+	ia, ib := 0, 0
+	for ia < len(a) && ib < len(b) {
+		if digit(a[ia]) && digit(b[ib]) {
+			ja, jb := ia, ib
+			for ja < len(a) && digit(a[ja]) {
+				ja++
+			}
+			for jb < len(b) && digit(b[jb]) {
+				jb++
+			}
+			na, nb := strings.TrimLeft(a[ia:ja], "0"), strings.TrimLeft(b[ib:jb], "0")
+			if len(na) != len(nb) {
+				return len(na) < len(nb)
+			}
+			if na != nb {
+				return na < nb
+			}
+			if ja-ia != jb-ib {
+				return ja-ia < jb-ib
+			}
+			ia, ib = ja, jb
+			continue
+		}
+		if a[ia] != b[ib] {
+			return a[ia] < b[ib]
+		}
+		ia++
+		ib++
+	}
+	return len(a)-ia < len(b)-ib
+}
+
 // packExeCandidates 按当前 OS 探测程序：exe_env → 搜索根 glob（版本目录取
 // 最新）→ PATH 兜底。返回 "" = 未安装。
 func (lc *packLifecycle) findExecutable() string {
@@ -300,8 +336,9 @@ func (lc *packLifecycle) findExecutable() string {
 		}
 	}
 	if len(found) > 0 {
-		sort.Strings(found)
-		return found[len(found)-1] // 版本目录序：最新
+		// 版本目录取最新：自然序（数字段按数值比，Blender 4.10 > 4.2）。
+		sort.Slice(found, func(i, j int) bool { return naturalLess(found[i], found[j]) })
+		return found[len(found)-1]
 	}
 	if search.PathLookup != "" {
 		if p, err := exec.LookPath(search.PathLookup); err == nil {
