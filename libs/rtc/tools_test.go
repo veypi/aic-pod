@@ -122,7 +122,12 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 			}
 		}
 	}
-	service, err := rtc.New(rtc.Config{Browser: relay, HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key, Dispatch: backend.HandleTool, Disconnect: backend.DisconnectTools, Send: func(sig *protocol.RtcSignal) {
+	service, err := rtc.New(rtc.Config{Streams: func(label string) (rtc.StreamRelay, bool) {
+		if label == protocol.RtcBrowserChannel {
+			return rtc.StreamRelay(relay), true
+		}
+		return nil, false
+	}, HostID: "host_1", UserID: "owner", CredentialVersion: 1, Key: key, Dispatch: backend.HandleTool, Disconnect: backend.DisconnectTools, Send: func(sig *protocol.RtcSignal) {
 		signalMu.Lock()
 		defer signalMu.Unlock()
 		if sig.Kind == protocol.RtcAnswer {

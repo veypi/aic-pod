@@ -1,0 +1,357 @@
+package host
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/vsh/commands"
+)
+
+// mcp 命令 = 服务管理面（docs/host-vtools.md）：工具调用不再经它中转——
+// 服务登记后直接 <alias> <tool> [flags]。tools/describe/call/read 保留为
+// 调试直通（原 mcpx.Command 行为不变）。
+
+const mcpManageHelp = `usage:
+  mcp list [--json]                       服务清单（配置态 + 运行态）
+  mcp add <alias> [--cwd DIR] [--env K=V]... [--idle DUR] [--persist] <command> [args...]
+  mcp add <alias> --url <http(s)-url> [--persist]
+  mcp add <alias> --tcp <host:port> [--persist]      （vtools/tcp 行分隔 JSON 协议）
+  mcp remove <alias> [--persist]
+  mcp start <alias>                       预连接（登记在 add/启动时已完成；连接本来懒惰）
+  mcp stop <alias>                        断开当前连接（下次调用自动重连）
+  mcp restart <alias>                     stop + start
+  mcp tools|describe|call|read ...        调试直通（原 mcp 命令）
+
+工具调用不再经 mcp 中转：服务登记为 vsh 根命令——<alias> <tool> [--flag value]...
+（<alias> 无参列工具目录，<alias> <tool> --help 看参数表）。
+add/remove 引入新能力/改配置，需要 exec 规则放行：grant cmd mcp。
+--persist 写 config.yaml（重启后仍在）；不带则进程级，重启失效。
+内置 browser/cua 不可经 remove 移除（要禁用请在配置文件设 disabled: true）。`
+
+func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
+	args := inv.Args
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(inv.Stdout, mcpManageHelp)
+		return nil
+	}
+	// 调试直通：保持原 mcp 命令四个动词的行为（含 --image-preview / --json）。
+	switch args[0] {
+	case "tools", "describe", "call", "read":
+		return c.mcpDebugCmd()(ctx, inv)
+	}
+	op, rest := args[0], args[1:]
+	sid := execution.SessionFromContext(ctx)
+	switch op {
+	case "list":
+		return c.mcpList(inv, rest)
+	case "add", "remove":
+		if !c.execAllowed(sid, "mcp") {
+			return commands.Exitf(inv, 126, "mcp %s: denied by exec rules（引入新能力/改配置需 grant cmd mcp）", op)
+		}
+		if op == "add" {
+			return c.mcpAdd(ctx, inv, rest)
+		}
+		return c.mcpRemove(ctx, inv, rest)
+	case "start", "stop", "restart":
+		if len(rest) != 1 {
+			return commands.Exitf(inv, 2, "usage: mcp %s <alias>", op)
+		}
+		if err := c.mcpGate(ctx, rest[0]); err != nil {
+			return commands.Exitf(inv, 126, "%s", err)
+		}
+		return c.mcpStartStop(ctx, inv, op, rest[0])
+	default:
+		return commands.Exitf(inv, 2, "mcp: unknown operation %q\n%s", op, mcpManageHelp)
+	}
+}
+
+// mcpDebugCmd 懒建调试直通命令（原 mcpx.Command，含 exec 规则门 mcp.<alias>）。
+func (c *Client) mcpDebugCmd() commands.CommandFunc {
+	c.mcpMu.Lock()
+	defer c.mcpMu.Unlock()
+	if c.mcpDebug == nil {
+		c.mcpDebug = mcpx.Command(c.mcpSession)
+	}
+	return c.mcpDebug
+}
+
+// ---- list ----
+
+type mcpListRow struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"` // mcp | tcp
+	State    string `json:"state"`
+	Idle     string `json:"idle_timeout,omitempty"`
+	Inflight int    `json:"inflight,omitempty"`
+	Err      string `json:"error,omitempty"`
+}
+
+func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
+	jsonOut := false
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+		} else {
+			return commands.Exitf(inv, 2, "usage: mcp list [--json]")
+		}
+	}
+	rows := []mcpListRow{}
+	seen := map[string]bool{}
+	if manager := c.mcpManager(); manager != nil {
+		for _, s := range manager.Status() {
+			seen[s.Name] = true
+			state := "configured"
+			switch {
+			case s.Disabled:
+				state = "disabled"
+			case s.Running:
+				state = "running"
+			case s.Starting:
+				state = "starting"
+			}
+			rows = append(rows, mcpListRow{Name: s.Name, Kind: "mcp", State: state, Idle: s.IdleTimeout, Inflight: s.Inflight, Err: s.Err})
+		}
+	}
+	// TCP 条目不走连接管理器：已登记即“registered”（连接懒惰）。
+	if c.services != nil {
+		for _, alias := range c.services.Aliases() {
+			if !seen[alias] {
+				rows = append(rows, mcpListRow{Name: alias, Kind: "tcp", State: "registered"})
+			}
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	if jsonOut {
+		enc := json.NewEncoder(inv.Stdout)
+		return enc.Encode(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(inv.Stdout, "(no services)")
+		return nil
+	}
+	for _, r := range rows {
+		line := r.Name + "\t" + r.Kind + "\t" + r.State
+		if r.Idle != "" {
+			line += "\tidle=" + r.Idle
+		}
+		if r.Err != "" {
+			line += "\terror=" + r.Err
+		}
+		fmt.Fprintln(inv.Stdout, line)
+	}
+	return nil
+}
+
+// ---- add ----
+
+func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []string) error {
+	var (
+		alias, rawURL, rawTCP, cwd, idle string
+		env                              = map[string]string{}
+		persist                          bool
+		positional                       []string
+	)
+	for n := 0; n < len(args); n++ {
+		a := args[n]
+		value := func() (string, error) {
+			if n+1 >= len(args) {
+				return "", fmt.Errorf("%s requires a value", a)
+			}
+			n++
+			return args[n], nil
+		}
+		switch a {
+		case "--url":
+			v, err := value()
+			if err != nil {
+				return commands.Exitf(inv, 2, "mcp add: %s", err)
+			}
+			rawURL = v
+		case "--tcp":
+			v, err := value()
+			if err != nil {
+				return commands.Exitf(inv, 2, "mcp add: %s", err)
+			}
+			rawTCP = v
+		case "--cwd":
+			v, err := value()
+			if err != nil {
+				return commands.Exitf(inv, 2, "mcp add: %s", err)
+			}
+			cwd = v
+		case "--idle":
+			v, err := value()
+			if err != nil {
+				return commands.Exitf(inv, 2, "mcp add: %s", err)
+			}
+			idle = v
+		case "--env":
+			v, err := value()
+			if err != nil {
+				return commands.Exitf(inv, 2, "mcp add: %s", err)
+			}
+			k, val, ok := strings.Cut(v, "=")
+			if !ok || k == "" {
+				return commands.Exitf(inv, 2, "mcp add: --env requires K=V")
+			}
+			env[k] = val
+		case "--persist":
+			persist = true
+		default:
+			if strings.HasPrefix(a, "--") {
+				return commands.Exitf(inv, 2, "mcp add: unknown option %s", a)
+			}
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) == 0 {
+		return commands.Exitf(inv, 2, "%s", mcpManageHelp)
+	}
+	alias = positional[0]
+	var config mcpx.Config
+	switch {
+	case rawTCP != "":
+		if rawURL != "" || len(positional) != 1 {
+			return commands.Exitf(inv, 2, "mcp add: --tcp 与 --url/command 互斥")
+		}
+		config = mcpx.Config{URL: "tcp://" + rawTCP, IdleTimeout: idle}
+	case rawURL != "":
+		if len(positional) != 1 {
+			return commands.Exitf(inv, 2, "mcp add: --url 与 command 互斥")
+		}
+		config = mcpx.Config{URL: rawURL, IdleTimeout: idle}
+	default:
+		if len(positional) < 2 {
+			return commands.Exitf(inv, 2, "mcp add: 需要 <command>（或 --url/--tcp）")
+		}
+		config = mcpx.Config{Command: positional[1], Args: positional[2:], Cwd: cwd, Env: env, IdleTimeout: idle}
+	}
+	if err := config.Validate(alias); err != nil {
+		return commands.Exitf(inv, 2, "mcp add: %s", err)
+	}
+	if c.services != nil && c.services.Has(alias) {
+		return commands.Exitf(inv, 1, "mcp add: %s 已存在（先 mcp remove）", alias)
+	}
+	// 运行态生效：MCP 条目进连接管理器，TCP 条目直接登记；两者都注册 vsh 命令。
+	var manager *mcpx.Manager
+	if !config.IsTCP() {
+		manager = c.mcpManager()
+		if manager == nil {
+			return commands.Exitf(inv, 1, "mcp add: MCP unavailable")
+		}
+		if err := manager.Add(alias, config); err != nil {
+			return commands.Exitf(inv, 1, "mcp add: %s", err)
+		}
+	}
+	c.registerService(alias, config)
+	if !c.services.Has(alias) {
+		if manager != nil {
+			_ = manager.Remove(ctx, alias) // 回滚：不留「管理器有、命令面没有」的半登记状态
+		}
+		return commands.Exitf(inv, 1, "mcp add: %s 注册 vsh 命令失败（撞名或配置无效），已回滚", alias)
+	}
+	if persist {
+		if err := c.persistMCPServer(alias, &config); err != nil {
+			return commands.Exitf(inv, 1, "mcp add: 已生效但落盘失败: %s", err)
+		}
+	}
+	fmt.Fprintf(inv.Stdout, "added %s（%s）\n", alias, map[bool]string{true: "persisted", false: "进程级，重启失效"}[persist])
+	return nil
+}
+
+// ---- remove ----
+
+func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args []string) error {
+	persist := false
+	var positional []string
+	for _, a := range args {
+		if a == "--persist" {
+			persist = true
+		} else if strings.HasPrefix(a, "--") {
+			return commands.Exitf(inv, 2, "mcp remove: unknown option %s", a)
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) != 1 {
+		return commands.Exitf(inv, 2, "usage: mcp remove <alias> [--persist]")
+	}
+	alias := positional[0]
+	if c.isBuiltinPack(alias) && !c.ownerConfigured(alias) {
+		return commands.Exitf(inv, 2, "mcp remove: 内置服务 %s 不可移除（要禁用请在配置文件设 disabled: true）", alias)
+	}
+	manager := c.mcpManager()
+	if manager != nil {
+		if err := manager.Remove(ctx, alias); err != nil && !strings.Contains(err.Error(), "unknown service") {
+			return commands.Exitf(inv, 1, "mcp remove: %s", err)
+		}
+	}
+	if c.services == nil || !c.services.Has(alias) {
+		if !persist {
+			return commands.Exitf(inv, 1, "mcp remove: unknown service %q", alias)
+		}
+	} else {
+		c.services.Unregister(alias)
+	}
+	if persist {
+		if err := c.persistMCPServer(alias, nil); err != nil {
+			return commands.Exitf(inv, 1, "mcp remove: 已生效但落盘失败: %s", err)
+		}
+	}
+	fmt.Fprintf(inv.Stdout, "removed %s\n", alias)
+	return nil
+}
+
+// ---- start / stop / restart ----
+
+func (c *Client) mcpStartStop(ctx context.Context, inv *commands.Invocation, op, alias string) error {
+	manager := c.mcpManager()
+	isMCP := false
+	if manager != nil {
+		for _, s := range manager.Status() {
+			if s.Name == alias {
+				isMCP = true
+				break
+			}
+		}
+	}
+	if !isMCP {
+		if c.services == nil {
+			return commands.Exitf(inv, 1, "mcp %s: unknown service %q", op, alias)
+		}
+		if _, ok := c.services.Lookup(alias); !ok {
+			return commands.Exitf(inv, 1, "mcp %s: unknown service %q", op, alias)
+		}
+	}
+	if op != "start" {
+		if isMCP {
+			if err := manager.Restart(ctx, alias); err != nil {
+				return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
+			}
+		} else if p, ok := c.services.Lookup(alias); ok {
+			if closer, isCloser := p.(interface{ Close() error }); isCloser {
+				if err := closer.Close(); err != nil {
+					return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
+				}
+			}
+		}
+	}
+	if op != "stop" {
+		if isMCP {
+			if _, err := manager.Session(ctx, alias); err != nil {
+				return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
+			}
+		} else if p, ok := c.services.Lookup(alias); ok {
+			if _, err := p.Tools(ctx); err != nil {
+				return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
+			}
+		}
+	}
+	fmt.Fprintf(inv.Stdout, "%s %s\n", op, alias)
+	return nil
+}

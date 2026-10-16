@@ -29,8 +29,10 @@ type Config struct {
 	// （host：HandleTool/DisconnectTools——不再有 ToolBackend 转发层）。
 	Dispatch   func(context.Context, protocol.Caller, protocol.Request) protocol.Response
 	Disconnect func(protocol.Caller)
-	Browser    BrowserRelay
-	Logf       func(string, ...any)
+	// Streams 按 DataChannel 标签解析流转发执行体（通道开启时现查注册表，
+	// 运行期新增的流式服务无需重启 RTC）；未命中 = 关闭该通道。
+	Streams func(label string) (StreamRelay, bool)
+	Logf    func(string, ...any)
 }
 type Service struct {
 	cfg      Config
@@ -153,7 +155,7 @@ func (s *Service) HandleSignal(sig *protocol.RtcSignal) {
 // 偏移的宿主机上让新 peer 立即「高龄」（win 实测 -70s，首个 maintain
 // tick 即被踢，hello 来不及完成）。
 func (s *Service) newPeer(id string, pc *webrtc.PeerConnection, ctx context.Context, cancel context.CancelFunc) *peer {
-	return &peer{s: s, id: id, pc: pc, ctx: ctx, cancel: cancel, created: s.now(), requests: make(chan struct{}, 32)}
+	return &peer{s: s, id: id, pc: pc, ctx: ctx, cancel: cancel, created: s.now(), requests: make(chan struct{}, 32), streams: map[string]*webrtc.DataChannel{}}
 }
 
 func (s *Service) offer(sig *protocol.RtcSignal) {

@@ -12,10 +12,10 @@ import (
 
 type peer struct {
 	toolsDC       *webrtc.DataChannel
-	browserDC     *webrtc.DataChannel
+	streams       map[string]*webrtc.DataChannel // 流转发通道（按标签至多一条）
 	toolsSend     sync.Mutex
 	toolsResponse sync.Mutex
-	browserSend   sync.Mutex
+	streamSend    sync.Mutex
 	s             *Service
 	id            string
 	pc            *webrtc.PeerConnection
@@ -66,13 +66,16 @@ func (p *peer) expire(now time.Time) {
 	}
 }
 func (p *peer) channel(dc *webrtc.DataChannel) {
-	if dc.Label() == protocol.RtcBrowserChannel {
-		p.browserChannel(dc)
-		return
-	}
 	if dc.Label() == protocol.RtcChannel {
 		p.toolsChannel(dc)
 		return
+	}
+	// 流转发通道：按标签现查注册表（运行期新增的流式服务即时生效）。
+	if p.s.cfg.Streams != nil {
+		if relay, ok := p.s.cfg.Streams(dc.Label()); ok {
+			p.streamChannel(dc, relay)
+			return
+		}
 	}
 	_ = dc.Close()
 }
@@ -81,8 +84,8 @@ func (p *peer) sendRaw(ctx context.Context, dc *webrtc.DataChannel, raw []byte, 
 		return protocol.Fail("unreachable", "Channel is unavailable")
 	}
 	lock := &p.toolsSend
-	if dc.Label() == protocol.RtcBrowserChannel {
-		lock = &p.browserSend
+	if dc.Label() != protocol.RtcChannel {
+		lock = &p.streamSend
 	}
 	lock.Lock()
 	defer lock.Unlock()

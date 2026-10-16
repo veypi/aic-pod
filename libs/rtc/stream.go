@@ -9,11 +9,15 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// BrowserRelay transports upstream WebSocket messages, not browser commands.
-type BrowserRelay func(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error
+// StreamRelay transports upstream stream messages (e.g. the browser daemon's
+// native WebSocket), not tool calls. 消息边界保持的纯转发；权限复查与保活由
+// 实现方负责。
+type StreamRelay func(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error
 
-func (p *peer) browserChannel(dc *webrtc.DataChannel) {
-	if p.s.cfg.Browser == nil || !dc.Ordered() || dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
+// streamChannel 是流转发通道的通用实现（原 browserChannel 泛化）：同一 peer
+// 上每个标签最多一条；帧格式 = uint32 大端长度 + 有序 16 KiB 分块。
+func (p *peer) streamChannel(dc *webrtc.DataChannel, relay StreamRelay) {
+	if !dc.Ordered() || dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
 		_ = dc.Close()
 		return
 	}
@@ -22,13 +26,14 @@ func (p *peer) browserChannel(dc *webrtc.DataChannel) {
 		_ = dc.Close()
 		return
 	}
+	label := dc.Label()
 	p.mu.Lock()
-	if p.browserDC != nil {
+	if p.streams[label] != nil {
 		p.mu.Unlock()
 		_ = dc.Close()
 		return
 	}
-	p.browserDC = dc
+	p.streams[label] = dc
 	p.mu.Unlock()
 	ctx, cancel := context.WithCancel(p.ctx)
 	input := make(chan []byte, 128)
@@ -38,8 +43,8 @@ func (p *peer) browserChannel(dc *webrtc.DataChannel) {
 			cancel()
 			_ = dc.Close()
 			p.mu.Lock()
-			if p.browserDC == dc {
-				p.browserDC = nil
+			if p.streams[label] == dc {
+				delete(p.streams, label)
 			}
 			p.mu.Unlock()
 		})
@@ -60,8 +65,8 @@ func (p *peer) browserChannel(dc *webrtc.DataChannel) {
 		go func() {
 			defer closeStream()
 			send := func(raw []byte) error {
-				if len(raw) == 0 || len(raw) > protocol.RtcBrowserMessageLimit {
-					return protocol.Fail("overloaded", "Browser frame too large")
+				if len(raw) == 0 || len(raw) > protocol.RtcStreamMessageLimit {
+					return protocol.Fail("overloaded", "Stream frame too large")
 				}
 				// One upstream message may exceed SCTP's message limit. Only transport
 				// framing is added: uint32 length, followed by ordered 16 KiB chunks.
@@ -77,7 +82,7 @@ func (p *peer) browserChannel(dc *webrtc.DataChannel) {
 				}
 				return nil
 			}
-			if err := p.s.cfg.Browser(ctx, caller, input, send); err != nil && ctx.Err() == nil {
+			if err := relay(ctx, caller, input, send); err != nil && ctx.Err() == nil {
 				_ = p.sendRaw(ctx, dc, []byte(err.Error()), true)
 			}
 		}()

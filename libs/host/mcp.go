@@ -20,7 +20,16 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	if err != nil {
 		return err
 	}
-	manager, err := mcpx.NewManager(servers, mcpx.Options{Authorize: c.authorizeMCP, HTTPClient: c.mcpHTTP(), Processes: c.procs, Logf: c.logf, Expired: c.mcpExpired, Policy: func(cfg mcpx.Config) vbox.Policy {
+	// TCP 条目（url = tcp://…）不是 MCP 传输：不进连接管理器，由 vtools
+	// 注册层直接接管（syncServiceRegistrations）。
+	mcpSet := make(map[string]mcpx.Config, len(servers))
+	for name, cfg := range servers {
+		if cfg.IsTCP() {
+			continue
+		}
+		mcpSet[name] = cfg
+	}
+	manager, err := mcpx.NewManager(mcpSet, mcpx.Options{Authorize: c.authorizeMCP, HTTPClient: c.mcpHTTP(), Processes: c.procs, Logf: c.logf, Expired: c.mcpExpired, Policy: func(cfg mcpx.Config) vbox.Policy {
 		return c.nativePolicy(context.Background(), cfg.Cwd, cfg.Command)
 	}})
 	if err != nil {
@@ -44,6 +53,8 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	c.browserContext, c.browserCancel = context.WithCancel(context.Background())
 	c.mcpServices = manager
 	c.mcpMu.Unlock()
+	// 服务登记为 vsh 根命令（vtools；含 TCP 条目与 browser 流通道）。
+	c.syncServiceRegistrations(servers)
 	return nil
 }
 

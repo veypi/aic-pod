@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
+	"github.com/veypi/aic-pod/libs/vtools"
 )
 
 func (c *Client) initTools() {
@@ -25,7 +26,14 @@ func (c *Client) initTools() {
 		c.initErr = err
 		return
 	}
+	// vtools 登记表先于 configureMCP 创建：服务（MCP/TCP）登记为 vsh 根命令。
+	c.services = vtools.NewRegistry(reg, c.mcpGate, c.logf)
 	c.initErr = c.configureMCP(c.options().MCP)
+	if c.initErr != nil {
+		return
+	}
+	// 内嵌技能包的非 MCP 服务（blender：TCP 通道 + 生命周期动词）。
+	c.initErr = c.registerBuiltinPacks()
 	if c.initErr != nil {
 		return
 	}

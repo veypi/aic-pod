@@ -3,9 +3,9 @@
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
 // vsh 默认 registry + contrib 命令（jq/awk/html-to-markdown）+ 平台命令
-// （commands/bg/grant/mcp/skill/ssh/scp/sftp）由引擎 Registry 收口；browser 与
-// cua 是官方 MCP 服务（门为 exec 规则 mcp.<alias>），不再有内建指令；原生命令按
-// exec_rules 首命中判定；
+// （commands/bg/grant/mcp/skill/ssh/scp/sftp）由引擎 Registry 收口；服务
+// （MCP/TCP 等）经 vtools 登记为 vsh 根命令（mcp 退化为管理面，browser 与
+// cua 是内置服务）；原生命令按 exec_rules 首命中判定；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
 // 且全在发送前；pod 不重新分类审批，只在执行点看 rules。
 package host
@@ -26,6 +26,8 @@ import (
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/libs/vtools"
+	"github.com/veypi/vsh/commands"
 
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/vbox"
@@ -52,9 +54,13 @@ type Client struct {
 	sessionRoot    string
 	mcpMu          sync.RWMutex
 	mcpServices    *mcpx.Manager
+	mcpDebug       commands.CommandFunc // 调试直通（mcpx.Command 懒建）
 	browserConfig  *mcpx.Config
 	browserContext context.Context
 	browserCancel  context.CancelFunc
+	// services 是 vtools 服务登记表（工具命令注册 + RTC 流通道查询）；
+	// initTools 时创建一次（先于 configureMCP），此后字段不再变。
+	services *vtools.Registry
 
 	optsMu          sync.RWMutex
 	opts            Options
@@ -330,7 +336,7 @@ func (c *Client) newRTCConfig(key []byte, hostname string) rtc.Config {
 		Version:    c.options().Version,
 		Dispatch:   c.HandleTool,
 		Disconnect: c.DisconnectTools,
-		Browser:    c.streamBrowser,
+		Streams:    c.streamResolver,
 		Send: func(sig *protocol.RtcSignal) {
 			nc := c.connection()
 			if nc == nil {

@@ -4,7 +4,9 @@ package protocol
 const RtcProtocol = "hosts_rtc/3"
 const RtcChannel = "aic-tools"
 const RtcBrowserChannel = "aic-browser"
-const RtcBrowserMessageLimit = 16 << 20
+
+// RtcStreamMessageLimit 是流转发通道的单消息上限（通用，非 browser 专属）。
+const RtcStreamMessageLimit = 16 << 20
 
 // Tool responses larger than one chunk use binary frames: uint32 BE payload
 // length, then ordered chunks of the original JSON. Requests remain JSON text.

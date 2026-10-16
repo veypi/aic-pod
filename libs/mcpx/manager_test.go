@@ -268,3 +268,92 @@ func TestManagerRejectsInvalidConfiguration(t *testing.T) {
 		}
 	}
 }
+
+// 运行期增删：Add 只登记（首次调用仍懒启动）；Remove 摘除配置与实例，
+// 之后同名调用报“未配置”；Add 同名可重新登记（remove 后再 add 的路径）。
+func TestManagerAddRemove(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(nil, Options{Processes: vbox.NewManager(), Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	fixture := Config{Command: binary, Args: []string{"-test.run=^TestMCPProcessFixture$"}, Cwd: t.TempDir(), Env: map[string]string{"AIC_MCP_TEST_PROCESS": "1"}, NoSandbox: true}
+	if err := manager.Add("fixture", fixture); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Add("fixture", fixture); err == nil {
+		t.Fatal("duplicate Add accepted")
+	}
+	if err := manager.Add("bad", Config{}); err == nil {
+		t.Fatal("invalid config accepted")
+	}
+	session, err := manager.Session(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "next", Arguments: map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.Status()
+	if len(status) != 1 || status[0].Name != "fixture" || !status[0].Running || !status[0].Launched || status[0].Starting || status[0].Err != "" {
+		t.Fatalf("status: %+v", status)
+	}
+	if err := manager.Remove(ctx, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Session(ctx, "fixture"); err == nil {
+		t.Fatal("removed service still resolves")
+	}
+	if got := manager.Status(); len(got) != 0 {
+		t.Fatalf("status after remove: %+v", got)
+	}
+	if err := manager.Remove(ctx, "fixture"); err == nil {
+		t.Fatal("removing an unknown service must fail")
+	}
+	// 重新登记同名服务并照常调用
+	if err := manager.Add("fixture", fixture); err != nil {
+		t.Fatal(err)
+	}
+	again, err := manager.Session(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again == session {
+		t.Fatal("re-added service reused the removed connection")
+	}
+}
+
+// Add 携带更短 idle_timeout 时 reap 扫描周期必须动态重算（启动时无任何
+// 有效期配置，若不重算永远不会扫描）。
+func TestManagerReapReschedulesOnAdd(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(nil, Options{Processes: vbox.NewManager(), Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := manager.Add("fixture", Config{Command: binary, Args: []string{"-test.run=^TestMCPProcessFixture$"}, Cwd: t.TempDir(), Env: map[string]string{"AIC_MCP_TEST_PROCESS": "1"}, IdleTimeout: "1s", NoSandbox: true}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := manager.Session(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitIdleRelease(t, manager, "fixture")
+	if again, err := manager.Session(ctx, "fixture"); err != nil {
+		t.Fatal(err)
+	} else if again == session {
+		t.Fatal("idle release did not happen after Add rescheduled the reaper")
+	}
+}

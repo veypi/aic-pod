@@ -34,6 +34,17 @@ func parseImagePreviewSize(value string) (*imagePreviewSize, error) {
 	return &imagePreviewSize{width: width, height: height}, nil
 }
 
+// PreviewToolImages 是 --image-preview 的导出包装（工具注册层 vtools 用）：
+// 校验 WIDTHxHEIGHT 尺寸并转换成功结果中的图片内容；语义与 mcp call
+// --image-preview 完全一致。
+func PreviewToolImages(result *mcp.CallToolResult, size string) (*mcp.CallToolResult, error) {
+	parsed, err := parseImagePreviewSize(size)
+	if err != nil {
+		return nil, err
+	}
+	return previewToolImages(result, *parsed)
+}
+
 // previewToolImages transforms only explicitly requested image content. Metadata
 // from the upstream capture remains unchanged; source dimensions allow callers
 // to undo this additional preview scaling before sending coordinates upstream.

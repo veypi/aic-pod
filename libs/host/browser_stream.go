@@ -55,7 +55,7 @@ func (c *Client) streamBrowser(parent context.Context, caller protocol.Caller, i
 		return fmt.Errorf("Browser stream: %w", err)
 	}
 	defer ws.CloseNow()
-	ws.SetReadLimit(protocol.RtcBrowserMessageLimit)
+	ws.SetReadLimit(protocol.RtcStreamMessageLimit)
 	writes := make(chan error, 1)
 	go func() {
 		var err error

@@ -16,7 +16,6 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
-	"github.com/veypi/aic-pod/libs/mcpx"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
@@ -73,20 +72,23 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			GrantStatus: c.vshGrantStatus,
 			SSH:         execution.SSHDeps{SSH: c.managedSSH, SCP: c.managedSCP, SFTP: c.managedSFTP},
 			// Host 不提供 ListHosts/SendUser，因此不注册这两个命令。
-			MCP: mcpx.Command(c.mcpSession),
+			// mcp 是服务管理面（list/add/remove/start/stop/restart + 调试直通）；
+			// 工具调用走服务自身的 vsh 根命令（vtools 登记，见 services.go）。
+			MCP: c.cmdMCP,
 			// pull/push：设备↔平台云盘传输（/fs/cloud HTTP 面；skill 命令已随
 			// NATS fetch 通道一并退役——包装载改用 pull，docs/skill.md §9.2）。
 			Pull: c.cmdPull,
 			Push: c.cmdPush,
 
-			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令、已装包命令，
-			// 外加名字不自明的 contrib 命令（html-to-markdown；jq/awk 属通用命令不列）。
+			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令、已登记的服务
+			// 命令（vtools），外加名字不自明的 contrib 命令（html-to-markdown；
+			// jq/awk 属通用命令不列）。
 			Discoverable: func(name string) bool {
 				switch name {
 				case "commands", "bg", "grant", "mcp", "ssh", "scp", "sftp", "pull", "push", "html-to-markdown":
 					return true
 				}
-				return false
+				return c.serviceRegistered(name)
 			},
 		},
 		NativeExec: c.nativeExec,

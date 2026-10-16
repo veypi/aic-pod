@@ -59,9 +59,23 @@ type Settings struct {
 
 var aliasPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
-func (c Config) Validate(alias string) error {
+// ValidateAlias 校验服务别名（配置校验与运行期登记共用同一规则）。
+func ValidateAlias(alias string) error {
 	if !aliasPattern.MatchString(alias) {
 		return fmt.Errorf("mcp: invalid server alias %q", alias)
+	}
+	return nil
+}
+
+// IsTCP 报告该条目是 TCP 工具服务（url = tcp://host:port，行分隔 JSON 协议，
+// 见 libs/vtools）：不是 MCP 传输，不进 mcpx.Manager，由工具注册层接管。
+func (c Config) IsTCP() bool {
+	return strings.HasPrefix(c.URL, "tcp://")
+}
+
+func (c Config) Validate(alias string) error {
+	if err := ValidateAlias(alias); err != nil {
+		return err
 	}
 	if c.Disabled {
 		return nil
@@ -74,8 +88,11 @@ func (c Config) Validate(alias string) error {
 	}
 	if c.URL != "" {
 		u, err := url.Parse(c.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" {
-			return fmt.Errorf("mcp %s: invalid HTTP endpoint", alias)
+		if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" {
+			return fmt.Errorf("mcp %s: invalid endpoint", alias)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "tcp" {
+			return fmt.Errorf("mcp %s: invalid endpoint scheme (http | https | tcp)", alias)
 		}
 		if len(c.Args) != 0 || len(c.Env) != 0 || c.Cwd != "" || c.NoSandbox {
 			return fmt.Errorf("mcp %s: process settings require command", alias)
@@ -123,7 +140,18 @@ type Manager struct {
 	launched  map[string]bool // 曾经启动过（Started；空闲回收不撤销）
 	options   Options
 	closed    bool
-	reapEvery time.Duration // 空闲扫描周期，0 = 无服务配置有效期
+	reapReset chan struct{} // 容量 1：配置增删时通知 reap 重算扫描周期
+}
+
+// copyConfig 深拷贝配置（Args/Env 独立，后续调用方修改不影响已登记项）。
+func copyConfig(cfg Config) Config {
+	cfg.Args = append([]string(nil), cfg.Args...)
+	env := make(map[string]string, len(cfg.Env))
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	cfg.Env = env
+	return cfg
 }
 
 func NewManager(configs map[string]Config, options Options) (*Manager, error) {
@@ -132,13 +160,7 @@ func NewManager(configs map[string]Config, options Options) (*Manager, error) {
 		if err := cfg.Validate(name); err != nil {
 			return nil, err
 		}
-		cfg.Args = append([]string(nil), cfg.Args...)
-		env := make(map[string]string, len(cfg.Env))
-		for k, v := range cfg.Env {
-			env[k] = v
-		}
-		cfg.Env = env
-		copy[name] = cfg
+		copy[name] = copyConfig(cfg)
 	}
 	if options.Processes == nil {
 		return nil, errors.New("mcp: process manager required")
@@ -147,18 +169,108 @@ func NewManager(configs map[string]Config, options Options) (*Manager, error) {
 		options.Logf = func(string, ...any) {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &Manager{ctx: ctx, cancel: cancel, configs: copy, instances: map[string]*instance{}, launched: map[string]bool{}, options: options, reapEvery: reapEvery(copy)}
-	if m.reapEvery > 0 {
-		go m.reap()
-	}
+	m := &Manager{ctx: ctx, cancel: cancel, configs: copy, instances: map[string]*instance{}, launched: map[string]bool{}, options: options, reapReset: make(chan struct{}, 1)}
+	go m.reap()
 	return m, nil
 }
 
-// reapEvery 返回空闲扫描周期：最短有效期的四分之一，钳在 0.25s..30s（有效期为
-// 分钟级时即“到期后半个扫描周期内回收”）；没有任何配置有效期时返回 0（不扫描）。
-func reapEvery(configs map[string]Config) time.Duration {
+// Add 在运行期登记一个新服务：只存配置，首次调用仍懒启动；同名已存在即拒。
+// 配置变化会通知 reap 重算扫描周期（新条目可能有更短的有效期）。
+func (m *Manager) Add(name string, cfg Config) error {
+	if err := cfg.Validate(name); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errors.New("mcp: manager closed")
+	}
+	if _, exists := m.configs[name]; exists {
+		m.mu.Unlock()
+		return fmt.Errorf("mcp %s: service already configured", name)
+	}
+	m.configs[name] = copyConfig(cfg)
+	m.mu.Unlock()
+	m.notifyReap()
+	return nil
+}
+
+// Remove 在运行期摘除一个服务：配置与实例一并移除；运行中的实例先取消再
+// 等待收尾（在途调用随连接结束失败，不会用到已摘除的配置）。缺席即错。
+func (m *Manager) Remove(ctx context.Context, name string) error {
+	m.mu.Lock()
+	if _, exists := m.configs[name]; !exists {
+		m.mu.Unlock()
+		return fmt.Errorf("mcp %s: unknown service", name)
+	}
+	delete(m.configs, name)
+	i := m.instances[name]
+	delete(m.instances, name)
+	m.mu.Unlock()
+	m.notifyReap()
+	if i == nil {
+		return nil
+	}
+	i.cancel()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-i.done:
+		return nil
+	}
+}
+
+// ServiceStatus 是一个服务的配置态 + 运行态快照（不含凭据与启动环境）。
+type ServiceStatus struct {
+	Name        string
+	Disabled    bool
+	Launched    bool      // 曾经启动过
+	Starting    bool      // 实例存在但未就绪
+	Running     bool      // 连接就绪且未结束
+	IdleTimeout string    // 配置原文（空 = 常驻）
+	Used        time.Time // 最后一次使用（未启动为零值）
+	Inflight    int
+	Err         string // 连接失败原因（就绪前）
+}
+
+// Status 返回全部已配置服务的快照（按名排序）。
+func (m *Manager) Status() []ServiceStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]ServiceStatus, 0, len(m.configs))
+	for name, cfg := range m.configs {
+		s := ServiceStatus{Name: name, Disabled: cfg.Disabled, Launched: m.launched[name], IdleTimeout: cfg.IdleTimeout}
+		if i := m.instances[name]; i != nil {
+			s.Used, s.Inflight = i.used, i.inflight
+			select {
+			case <-i.done:
+			default:
+				select {
+				case <-i.ready:
+					s.Running = i.err == nil
+				default:
+					s.Starting = true
+				}
+			}
+			if i.err != nil {
+				s.Err = i.err.Error()
+			}
+		}
+		out = append(out, s)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Name < out[b].Name })
+	return out
+}
+
+// reapInterval 返回当前配置下的空闲扫描周期：最短有效期的四分之一，钳在
+// 0.25s..30s（有效期为分钟级时即“到期后半个扫描周期内回收”）；没有任何配置
+// 有效期时返回 0（不扫描）。配置运行期可增删（Add/Remove），每次扫描与配置
+// 变化都重算。
+func (m *Manager) reapInterval() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	shortest := time.Duration(0)
-	for _, cfg := range configs {
+	for _, cfg := range m.configs {
 		d, err := cfg.IdleDuration()
 		if err != nil || d <= 0 {
 			continue
@@ -178,6 +290,14 @@ func reapEvery(configs map[string]Config) time.Duration {
 		every = 30 * time.Second
 	}
 	return every
+}
+
+// notifyReap 通知 reap 重算扫描周期（非阻塞：已有未读通知时合并）。
+func (m *Manager) notifyReap() {
+	select {
+	case m.reapReset <- struct{}{}:
+	default:
+	}
 }
 
 // Session shares a device-owned connection. The request context only controls
@@ -407,14 +527,34 @@ func (m *Manager) endRequest(i *instance) {
 }
 
 // reap stops services that have been idle beyond their configured timeout.
+// 扫描周期随配置动态重算：计时器到期扫一次，配置增删（reapReset）重臂。
 func (m *Manager) reap() {
-	ticker := time.NewTicker(m.reapEvery)
-	defer ticker.Stop()
+	var timer *time.Timer
+	var tick <-chan time.Time
+	arm := func() {
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+			tick = nil
+		}
+		if d := m.reapInterval(); d > 0 {
+			timer = time.NewTimer(d)
+			tick = timer.C
+		}
+	}
+	arm()
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
-		case now := <-ticker.C:
+		case <-m.reapReset:
+			arm()
+		case now := <-tick:
 			type released struct {
 				name string
 				i    *instance
@@ -438,6 +578,7 @@ func (m *Manager) reap() {
 			for _, r := range expired {
 				m.expire(r.name, r.i)
 			}
+			arm()
 		}
 	}
 }

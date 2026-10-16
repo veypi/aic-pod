@@ -10,9 +10,10 @@ require (
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
+	github.com/veypi/aic-skills v0.2.0
 	github.com/veypi/vbox v0.3.1
 	github.com/veypi/vigo v0.7.7
-	github.com/veypi/vsh v0.2.0
+	github.com/veypi/vsh v0.3.0
 	github.com/veypi/vsh/contrib/awk v0.1.0
 	github.com/veypi/vsh/contrib/htmltomarkdown v0.1.0
 	github.com/veypi/vsh/contrib/jq v0.1.0
@@ -88,3 +89,8 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
+
+// 本地开发以工作区兄弟目录为准（10-05 skillrun 时代同款接线）；require 版本随
+// aic-skills 发版推进，replace 保证未打 tag 时本地可构建（docker 只 COPY 预编译
+// 二进制，不经此文件）。
+replace github.com/veypi/aic-skills => ../aic-skills

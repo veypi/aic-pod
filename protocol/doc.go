@@ -12,7 +12,7 @@
 //   - hosts_nats.go：hosts_nats/3 签名信封（NatsProtocol/NatsRequest/
 //     NatsSubject/NatsSign/NatsVerify）。
 //   - hosts_rtc.go：hosts_rtc/3 设备数据通道信封（RtcProtocol/RtcChannel/
-//     RtcBrowserChannel/RtcRequest/RtcAuthResult 及分块上限）。
+//     RtcBrowserChannel/RtcStreamMessageLimit/RtcRequest/RtcAuthResult 及分块上限）。
 //   - rtc_ticket.go：RTC 直连票据（RtcTicket/SignRtcTicket/VerifyRtcTicket/
 //     RtcDirectKey/NormalizeFingerprint 与租约常量）。
 //   - rtc_signal.go：NATS 上的 RTC 信令信封（RtcSignal 与种类常量）。
