@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **四次评审修复·第二批（2026-10-16 交叉 review）**：RTC 流发送锁改 per-label（原全局 streamSend 单锁下，一个拥塞通道可把其余流通道阻塞到 30s 超时）；`blenderProvider` 地址改构造时钉死（原 `Addr()` 每次现算读 env，与 `sync.Once` 钉在首次调用的真实拨号地址可能不一致；AIC_BLENDER_PORT 改动自此明确需重启 pod，帮助文案已注明）；`mcp list` 补曝光配置里 `disabled: true` 的 TCP 条目（原既不 registered 也不 rejected，禁用状态完全不可见）。
+
 - **四次评审修复·第一批（2026-10-16 交叉 review）**：`TestManagedGitDeniedWithoutGrant` 适配 ssh 内建放行（改用非内建主机 gitlab.com 验拒绝路径），新增 `TestManagedGitBuiltinDeniedByOwnerRule`（所有者 `deny:github.com:22` 压过内建）；vtools 命令面区分裸 flag 与显式 `--flag=`——string 参数的空串终于能传入（原两者同映射 `raw==""`，空串永远被拒）；`registerBuiltinPacks` 改单包失败记日志跳过（原 return err → initErr，内嵌包撞名/坏清单会打挂整机），alias 排序注册消除 map 迭代序不确定性；`mcp` 帮助与 `docs/host-vtools.md` 补「内置含 blender」与「手改 config.yaml 需重启 pod」。
 
 - **三次评审修复（2026-10-16 交叉 review 收口）**：服务 alias 命名空间收口——登记失败（撞平台命令名/地址无效）不再只进日志：`mcp list` 以 `state=rejected` + 原因曝光，`mcp remove` 可摘除该记录；`vtools.Gate` 的会话键改由 `Options.SessionOf` 注入（host 传 `execution.SessionFromContext`），去掉 vtools→execution 的反向依赖；换型/换址判定改按 `vtools.AddrProvider` 接口，`blenderProvider`（TCP 后端包装）不再被误判成非 TCP 服务；契约同步 `docs/host-vtools.md`。

@@ -14,6 +14,7 @@ import (
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/vtools"
 	"github.com/veypi/aic-pod/protocol"
+	"github.com/veypi/vsh/commands"
 )
 
 // vtools 全生命周期：mcp add → alias 根命令直调（flag 映射 / 目录 / 参数表）
@@ -236,7 +237,7 @@ func TestRegisterServiceTypeSwitch(t *testing.T) {
 
 	// TCP 后端的包装 provider（blenderProvider）：地址按接口判定，不断言具体
 	// 类型——否则它会被当成「非 TCP」，换成 MCP 配置时留在原地继续服务旧端点。
-	wrapped := &blenderProvider{addr: func() string { return "127.0.0.1:9866" }}
+	wrapped := &blenderProvider{addr: "127.0.0.1:9866"}
 	if err := c.services.Register("bl", wrapped); err != nil {
 		t.Fatal(err)
 	}
@@ -278,5 +279,29 @@ func TestVtoolsDiscoverable(t *testing.T) {
 	}
 	if strings.Contains(text, "sed") || strings.Contains(text, "grep") {
 		t.Fatalf("builtins must stay out of the discovery view: %q", text)
+	}
+}
+
+// 配置里 disabled 的 TCP 条目也要在 mcp list 曝光（原既不 registered 也不
+// rejected，「禁用了 TCP 服务」在任何清单都不可见）。
+func TestMCPListShowsDisabledTCP(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true,
+		MCP: mcpx.Settings{Servers: map[string]mcpx.Config{
+			"off-tcp": {URL: "tcp://127.0.0.1:9999", Disabled: true},
+		}}})
+	c.hostID = "host_1"
+	c.uid = "owner"
+	c.kTool = "test-key"
+	c.sessionRoot = t.TempDir()
+	if c.initErr != nil {
+		t.Fatal(c.initErr)
+	}
+	var out strings.Builder
+	if err := c.mcpList(&commands.Invocation{Stdout: &out}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "off-tcp\ttcp\tdisabled") {
+		t.Fatalf("disabled tcp 未曝光:\n%s", out.String())
 	}
 }

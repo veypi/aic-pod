@@ -59,25 +59,26 @@ func blenderAddr(m *packManifest) string {
 }
 
 // blenderProvider TCP 适配 + 错误翻译：拨号失败 = Blender 没在跑（分级 L2）。
-// 连接地址按首次调用解析（AIC_BLENDER_PORT 覆盖生效时机与 addon 一致）。
+// 地址在构造时钉死（AIC_BLENDER_PORT 覆盖此时读取，之后改动需重启 pod 生效）——
+// Addr() 与真实拨号地址必须同源，否则登记层的「同址不重登记」判定会失真。
 type blenderProvider struct {
-	addr  func() string
+	addr  string
 	once  sync.Once
 	inner *vtools.TCPProvider
 	err   error
 }
 
 func newBlenderProvider(m *packManifest) *blenderProvider {
-	return &blenderProvider{addr: func() string { return blenderAddr(m) }}
+	return &blenderProvider{addr: blenderAddr(m)}
 }
 
 // Addr 返回 addon 端点（vtools.AddrProvider）：登记层据此判定已登记服务是不是
 // 同一个 TCP 端点（换型/换址即摘除重登记）。
-func (b *blenderProvider) Addr() string { return b.addr() }
+func (b *blenderProvider) Addr() string { return b.addr }
 
 func (b *blenderProvider) provider() (vtools.Provider, error) {
 	b.once.Do(func() {
-		b.inner, b.err = vtools.NewTCP(b.addr())
+		b.inner, b.err = vtools.NewTCP(b.addr)
 	})
 	if b.err != nil {
 		return nil, b.err
@@ -184,7 +185,8 @@ const blenderHelp = `usage:
   blender <tool> [flags]         工具调用（<tool> --help 看参数表）
 
 工具面：ping / get_scene_info / get_object_info / execute_code / get_viewport_screenshot。
-长渲染/批量几何走 exec 原生无头（grant cmd blender 后 blender -b --python …）。`
+长渲染/批量几何走 exec 原生无头（grant cmd blender 后 blender -b --python …）。
+AIC_BLENDER_PORT / AIC_BLENDER_EXE 改动需重启 pod 生效（地址在登记时钉死）。`
 
 func (c *Client) blenderCommand(alias string) commands.CommandFunc {
 	return func(ctx context.Context, inv *commands.Invocation) error {

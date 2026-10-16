@@ -150,6 +150,18 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 		}
 		rows = append(rows, mcpListRow{Name: name, Kind: rej.kind, State: "rejected", Err: rej.reason})
 	}
+	// 配置里 disabled 的 TCP 条目：不进管理器也不登记，补行曝光（MCP 形态已由
+	// manager.Status 的 Disabled 分支覆盖；否则「禁用了 TCP 服务」在任何清单都不可见）。
+	for name, serverCfg := range c.options().MCP.Servers {
+		if seen[name] || !serverCfg.Disabled || !serverCfg.IsTCP() {
+			continue
+		}
+		if c.services != nil && c.services.Has(name) {
+			continue // 上面 registered 段已列
+		}
+		seen[name] = true
+		rows = append(rows, mcpListRow{Name: name, Kind: "tcp", State: "disabled"})
+	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	if jsonOut {
 		enc := json.NewEncoder(inv.Stdout)

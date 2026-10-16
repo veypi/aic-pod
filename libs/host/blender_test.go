@@ -223,3 +223,18 @@ func TestRegisterPackServiceFailureIsolated(t *testing.T) {
 		t.Fatal("登记失败的包留下了服务")
 	}
 }
+
+// blenderProvider 地址在构造时钉死：之后改 AIC_BLENDER_PORT 不影响已登记
+// provider（Addr() 与真实拨号同源，重启 pod 才生效）。
+func TestBlenderProviderAddrPinned(t *testing.T) {
+	m := &packManifest{
+		Service:   packService{URL: "tcp://127.0.0.1:9866"},
+		Lifecycle: &packLifecycle{PortEnv: "AIC_BLENDER_PORT_TEST"},
+	}
+	t.Setenv("AIC_BLENDER_PORT_TEST", "10001")
+	p := newBlenderProvider(m)
+	t.Setenv("AIC_BLENDER_PORT_TEST", "10002")
+	if p.Addr() != "127.0.0.1:10001" {
+		t.Fatalf("addr 未在构造时钉死: %s", p.Addr())
+	}
+}
