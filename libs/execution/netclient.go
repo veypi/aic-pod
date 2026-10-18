@@ -3,6 +3,7 @@ package execution
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -197,6 +198,10 @@ func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL strin
 			return nil, nil, perr
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	if req.Insecure {
+		// curl -k/--insecure：只关证书校验，不碰私网阻断与规则表门。
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{
