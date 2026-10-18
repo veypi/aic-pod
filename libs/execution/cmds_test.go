@@ -85,7 +85,7 @@ func TestCmdCommandsDisplayFilter(t *testing.T) {
 	_ = RegisterPlatformCommands(reg, PlatformDeps{
 		Tasks:        NewTaskTable(),
 		Discoverable: func(name string) bool { return core[name] },
-		SendUser:     func(context.Context, string, string) error { return nil },
+		SendUser:     func(context.Context, string, string, []string, string) error { return nil },
 	})
 	out, _, err := runCmd(t, reg, "commands")
 	if err != nil {
@@ -334,10 +334,14 @@ func TestCmdSendUserAndHosts(t *testing.T) {
 	t.Parallel()
 	reg := commands.NewRegistry()
 	var sent string
+	var sentFiles []string
+	var sentChannel string
 	_ = RegisterPlatformCommands(reg, PlatformDeps{
 		Tasks: NewTaskTable(),
-		SendUser: func(ctx context.Context, sessionKey, msg string) error {
+		SendUser: func(ctx context.Context, sessionKey, msg string, files []string, channelID string) error {
 			sent = msg
+			sentFiles = files
+			sentChannel = channelID
 			return nil
 		},
 		ListHosts: func(ctx context.Context, sessionKey string) (string, error) {
@@ -348,6 +352,22 @@ func TestCmdSendUserAndHosts(t *testing.T) {
 	out, _, err := runCmdCtx(ctx, t, reg, "send_user", "hello", "world")
 	if err != nil || sent != "hello world" || !strings.Contains(out, "sent") {
 		t.Fatalf("send_user: %q %q %v", out, sent, err)
+	}
+	// --file/--channel 解析：文件归附件、文本归消息、不串味
+	out, _, err = runCmdCtx(ctx, t, reg, "send_user", "--file", "/u/admin/a.md", "-f", "/b.png", "--channel", "ch-9", "look", "this")
+	if err != nil || sent != "look this" || sentChannel != "ch-9" || !strings.Contains(out, "sent") {
+		t.Fatalf("send_user flags: %q %q %q %v", out, sent, sentChannel, err)
+	}
+	if len(sentFiles) != 2 || sentFiles[0] != "/u/admin/a.md" || sentFiles[1] != "/b.png" {
+		t.Fatalf("send_user files: %v", sentFiles)
+	}
+	// 仅附件无文本合法（发送端自行决定是否要求文本）
+	if _, _, err = runCmdCtx(ctx, t, reg, "send_user", "--file", "/x"); err != nil {
+		t.Fatalf("send_user files-only: %v", err)
+	}
+	// --file 缺路径 → exit 2
+	if _, _, err = runCmdCtx(ctx, t, reg, "send_user", "--file"); err == nil {
+		t.Fatal("send_user --file without path should fail")
 	}
 	out, _, err = runCmdCtx(ctx, t, reg, "list_hosts")
 	if err != nil || !strings.Contains(out, "h1") {

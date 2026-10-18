@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- **send_user 支持附件与指定 channel（破坏性，2026-10-19）**：`PlatformDeps.SendUser` 签名扩为 `func(ctx, sessionKey, message string, files []string, channelID string) error`；`send_user` 命令新增 `--file/-f <路径>`（可重复，云空间绝对路径）与 `--channel <id>`，仅附件无文本合法。此前模型调 `send_user --file x y` 会被当纯文本原样发出（4000 微信实测踩坑）。aic 侧接线（engine_cloud → gateway.SendUser）同步更新。
+
 - **blender 工具面跟到 addon 0.3.0（2026-10-16）**：`blender --help` 的工具清单补 `render`（渲一帧 PNG 落盘，支持临时机位/引擎/采样/裁剪面并渲完还原）与 `execute_code --file` 提示，细节指向 aic-skills 手册。addon 与手册本体在 aic-skills 仓（blender 0.2.1→0.3.0），pod 经内嵌包分发，**需重建 pod 才生效**。
 
 - **blender launch 就绪探测补 token（2026-10-16 真机验收修复）**：launch 拉起 GUI 后轮询 ping 的 probe 漏了 `vtools.WithToken`——addon 已强制认证首行，裸连接只会拿到 `auth failed`，于是冷启动必然等满超时并报「addon 未就绪」（实测 addon ~1s 就通了，紧接着 `blender doctor` L3 ✓）。probe 改带 token；等待上限提为 `blenderReadyTimeout = 60s`（实测冷启动到握手 ~1s，余量留给首次启动/磁盘冷缓存），超时文案补「先 `blender doctor` 复查」指引。

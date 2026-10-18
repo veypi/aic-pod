@@ -33,8 +33,9 @@ type PlatformDeps struct {
 	// ListHosts 返回预格式化的主机表文本（表格形态由平台定——cloud 给
 	// Markdown 表；host 端通常 nil 降级）。sessionKey=调用会话。
 	ListHosts func(ctx context.Context, sessionKey string) (string, error)
-	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话。
-	SendUser func(ctx context.Context, sessionKey, message string) error
+	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话；files 为附件路径
+// （云端 UFS 绝对路径，可多个），channelID 指定目标 channel（空=会话默认）。
+	SendUser func(ctx context.Context, sessionKey, message string, files []string, channelID string) error
 	// Skill 注册中心与设备包操作（v6；nil 子命令降级报错）。
 	Skill SkillDeps
 	// SSH is host-only. Nil implementations are never registered on cloud/page.
@@ -356,7 +357,9 @@ func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation
 	return nil
 }
 
-const sendUserHelp = `usage: send_user <消息...> — 给用户发一条通知消息`
+const sendUserHelp = `usage: send_user [--file <路径>]... [--channel <id>] <消息...> — 给用户发一条消息
+  --file/-f  附件（云空间绝对路径），可重复
+  --channel  指定目标 channel id（默认当前会话绑定）`
 
 const skillHelp = `usage:
  skill search [query] [--limit N]
@@ -444,13 +447,35 @@ func (d PlatformDeps) cmdSendUser(ctx context.Context, inv *commands.Invocation)
 		fmt.Fprintln(inv.Stdout, sendUserHelp)
 		return nil
 	}
-	if len(inv.Args) == 0 {
-		return commands.Exitf(inv, 2, "usage: send_user <消息...>")
+	var files []string
+	var channelID string
+	var words []string
+	for i := 0; i < len(inv.Args); i++ {
+		switch inv.Args[i] {
+		case "--file", "-f":
+			if i+1 >= len(inv.Args) {
+				return commands.Exitf(inv, 2, "send_user: --file 缺路径")
+			}
+			files = append(files, inv.Args[i+1])
+			i++
+		case "--channel":
+			if i+1 >= len(inv.Args) {
+				return commands.Exitf(inv, 2, "send_user: --channel 缺 id")
+			}
+			channelID = inv.Args[i+1]
+			i++
+		default:
+			words = append(words, inv.Args[i])
+		}
+	}
+	message := strings.Join(words, " ")
+	if message == "" && len(files) == 0 {
+		return commands.Exitf(inv, 2, "usage: send_user [--file <路径>]... <消息...>")
 	}
 	if d.SendUser == nil {
 		return commands.Exitf(inv, 1, "send_user: 此端未接通知通道")
 	}
-	if err := d.SendUser(ctx, SessionFromContext(ctx), strings.Join(inv.Args, " ")); err != nil {
+	if err := d.SendUser(ctx, SessionFromContext(ctx), message, files, channelID); err != nil {
 		return commands.Exitf(inv, 1, "send_user: %s", err)
 	}
 	fmt.Fprintln(inv.Stdout, "sent")
