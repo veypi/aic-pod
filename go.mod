@@ -10,7 +10,7 @@ require (
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/aic-skills v0.2.0
+	github.com/veypi/aic-skills v0.2.1
 	github.com/veypi/vbox v0.3.3
 	github.com/veypi/vigo v0.8.1
 	github.com/veypi/vsh v0.3.1
@@ -90,7 +90,5 @@ require (
 	modernc.org/sqlite v1.23.1 // indirect
 )
 
-// 本地开发以工作区兄弟目录为准（10-05 skillrun 时代同款接线）；require 版本随
-// aic-skills 发版推进，replace 保证未打 tag 时本地可构建（docker 只 COPY 预编译
-// 二进制，不经此文件）。
-replace github.com/veypi/aic-skills => ../aic-skills
+// require 版本随 aic-skills 发版推进（当前 v0.2.1）。本地开发由 go.work 指向兄弟目录，
+// 此处不得再用 replace ../aic-skills——CI/发行构建没有兄弟目录，replace 会让构建直接失败。
