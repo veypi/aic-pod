@@ -5,6 +5,14 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.9.2 — 2026-10-19
+
+- **发布说明（2026-10-19）**：破坏性版本，与 aic **v0.17.0** 同批发（服务端 `cfg.MinPodVersion` 已提到 v0.9.2，低于此版会被 caps 门禁拒服务）。
+  - **设备凭证迁进 vbase 静态秘钥（破坏性）**：认证根 = vbase `auth_keys`（kind=`aic:device`，复合凭据 `<host_id>.<四段 credential>`），旧 secret 无法迁移——**每台设备都要在平台设备页重新创建/重置凭证，把新复合凭据写进 pod 配置**；NATS fetch 通道同时退役，改走 pull/push。
+  - **`send_user` 支持附件与指定 channel（破坏性）**：`PlatformDeps.SendUser` 签名扩为 `(ctx, sessionKey, message, files []string, channelID string) error`，新增 `--file/-f`（可重复）与 `--channel`。
+  - **依赖升级（CI 无 go.work，按已发布模块解析）**：`veypi/vsh` v0.3.0→**v0.3.1**（`network.Request.Insecure` / curl `-k` 等）、`veypi/vbox` v0.3.1→**v0.3.3**（`CheckNetPolicy`/`ParseNetRule`/`NetRule.ToolOnly`，net 规则内核可执行性分类）、`veypi/vigo` v0.7.7→**v0.8.1**。
+  - 发版要求：必须推 tag **v0.9.2**（二进制版本由 `git describe` 注入，无 tag 会报 v0.9.1 被服务端拒）。
+
 ## Unreleased
 
 - **send_user 支持附件与指定 channel（破坏性，2026-10-19）**：`PlatformDeps.SendUser` 签名扩为 `func(ctx, sessionKey, message string, files []string, channelID string) error`；`send_user` 命令新增 `--file/-f <路径>`（可重复，云空间绝对路径）与 `--channel <id>`，仅附件无文本合法。此前模型调 `send_user --file x y` 会被当纯文本原样发出（4000 微信实测踩坑）。aic 侧接线（engine_cloud → gateway.SendUser）同步更新。

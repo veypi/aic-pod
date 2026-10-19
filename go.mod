@@ -11,9 +11,9 @@ require (
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
 	github.com/veypi/aic-skills v0.2.0
-	github.com/veypi/vbox v0.3.1
-	github.com/veypi/vigo v0.7.7
-	github.com/veypi/vsh v0.3.0
+	github.com/veypi/vbox v0.3.3
+	github.com/veypi/vigo v0.8.1
+	github.com/veypi/vsh v0.3.1
 	github.com/veypi/vsh/contrib/awk v0.1.0
 	github.com/veypi/vsh/contrib/htmltomarkdown v0.1.0
 	github.com/veypi/vsh/contrib/jq v0.1.0
