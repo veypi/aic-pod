@@ -175,16 +175,7 @@ func (a *ufsAdapter) resolve(name string) string {
 		name = a.cwd + "/" + name
 		a.mu.Unlock()
 	}
-	abs := gbfs.Clean(name)
-	for prefix, target := range a.aliases {
-		if abs == prefix {
-			return target
-		}
-		if strings.HasPrefix(abs, prefix+"/") {
-			return target + strings.TrimPrefix(abs, prefix)
-		}
-	}
-	return abs
+	return ApplyAlias(gbfs.Clean(name), a.aliases)
 }
 
 // isMem 判定路径是否路由进内存层。
