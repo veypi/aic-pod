@@ -19,6 +19,7 @@
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol } = require('electron')
 const { spawn } = require('child_process')
 const { waitForStartup } = require('./backend-startup.cjs')
+const { createBackend } = require('./backend.cjs')
 const { composeLocalStatus } = require('./host-state.cjs')
 const fs = require('fs')
 const net = require('net')
@@ -42,44 +43,19 @@ const DEFAULT_HOST = 'https://ivec-ai.com'
 // LEGACY_HOSTS：旧平台域名（ivec.ai 现 301 至 ivec-ai.com），作为受信任 host 保留，
 // 兼容旧配置与跳转后的页面 origin。
 const LEGACY_HOSTS = ['ivec.ai']
+const { createHostPolicy } = require('./platform-hosts.cjs')
+const hostPolicy = createHostPolicy({ platform: DEFAULT_HOST, defaultHost: DEFAULT_HOST, legacyHosts: LEGACY_HOSTS })
 
 // ---- 设置窗自定义协议（2026-09-22 去本地管理 API） ----
-// app://aic/<path> → desktop/settings-ui/<path>（单文件静态设置页 settings.html：
-// 无框架、无构建、无本地 HTTP 服务）。设置读写经 IPC → spawn `aic-backend config|bind` 子命令。
-const SETTINGS_SCHEME = 'app'
-const SETTINGS_ORIGIN = 'app://aic'
-const SETTINGS_PAGE = '/settings.html'
+// app://aic/<path> → desktop/settings-ui/<path>；实现见 settings-protocol.cjs。
+const settingsProtocol = require('./settings-protocol.cjs')
+const { SETTINGS_ORIGIN, SETTINGS_PAGE } = settingsProtocol
 const settingsUiDir = path.join(__dirname, 'settings-ui')
-const SETTINGS_MIME = {
-  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
-  '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp',
-  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon',
-}
 // standard+secure 才有真实 origin（localStorage 可用）且不被当跨源阻塞；须在 app ready 前注册
-protocol.registerSchemesAsPrivileged([
-  { scheme: SETTINGS_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
-])
+settingsProtocol.registerScheme(protocol)
 
 function registerSettingsProtocol() {
-  const handler = async (request) => {
-    let rel = SETTINGS_PAGE
-    try { rel = decodeURIComponent(new URL(request.url).pathname || SETTINGS_PAGE) } catch (e) { /* 忽略 */ }
-    if (rel === '/') rel = SETTINGS_PAGE
-    const notFound = () => new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } })
-    const file = path.resolve(settingsUiDir, '.' + path.posix.normalize(rel))
-    if (file !== settingsUiDir && !file.startsWith(settingsUiDir + path.sep)) return notFound() // 目录穿越护栏
-    try {
-      const body = await fs.promises.readFile(file)
-      const mime = SETTINGS_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
-      return new Response(body, { headers: { 'Content-Type': mime } })
-    } catch (e) { return notFound() }
-  }
-  // 默认 session + 设置窗独立 partition：自定义协议逐 session 注册，缺一处即 ERR_UNKNOWN_URL_SCHEME
-  protocol.handle(SETTINGS_SCHEME, handler)
-  try { session.fromPartition('settings').protocol.handle(SETTINGS_SCHEME, handler) } catch (e) {
-    console.error('[settings] protocol register failed:', e.message)
-  }
+  settingsProtocol.registerHandler({ protocol, session, uiDir: settingsUiDir })
 }
 
 let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
@@ -89,13 +65,19 @@ let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边�
 let keepWin = null // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
 let keepExpectedUrl = '' // keepWin 当前期望地址（did-fail-load 延迟重试的竞态护栏）
 let tray = null
-let backend = null
 let quitting = false
 let petDragOff = null // 桌宠拖动：鼠标相对窗口偏移
 let petPos = null // 桌宠当前位置 {x, y}（内存缓存，创建/拖动时更新）
 let petPosTimer = null // 桌宠位置写盘防抖 timer
-let backendReady = false // 后端子进程已就绪（就绪后异常退出 → failStartup；主动 stop/restart 不算失败）
 let host = DEFAULT_HOST // 平台地址（配置读取）
+
+const backendCtl = createBackend({
+  spawn,
+  binary: backendBin,
+  env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...cuaBundleEnv(), ...agentBrowserBundleEnv() },
+  waitForStartup,
+  onFatal: (error) => failStartup(error),
+})
 
 // ---- 单实例（唯一 ID，第二实例聚焦现有窗口；本地服务端口唯一） ----
 if (!app.requestSingleInstanceLock()) {
@@ -128,7 +110,7 @@ function quitFlushingCookies(event) {
 // 注册在启动流程最前：除正常退出外，spawn 超时/启动中途失败等提前 app.quit() 的
 // 路径同样要回收子进程（原先注册在 start() 末尾，这些路径漏 kill 会留下孤儿后端）。
 app.on('will-quit', () => {
-  if (backend && !backend.killed) backend.kill('SIGTERM')
+  backendCtl.terminate()
 })
 
 // ---- 应用菜单 ----
@@ -199,7 +181,7 @@ async function start() {
   const cfg = await readConfig().catch(() => null)
   if (!cfg) throw new Error('无法读取本地服务配置，请检查本地服务日志')
   if (cfg && cfg.host) host = cfg.host
-  allowedHostsCache = computeAllowedHosts(host)
+  hostPolicy.replace(host)
   // 默认打开地址：host + home_path（默认 /；非法值回退 /）
   let homePath = (cfg && cfg.home_path) || '/'
   if (typeof homePath !== 'string' || !homePath.startsWith('/') || homePath.startsWith('//')) homePath = '/'
@@ -249,52 +231,11 @@ function agentBrowserBundleEnv() {
   return { AIC_AGENT_BROWSER_BUNDLE_DIR: dir }
 }
 
-// ---- 后端子进程：启动 / 停止 / 重启（无端口握手，2026-09-22） ----
-async function spawnBackend() {
-  backend = spawn(backendBin, [], {
-    env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...cuaBundleEnv(), ...agentBrowserBundleEnv() },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
-  backend.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
-  backend.on('exit', (code, signal) => {
-    if (backendReady) failStartup(new Error(`后端进程异常退出（${signal || code}）`))
-    backendReady = false
-  })
-  backend.on('error', (error) => {
-    if (backendReady) failStartup(error)
-    backendReady = false
-  })
-  await waitForStartup(backend)
-  backendReady = true
-  return backend
-}
-
-function backendAlive() {
-  return !!backend && !backend.killed && backend.exitCode == null && backend.signalCode == null
-}
-
-async function stopBackend() {
-  const child = backend
-  backendReady = false // 主动停止：退出不再算启动失败
-  backend = null
-  if (!child || child.exitCode != null || child.signalCode != null) return
-  await new Promise((resolve) => {
-    child.once('close', () => resolve())
-    try { child.kill('SIGTERM') } catch (e) { /* 已退出 */ }
-    const t = setTimeout(() => { try { child.kill('SIGKILL') } catch (e) { /* 忽略 */ } resolve() }, 5000)
-    t.unref?.()
-  })
-}
-
-// 保存配置/绑定凭证后重启后端子进程（变更 = 重启生效）；并发调用串行化
-let restarting = null
-function restartBackend() {
-  if (!restarting) {
-    restarting = (async () => { await stopBackend(); await spawnBackend() })().finally(() => { restarting = null })
-  }
-  return restarting
-}
+// ---- 后端子进程：启动 / 停止 / 重启（实现见 backend.cjs） ----
+const spawnBackend = () => backendCtl.start()
+const backendAlive = () => backendCtl.alive()
+const stopBackend = () => backendCtl.stop()
+const restartBackend = () => backendCtl.restart()
 
 function failStartup(error) {
   if (quitting) return
@@ -378,7 +319,7 @@ async function localStatus() {
   const out = composeLocalStatus({
     alive: backendAlive(),
     key: (cfg && cfg.key) || '',
-    childPid: backend ? backend.pid : null,
+    childPid: backendCtl.child ? backendCtl.child.pid : null,
     state: await readState(),
     hostname: os.hostname(),
   })
@@ -423,9 +364,7 @@ async function syncHostFromConfig() {
   const cfg = await readConfig().catch(() => null)
   if (!cfg || !cfg.host) return
   host = cfg.host
-  for (const h of computeAllowedHosts(host)) {
-    if (!allowedHostsCache.includes(h)) allowedHostsCache.push(h)
-  }
+  hostPolicy.remember(host)
 }
 
 async function probeRoot(url) {
@@ -436,53 +375,6 @@ async function probeRoot(url) {
       signal: AbortSignal.timeout(probeTimeout),
     })
     return r.ok || r.status === 304
-  } catch (e) {
-    return false
-  }
-}
-
-// ---- 白名单（注入与 IPC 校验共用） ----
-let allowedHostsCache = [DEFAULT_HOST.replace(/^https?:\/\//, ''), ...LEGACY_HOSTS]
-function computeAllowedHosts(platform) {
-  const list = []
-  const add = (u) => {
-    try {
-      const h = new URL(u).host
-      if (h && !list.includes(h)) list.push(h)
-    } catch (e) { /* 忽略 */ }
-  }
-  add(platform)
-  add(DEFAULT_HOST)
-  for (const h of LEGACY_HOSTS) {
-    if (!list.includes(h)) list.push(h)
-  }
-  return list
-}
-
-// 记住目标平台 host：改地址后新平台页也要注入 remote-preload（白名单缓存启动时
-// 只按配置 host 算一次，设置窗口确认打开新地址时增量并入）。
-function rememberPlatformHost(url) {
-  try {
-    const h = new URL(url).host
-    if (h && !allowedHostsCache.includes(h)) allowedHostsCache.push(h)
-  } catch (e) { /* 非法 URL 忽略 */ }
-}
-
-// 校验 IPC 调用方 frame 是否平台白名单（host ∈ 配置 host / 默认与旧平台域名）
-function isPlatformFrame(event) {
-  try {
-    const h = new URL(event.senderFrame.url).host
-    return allowedHostsCache.includes(h)
-  } catch (e) {
-    return false
-  }
-}
-
-// 校验调用方是否设置窗（app://aic 设置页；与平台页/开发态 localhost 完全区分）
-function isSettingsFrame(event) {
-  try {
-    const u = new URL(event.senderFrame.url)
-    return u.protocol === SETTINGS_SCHEME + ':' && u.hostname === 'aic'
   } catch (e) {
     return false
   }
@@ -574,14 +466,14 @@ function reloadSettingsIfOpen() {
 function registerIpc() {
   // 白名单下发（remote-preload 顶层 sendSync）：平台 host 列表
   ipcMain.on('allowed:hosts', (e) => {
-    e.returnValue = allowedHostsCache
+    e.returnValue = hostPolicy.all()
   })
 
   // 设置面 + 本地状态：方法名与平台页 window.aicDesktop.api、设置页 $mod.$pod 一致。
   // 平台 frame（hosts 页绑定/解绑/查状态）与设置窗 frame 都可用；实现 = 主进程本地执行
   // （spawn `aic-backend config|bind` 子命令 / 读日志 / 重启后端子进程），不经过任何端口。
   ipcMain.handle('local:api', async (event, name, args) => {
-    if (!isPlatformFrame(event) && !isSettingsFrame(event)) throw new Error('forbidden')
+    if (!hostPolicy.isPlatformFrame(event) && !hostPolicy.isSettingsFrame(event)) throw new Error('forbidden')
     const m = String(name || '')
     if (!/^[a-z_]+$/.test(m)) throw new Error('invalid method')
     const a = args || {}
@@ -627,22 +519,22 @@ function registerIpc() {
   })
 
   // 窗口控制（平台页桌面版 header / 桌宠页）
-  ipcMain.handle('window:minimise', (e) => { if (isPlatformFrame(e)) mainWin?.minimize(); return state() })
+  ipcMain.handle('window:minimise', (e) => { if (hostPolicy.isPlatformFrame(e)) mainWin?.minimize(); return state() })
   ipcMain.handle('window:maximise', (e) => {
-    if (isPlatformFrame(e) && mainWin) mainWin.isMaximized() ? mainWin.unmaximize() : mainWin.maximize()
+    if (hostPolicy.isPlatformFrame(e) && mainWin) mainWin.isMaximized() ? mainWin.unmaximize() : mainWin.maximize()
     return state()
   })
-  ipcMain.handle('window:close', (e) => { if (isPlatformFrame(e)) mainWin?.hide(); return state() })
+  ipcMain.handle('window:close', (e) => { if (hostPolicy.isPlatformFrame(e)) mainWin?.hide(); return state() })
   ipcMain.handle('window:fullscreen', (e) => {
-    if (isPlatformFrame(e) && mainWin) mainWin.setFullScreen(!mainWin.isFullScreen())
+    if (hostPolicy.isPlatformFrame(e) && mainWin) mainWin.setFullScreen(!mainWin.isFullScreen())
     return state()
   })
-  ipcMain.handle('window:pet', (e, page) => (isPlatformFrame(e) ? enterPet(page) : state()))
-  ipcMain.handle('window:restore', (e) => (isPlatformFrame(e) ? leavePet() : state()))
+  ipcMain.handle('window:pet', (e, page) => (hostPolicy.isPlatformFrame(e) ? enterPet(page) : state()))
+  ipcMain.handle('window:restore', (e) => (hostPolicy.isPlatformFrame(e) ? leavePet() : state()))
 
   // 外链 → 系统默认浏览器（平台页拦截普通外链）
   ipcMain.handle('open:external', (e, url) => {
-    if (!isPlatformFrame(e)) return false
+    if (!hostPolicy.isPlatformFrame(e)) return false
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
     shell.openExternal(u)
@@ -669,12 +561,12 @@ function registerIpc() {
 
   // 桌宠拖动（pet 页）
   ipcMain.on('pet:drag-start', (e, { x, y }) => {
-    if (!isPlatformFrame(e) || !petWin) return
+    if (!hostPolicy.isPlatformFrame(e) || !petWin) return
     const [wx, wy] = petWin.getPosition()
     petDragOff = [x - wx, y - wy]
   })
   ipcMain.on('pet:drag-move', (e, { x, y }) => {
-    if (!isPlatformFrame(e) || !petWin || !petDragOff) return
+    if (!hostPolicy.isPlatformFrame(e) || !petWin || !petDragOff) return
     petWin.setPosition(Math.round(x - petDragOff[0]), Math.round(y - petDragOff[1]))
     petPos = petWin.getPosition()
     savePetPosDebounced()
@@ -682,15 +574,15 @@ function registerIpc() {
 
   // 设置窗口能力（仅设置窗 app://aic 页面）
   ipcMain.handle('platform:check', async (e, url) => {
-    if (!isSettingsFrame(e)) return { ok: false, error: 'forbidden' }
+    if (!hostPolicy.isSettingsFrame(e)) return { ok: false, error: 'forbidden' }
     const ok = await probeRoot(url)
     return { ok, url: String(url || '').replace(/\/+$/, '') + '/root.html' }
   })
   ipcMain.handle('platform:open', (e, url) => {
-    if (!isSettingsFrame(e)) return false
+    if (!hostPolicy.isSettingsFrame(e)) return false
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
-    rememberPlatformHost(u)
+    hostPolicy.remember(u)
     loadMain(u)
     // 不关闭配置窗口：配置页内任何操作（保存/获取）都不得让配置页消失
     return true
