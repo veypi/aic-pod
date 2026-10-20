@@ -15,10 +15,15 @@ import (
 	"github.com/veypi/aic-pod/protocol"
 )
 
-// 预览行数上限（NATS/AI 消费）。跨仓共用同一常量，不再由各端手抄。
+// 预览上限（NATS/AI 消费）：行数 + 字节双维度。字节兜底防单行/少行巨输出
+// 整串进预览（行截断管不到无换行的 8MiB 采集）——任一维度截取都置
+// truncated 并 spill 落盘，全量经 output/error_output 续读。跨仓共用同一
+// 常量，不再由各端手抄。
 const (
 	PreviewStdoutLines = 1000
 	PreviewStderrLines = 100
+	PreviewStdoutBytes = 1 << 20
+	PreviewStderrBytes = 256 << 10
 )
 
 // LogPair 拥有一次执行的两条惰性日志流与路径；stdout/stderr 直接作为引擎
@@ -104,12 +109,12 @@ func (p *LogPair) Settle(attrs map[string]string, res *ExecResult, preview bool)
 		return protocol.Fail("internal", "exec: stderr capture truncated without log spill")
 	}
 	if preview {
-		if _, cut := HeadLines(res.Stdout, PreviewStdoutLines); cut {
+		if _, cut := previewHead(res.Stdout, PreviewStdoutLines, PreviewStdoutBytes); cut {
 			if err := p.Stdout.Spill(); err != nil {
 				return protocol.Fail("internal", "exec: spill log: "+err.Error())
 			}
 		}
-		if _, cut := HeadLines(res.Stderr, PreviewStderrLines); cut {
+		if _, cut := previewHead(res.Stderr, PreviewStderrLines, PreviewStderrBytes); cut {
 			if err := p.Stderr.Spill(); err != nil {
 				return protocol.Fail("internal", "exec: spill log: "+err.Error())
 			}
@@ -197,10 +202,10 @@ func (p *LogPair) Completed(res *ExecResult, attrs map[string]string, full bool,
 // preview 是有界 AI/NATS 视图（exit_code 已由调用方设置）。
 func (p *LogPair) preview(res *ExecResult, attrs map[string]string) *protocol.Output {
 	truncated := res.StdoutTruncated || res.StderrTruncated
-	content, cut := HeadLines(res.Stdout, PreviewStdoutLines)
+	content, cut := previewHead(res.Stdout, PreviewStdoutLines, PreviewStdoutBytes)
 	truncated = truncated || cut
 	if res.Stderr != "" {
-		errHead, errCut := HeadLines(res.Stderr, PreviewStderrLines)
+		errHead, errCut := previewHead(res.Stderr, PreviewStderrLines, PreviewStderrBytes)
 		attrs["stderr"] = errHead
 		truncated = truncated || errCut
 	}
@@ -208,6 +213,21 @@ func (p *LogPair) preview(res *ExecResult, attrs map[string]string) *protocol.Ou
 		attrs["truncated"] = "true"
 	}
 	return &protocol.Output{Content: content, Attrs: attrs}
+}
+
+// previewHead 是预览截取的双上限入口（Settle 的 spill 判定与 preview 的
+// 内容生成共用同一谓词——截断必有落盘，不会出现「预览截了但没文件续读」）。
+// 字节截取回退到上限内最后一个换行（保持整行语义；全程无换行则硬截）。
+func previewHead(s string, lines, bytes int) (string, bool) {
+	head, cut := HeadLines(s, lines)
+	if len(head) <= bytes {
+		return head, cut
+	}
+	head = head[:bytes]
+	if i := strings.LastIndexByte(head, '\n'); i >= 0 {
+		head = head[:i+1]
+	}
+	return head, true
 }
 
 // HeadLines 截取前 n 行；发生截取时返回 truncated=true。按原始字节保留
