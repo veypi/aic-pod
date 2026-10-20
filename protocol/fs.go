@@ -42,6 +42,64 @@ type FSEntry struct {
 	Version    string `json:"version"`
 	MediaType  string `json:"media_type,omitempty"`
 }
+
+// FS 数据面结果类型：方法返回值直接 json.Marshal，键名是线上契约。
+type FSRootFeatures struct {
+	Read             bool   `json:"read"`
+	Write            bool   `json:"write"`
+	AtomicReplace    bool   `json:"atomic_replace"`
+	ConditionalWrite string `json:"conditional_write"`
+}
+
+type FSRootLimits struct {
+	DirectoryEntries int `json:"directory_entries"`
+}
+
+type FSRoot struct {
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	Default    bool           `json:"default"`
+	NativePath string         `json:"native_path"`
+	PathStyle  string         `json:"path_style"`
+	Features   FSRootFeatures `json:"features"`
+	Limits     FSRootLimits   `json:"limits"`
+}
+
+type FSRootsResult struct {
+	Roots []FSRoot `json:"roots"`
+}
+
+type FSListResult struct {
+	Entries    []FSEntry `json:"entries"`
+	NextCursor string    `json:"next_cursor"`
+	Revision   string    `json:"revision"`
+}
+
+type FSFindResult struct {
+	Entries   []FSEntry `json:"entries"`
+	Truncated bool      `json:"truncated"`
+}
+
+type FSRemoveResult struct {
+	Removed bool    `json:"removed"`
+	Path    *FSPath `json:"path,omitempty"`
+	// Completed 仅递归删除返回（单条 remove 不带该键）。
+	Completed *int `json:"completed,omitempty"`
+}
+
+type FSCopyResult struct {
+	Entry     FSEntry `json:"entry"`
+	Completed int     `json:"completed"`
+}
+
+type FSSourceReadResult struct {
+	Data   []byte `json:"data"`
+	Offset int64  `json:"offset"`
+}
+
+type FSUploadWriteResult struct {
+	Offset int64 `json:"offset"`
+}
 type FSCondition struct {
 	Absent  bool   `json:"absent,omitempty"`
 	Version string `json:"version,omitempty"`

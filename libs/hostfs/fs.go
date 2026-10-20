@@ -415,7 +415,7 @@ func (f *FS) dispatch(ctx context.Context, call Call) (any, error) {
 		}
 		return p, nil
 	case "roots":
-		out := make([]map[string]any, 0, len(f.roots))
+		out := make([]protocol.FSRoot, 0, len(f.roots))
 		for _, r := range f.roots {
 			// A volume may contain allowed descendants even when listing its root
 			// is denied. Keep addressing available; each operation checks its path.
@@ -423,10 +423,20 @@ func (f *FS) dispatch(ctx context.Context, call Call) (any, error) {
 			if runtime.GOOS == "windows" {
 				style = "windows"
 			}
-			out = append(out, map[string]any{"id": r.ID, "name": r.Name, "default": r.Default, "native_path": filepath.ToSlash(r.Path), "path_style": style, "features": map[string]any{"read": safeReadSupported(), "write": atomicReplaceSupported() && f.cfg.Check(ctx, call, r.Path, true) == nil, "atomic_replace": atomicReplaceSupported(), "conditional_write": "runtime_serialized"}, "limits": map[string]int{"directory_entries": f.cfg.MaxDirectoryEntries}})
+			out = append(out, protocol.FSRoot{
+				ID: r.ID, Name: r.Name, Default: r.Default,
+				NativePath: filepath.ToSlash(r.Path), PathStyle: style,
+				Features: protocol.FSRootFeatures{
+					Read:             safeReadSupported(),
+					Write:            atomicReplaceSupported() && f.cfg.Check(ctx, call, r.Path, true) == nil,
+					AtomicReplace:    atomicReplaceSupported(),
+					ConditionalWrite: "runtime_serialized",
+				},
+				Limits: protocol.FSRootLimits{DirectoryEntries: f.cfg.MaxDirectoryEntries},
+			})
 		}
-		sort.Slice(out, func(i, j int) bool { return out[i]["id"].(string) < out[j]["id"].(string) })
-		return map[string]any{"roots": out}, nil
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		return protocol.FSRootsResult{Roots: out}, nil
 	case "stat", "read":
 		var p pathArgs
 		_ = protocol.Decode(call.Args, &p)
@@ -474,6 +484,7 @@ func fault(err error) error {
 	}
 	return protocol.FSFail("filesystem_error", "Filesystem operation could not be completed")
 }
+
 // joinRoot 拼接 root 内的绝对路径（未解析符号链接的请求形态）。
 func joinRoot(r *root, segments []string) string {
 	return filepath.Join(append([]string{r.Path}, segments...)...)
@@ -851,7 +862,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 	if version(after) != revision {
 		return nil, protocol.FSFail("cursor_invalid", "Directory changed during enumeration")
 	}
-	return map[string]any{"entries": out, "next_cursor": next, "revision": revision}, nil
+	return protocol.FSListResult{Entries: out, NextCursor: next, Revision: revision}, nil
 }
 func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if len(p.Path.Segments) == 0 {
@@ -1029,7 +1040,7 @@ func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 	defer h.Close()
 	info, err := h.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) && p.MissingOK {
-		return map[string]any{"removed": false}, nil
+		return protocol.FSRemoveResult{Removed: false}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -1043,7 +1054,8 @@ func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 	if err = h.Remove(name); err != nil {
 		return nil, err
 	}
-	return map[string]any{"removed": true, "path": p.Path}, nil
+	path := p.Path
+	return protocol.FSRemoveResult{Removed: true, Path: &path}, nil
 }
 
 type Call struct {
@@ -1062,4 +1074,3 @@ func (f *FS) Run(ctx context.Context, call Call) (any, error) {
 	}
 	return f.run(ctx, call)
 }
-

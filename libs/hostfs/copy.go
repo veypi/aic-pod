@@ -88,7 +88,7 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if err != nil {
 		return nil, partial(err, completed)
 	}
-	return map[string]any{"entry": entry(p.Dst, current), "completed": completed}, nil
+	return protocol.FSCopyResult{Entry: entry(p.Dst, current), Completed: completed}, nil
 }
 
 func (f *FS) copyFile(ctx context.Context, call Call, src, dst protocol.FSPath, version string, condition protocol.FSCondition) error {

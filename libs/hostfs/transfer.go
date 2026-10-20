@@ -70,7 +70,7 @@ func (f *FS) handleBytes(ctx context.Context, call Call) (value any, ok bool, er
 		}
 		var out bytes.Buffer
 		err := f.cfg.Bytes.Copy(ctx, call.Owner, a.Ref, a.Offset, &a.Length, &out)
-		return map[string]any{"data": out.Bytes(), "offset": a.Offset}, true, err
+		return protocol.FSSourceReadResult{Data: out.Bytes(), Offset: a.Offset}, true, err
 	case "upload.open":
 		var a UploadArgs
 		if err := protocol.Decode(call.Args, &a); err != nil {
@@ -90,7 +90,7 @@ func (f *FS) handleBytes(ctx context.Context, call Call) (value any, ok bool, er
 			return nil, true, err
 		}
 		offset, err := f.cfg.Bytes.writeRange(ctx, call.Owner, a)
-		return map[string]int64{"offset": offset}, true, err
+		return protocol.FSUploadWriteResult{Offset: offset}, true, err
 	case "upload.seal":
 		var a SealArgs
 		if err := protocol.Decode(call.Args, &a); err != nil {

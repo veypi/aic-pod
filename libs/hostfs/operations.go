@@ -150,7 +150,7 @@ func (f *FS) find(ctx context.Context, call Call, p findArgs) (any, error) {
 	if err != nil && !truncated {
 		return nil, err
 	}
-	return map[string]any{"entries": out, "truncated": truncated}, nil
+	return protocol.FSFindResult{Entries: out, Truncated: truncated}, nil
 }
 func partial(err error, completed int) error {
 	result := protocol.AsFault(fault(err))
@@ -252,7 +252,8 @@ func (f *FS) removeTree(ctx context.Context, call Call, p removeArgs) (any, erro
 		}
 		completed++
 	}
-	return map[string]any{"removed": true, "path": p.Path, "completed": completed}, nil
+	path := p.Path
+	return protocol.FSRemoveResult{Removed: true, Path: &path, Completed: &completed}, nil
 }
 func (f *FS) move(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if len(p.Src.Segments) == 0 || len(p.Dst.Segments) == 0 {
