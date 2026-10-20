@@ -56,7 +56,7 @@ func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
 	if err := c.configureMCP(mcpx.Settings{Servers: configured}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.mcpServices.Session(context.Background(), "browser"); err == nil || !strings.Contains(err.Error(), "disabled") {
+	if _, err := c.mcpManager().Session(context.Background(), "browser"); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("disabled builtin started: %v", err)
 	}
 }

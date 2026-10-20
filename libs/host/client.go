@@ -48,20 +48,24 @@ type Options struct {
 	OnLog       func(format string, args ...any)
 }
 
+// serviceState 是设备服务集合的唯一运行态：MCP 连接管理器、vsh 命令登记表、
+// 所有者配置与登记失败曝光同属一个快照。mcp list/add/remove/start/stop 只
+// 读写这里，不再各自维护第二份状态。
+type serviceState struct {
+	mu            sync.RWMutex
+	manager       *mcpx.Manager          // MCP 连接（nil = 未初始化）
+	registry      *vtools.Registry       // 所有服务（MCP/TCP/内置）的 vsh 根命令
+	owner         map[string]mcpx.Config // 所有者显式配置（不含内置默认项）
+	rejected      map[string]serviceRejection
+	browser       *mcpx.Config // 内置 browser 的有效配置（nil = 非内置/已禁用）
+	browserCtx    context.Context
+	browserCancel context.CancelFunc
+}
+
 // Client 是 host agent 客户端。
 type Client struct {
-	sessionRoot    string
-	mcpMu          sync.RWMutex
-	mcpServices    *mcpx.Manager
-	browserConfig  *mcpx.Config
-	browserContext context.Context
-	browserCancel  context.CancelFunc
-	// services 是 vtools 服务登记表（工具命令注册 + RTC 流通道查询）；
-	// initTools 时创建一次（先于 configureMCP），此后字段不再变。
-	services *vtools.Registry
-	// mcpRejected 是配置里登记失败的服务（撞名/地址无效）：命令面没有它但配置
-	// 还在，mcp list 以 state=rejected 曝光，避免只留在 pod 日志。mcpMu 保护。
-	mcpRejected map[string]serviceRejection
+	sessionRoot string
+	svc         serviceState
 
 	optsMu          sync.RWMutex
 	opts            Options
@@ -275,13 +279,16 @@ func (c *Client) Close() error {
 	}
 	c.closed = true
 	c.closeConnection()
-	if c.browserCancel != nil {
-		c.browserCancel()
+	c.svc.mu.Lock()
+	browserCancel, manager, browser := c.svc.browserCancel, c.svc.manager, c.svc.browser
+	c.svc.mu.Unlock()
+	if browserCancel != nil {
+		browserCancel()
 	}
-	if c.mcpServices != nil {
-		c.mcpServices.Close()
-		if c.mcpServices.Started("browser") {
-			c.closeBrowser(c.browserConfig)
+	if manager != nil {
+		manager.Close()
+		if manager.Started("browser") {
+			c.closeBrowser(browser)
 		}
 	}
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)

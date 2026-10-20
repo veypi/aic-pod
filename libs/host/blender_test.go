@@ -17,8 +17,8 @@ import (
 )
 
 // fakeBlenderAddon 是 vtools/tcp v1 的假 addon：接受任意 auth 握手首行
-//（pod 侧总带 token），tools 回两条目录，ping 回握手，echo 回显 arguments
-//（覆盖 flag 映射经自定义命令透传到 Provider 的链路）。
+// （pod 侧总带 token），tools 回两条目录，ping 回握手，echo 回显 arguments
+// （覆盖 flag 映射经自定义命令透传到 Provider 的链路）。
 // 返回关闭函数：断 listener 与全部已接受连接（模拟 Blender 退出）。
 func fakeBlenderAddon(t *testing.T) (addr string, closeAll func()) {
 	t.Helper()
@@ -228,13 +228,13 @@ func TestRegisterPackServiceFailureIsolated(t *testing.T) {
 	if c.initErr != nil {
 		t.Fatalf("坏包污染 initErr: %v", c.initErr)
 	}
-	if c.services.Has("bogus") || c.services.Has("badaddr") {
+	if c.serviceRegistry().Has("bogus") || c.serviceRegistry().Has("badaddr") {
 		t.Fatal("登记失败的包留下了服务")
 	}
 }
 
 // addon 认证接线：provider 的 token 来自 $HOME/.aic/blender/bridge_token
-//（与 addon 共读）；token 不对时握手被拒（错误经翻译层透出）。
+// （与 addon 共读）；token 不对时握手被拒（错误经翻译层透出）。
 func TestBlenderProviderAuth(t *testing.T) {
 	c, _ := testClient(t)
 	_ = c

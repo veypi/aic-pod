@@ -32,9 +32,9 @@ func (c *Client) mcpGate(_ context.Context, session, alias string) error {
 // 服务命令无需重注册。
 func (c *Client) mcpResolve(name string) vtools.MCPResolve {
 	return func(ctx context.Context) (*mcp.ClientSession, error) {
-		c.mcpMu.RLock()
-		manager := c.mcpServices
-		c.mcpMu.RUnlock()
+		c.svc.mu.RLock()
+		manager := c.svc.manager
+		c.svc.mu.RUnlock()
 		if manager == nil {
 			return nil, fmt.Errorf("MCP unavailable")
 		}
@@ -44,15 +44,18 @@ func (c *Client) mcpResolve(name string) vtools.MCPResolve {
 
 // mcpManager 返回当前连接管理器（可能为 nil——配置更新期间）。
 func (c *Client) mcpManager() *mcpx.Manager {
-	c.mcpMu.RLock()
-	defer c.mcpMu.RUnlock()
-	return c.mcpServices
+	c.svc.mu.RLock()
+	defer c.svc.mu.RUnlock()
+	return c.svc.manager
 }
 
 // serviceRegistered 报告 alias 是否是已登记的服务命令（commands 动态展示用）。
 func (c *Client) serviceRegistered(name string) bool {
-	return c.services != nil && c.services.Has(name)
+	return c.svc.registry != nil && c.svc.registry.Has(name)
 }
+
+// serviceRegistry 返回服务登记表（nil = 工具未初始化）。
+func (c *Client) serviceRegistry() *vtools.Registry { return c.svc.registry }
 
 // tcpAddr 报告已登记 Provider 的 TCP 端点（非 TCP 形态 = false）。按接口判定
 // 而非具体类型：宿主在 TCPProvider 之上还有包装（blenderProvider），断言
@@ -71,7 +74,7 @@ func tcpAddr(p vtools.Provider) (string, bool) {
 // 不动；其余（TCP↔MCP 换型、TCP 换址）摘除重登记——TCP 端点钉在 provider
 // 实例上，不能留着旧地址继续服务。
 func (c *Client) registerService(name string, cfg mcpx.Config) error {
-	hub := c.services
+	hub := c.svc.registry
 	if hub == nil {
 		return fmt.Errorf("vtools %s: registry unavailable", name)
 	}
@@ -110,7 +113,7 @@ func (c *Client) registerService(name string, cfg mcpx.Config) error {
 // 管理器重建对其透明）。内置 browser 的实时画面通道随配置状态挂上/摘除。
 // 登记失败的服务（撞名/地址无效）不影响其余服务，被拒清单随之从头重算。
 func (c *Client) syncServiceRegistrations(servers map[string]mcpx.Config) {
-	hub := c.services
+	hub := c.svc.registry
 	if hub == nil {
 		return
 	}
@@ -134,9 +137,9 @@ func (c *Client) syncServiceRegistrations(servers map[string]mcpx.Config) {
 	}
 	// 内置 browser 的流通道：所有者覆盖/禁用时不挂（streamBrowser 本身也要求
 	// 内置配置在场，这里保持登记与语义一致）。
-	c.mcpMu.RLock()
-	builtin := c.browserConfig != nil
-	c.mcpMu.RUnlock()
+	c.svc.mu.RLock()
+	builtin := c.svc.browser != nil
+	c.svc.mu.RUnlock()
 	if cfg, ok := servers["browser"]; builtin && ok && !cfg.Disabled {
 		if err := hub.RegisterStream("browser", vtools.StreamerFunc{Channel: protocol.RtcBrowserChannel, Relay: c.streamBrowser}); err != nil {
 			c.logf("vtools browser stream: %v", err)
@@ -160,34 +163,34 @@ func (c *Client) recordServiceRejection(name string, cfg mcpx.Config, err error)
 	if cfg.IsTCP() {
 		kind = "tcp"
 	}
-	c.mcpMu.Lock()
-	defer c.mcpMu.Unlock()
-	if c.mcpRejected == nil {
-		c.mcpRejected = map[string]serviceRejection{}
+	c.svc.mu.Lock()
+	defer c.svc.mu.Unlock()
+	if c.svc.rejected == nil {
+		c.svc.rejected = map[string]serviceRejection{}
 	}
-	c.mcpRejected[name] = serviceRejection{kind: kind, reason: err.Error()}
+	c.svc.rejected[name] = serviceRejection{kind: kind, reason: err.Error()}
 }
 
 // clearServiceRejection 摘除一条被拒记录（配置里的条目被移除时）。
 func (c *Client) clearServiceRejection(name string) {
-	c.mcpMu.Lock()
-	defer c.mcpMu.Unlock()
-	delete(c.mcpRejected, name)
+	c.svc.mu.Lock()
+	defer c.svc.mu.Unlock()
+	delete(c.svc.rejected, name)
 }
 
 // resetServiceRejections 清空被拒清单（全量同步开头重算）。
 func (c *Client) resetServiceRejections() {
-	c.mcpMu.Lock()
-	defer c.mcpMu.Unlock()
-	c.mcpRejected = map[string]serviceRejection{}
+	c.svc.mu.Lock()
+	defer c.svc.mu.Unlock()
+	c.svc.rejected = map[string]serviceRejection{}
 }
 
 // serviceRejections 返回被拒清单快照。
 func (c *Client) serviceRejections() map[string]serviceRejection {
-	c.mcpMu.RLock()
-	defer c.mcpMu.RUnlock()
-	out := make(map[string]serviceRejection, len(c.mcpRejected))
-	for name, rej := range c.mcpRejected {
+	c.svc.mu.RLock()
+	defer c.svc.mu.RUnlock()
+	out := make(map[string]serviceRejection, len(c.svc.rejected))
+	for name, rej := range c.svc.rejected {
 		out[name] = rej
 	}
 	return out
@@ -215,8 +218,21 @@ func (c *Client) persistMCPServer(alias string, config *mcpx.Config) error {
 
 // ownerConfigured 报告服务是否由设备所有者显式配置（内置默认项不在此列）。
 func (c *Client) ownerConfigured(alias string) bool {
-	_, ok := c.options().MCP.Servers[alias]
+	c.svc.mu.RLock()
+	defer c.svc.mu.RUnlock()
+	_, ok := c.svc.owner[alias]
 	return ok
+}
+
+// ownerConfigs 返回所有者显式配置的快照。
+func (c *Client) ownerConfigs() map[string]mcpx.Config {
+	c.svc.mu.RLock()
+	defer c.svc.mu.RUnlock()
+	out := make(map[string]mcpx.Config, len(c.svc.owner))
+	for name, cfg := range c.svc.owner {
+		out[name] = cfg
+	}
+	return out
 }
 
 // isBuiltinPack 报告 alias 是否是内嵌技能包声明的内置服务。
@@ -232,10 +248,10 @@ func (c *Client) isBuiltinPack(alias string) bool {
 // streamResolver 是 rtc.Config.Streams 的装配：按 DataChannel 标签现查
 // vtools 登记表（通道开启时解析，运行期 add 的流式服务无需重启 RTC）。
 func (c *Client) streamResolver(label string) (rtc.StreamRelay, bool) {
-	if c.services == nil {
+	if c.svc.registry == nil {
 		return nil, false
 	}
-	relay, ok := c.services.StreamHandler(label)
+	relay, ok := c.svc.registry.StreamHandler(label)
 	if !ok {
 		return nil, false
 	}

@@ -195,13 +195,13 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 	}
 	// TCP 条目不走连接管理器：已登记即“registered”。kind 按 provider 实际
 	// 类型标（manager 失配时不误标 tcp）。
-	if c.services != nil {
-		for _, alias := range c.services.Aliases() {
+	if c.svc.registry != nil {
+		for _, alias := range c.svc.registry.Aliases() {
 			if seen[alias] {
 				continue
 			}
 			kind := "tcp"
-			if p, ok := c.services.Lookup(alias); ok {
+			if p, ok := c.svc.registry.Lookup(alias); ok {
 				if _, isMCP := p.(*vtools.MCPProvider); isMCP {
 					kind = "mcp"
 				}
@@ -219,11 +219,11 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 	}
 	// 配置里 disabled 的 TCP 条目：不进管理器也不登记，补行曝光（MCP 形态已由
 	// manager.Status 的 Disabled 分支覆盖；否则「禁用了 TCP 服务」在任何清单都不可见）。
-	for name, serverCfg := range c.options().MCP.Servers {
+	for name, serverCfg := range c.ownerConfigs() {
 		if seen[name] || !serverCfg.Disabled || !serverCfg.IsTCP() {
 			continue
 		}
-		if c.services != nil && c.services.Has(name) {
+		if c.svc.registry != nil && c.svc.registry.Has(name) {
 			continue // 上面 registered 段已列
 		}
 		seen[name] = true
@@ -256,9 +256,9 @@ func (c *Client) mcpList(inv *commands.Invocation, args []string) error {
 func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []string) error {
 	var (
 		alias, rawURL, rawTCP, cwd, idle, token string
-		env                                   = map[string]string{}
-		persist                               bool
-		positional                            []string
+		env                                     = map[string]string{}
+		persist                                 bool
+		positional                              []string
 	)
 	for n := 0; n < len(args); n++ {
 		a := args[n]
@@ -359,7 +359,7 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 	if err := config.Validate(alias); err != nil {
 		return commands.Exitf(inv, 2, "mcp add: %s", err)
 	}
-	if c.services != nil && c.services.Has(alias) {
+	if c.svc.registry != nil && c.svc.registry.Has(alias) {
 		return commands.Exitf(inv, 1, "mcp add: %s 已存在（先 mcp remove）", alias)
 	}
 	// 运行态生效：MCP 条目进连接管理器，TCP 条目直接登记；两者都注册 vsh 命令。
@@ -384,14 +384,14 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 			return commands.Exitf(inv, 1, "mcp add: 已生效但落盘失败: %s", err)
 		}
 	}
-	// 内存配置同步刷新：ownerConfigured 据此判定「所有者显式配置」（不加会
-	// 同进程旧值——add 了内置同名覆盖项后 remove 仍被误判成内置不可移除）。
-	c.optsMu.Lock()
-	if c.opts.MCP.Servers == nil {
-		c.opts.MCP.Servers = map[string]mcpx.Config{}
+	// owner 同步：ownerConfigured 据此判定「所有者显式配置」（不加会同进程
+	// 旧值——add 了内置同名覆盖项后 remove 仍被误判成内置不可移除）。
+	c.svc.mu.Lock()
+	if c.svc.owner == nil {
+		c.svc.owner = map[string]mcpx.Config{}
 	}
-	c.opts.MCP.Servers[alias] = config
-	c.optsMu.Unlock()
+	c.svc.owner[alias] = config
+	c.svc.mu.Unlock()
 	fmt.Fprintf(inv.Stdout, "added %s（%s）\n", alias, map[bool]string{true: "persisted", false: "进程级，重启失效"}[persist])
 	return nil
 }
@@ -423,7 +423,7 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 			return commands.Exitf(inv, 1, "mcp remove: %s", err)
 		}
 	}
-	if c.services == nil || !c.services.Has(alias) {
+	if c.svc.registry == nil || !c.svc.registry.Has(alias) {
 		// 登记失败的条目（mcp list 的 rejected 行）：摘掉曝光记录；否则是未知服务
 		if _, rejected := c.serviceRejections()[alias]; rejected {
 			c.clearServiceRejection(alias)
@@ -431,17 +431,17 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 			return commands.Exitf(inv, 1, "mcp remove: unknown service %q", alias)
 		}
 	} else {
-		c.services.Unregister(alias)
+		c.svc.registry.Unregister(alias)
 	}
 	if persist {
 		if err := c.persistMCPServer(alias, nil); err != nil {
 			return commands.Exitf(inv, 1, "mcp remove: 已生效但落盘失败: %s", err)
 		}
 	}
-	// 同 add：内存配置同步摘除（ownerConfigured 判定源）。
-	c.optsMu.Lock()
-	delete(c.opts.MCP.Servers, alias)
-	c.optsMu.Unlock()
+	// 同 add：owner 同步摘除（ownerConfigured 判定源）。
+	c.svc.mu.Lock()
+	delete(c.svc.owner, alias)
+	c.svc.mu.Unlock()
 	fmt.Fprintf(inv.Stdout, "removed %s\n", alias)
 	return nil
 }
@@ -460,10 +460,10 @@ func (c *Client) mcpStartStop(ctx context.Context, inv *commands.Invocation, op,
 		}
 	}
 	if !isMCP {
-		if c.services == nil {
+		if c.svc.registry == nil {
 			return commands.Exitf(inv, 1, "mcp %s: unknown service %q", op, alias)
 		}
-		if _, ok := c.services.Lookup(alias); !ok {
+		if _, ok := c.svc.registry.Lookup(alias); !ok {
 			return commands.Exitf(inv, 1, "mcp %s: unknown service %q", op, alias)
 		}
 	}
@@ -472,7 +472,7 @@ func (c *Client) mcpStartStop(ctx context.Context, inv *commands.Invocation, op,
 			if err := manager.Restart(ctx, alias); err != nil {
 				return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
 			}
-		} else if p, ok := c.services.Lookup(alias); ok {
+		} else if p, ok := c.svc.registry.Lookup(alias); ok {
 			if closer, isCloser := p.(interface{ Close() error }); isCloser {
 				if err := closer.Close(); err != nil {
 					return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
@@ -485,7 +485,7 @@ func (c *Client) mcpStartStop(ctx context.Context, inv *commands.Invocation, op,
 			if _, err := manager.Session(ctx, alias); err != nil {
 				return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
 			}
-		} else if p, ok := c.services.Lookup(alias); ok {
+		} else if p, ok := c.svc.registry.Lookup(alias); ok {
 			if _, err := p.Tools(ctx); err != nil {
 				return commands.Exitf(inv, 1, "mcp %s: %s", op, err)
 			}

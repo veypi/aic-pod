@@ -30,9 +30,9 @@ func (c *Client) streamBrowser(parent context.Context, caller protocol.Caller, i
 	if err := check(); err != nil {
 		return err
 	}
-	c.mcpMu.RLock()
-	config, lifetime := c.browserConfig, c.browserContext
-	c.mcpMu.RUnlock()
+	c.svc.mu.RLock()
+	config, lifetime := c.svc.browser, c.svc.browserCtx
+	c.svc.mu.RUnlock()
 	if config == nil || lifetime == nil {
 		return protocol.Fail("unsupported", "Live view requires the built-in agent-browser service")
 	}
@@ -107,9 +107,9 @@ func (c *Client) keepBrowserAlive(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.mcpMu.RLock()
-			manager := c.mcpServices
-			c.mcpMu.RUnlock()
+			c.svc.mu.RLock()
+			manager := c.svc.manager
+			c.svc.mu.RUnlock()
 			if manager != nil {
 				manager.Touch("browser")
 			}

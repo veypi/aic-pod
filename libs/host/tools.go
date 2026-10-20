@@ -27,7 +27,7 @@ func (c *Client) initTools() {
 	}
 	// vtools 登记表先于 configureMCP 创建：服务（MCP/TCP）登记为 vsh 根命令。
 	// SessionOf 注入执行层的会话键取法（vtools 不反向依赖 execution）。
-	c.services = vtools.NewRegistry(reg, vtools.Options{Gate: c.mcpGate, SessionOf: execution.SessionFromContext, Logf: c.logf})
+	c.svc.registry = vtools.NewRegistry(reg, vtools.Options{Gate: c.mcpGate, SessionOf: execution.SessionFromContext, Logf: c.logf})
 	// 平台命令先占位（RegisterGuarded 撞名即拒）：之后服务登记撞名只会被
 	// 拒并记日志跳过；反过来（服务先登记）会让撞名的平台命令注册失败、
 	// initErr 直接打挂整机（Connect 返回 initErr）。

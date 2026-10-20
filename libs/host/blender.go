@@ -64,7 +64,7 @@ func blenderAddr(m *packManifest) string {
 // blenderBridgeToken 是 addon 的认证 token（vtools/tcp 握手首行，协议见
 // libs/vtools/tcp.go）：env AIC_BLENDER_TOKEN 优先，否则
 // $HOME/.aic/blender/bridge_token（0600，O_EXCL 先建者赢）。pod 与 addon
-//（Blender 进程内）读同一文件——人工 install 路径没有 env 透传通道。
+// （Blender 进程内）读同一文件——人工 install 路径没有 env 透传通道。
 // 威胁模型：防浏览器页面/跨用户本机进程直连 127.0.0.1:9866 驱动 execute_code；
 // 同 uid 的恶意本机进程能读该文件，不在此模型内。
 func blenderBridgeToken() (string, error) {
@@ -190,7 +190,7 @@ func (c *Client) registerBuiltinPacks() {
 		if m.Service.Kind == "mcp-stdio" {
 			continue // configureMCP 已覆盖
 		}
-		if c.ownerConfigured(alias) || c.services.Has(alias) {
+		if c.ownerConfigured(alias) || (c.svc.registry != nil && c.svc.registry.Has(alias)) {
 			continue
 		}
 		if err := c.registerPackService(alias, m); err != nil {
@@ -218,9 +218,9 @@ func (c *Client) registerPackService(alias string, m *packManifest) error {
 		}
 		var err error
 		if cmd != nil {
-			err = c.services.RegisterCustom(alias, p, cmd)
+			err = c.svc.registry.RegisterCustom(alias, p, cmd)
 		} else {
-			err = c.services.Register(alias, p)
+			err = c.svc.registry.Register(alias, p)
 		}
 		if err != nil {
 			return fmt.Errorf("pack %s: %w", alias, err)
@@ -258,7 +258,7 @@ func (c *Client) blenderCommand(alias string) commands.CommandFunc {
 				return nil
 			}
 		}
-		return c.services.RunTool(ctx, inv, alias)
+		return c.svc.registry.RunTool(ctx, inv, alias)
 	}
 }
 

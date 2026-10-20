@@ -172,7 +172,7 @@ func TestServiceAliasCollisionWithPlatformCommand(t *testing.T) {
 	if c.initErr != nil {
 		t.Fatalf("colliding service alias bricked init: %v", c.initErr)
 	}
-	if c.services.Has("ssh") {
+	if c.serviceRegistry().Has("ssh") {
 		t.Fatal("colliding service must be skipped")
 	}
 	// 平台命令 ssh 仍是内建那个（usage 类退出码，而非 127 未注册）
@@ -208,7 +208,7 @@ func TestServiceAliasCollisionWithPlatformCommand(t *testing.T) {
 func TestRegisterServiceTypeSwitch(t *testing.T) {
 	c, _ := testClient(t)
 	lookup := func() vtools.Provider {
-		p, ok := c.services.Lookup("sw")
+		p, ok := c.serviceRegistry().Lookup("sw")
 		if !ok {
 			t.Fatal("service not registered")
 		}
@@ -238,11 +238,11 @@ func TestRegisterServiceTypeSwitch(t *testing.T) {
 	// TCP 后端的包装 provider（blenderProvider）：地址按接口判定，不断言具体
 	// 类型——否则它会被当成「非 TCP」，换成 MCP 配置时留在原地继续服务旧端点。
 	wrapped := &blenderProvider{addr: "127.0.0.1:9866"}
-	if err := c.services.Register("bl", wrapped); err != nil {
+	if err := c.serviceRegistry().Register("bl", wrapped); err != nil {
 		t.Fatal(err)
 	}
 	blLookup := func() vtools.Provider {
-		p, ok := c.services.Lookup("bl")
+		p, ok := c.serviceRegistry().Lookup("bl")
 		if !ok {
 			t.Fatal("wrapped service not registered")
 		}
@@ -298,7 +298,7 @@ func TestMCPAddRemoveBuiltinOverrideSameProcess(t *testing.T) {
 	if c.initErr != nil {
 		t.Fatal(c.initErr)
 	}
-	if c.services.Has("blender") {
+	if c.serviceRegistry().Has("blender") {
 		t.Fatal("disabled 内置不应登记")
 	}
 	var out strings.Builder
@@ -306,13 +306,13 @@ func TestMCPAddRemoveBuiltinOverrideSameProcess(t *testing.T) {
 	if err := c.mcpAdd(context.Background(), inv(), []string{"blender", "--tcp", "127.0.0.1:9866"}); err != nil {
 		t.Fatalf("add 覆盖项: %v", err)
 	}
-	if !c.services.Has("blender") {
+	if !c.serviceRegistry().Has("blender") {
 		t.Fatal("add 后未登记")
 	}
 	if err := c.mcpRemove(context.Background(), inv(), []string{"blender"}); err != nil {
 		t.Fatalf("同进程 remove 所有者覆盖项被误判: %v", err)
 	}
-	if c.services.Has("blender") {
+	if c.serviceRegistry().Has("blender") {
 		t.Fatal("remove 后仍在")
 	}
 }

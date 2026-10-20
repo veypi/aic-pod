@@ -47,7 +47,7 @@ func TestUpstreamMCPThroughExec(t *testing.T) {
 		t.Fatal(err)
 	}
 	// This test uses isolated paths while exercising the built-in stream adapter.
-	c.browserConfig = &browser
+	c.svc.browser = &browser
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	caller := testCaller()

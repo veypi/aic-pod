@@ -35,24 +35,29 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	if err != nil {
 		return err
 	}
-	c.mcpMu.Lock()
-	if c.browserCancel != nil {
-		c.browserCancel()
+	c.svc.mu.Lock()
+	if c.svc.browserCancel != nil {
+		c.svc.browserCancel()
 	}
-	if c.mcpServices != nil {
-		c.mcpServices.Close()
-		if c.mcpServices.Started("browser") {
-			c.closeBrowser(c.browserConfig)
+	if c.svc.manager != nil {
+		old := c.svc.manager
+		old.Close()
+		if old.Started("browser") {
+			c.closeBrowser(c.svc.browser)
 		}
 	}
-	c.browserConfig = nil
+	c.svc.browser = nil
 	if _, overridden := settings.Servers["browser"]; !overridden {
 		browser := servers["browser"]
-		c.browserConfig = &browser
+		c.svc.browser = &browser
 	}
-	c.browserContext, c.browserCancel = context.WithCancel(context.Background())
-	c.mcpServices = manager
-	c.mcpMu.Unlock()
+	c.svc.owner = make(map[string]mcpx.Config, len(settings.Servers))
+	for name, cfg := range settings.Servers {
+		c.svc.owner[name] = cfg
+	}
+	c.svc.browserCtx, c.svc.browserCancel = context.WithCancel(context.Background())
+	c.svc.manager = manager
+	c.svc.mu.Unlock()
 	// 服务登记为 vsh 根命令（vtools；含 TCP 条目与 browser 流通道）。
 	c.syncServiceRegistrations(servers)
 	return nil
@@ -65,9 +70,9 @@ func (c *Client) mcpExpired(name string) {
 	if name != "browser" {
 		return
 	}
-	c.mcpMu.RLock()
-	config := c.browserConfig
-	c.mcpMu.RUnlock()
+	c.svc.mu.RLock()
+	config := c.svc.browser
+	c.svc.mu.RUnlock()
 	c.closeBrowser(config)
 }
 
@@ -75,9 +80,9 @@ func (c *Client) mcpSession(ctx context.Context, server string) (*mcp.ClientSess
 	if !c.execAllowed(execution.SessionFromContext(ctx), "mcp."+server) {
 		return nil, fmt.Errorf("mcp.%s: denied by exec rules; request grant cmd mcp.%s", server, server)
 	}
-	c.mcpMu.RLock()
-	manager := c.mcpServices
-	c.mcpMu.RUnlock()
+	c.svc.mu.RLock()
+	manager := c.svc.manager
+	c.svc.mu.RUnlock()
 	if manager == nil {
 		return nil, fmt.Errorf("MCP unavailable")
 	}
