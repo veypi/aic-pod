@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/veypi/aic-pod/protocol"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/contrib/ufs"
 	gbfs "github.com/veypi/vsh/fs"
@@ -115,7 +116,8 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 type CloudFSConfig struct {
 	// UserRoot = /u/{uid}（HOME；jail 首根=cwd）。
 	UserRoot string
-	// JailExtra 额外 jail 根（v6.1 = ["/skill"]：skill 包与云盘同层进执行面）。
+	// JailExtra 额外 jail 根（当前 = ["/skills", "/public"]：skill 包与云盘同层，
+	// public 是可读公共面；具体深度/读写由规则表表达）。
 	JailExtra []string
 	// Backing UFS 直通（调用方已包 QuotaFS）。
 	Backing ufs.FS
@@ -333,12 +335,7 @@ func (a *ufsAdapter) inJail(abs string) bool {
 	if len(a.jails) == 0 {
 		return true
 	}
-	for _, j := range a.jails {
-		if abs == j || strings.HasPrefix(abs, j+"/") {
-			return true
-		}
-	}
-	return false
+	return protocol.WithinRoots(abs, a.jails)
 }
 
 // --- gbfs.FileSystem 实现 ---

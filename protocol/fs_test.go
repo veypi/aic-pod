@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"errors"
+	"io/fs"
+	"testing"
+)
 
 func TestStructuredPathValidation(t *testing.T) {
 	for _, path := range []FSPath{{RootID: "home", Segments: []string{}}, {RootID: "home", Segments: []string{"中文 空格", "100%#?.txt"}}} {
@@ -17,6 +21,28 @@ func TestStructuredPathValidation(t *testing.T) {
 		if err := (FSPath{RootID: "drive", Segments: []string{name}}).Validate(true); err == nil {
 			t.Fatalf("Windows segment accepted: %q", name)
 		}
+	}
+}
+
+func TestFSFaultClassification(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{fs.ErrNotExist, "not_found"},
+		{fs.ErrExist, "already_exists"},
+		{fs.ErrPermission, "permission_denied"},
+	} {
+		fault, ok := FSFault(tc.err)
+		if !ok || fault.Code != tc.code {
+			t.Fatalf("FSFault(%v) = %+v, %v; want %s", tc.err, fault, ok, tc.code)
+		}
+	}
+	if fault, ok := FSFault(errors.New("boom")); ok || fault != nil {
+		t.Fatalf("unrecognized error must not be classified: %+v, %v", fault, ok)
+	}
+	if fault, ok := FSFault(FSFail("cancelled", "stop")); !ok || fault.Code != "cancelled" {
+		t.Fatalf("existing fault must pass through: %+v, %v", fault, ok)
 	}
 }
 

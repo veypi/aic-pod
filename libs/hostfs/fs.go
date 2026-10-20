@@ -463,21 +463,14 @@ func (f *FS) dispatch(ctx context.Context, call Call) (any, error) {
 	return nil, protocol.FSFail("unsupported", "Unknown fs method")
 }
 func fault(err error) error {
-	var f *protocol.Fault
-	if errors.As(err, &f) {
+	if err == nil {
+		return nil
+	}
+	if f, ok := protocol.FSFault(err); ok {
 		return f
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return protocol.FSFail("not_found", "File or directory does not exist")
-	}
-	if errors.Is(err, fs.ErrExist) {
-		return protocol.FSFail("already_exists", "File or directory already exists")
-	}
-	if errors.Is(err, fs.ErrPermission) {
-		return protocol.FSFail("permission_denied", "Filesystem access denied")
 	}
 	return protocol.FSFail("filesystem_error", "Filesystem operation could not be completed")
 }
@@ -1051,57 +1044,6 @@ func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"removed": true, "path": p.Path}, nil
-}
-
-// ResultPolicy binds a metadata snapshot to its originally checked paths. The
-// verifier only calls the device policy, without reacquiring the provider lock:
-// a consumer may legally use the immutable JSON source as fs.write input.
-func (f *FS) ResultPolicy(call Call) (func(context.Context) error, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if call.Method == "roots" || call.Method == "home" {
-		return func(context.Context) error { return nil }, nil
-	}
-	var p struct {
-		Path protocol.FSPath `json:"path"`
-		Src  protocol.FSPath `json:"src"`
-		Dst  protocol.FSPath `json:"dst"`
-	}
-	if err := json.Unmarshal(call.Args, &p); err != nil {
-		return nil, err
-	}
-	type target struct {
-		path  string
-		write bool
-	}
-	var paths []target
-	add := func(path protocol.FSPath, write bool) error {
-		r, abs, err := f.check(context.Background(), call, path, write)
-		if err != nil {
-			return err
-		}
-		requested := joinRoot(r, path.Segments)
-		paths = append(paths, target{requested, write}, target{abs, write})
-		return nil
-	}
-	write := call.Method == "write" || call.Method == "mkdir" || call.Method == "remove" || call.Method == "move" || call.Method == "copy"
-	if call.Method == "move" || call.Method == "copy" {
-		if err := add(p.Src, call.Method == "move"); err != nil {
-			return nil, err
-		}
-		p.Path = p.Dst
-	}
-	if err := add(p.Path, write); err != nil {
-		return nil, err
-	}
-	return func(ctx context.Context) error {
-		for _, p := range paths {
-			if err := f.cfg.Check(ctx, call, p.path, p.write); err != nil {
-				return err
-			}
-		}
-		return nil
-	}, nil
 }
 
 type Call struct {

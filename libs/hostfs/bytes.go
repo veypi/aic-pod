@@ -242,22 +242,6 @@ func (b *Bytes) source(owner string, ref protocol.FSResourceRef) (*byteSource, e
 	}
 	return s, nil
 }
-
-// SetVerifier attaches current policy checks to a staged command result.
-// Transport/session authorization is still checked by the shared endpoint.
-func (b *Bytes) SetVerifier(owner string, ref protocol.FSResourceRef, verify func(context.Context) error) error {
-	source, err := b.source(owner, ref)
-	if err != nil {
-		return err
-	}
-	source.mu.Lock()
-	defer source.mu.Unlock()
-	if source.closed {
-		return protocol.FSFail("expired", "Byte source closed")
-	}
-	source.verify = verify
-	return nil
-}
 func (b *Bytes) Describe(owner string, ref protocol.FSResourceRef) (ByteSource, error) {
 	s, err := b.source(owner, ref)
 	if err != nil {

@@ -11,16 +11,26 @@ import (
 	"github.com/veypi/vbox"
 )
 
-// fsGate 返回 fsx 的 vbox 规则表门（permissionState 快照每次调用取当次值——grant
-// temp 动态行即时生效；first-wins 行序）。读默认开放；写出区硬拒，报错
-// 引导 grant fs（与引擎 fs_host 适配器同一 matcher、同一份策略源）。
+// fsDecision 是 fs 数据面与 fsx 共用的规则表判定入口：快照每次调用取当次
+// 值（grant temp 动态行即时生效；first-wins 行序）。noFollow = unlink/rename
+// 语义（作用于链接本身）。
+func (c *Client) fsDecision(sid, abs string, write, noFollow bool) vbox.Decision {
+	op := vbox.OpRead
+	if write {
+		op = vbox.OpWrite
+	}
+	rules := c.perms.fsSnapshot(sid)
+	if noFollow {
+		return rules.MatchNoFollow(abs, op)
+	}
+	return rules.Match(abs, op)
+}
+
+// fsGate 返回 fsx 的 vbox 规则表门：读默认开放；写出区硬拒，报错引导 grant fs
+// （与引擎 fs_host 适配器同一 matcher、同一份策略源）。
 func (c *Client) fsGate(sid string) func(op, abs string, write bool) error {
 	return func(op, abs string, write bool) error {
-		vop := vbox.OpRead
-		if write {
-			vop = vbox.OpWrite
-		}
-		if d := c.perms.fsSnapshot(sid).Match(abs, vop); !d.Allow {
+		if d := c.fsDecision(sid, abs, write, false); !d.Allow {
 			return fmt.Errorf("%s: %s 被规则表拒绝（越界硬拒绝；如需写入请用 exec 执行 `grant fs %s`）", op, abs, abs)
 		}
 		return nil
@@ -45,21 +55,11 @@ func (c *Client) initFilesystem() error {
 			return err
 		}
 		p := filepath.ToSlash(path)
-		vop := vbox.OpRead
-		if write {
-			vop = vbox.OpWrite
-		}
-		rules := c.perms.fsSnapshot(call.Caller.Origin)
 		// remove/move 是 unlink/rename 语义：末段符号链接不跟随（删/挪的是链接
 		// 本身）——否则可写根内的外向链接会被目标路径的策略拒绝（2026-09-22：
 		// fs rm 删 venv 被 .venv/bin/python -> /opt/homebrew/... 挡下）。
-		var d vbox.Decision
-		if call.Method == "remove" || call.Method == "move" {
-			d = rules.MatchNoFollow(p, vop)
-		} else {
-			d = rules.Match(p, vop)
-		}
-		if !d.Allow {
+		noFollow := call.Method == "remove" || call.Method == "move"
+		if d := c.fsDecision(call.Caller.Origin, p, write, noFollow); !d.Allow {
 			return protocol.Fail("permission_denied", fmt.Sprintf("fs: %s 被规则表拒绝（如需写入请 grant fs %s）", p, p))
 		}
 		return nil

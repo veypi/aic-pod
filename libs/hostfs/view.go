@@ -47,15 +47,16 @@ func (v *fileView) location(name string) (protocol.FSPath, error) {
 		return protocol.FSPath{}, err
 	}
 	for _, r := range v.f.roots {
-		rel, err := filepath.Rel(r.Path, abs)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			segments := []string{}
-			if rel != "." {
-				segments = strings.Split(rel, string(filepath.Separator))
-			}
-			p := protocol.FSPath{RootID: r.ID, Segments: segments}
-			return p, p.Validate(runtime.GOOS == "windows")
+		rel, err := relWithin(r, abs)
+		if err != nil {
+			continue
 		}
+		segments := []string{}
+		if rel != "." {
+			segments = strings.Split(rel, string(filepath.Separator))
+		}
+		p := protocol.FSPath{RootID: r.ID, Segments: segments}
+		return p, p.Validate(runtime.GOOS == "windows")
 	}
 	return protocol.FSPath{}, protocol.FSFail("permission_denied", "Path is outside filesystem roots")
 }

@@ -6,7 +6,6 @@
 package cfg
 
 import (
-	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/veypi/aic-pod/libs/mcpx"
-	"github.com/veypi/vbox"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -267,30 +265,6 @@ func LoadFile() (*Options, error) {
 	return o, nil
 }
 
-// AuthCfg 是四张首命中规则表的纯数据快照（permissionState 编译输入）。
-type AuthCfg struct {
-	ExecPolicy string
-	ExecRules  []string
-	FsPolicy   string
-	FsRules    []string
-	NetPolicy  string
-	NetRules   []string
-	SshPolicy  string
-	SshRules   []string
-}
-
-// AuthFrom 从 Options 取授权快照（纯函数；host permissionState 的启动构建
-// 与 permanent grant 的候选编译共用）。policy 在读点归一化（防空值/非法值
-// 漂移到安全语义外：fs/ssh 空=deny，net 空=open）。
-func AuthFrom(o *Options) AuthCfg {
-	return AuthCfg{
-		ExecPolicy: NormalizePolicy(o.ExecPolicy, PolicyOpen), ExecRules: append([]string(nil), o.ExecRules...),
-		FsPolicy: NormalizePolicy(o.FsPolicy, PolicyDeny), FsRules: append([]string(nil), o.FsRules...),
-		NetPolicy: NormalizePolicy(o.NetPolicy, PolicyOpen), NetRules: append([]string(nil), o.NetRules...),
-		SshPolicy: NormalizePolicy(o.SshPolicy, PolicyDeny), SshRules: append([]string(nil), o.SshRules...),
-	}
-}
-
 // Save 持久化配置（yaml，flags.DumpCfg 原子写；含凭证，文件权限 0600）。
 // 不以文件内容为门：任何保存都落盘——文件里已有什么只影响运行时工具门控，
 // 不构成拒绝写入的理由；废弃键与未知键随重写自然消失。
@@ -310,25 +284,15 @@ func Save(o *Options) error {
 	return os.Chmod(p, 0o600)
 }
 
-// ValidateAuth rejects malformed execution rules before they become active.
+// ValidateAuth rejects malformed authorization configuration before it becomes
+// active. 原始值校验（不经 NormalizePolicy），非法 policy 不会被读点归一化吞掉。
 func (o *Options) ValidateAuth() error {
-	for _, mode := range []string{o.FsPolicy, o.ExecPolicy, o.NetPolicy, o.SshPolicy} {
-		if mode != "" && mode != PolicyOpen && mode != PolicyDeny {
-			return fmt.Errorf("invalid policy %q", mode)
-		}
-	}
-	if err := vbox.ValidateFSRules(o.FsRules); err != nil {
-		return err
-	}
-	if err := ValidateExecRules(o.ExecRules); err != nil {
-		return err
-	}
-	for _, list := range [][]string{o.NetRules, o.SshRules} {
-		if err := vbox.ValidateTargetRules(list); err != nil {
-			return err
-		}
-	}
-	return nil
+	return AuthCfg{
+		ExecPolicy: o.ExecPolicy, ExecRules: o.ExecRules,
+		FsPolicy: o.FsPolicy, FsRules: o.FsRules,
+		NetPolicy: o.NetPolicy, NetRules: o.NetRules,
+		SshPolicy: o.SshPolicy, SshRules: o.SshRules,
+	}.Validate()
 }
 
 // LockUpdate serializes local config read-modify-write transactions.

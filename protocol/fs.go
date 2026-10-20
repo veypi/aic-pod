@@ -2,7 +2,9 @@
 package protocol
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"unicode/utf8"
 )
@@ -91,3 +93,26 @@ const FSMaxSafeInteger = 1<<53 - 1
 // FSFail 构造 FS 失败：Effect=none——FS 各失败入口保证无任何副作用
 // （批次 2 错误模型收敛后保留此语义，不得机械替换为无 Effect 的 Fail）。
 func FSFail(code, message string) *Fault { f := Fail(code, message); f.Effect = "none"; return f }
+
+// FSFault 把常见文件系统错误归类为稳定 Fault 码；未识别的错误返回 ok=false，
+// 由调用方决定兜底口径（host 交给 AsFault 判 internal，hostfs 归
+// filesystem_error）。这是 "not_found / permission_denied / already_exists"
+// 归类的唯一实现。
+func FSFault(err error) (*Fault, bool) {
+	if err == nil {
+		return nil, false
+	}
+	var f *Fault
+	if errors.As(err, &f) {
+		return f, true
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return FSFail("not_found", err.Error()), true
+	case errors.Is(err, fs.ErrExist):
+		return FSFail("already_exists", err.Error()), true
+	case errors.Is(err, fs.ErrPermission):
+		return FSFail("permission_denied", err.Error()), true
+	}
+	return nil, false
+}

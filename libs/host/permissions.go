@@ -73,7 +73,7 @@ var nativeNetPlatform = runtime.GOOS
 
 // compileAuth 完整编译校验一份授权配置（纯函数，不触碰运行状态）。
 func compileAuth(a cfg.AuthCfg) (*compiledAuth, error) {
-	if err := validateAuthCfg(a); err != nil {
+	if err := a.Validate(); err != nil {
 		return nil, err
 	}
 	rules, err := vbox.CompileFSRules(a.FsRules, vbox.ClassCfg)
@@ -135,22 +135,6 @@ func nativeNetRows(rows []vbox.NetRule) []vbox.NetRule {
 		}
 	}
 	return kept
-}
-
-// validateAuthCfg 与 Options.ValidateAuth 同口径（AuthCfg 已归一 policy 值）。
-func validateAuthCfg(a cfg.AuthCfg) error {
-	if err := vbox.ValidateFSRules(a.FsRules); err != nil {
-		return err
-	}
-	if err := cfg.ValidateExecRules(a.ExecRules); err != nil {
-		return err
-	}
-	for _, list := range [][]string{a.NetRules, a.SshRules} {
-		if err := vbox.ValidateTargetRules(list); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func compileNetRules(rows []string) ([]vbox.NetRule, error) {

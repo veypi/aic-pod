@@ -13,7 +13,7 @@ contracts, the desktop packaging and the CLI. It does **not** own: the platform 
 approvals, prompts), or skills — skills are static cloud content and the in-repo skill runner/registry
 mechanism (`libs/skillrun`, `libs/uiscript`, `protocol/hosts_tools`) was removed on purpose; do not
 reintroduce it. The `aic-skills` Go module stays on purpose: `libs/host/packs.go` reads its embedded
-manifest for the built-in packs (browser/cua).
+manifest for the built-in packs (browser/cua/blender).
 
 ## Layout
 
@@ -25,7 +25,8 @@ manifest for the built-in packs (browser/cua).
 - `cfg/` — config schema/defaults and `Version` (the only place the version number lives).
 - `libs/` — `execution` (exec runner), `fsx` (fs tool layer), `host` (host engine: connect,
   dispatch, deny rules, browser stream, vsh engine), `hostfs` (os.Root-backed backend and path
-  canonicalization), `mcpx` (official MCP Go SDK wrapper), `rtc`, `imageutil`.
+  canonicalization), `mcpx` (official MCP Go SDK wrapper), `vtools` (protocol-agnostic service
+  registration as vsh root commands), `rtc`, `imageutil`.
 - `protocol/` — transport-independent contracts: `tool.go` (the request/action face), `caps.go`,
   `fs.go`, `hosts_nats.go`, `hosts_rtc.go`, `path.go`, `sign.go`, `subject.go`, RTC signal/ticket.
 - `docs/` — Chinese design and operational docs: `host_sandbox.md` (security/authorization

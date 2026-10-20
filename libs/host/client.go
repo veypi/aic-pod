@@ -27,7 +27,6 @@ import (
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/vtools"
-	"github.com/veypi/vsh/commands"
 
 	"github.com/veypi/aic-pod/libs/rtc"
 	"github.com/veypi/vbox"
@@ -54,7 +53,6 @@ type Client struct {
 	sessionRoot    string
 	mcpMu          sync.RWMutex
 	mcpServices    *mcpx.Manager
-	mcpDebug       commands.CommandFunc // 调试直通（mcpx.Command 懒建）
 	browserConfig  *mcpx.Config
 	browserContext context.Context
 	browserCancel  context.CancelFunc

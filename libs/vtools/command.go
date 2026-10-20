@@ -141,7 +141,8 @@ func convertFlag(name, raw string, explicit bool, prop schemaProp) (any, error) 
 	}
 }
 
-func findTool(tools []Tool, name string) *Tool {
+// FindTool 按名查找工具（目录/参数表与调试直通共用）。
+func FindTool(tools []Tool, name string) *Tool {
 	for i := range tools {
 		if tools[i].Name == name {
 			return &tools[i]
@@ -206,13 +207,14 @@ func renderToolHelp(inv *commands.Invocation, alias string, tool Tool) {
 	}
 }
 
-func (r *Registry) renderCatalog(ctx context.Context, inv *commands.Invocation, alias string, p Provider, jsonOut bool) error {
+// RenderCatalog 渲染服务工具目录（<alias> 无参 / --json）。
+func RenderCatalog(ctx context.Context, inv *commands.Invocation, alias string, p Provider, jsonOut bool) error {
 	tools, err := p.Tools(ctx)
 	if err != nil {
 		return commands.Exitf(inv, 1, "%s: %s", alias, err)
 	}
 	if jsonOut {
-		return writeResult(inv, tools, true)
+		return WriteResult(inv, tools, true)
 	}
 	if len(tools) == 0 {
 		fmt.Fprintf(inv.Stdout, "%s: (no tools)\n", alias)
@@ -229,9 +231,9 @@ func (r *Registry) renderCatalog(ctx context.Context, inv *commands.Invocation, 
 	return nil
 }
 
-// writeResult 渲染调用结果：默认缩进 JSON，--json 紧凑；下游提前关闭按
+// WriteResult 渲染调用结果：默认缩进 JSON，--json 紧凑；下游提前关闭按
 // SIGPIPE 语义返回 141（与 vsh 内建命令同一约定）。
-func writeResult(inv *commands.Invocation, value any, compact bool) error {
+func WriteResult(inv *commands.Invocation, value any, compact bool) error {
 	enc := json.NewEncoder(inv.Stdout)
 	if !compact {
 		enc.SetIndent("", "  ")
@@ -252,8 +254,7 @@ func (r *Registry) commandFunc(alias string) commands.CommandFunc {
 	}
 }
 
-// RunTool 是工具调用内核（调用门 + 目录/参数表/调用）：服务根命令的直接实现，
-// 自定义命令（生命周期动词）在动词分发后把原始参数透传到这里。
+// RunTool 是已登记服务的工具调用入口（调用门 + 查找 + RunProvider）。
 func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias string) error {
 	if r.gate != nil {
 		// 会话键取自注入的 SessionOf（host = execution.SessionFromContext）。
@@ -267,8 +268,13 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 	if e == nil {
 		return commands.Exitf(inv, 1, "%s: service is not registered", alias)
 	}
-	p := e.provider
+	return RunProvider(ctx, inv, alias, e.provider)
+}
 
+// RunProvider 是工具调用内核（目录/参数表/调用），不依赖登记表；调试直通
+// （mcp tools/describe/call）与自定义命令动词分发后直接复用。调用门由调用方
+// 负责（Registry.RunTool 或已认证的调试入口）。
+func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p Provider) error {
 	var (
 		positional []string
 		input      string
@@ -337,7 +343,7 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 		return nil
 	}
 	if len(positional) == 0 {
-		return r.renderCatalog(ctx, inv, alias, p, jsonOut)
+		return RenderCatalog(ctx, inv, alias, p, jsonOut)
 	}
 	tool := positional[0]
 	if len(positional) != 1 {
@@ -356,7 +362,7 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 		if err != nil {
 			return commands.Exitf(inv, 1, "%s: %s", alias, err)
 		}
-		toolDef = findTool(tools, tool)
+		toolDef = FindTool(tools, tool)
 		if toolDef == nil {
 			return commands.Exitf(inv, 1, "%s: unknown tool %q（可用: %s）", alias, tool, toolNames(tools))
 		}
@@ -434,7 +440,7 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 	if err != nil {
 		var callErr *CallError
 		if errors.As(err, &callErr) {
-			if werr := writeResult(inv, callErr.Result, jsonOut); werr != nil {
+			if werr := WriteResult(inv, callErr.Result, jsonOut); werr != nil {
 				return werr
 			}
 			return &commands.ExitError{Code: 1}
@@ -446,5 +452,5 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 			return commands.Exitf(inv, 1, "%s: %s", alias, err)
 		}
 	}
-	return writeResult(inv, result, jsonOut)
+	return WriteResult(inv, result, jsonOut)
 }

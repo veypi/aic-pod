@@ -4,10 +4,10 @@
 // Package pod 是 AIC 本地客户端（aic-pod）的根包：host 会话装配（Start/Stop）。
 // 目录结构（对照 aic 服务端的分层）：
 //
-//	cfg/       配置中心：Options + Global、Version/DeviceType 二进制身份、日志文件写入
-//	settings/  本机设置面（`aic config get|set` 的读/写模型，原 api 包逻辑）
-//	libs/      客户端核心：host（NATS 会话运行时）、proto（协议信封签名）、
-//	          vcore（虚拟指令）、vsh/vbox（脚本 glue / 进程沙箱）、utils（纯工具）
+//	cfg/       配置中心：Options + Global、授权快照、Version/DeviceType 二进制身份、日志文件写入
+//	protocol/  线上契约：工具请求/响应、FS 数据面、NATS/RTC 信封、路径与凭证
+//	libs/      客户端核心：execution（vsh 执行编排）、fsx（fs 工具层）、host（设备运行时）、
+//	          hostfs（文件数据面）、mcpx（MCP 连接）、vtools（服务登记）、rtc、imageutil
 //	cli/       命令行版本（aic）：连接运行 / config / bind / unbind
 //	desktop/   Electron 壳（main.js + preload.js）：Chromium 窗口 + Go 后端子进程
 //

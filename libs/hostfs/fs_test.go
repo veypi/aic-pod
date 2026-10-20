@@ -196,30 +196,3 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 		t.Fatal("implicitly recursive remove")
 	}
 }
-
-func TestMetadataSourcePolicyAllowsWriteConsumptionAndRevocation(t *testing.T) {
-	f := setup(t)
-	args, _ := json.Marshal(map[string]any{"path": loc()})
-	verify, err := f.fs.ResultPolicy(Call{Owner: f.owner, Command: "fs", Method: "list", Args: args})
-	if err != nil {
-		t.Fatal(err)
-	}
-	size := int64(2)
-	source, err := f.store.Upload(context.Background(), f.owner, strings.NewReader("{}"), &size, "", "application/json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = f.store.SetVerifier(f.owner, source.Ref, verify); err != nil {
-		t.Fatal(err)
-	}
-	op := f.call(t, "write", map[string]any{"path": loc("snapshot.json"), "source": source.Ref, "condition": map[string]any{"absent": true}})
-	if op.Status != "succeeded" {
-		t.Fatal("metadata source could not be written", op)
-	}
-	f.fs.cfg.Check = func(context.Context, Call, string, bool) error {
-		return protocol.FSFail("permission_denied", "changed policy")
-	}
-	if err = f.store.Copy(context.Background(), f.owner, source.Ref, 0, nil, &bytes.Buffer{}); err == nil || protocol.AsFault(err).Code != "permission_denied" {
-		t.Fatal("snapshot policy not rechecked", err)
-	}
-}

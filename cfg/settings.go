@@ -5,12 +5,11 @@
 package cfg
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/veypi/vbox"
 )
 
 // SettingsView 是设置面读视图（含 key——设置窗口需显示当前凭证；仅本机同用户进程可见）。
@@ -69,9 +68,21 @@ type SettingsUpdate struct {
 	SshRules    *[]string `json:"ssh_rules"`
 }
 
-// validPolicy 校验 policy 取值（空串 = 不改，合法）。
-func validPolicy(s string) bool {
-	return s == "" || s == PolicyDeny || s == PolicyOpen
+// authCfg 把本次提交的授权字段收成校验快照：nil 列表 = 不改（校验时视为空表），
+// 空 policy = 不改。
+func (u *SettingsUpdate) authCfg() AuthCfg {
+	list := func(p *[]string) []string {
+		if p == nil {
+			return nil
+		}
+		return *p
+	}
+	return AuthCfg{
+		ExecPolicy: u.ExecPolicy, ExecRules: list(u.ExecRules),
+		FsPolicy: u.FsPolicy, FsRules: list(u.FsRules),
+		NetPolicy: u.NetPolicy, NetRules: list(u.NetRules),
+		SshPolicy: u.SshPolicy, SshRules: list(u.SshRules),
+	}
 }
 
 // Apply 校验并持久化设置：基于文件配置落盘（flag/env 启动覆盖不落盘）。
@@ -87,27 +98,12 @@ func (u *SettingsUpdate) Apply() error {
 		}
 	}
 	// 本次提交内容的表单校验（值域/语法）；不拦文件里已有的内容。
-	if !validPolicy(u.ExecPolicy) || !validPolicy(u.FsPolicy) || !validPolicy(u.NetPolicy) || !validPolicy(u.SshPolicy) {
-		return &InvalidArg{Field: "policy", Reason: "want deny | open"}
-	}
-	if u.ExecRules != nil {
-		if err := ValidateExecRules(*u.ExecRules); err != nil {
-			return &InvalidArg{Field: "exec_rules", Reason: err.Error()}
+	if err := u.authCfg().Validate(); err != nil {
+		var field *AuthFieldError
+		if errors.As(err, &field) {
+			return &InvalidArg{Field: field.Field, Reason: field.Err.Error()}
 		}
-	}
-	for name, list := range map[string]*[]string{"net_rules": u.NetRules, "ssh_rules": u.SshRules} {
-		if list != nil {
-			if err := vbox.ValidateTargetRules(*list); err != nil {
-				return &InvalidArg{Field: name, Reason: err.Error()}
-			}
-		}
-	}
-	for name, list := range map[string]*[]string{"fs_rules": u.FsRules} {
-		if list != nil {
-			if err := vbox.ValidateFSRules(*list); err != nil {
-				return &InvalidArg{Field: name, Reason: err.Error()}
-			}
-		}
+		return err
 	}
 	fileCfg, err := LoadFile()
 	if err != nil {
@@ -120,7 +116,7 @@ func (u *SettingsUpdate) Apply() error {
 	//（Go exec 不做 shell 展开，设置面填 ~/test 会因路径不存在导致所有 exec 失败）
 	wd := strings.TrimSpace(u.WorkDir)
 	if wd != "" {
-		wd = expandHome(wd)
+		wd = ExpandHome(wd)
 		abs, err := filepath.Abs(wd)
 		if err != nil {
 			return &InvalidArg{Field: "work_dir", Reason: err.Error()}
@@ -176,23 +172,6 @@ func (u *SettingsUpdate) applyAuth(o *Options) {
 			*field.target = *field.value
 		}
 	}
-}
-
-// expandHome 展开 work_dir 的 ~ 前缀（~ 或 ~/xxx → 用户主目录）。
-// 配置保存时调用：落盘即为真实绝对路径，运行时不再需要 shell 展开语义。
-func expandHome(p string) string {
-	if p == "~" {
-		if h, err := os.UserHomeDir(); err == nil {
-			return h
-		}
-		return p
-	}
-	if strings.HasPrefix(p, "~/") {
-		if h, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(h, strings.TrimPrefix(p, "~/"))
-		}
-	}
-	return p
 }
 
 // BoundHostID 从凭证首段解析 host_id（与连接状态无关）。

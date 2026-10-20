@@ -5,7 +5,6 @@ import (
 	"github.com/veypi/aic-pod/protocol"
 	"os"
 	"os/user"
-	"path/filepath"
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
@@ -21,7 +20,7 @@ import (
 
 func (c *Client) grantFS(sid, path string, permanent bool) (string, error) {
 	wd, _ := os.Getwd()
-	abs, err := protocol.ResolvePath(expandHomeDir(path), wd)
+	abs, err := protocol.ResolvePath(cfg.ExpandHome(path), wd)
 	if err != nil {
 		return "", fmt.Errorf("exec grant fs: invalid path %q: %w", path, err)
 	}
@@ -179,23 +178,6 @@ func (c *Client) persistGrant(domain, value string) error {
 	// 保存失败则不发布；发布即原子生效（即时生效能力保留）。
 	c.perms.publish(base)
 	return nil
-}
-
-// expandHomeDir 展开路径的 ~ 前缀（与 api 包 expandHome 同语义；grant fs
-// 面向 AI 直接调用，落盘前展开为真实绝对路径）。展开失败原样返回（后续
-// Abs/canonical 会处理或报错）。
-func expandHomeDir(p string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return p
-	}
-	if p == "~" {
-		return home
-	}
-	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(home, strings.TrimPrefix(p, "~/"))
-	}
-	return p
 }
 
 func (c *Client) execAllowed(sid, name string) bool {

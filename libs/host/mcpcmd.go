@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/vtools"
@@ -16,7 +17,7 @@ import (
 
 // mcp 命令 = 服务管理面（docs/host-vtools.md）：工具调用不再经它中转——
 // 服务登记后直接 <alias> <tool> [flags]。tools/describe/call/read 保留为
-// 调试直通（原 mcpx.Command 行为不变）。
+// 调试直通：tools/describe 透传上游 schema，call 复用 vtools 参数面。
 
 const mcpManageHelp = `usage:
   mcp list [--json]                       服务清单（配置态 + 运行态）
@@ -42,10 +43,11 @@ func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
 		fmt.Fprintln(inv.Stdout, mcpManageHelp)
 		return nil
 	}
-	// 调试直通：保持原 mcp 命令四个动词的行为（含 --image-preview / --json）。
+	// 调试直通：tools/describe 输出上游原始 schema，call 复用 vtools 参数面，
+	// read 直读资源。
 	switch args[0] {
 	case "tools", "describe", "call", "read":
-		return c.mcpDebugCmd()(ctx, inv)
+		return c.mcpDebug(ctx, inv)
 	}
 	op, rest := args[0], args[1:]
 	sid := execution.SessionFromContext(ctx)
@@ -73,14 +75,79 @@ func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
 	}
 }
 
-// mcpDebugCmd 懒建调试直通命令（原 mcpx.Command，含 exec 规则门 mcp.<alias>）。
-func (c *Client) mcpDebugCmd() commands.CommandFunc {
-	c.mcpMu.Lock()
-	defer c.mcpMu.Unlock()
-	if c.mcpDebug == nil {
-		c.mcpDebug = mcpx.Command(c.mcpSession)
+// mcpDebug 是 mcp 调试直通：tools/describe 保留上游 schema 原样，call 走
+// vtools 的通用参数面（--input / 逐 flag / --image-preview），read 直读资源。
+func (c *Client) mcpDebug(ctx context.Context, inv *commands.Invocation) error {
+	args := inv.Args
+	if len(args) < 2 {
+		return commands.Exitf(inv, 2, "usage: mcp <tools|describe|call|read> <server> ...")
 	}
-	return c.mcpDebug
+	op, server, rest := args[0], args[1], args[2:]
+	session, err := c.mcpSession(ctx, server)
+	if err != nil {
+		return commands.Exitf(inv, 126, "mcp: %s", err)
+	}
+	jsonOut, rest := debugJSON(op, rest)
+	switch op {
+	case "tools":
+		if len(rest) != 0 {
+			return commands.Exitf(inv, 2, "usage: mcp tools <server> [--json]")
+		}
+		tools := []*mcp.Tool{}
+		for tool, err := range session.Tools(ctx, nil) {
+			if err != nil {
+				return commands.Exitf(inv, 1, "mcp: %s", err)
+			}
+			tools = append(tools, tool)
+		}
+		return vtools.WriteResult(inv, tools, jsonOut)
+	case "describe":
+		if len(rest) != 1 {
+			return commands.Exitf(inv, 2, "usage: mcp describe <server> <tool> [--json]")
+		}
+		for tool, err := range session.Tools(ctx, nil) {
+			if err != nil {
+				return commands.Exitf(inv, 1, "mcp: %s", err)
+			}
+			if tool.Name == rest[0] {
+				return vtools.WriteResult(inv, tool, jsonOut)
+			}
+		}
+		return commands.Exitf(inv, 1, "mcp: unknown tool %q", rest[0])
+	case "call":
+		if len(rest) == 0 {
+			return commands.Exitf(inv, 2, "usage: mcp call <server> <tool> [--input JSON|-] [--json] [--image-preview WxH]")
+		}
+		provider := vtools.MCP(func(context.Context) (*mcp.ClientSession, error) { return session, nil })
+		callInv := *inv
+		callInv.Args = rest
+		return vtools.RunProvider(ctx, &callInv, server, provider)
+	case "read":
+		if len(rest) != 1 {
+			return commands.Exitf(inv, 2, "usage: mcp read <server> <resource-uri> [--json]")
+		}
+		value, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: rest[0]})
+		if err != nil {
+			return commands.Exitf(inv, 1, "mcp: %s", err)
+		}
+		return vtools.WriteResult(inv, value, jsonOut)
+	}
+	return commands.Exitf(inv, 2, "mcp: unknown debug operation %q", op)
+}
+
+// debugJSON 剥离 --json（仅 tools/describe/read 的合法选项；call 交给
+// vtools 统一解析）。
+func debugJSON(op string, args []string) (bool, []string) {
+	jsonOut := false
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--json" && op != "call" {
+			jsonOut = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return jsonOut, rest
 }
 
 // ---- list ----
