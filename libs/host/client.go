@@ -315,8 +315,7 @@ func (c *Client) startRTC() error {
 	if err != nil {
 		return err
 	}
-	hostname, _ := os.Hostname()
-	svc, err := rtc.New(c.newRTCConfig(key, hostname))
+	svc, err := rtc.New(c.newRTCConfig(key))
 	if err != nil {
 		return err
 	}
@@ -325,7 +324,7 @@ func (c *Client) startRTC() error {
 }
 
 // newRTCConfig 装配 RTC 应答服务配置（抽出以便锁定关键接线）。
-func (c *Client) newRTCConfig(key []byte, hostname string) rtc.Config {
+func (c *Client) newRTCConfig(key []byte) rtc.Config {
 	return rtc.Config{
 		HostID:            c.hostID,
 		UserID:            c.uid,
@@ -335,8 +334,6 @@ func (c *Client) newRTCConfig(key []byte, hostname string) rtc.Config {
 		// 宿主机系统时钟可能显著偏离平台（win 实测落后 70s），用原始
 		// time.Now 会把刚签发的票据判为「未生效/过期」。
 		Now:        clockNow,
-		Hostname:   hostname,
-		Version:    c.options().Version,
 		Dispatch:   c.HandleTool,
 		Disconnect: c.DisconnectTools,
 		Streams:    c.streamResolver,

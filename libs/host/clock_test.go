@@ -108,7 +108,7 @@ func TestRTCConfigUsesCalibratedClock(t *testing.T) {
 	c.hostID, c.uid, c.credVer = "host_1", "owner", 1
 	defer setClockOffset(0)
 
-	cfg := c.newRTCConfig(make([]byte, 32), "test-host")
+	cfg := c.newRTCConfig(make([]byte, 32))
 	if cfg.Now == nil {
 		t.Fatal("rtc.Config.Now must be wired (calibrated clock)")
 	}

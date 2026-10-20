@@ -24,7 +24,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"maps"
 	"runtime"
 	"strings"
 	"time"
@@ -242,9 +241,7 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 	if timeout <= 0 {
 		timeout = BackgroundWallClock
 	}
-	env := map[string]string{}
-	maps.Copy(env, e.cfg.BaseEnv)
-	maps.Copy(env, req.Env)
+	// Env 只传请求级：BaseEnv 已经 WithBaseEnv 交给 vsh，executionEnv 统一 merge。
 	workDir := req.WorkDir
 	if workDir == "" {
 		workDir = sessWorkDir
@@ -252,7 +249,7 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 	ereq := &vshcore.ExecutionRequest{
 		Script:  req.Script,
 		WorkDir: workDir,
-		Env:     env,
+		Env:     req.Env,
 		Stdin:   req.Stdin,
 		Timeout: timeout,
 	}

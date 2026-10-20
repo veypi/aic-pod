@@ -19,17 +19,17 @@ import (
 const sshConfigLimit = 1 << 20
 
 type sshTarget struct {
-	Original, Host, User string
-	Port                 int
-	Identities           []string
-	IdentitiesOnly       bool
-	Home                 string
+	Host, User     string
+	Port           int
+	Identities     []string
+	IdentitiesOnly bool
+	Home           string
 }
 
 func (t sshTarget) address() string { return net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) }
 
 func parseSSHTarget(raw string) (sshTarget, error) {
-	t := sshTarget{Original: raw}
+	t := sshTarget{}
 	if i := strings.LastIndexByte(raw, '@'); i >= 0 {
 		t.User, raw = raw[:i], raw[i+1:]
 		if !sshUserValid(t.User) {

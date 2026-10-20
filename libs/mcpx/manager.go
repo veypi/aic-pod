@@ -235,8 +235,7 @@ type ServiceStatus struct {
 	Launched    bool      // 曾经启动过
 	Starting    bool      // 实例存在但未就绪
 	Running     bool      // 连接就绪且未结束
-	IdleTimeout string    // 配置原文（空 = 常驻）
-	Used        time.Time // 最后一次使用（未启动为零值）
+	IdleTimeout string // 配置原文（空 = 常驻）
 	Inflight    int
 	Err         string // 连接失败原因（就绪前）
 }
@@ -249,7 +248,7 @@ func (m *Manager) Status() []ServiceStatus {
 	for name, cfg := range m.configs {
 		s := ServiceStatus{Name: name, Disabled: cfg.Disabled, Launched: m.launched[name], IdleTimeout: cfg.IdleTimeout}
 		if i := m.instances[name]; i != nil {
-			s.Used, s.Inflight = i.used, i.inflight
+			s.Inflight = i.inflight
 			select {
 			case <-i.done:
 			default:
@@ -459,20 +458,6 @@ type logWriter struct {
 func (w *logWriter) Write(p []byte) (int, error) {
 	w.logf("mcp %s: %s", w.name, strings.TrimSpace(string(p)))
 	return len(p), nil
-}
-
-// Names contains no credentials or launch environment.
-func (m *Manager) Names() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	names := make([]string, 0, len(m.configs))
-	for k, c := range m.configs {
-		if !c.Disabled {
-			names = append(names, k)
-		}
-	}
-	sort.Strings(names)
-	return names
 }
 
 func (m *Manager) Restart(ctx context.Context, name string) error {

@@ -18,7 +18,7 @@ import (
 const maxPeerConnections = 16
 
 type Config struct {
-	HostID, Hostname, Version string
+	HostID string
 	// 票据验签材料（rtc direct key 派生自设备凭据）。
 	UserID            string
 	CredentialVersion uint64

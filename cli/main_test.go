@@ -92,9 +92,11 @@ func TestInvalidConfigStillLoadsAndCanBeRepaired(t *testing.T) {
 			isolateConfigDir(t)
 			writeRawConfig(t, body)
 			// config get：与真实 CLI 同口径（flags.Parse 装载 Global 后输出视图）
-			if _, err := cfg.Load(); err != nil {
+			o, err := cfg.LoadFile()
+			if err != nil {
 				t.Fatal(err)
 			}
+			cfg.Global = o
 			out := capture(t, runConfigGet)
 			var view map[string]any
 			if err := json.Unmarshal([]byte(out), &view); err != nil {

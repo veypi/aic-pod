@@ -34,18 +34,13 @@ type fileView struct {
 
 func (v *fileView) location(name string) (protocol.FSPath, error) {
 	if runtime.GOOS == "windows" {
-		name = protocol.NormalizeHostPath(name)
-		if q, ok := protocol.WinTmpToOS(name, os.TempDir()); ok {
-			// /tmp 虚拟别名（cygwin 式映射 os.TempDir()，与 Decide 侧
-			// vbox.HostPathToOS 同口径）。
-			name = q
-		} else {
-			drive, rest, ok := protocol.SplitDriveRoot(name)
-			if !ok {
-				return protocol.FSPath{}, protocol.FSFail("invalid_argument", "Windows file operations require a drive path (/c/…)")
-			}
-			name = strings.ToUpper(string(drive)) + `:\` + strings.ReplaceAll(rest, "/", `\`)
+		// 规范形 → OS 原生路径（/tmp 虚拟别名 cygwin 式映射 os.TempDir()，
+		// 与 Decide 侧 vbox.HostPathToOS 同口径；映射本体在 protocol.HostPathToOS）。
+		q, err := protocol.HostPathToOS(name, os.TempDir())
+		if err != nil {
+			return protocol.FSPath{}, protocol.FSFail("invalid_argument", "Windows file operations require a drive path (/c/…)")
 		}
+		name = q
 	}
 	abs, err := filepath.Abs(filepath.FromSlash(name))
 	if err != nil {
@@ -233,8 +228,7 @@ func (v *fileView) ReadDir(name string) (result []fs.DirEntry, err error) {
 	}
 	out := []fs.DirEntry{}
 	for _, entry := range entries {
-		child := protocol.FSPath{RootID: p.RootID, Segments: append(append([]string{}, p.Segments...), entry.Name())}
-		if _, _, err := v.f.check(v.ctx, v.call, child, false); err == nil {
+		if _, _, err := v.f.check(v.ctx, v.call, child(p, entry.Name()), false); err == nil {
 			out = append(out, entry)
 		}
 	}

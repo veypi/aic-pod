@@ -227,14 +227,6 @@
       flex: 1
     }
 
-    .grid-size {
-      display: grid;
-      grid-template-columns: 1fr 84px 84px;
-      gap: 8px;
-      align-items: center;
-      margin-top: 8px
-    }
-
     /* ---- 按钮 ---- */
     button {
       padding: 7px 15px;
@@ -364,6 +356,14 @@
       color: var(--fg2)
     }
 
+    /* 被前序规则压住的行（最先命中者胜 → 本行不生效）的标注 */
+    .entry span.note {
+      flex: 0 0 auto;
+      color: var(--danger);
+      font-size: 11px;
+      white-space: nowrap
+    }
+
     button.x {
       padding: 0 6px;
       background: transparent;
@@ -413,21 +413,11 @@
         placeholder="留空 = 系统临时目录"></label>
     <label class="f"><span>后台超时 <em>exec_timeout</em></span><input id="exec_timeout"
         placeholder="留空 = 30m（如 30s / 5m / 1h）"></label>
-    <div class="f">
-      <span>浏览器 <em>chromium</em></span>
-      <input id="browser_path" placeholder="Chrome 路径（留空自动查找，下次启动浏览器生效）" aria-label="Chrome 可执行文件">
-      <div class="grid-size">
-        <span class="hint" style="margin:0">分辨率（宽 × 高）</span>
-        <input type="number" id="browser_width" min="320" max="4096" step="1" placeholder="1280" aria-label="浏览器宽度">
-        <input type="number" id="browser_height" min="320" max="4096" step="1" placeholder="720" aria-label="浏览器高度">
-      </div>
-      <p class="hint">默认 1280 × 720，新建标签时生效；页面尺寸固定，显示区域自动等比例缩放。</p>
-    </div>
     <label class="f"><span>默认打开地址 <em>home_path</em></span><input id="home_path"
         placeholder="留空 = /（如 /、/a）"></label>
 
     <div class="sec">访问授权</div>
-    <p class="hint">有序规则表：按书写顺序逐条匹配，最后命中者胜；未命中走 policy 兜底（deny=仅规则放行，open=除 deny 行外全放）。builtin 凭证 deny 恒在表最前、不可编辑；permanent grant 直接追加在表尾。保存后重启后端子进程生效。</p>
+    <p class="hint">有序规则表：按书写顺序逐条匹配，最先命中者胜；未命中走 policy 兜底（deny=仅规则放行，open=除 deny 行外全放）。会话 temp grant 排最前；内建凭证 deny 排在你的规则之后、可被覆盖；permanent grant 插入表头。「添加」的新行同样插入表头（优先级最高），被前序规则压住的行会就地标注。保存后重启后端子进程生效。</p>
     <div id="auth"></div>
   </main>
 
@@ -466,7 +456,7 @@
 
     // ---- 脏检查：只有改动过才显示「保存」 ----
     // 表单字段 + 三域授权（policy/deny/allow）全量快照；列表编辑器的「新增输入框」不计入。
-    const FIELDS = ['host', 'key', 'work_dir', 'exec_timeout', 'browser_path', 'browser_width', 'browser_height', 'home_path']
+    const FIELDS = ['host', 'key', 'work_dir', 'exec_timeout', 'home_path']
     const domains = [
       { key: 'fs', name: '文件 (fs)', ph: '如 deny:~/**/*.pem、rw:~/.cache/**' },
       { key: 'net', name: '网络 (net)', ph: '如 allow:example.com:443、deny:169.254.169.254:*' },
@@ -490,6 +480,35 @@
     const markClean = () => { baseline = snapshot(); refreshDirty() }
     pane.addEventListener('input', refreshDirty)
     pane.addEventListener('change', refreshDirty)
+
+    // ---- 覆盖判定（保守）：只标「确定被前序规则压住」的行，判不出就不标 ----
+    // fs 规则形如 'deny:|ro:|rw:' + 路径（裸路径按子树覆盖）；net/ssh 规则形如
+    // 'allow:|deny:' + host[:port]。含通配符（* ? []）的规则静态判不准 → 不标。
+    const RULE_GLOB = /[*?[\]]/
+    const splitRule = (raw) => {
+      const i = raw.indexOf(':')
+      return i < 0 ? { effect: '', target: raw.trim() } : { effect: raw.slice(0, i), target: raw.slice(i + 1).trim() }
+    }
+    // 路径祖先判定：同根（/ 或 ~）且前者是后者的目录前缀
+    const pathCovers = (a, b) => {
+      if (!a || !b || RULE_GLOB.test(a) || RULE_GLOB.test(b)) return false
+      const x = a.replace(/\/+$/, ''), y = b.replace(/\/+$/, '')
+      if (!x) return false
+      if (x === y) return true
+      if (x.startsWith('/') && y.startsWith('/')) return y.startsWith(x + '/')
+      if (x.startsWith('~') && y.startsWith('~')) return y.startsWith(x + '/')
+      return false
+    }
+    // 返回压住本行的前序行号（1 起）；0 = 未判定为被压住
+    const shadowedBy = (domainKey, rules, i) => {
+      for (let j = 0; j < i; j++) {
+        if (rules[j] === rules[i]) return j + 1
+        if (domainKey !== 'fs') continue
+        const prev = splitRule(rules[j]), cur = splitRule(rules[i])
+        if (pathCovers(prev.target, cur.target)) return j + 1
+      }
+      return 0
+    }
 
     // ---- 规则表编辑器（policy + <域>_rules 有序列表；顺序即匹配顺序） ----
     const listEl = (d, st, title) => {
@@ -525,6 +544,14 @@
         del.title = '删除（grant --permanent 产物删行即撤销）'
         del.onclick = () => { rules.splice(i, 1); renderAuth() }
         row.appendChild(t)
+        const shadow = shadowedBy(d.key, rules, i)
+        if (shadow) {
+          const n = document.createElement('span')
+          n.className = 'note'
+          n.textContent = `被第 ${shadow} 行覆盖`
+          n.title = '前面的规则先命中（最先命中者胜），本行不会生效'
+          row.appendChild(n)
+        }
         row.appendChild(up)
         row.appendChild(down)
         row.appendChild(del)
@@ -542,7 +569,7 @@
       const doAdd = () => {
         const v = inp.value.trim()
         if (!v || rules.includes(v)) return
-        rules.push(v) // 追加表尾 = 生效顺序最后（最后命中者胜）
+        rules.unshift(v) // 插入表头 = 优先级最高（最先命中者胜；与 grant --permanent 同向）
         renderAuth()
       }
       add.onclick = doAdd
@@ -645,9 +672,6 @@
         $('work_dir').value = cfg.work_dir || ''
         $('exec_timeout').value = cfg.exec_timeout || ''
         $('home_path').value = cfg.home_path || '/'
-        $('browser_path').value = cfg.browser_path || ''
-        $('browser_width').value = cfg.browser_width || 1280
-        $('browser_height').value = cfg.browser_height || 720
         for (const d of domains) {
           auth[d.key].policy = cfg[d.key + '_policy'] || auth[d.key].policy
           auth[d.key].rules = cfg[d.key + '_rules'] || []
@@ -670,12 +694,7 @@
       const exec_timeout = $('exec_timeout').value.trim()
       const home_path = $('home_path').value.trim()
       try {
-        const browser_width = Number($('browser_width').value || 1280)
-        const browser_height = Number($('browser_height').value || 720)
-        if (![browser_width, browser_height].every(n => Number.isInteger(n) && n >= 320 && n <= 4096)) {
-          throw new Error('浏览器宽高必须是 320–4096 之间的整数')
-        }
-        const body = { host, work_dir, exec_timeout, home_path, browser_width, browser_height, browser_path: $('browser_path').value.trim() }
+        const body = { host, work_dir, exec_timeout, home_path }
         for (const d of domains) {
           body[d.key + '_policy'] = auth[d.key].policy
           body[d.key + '_rules'] = auth[d.key].rules

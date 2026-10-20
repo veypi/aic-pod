@@ -555,13 +555,8 @@ func (a *ufsAdapter) Chtimes(ctx context.Context, name string, atime, mtime time
 	if err := a.gate(abs, vbox.OpWrite, false); err != nil {
 		return err
 	}
-	// ufs.FS 无 Chtimes：backing 实现支持则用，否则尽力而为（touch/cp -p/tar
-	// 不因此失败；mtime 语义降级，记录在案）。
-	if ct, ok := a.backing.(interface {
-		Chtimes(name string, atime, mtime time.Time) error
-	}); ok {
-		return ct.Chtimes(abs, atime, mtime)
-	}
+	// ufs.FS 无 Chtimes：mtime 语义降级为 no-op（touch/cp -p/tar 不因此失败；
+	// 记录在案。backing 均无此方法，曾有的能力探测分支已随评审移除）。
 	return nil
 }
 

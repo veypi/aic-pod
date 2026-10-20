@@ -403,14 +403,3 @@ func (b *Bytes) Reap() {
 }
 
 func (b *Bytes) sourceLimit() int64 { b.mu.Lock(); defer b.mu.Unlock(); return b.cfg.MaxSourceBytes }
-func (b *Bytes) Configure(limit int64, sources int) {
-	if limit <= 0 {
-		limit = 512 << 20
-	}
-	if sources <= 0 {
-		sources = 128
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.cfg.MaxSourceBytes, b.cfg.MaxSources = limit, sources
-}

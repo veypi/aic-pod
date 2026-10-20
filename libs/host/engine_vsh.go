@@ -324,12 +324,12 @@ func settleExecLogs(attrs map[string]string, logOut, logErr string, outSpill, er
 		return protocol.Fail("internal", "exec: stderr capture truncated without log spill")
 	}
 	if natsPreview {
-		if _, cut := headLines(res.Stdout, 1000); cut {
+		if _, cut := headLines(res.Stdout, previewStdoutLines); cut {
 			if err := outSpill.Spill(); err != nil {
 				return protocol.Fail("internal", "exec: spill log: "+err.Error())
 			}
 		}
-		if _, cut := headLines(res.Stderr, 100); cut {
+		if _, cut := headLines(res.Stderr, previewStderrLines); cut {
 			if err := errSpill.Spill(); err != nil {
 				return protocol.Fail("internal", "exec: spill log: "+err.Error())
 			}
@@ -446,10 +446,10 @@ func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcF
 		return &protocol.Output{Content: res.Stdout, Attrs: attrs}
 	}
 	truncated := res.StdoutTruncated || res.StderrTruncated
-	content, cut := headLines(res.Stdout, 1000)
+	content, cut := headLines(res.Stdout, previewStdoutLines)
 	truncated = truncated || cut
 	if res.Stderr != "" {
-		errHead, errCut := headLines(res.Stderr, 100)
+		errHead, errCut := headLines(res.Stderr, previewStderrLines)
 		attrs["stderr"] = errHead
 		truncated = truncated || errCut
 	}
@@ -460,6 +460,12 @@ func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcF
 }
 
 // headLines 截取前 n 行；发生截取时返回 truncated=true。
+// 预览行数上限（与平台侧 aic/fs.ExecMaxLines 约定一致；跨仓无法共享常量）。
+const (
+	previewStdoutLines = 1000
+	previewStderrLines = 100
+)
+
 func headLines(s string, n int) (string, bool) {
 	if n <= 0 || s == "" {
 		return s, false

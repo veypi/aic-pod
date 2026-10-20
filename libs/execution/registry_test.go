@@ -41,26 +41,3 @@ func TestMissingPathNeverCallsNativeExec(t *testing.T) {
 	}
 }
 
-// skill 命令准入薄检查（原 gatedRegistry 的等效语义，2026-10-06 §4）：
-// Allow 拒绝 = 126 + grant 引导，不继续执行。
-func TestSkillCommandGate(t *testing.T) {
-	t.Parallel()
-	ran := false
-	d := PlatformDeps{Skill: SkillDeps{
-		Allow: func(context.Context) bool { return false },
-		Load:  func(context.Context, string, string) (string, error) { ran = true; return "", nil },
-	}}
-	var out, errBuf strings.Builder
-	err := d.cmdSkill(context.Background(), &commands.Invocation{Args: []string{"load", "x"}, Stdout: &out, Stderr: &errBuf})
-	if code, _ := commands.ExitCode(err); code != 126 || !strings.Contains(errBuf.String(), "denied by exec rules") {
-		t.Fatalf("denied skill must error with permission guidance: %v %q", err, errBuf.String())
-	}
-	if ran {
-		t.Fatal("denied skill command executed")
-	}
-	// nil Allow = 放行（cloud）
-	d.Skill.Allow = nil
-	if err := d.cmdSkill(context.Background(), &commands.Invocation{Args: []string{"load", "x"}, Stdout: &out, Stderr: &errBuf}); err != nil || !ran {
-		t.Fatalf("nil Allow must pass: %v ran=%v", err, ran)
-	}
-}

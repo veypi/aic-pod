@@ -88,6 +88,35 @@ func isLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
+// HostPathToOS 把规范形路径映射为 Windows 原生路径（调用方自行限定 GOOS）：
+// 链条 = NormalizeHostPath → WinTmpToOS（/tmp 虚拟别名优先于盘根判定）→
+// SplitDriveRoot（盘符大写 + 反斜杠）。/c → C:\；/c/x → C:\x。
+// 非盘符路径（含 "/" 虚拟根与相对路径）报错，错误口径由各调用方包装
+// （osvfs 的虚拟根 sentinel / hostfs 的 invalid_argument）。osvfs 与 hostfs
+// 的 win 分支共用本函数，禁止各处另写映射逻辑。
+//
+// 与 vbox.HostPathToOS（vbox/canonical.go）的差异边界：vbox 版自行判 GOOS，
+// 非 Windows 上原样返回，映射失败也原样返回（无错误）；本函数不判 GOOS
+// （调用方自行限定），映射失败一律报错。两侧成功路径（/tmp 别名 + 盘符根）
+// 同口径——但归一化是各自独立实现（本包 NormalizeHostPath vs vbox 的
+// normalizeHostPath），改动任一侧都必须同步核对，否则会出现「规则表判的
+// 路径」与「实际执行路径」错位。
+func HostPathToOS(p, tmpDir string) (string, error) {
+	p = NormalizeHostPath(p)
+	if q, ok := WinTmpToOS(p, tmpDir); ok {
+		return q, nil
+	}
+	drive, rest, ok := SplitDriveRoot(p)
+	if !ok {
+		return "", fmt.Errorf("proto: windows path requires a drive root (/c/…); got %q", p)
+	}
+	d := strings.ToUpper(string(drive)) + `:\`
+	if rest == "" {
+		return d, nil
+	}
+	return d + strings.ReplaceAll(rest, "/", `\`), nil
+}
+
 // WinTmpToOS 把 /tmp（及子路径）映射为 windows 临时目录原生路径：/tmp →
 // tmpDir；/tmp/a/b → tmpDir\a\b。其余输入 ok=false。纯函数（tmpDir 注入，
 // 跨平台可测）；osvfs/hostfs 的 win 分支与 HostPathToOS 共用本函数，禁止

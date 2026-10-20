@@ -12,10 +12,10 @@ import (
 const MaxReadBinBytes = 256 << 20
 
 // ReadBin 按字节区间读取文件原始字节（2026-09-10，RTC 直连通道 readbin op
-// 的执行体）：**不属于 fs 指令集**（8 action 契约不变，AI 面不可见），仅经
+// 的执行体）：**不属于 fs 指令集**（5 action 契约不变，AI 面不可见），仅经
 // owner 直连控制台暴露——预览/下载大二进制（视频等）的字节出口。
 //
-// 权限门与 fs read 同一判定实例：Resolve → CheckPath → CheckPolicy（read 级，
+// 权限门与 fs read 同一判定实例：Resolve → CheckPolicy（read 级，
 // deny 恒拒不可绕过）。length<=0 = 读到文件尾；请求区间超 MaxReadBinBytes
 // 报错（不静默截断——调用方拿残缺的视频无法播放，宁可显式失败）。
 // mime 一律按文件头 512 字节探测（off>0 时单独读头，不用区间内数据猜）。
@@ -32,9 +32,6 @@ func ReadBin(env *Env, path string, off, length int64) (data []byte, mime string
 	abs, err := env.Resolve(path)
 	if err != nil {
 		return nil, "", 0, fsOpErr("readbin", err)
-	}
-	if err := env.CheckPath("readbin", abs); err != nil {
-		return nil, "", 0, err
 	}
 	if err := env.CheckPolicy("readbin", abs, false); err != nil {
 		return nil, "", 0, err

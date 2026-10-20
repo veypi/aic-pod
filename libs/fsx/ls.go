@@ -23,7 +23,7 @@ import (
 //
 // 排序：恒按 mtime 降序（最近修改在前），同值按名称 UTF-8 字节序（禁止 locale 排序）。
 // 规则：隐藏项（点开头）默认完全跳过（不显示不递归），all=true 收录；
-// lsSkipDirs（node_modules 等大目录）不 descend，仍作为叶条目出现；
+// skipDirs（node_modules 等大目录）不 descend，仍作为叶条目出现；
 // 节点上限 lsMaxNodes，超限 truncated=true。
 const (
 	lsDefaultDepth = 1
@@ -31,8 +31,9 @@ const (
 	lsMaxNodes     = 2000
 )
 
-// lsSkipDirs 是递归时不 descend 的目录名（与前端 tree_cache 的跳过集对齐）。
-var lsSkipDirs = map[string]bool{
+// skipDirs 是 ls/rg 递归时不 descend/不进入的目录名（两者同一集合；§5.4：
+// node_modules/vendor 与常见编译产物/缓存目录；与前端 tree_cache 的跳过集对齐）。
+var skipDirs = map[string]bool{
 	"node_modules": true, "vendor": true, "__pycache__": true,
 	"bower_components": true, "dist": true, "build": true, "target": true,
 	".next": true, ".nuxt": true, "coverage": true, ".turbo": true, ".output": true,
@@ -92,9 +93,6 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	abs, err := env.Resolve(target)
 	if err != nil {
 		return nil, fsOpErr("ls", err)
-	}
-	if err := env.CheckPath("ls", abs); err != nil {
-		return nil, err
 	}
 	if err := env.CheckPolicy("fs ls", abs, false); err != nil {
 		return nil, err
@@ -173,7 +171,7 @@ func buildLsDir(ctx context.Context, env *Env, dir string, remain int, all bool,
 		}
 		st.count++
 		if e.IsDir() {
-			skipDescend := lsSkipDirs[name] || atVirtualRoot
+			skipDescend := skipDirs[name] || atVirtualRoot
 			if remain > 1 && !skipDescend && !st.truncated {
 				sub := buildLsDir(ctx, env, full, remain-1, all, st)
 				ent.Items = &sub // 已展开（空目录为 []），与"未展开省略 items"区分

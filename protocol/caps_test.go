@@ -27,17 +27,11 @@ func TestCapsFSActionsForms(t *testing.T) {
 	if c3.FS.Actions == nil || len(*c3.FS.Actions) != 0 {
 		t.Errorf("[] actions = %v, want non-nil empty", c3.FS.Actions)
 	}
-	if !c1.FS.Supports("read") || !c1.FS.Supports("write") || !c1.FS.Supports("edit") {
-		t.Error("nil actions should support all 3")
-	}
-	if c3.FS.Supports("read") {
-		t.Error("[] actions should support none")
-	}
 	// 子集
 	var c4 Caps
 	mustUnmarshal(t, `{"host_id":"host_a","fs":{"actions":["read"]}}`, &c4)
-	if !c4.FS.Supports("read") || c4.FS.Supports("write") {
-		t.Errorf("subset actions wrong: %v", *c4.FS.Actions)
+	if c4.FS.Actions == nil || len(*c4.FS.Actions) != 1 || (*c4.FS.Actions)[0] != "read" {
+		t.Errorf("subset actions wrong: %v", c4.FS.Actions)
 	}
 }
 

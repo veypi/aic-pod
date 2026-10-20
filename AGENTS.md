@@ -10,9 +10,10 @@ exposes the host's capabilities (exec, fs, browser, cua, ssh/scp) as tools an LL
 
 This repo owns: sandbox and authorization enforcement, the exec/fs tool layer, the transport
 contracts, the desktop packaging and the CLI. It does **not** own: the platform side (accounts,
-approvals, prompts), or skills — skills are static cloud content and the in-repo skill/package
-mechanism (`libs/skillrun`, `libs/uiscript`, `protocol/hosts_tools`, any aic-skills dependency) was
-removed on purpose; do not reintroduce it.
+approvals, prompts), or skills — skills are static cloud content and the in-repo skill runner/registry
+mechanism (`libs/skillrun`, `libs/uiscript`, `protocol/hosts_tools`) was removed on purpose; do not
+reintroduce it. The `aic-skills` Go module stays on purpose: `libs/host/packs.go` reads its embedded
+manifest for the built-in packs (browser/cua).
 
 ## Layout
 
@@ -61,9 +62,12 @@ make docker-build ; make docker-push ; make release ; make clean ; make help
 - **Sandbox fails closed**: with no usable backend the command is not run — never run bare.
 - **`nosandbox` is request-level and separately approved**: it always escalates to Critical(4) and
   an approval does not by itself waive the sandbox.
-- **Three-domain authorization** (fs/net/ssh × policy/deny/allow): deny always wins, an explicit
-  allow may override a deny, built-in roots are workspace / session dir / system temp, and session
-  grants (`grant <domain> <target> [--permanent]`) are the only ad-hoc widening. Changing the
+- **Four-domain authorization** (fs/net/ssh/exec, each a policy + an ordered **first-match** rule
+  list): session temp grants prepend to the head and therefore CAN override an earlier deny ("deny
+  always wins" is not the model); built-in rules (net `localhost:*`, ssh `github.com:22`, credential
+  denies) sit at the tail so owner cfg lines still beat them; built-in writable roots are workspace /
+  session dir / system temp; session grants (`grant <domain> <target> [--permanent]`) are the only
+  ad-hoc widening, and `--permanent` prepends into the persisted `<domain>_rules`. Changing the
   decision formula means updating `docs/host_sandbox.md` in the same turn.
 - **No local listening port**: the settings surface is the shared config file plus
   `aic config`/`aic bind` (the desktop window spawns the same subcommands over Electron IPC). Do
@@ -75,9 +79,11 @@ make docker-build ; make docker-push ; make release ; make clean ; make help
   wire changes bump the version, and `protocol/tool` `Request{protocol, request_id, action,
   exec|cancel_id|fs}` stays the single action face — exec carries the whole script only, native fs
   goes through the same face.
-- **The version number lives only in `cfg/config.go`** (with a `v` prefix). `desktop/package.json`
-  is synced by `make desktop-version` from `git describe`; pushing a `v*` tag triggers the release
-  workflow.
+- **Version source of truth is `git describe`**, injected into `cfg.Version` at build time (the
+  fallback default lives in `cfg/config.go`, with a `v` prefix). `desktop/package.json` is a second
+  stored copy — electron-builder takes the product version from it — synced only by `make
+  desktop-version` (the desktop make targets run it; packaging that bypasses make ships a stale
+  version). Pushing a `v*` tag triggers the release workflow.
 - **browser/cua are upstream programs** (`agent-browser`, `cua-driver`, pinned in `desktop/*.json`):
   tool names, parameters and results pass through unchanged, and the Pod only starts/streams them.
   Do not hand-roll Chrome/CDP again.

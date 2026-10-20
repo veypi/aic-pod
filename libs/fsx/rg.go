@@ -187,14 +187,6 @@ func isMinified(env *Env, p string) bool {
 	return lines > 0 && size/lines > minifiedAvgLineBytes
 }
 
-// skipDirs 是 rg 递归不进入的目录（§5.4：node_modules/vendor 与常见编译产物/
-// 缓存目录；与 ls skipDirs 同一集合）。
-var skipDirs = map[string]bool{
-	"node_modules": true, "vendor": true, "__pycache__": true,
-	"bower_components": true, "dist": true, "build": true, "target": true,
-	".next": true, ".nuxt": true, "coverage": true, ".turbo": true, ".output": true,
-}
-
 // checkRgVirtualRoot 拒绝从虚拟挂载根（windows 盘符列表根）发起的 rg：
 // 递归遍历全部盘符无界（rgWalk 无节点上限），必须指定盘符路径。
 func checkRgVirtualRoot(env *Env, abs string) error {
@@ -261,9 +253,6 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err := checkRgVirtualRoot(env, abs); err != nil {
 		return nil, err
 	}
-	if err := env.CheckPath("rg", abs); err != nil {
-		return nil, err
-	}
 	if err := env.CheckPolicy("fs rg", abs, false); err != nil {
 		return nil, err
 	}
@@ -277,12 +266,12 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	var res *Result
 	if !info.IsDir() {
 		candidates = []string{abs}
-		res, err = rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, true)
+		res, err = rgSearch(env, abs, candidates, re, limit, rgCtx, true)
 	} else {
-		if werr := rgWalk(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }); werr != nil {
+		if werr := rgWalkDepth(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }, 0); werr != nil {
 			return nil, fsOpErr("rg", werr)
 		}
-		res, err = rgSearch(env, abs, p.Pattern, candidates, re, limit, rgCtx, p.All)
+		res, err = rgSearch(env, abs, candidates, re, limit, rgCtx, p.All)
 	}
 	clampNote(res, "limit", p.Limit, limit)
 	clampNote(res, "context", p.Context, rgCtx)
@@ -299,12 +288,8 @@ func hasUpper(s string) bool {
 	return false
 }
 
-// rgWalk 递归收集目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
-// --hidden 收录；skipDirs 恒跳过；glob 按文件名过滤）。
-func rgWalk(ctx context.Context, env *Env, dir string, globs []string, hidden bool, fn func(path string)) error {
-	return rgWalkDepth(ctx, env, dir, globs, hidden, fn, 0)
-}
-
+// rgWalkDepth 递归收集目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
+// --hidden 收录；skipDirs 恒跳过；glob 按文件名过滤）。depth 为递归深度（入口传 0）。
 func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidden bool, fn func(path string), depth int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -408,9 +393,6 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 		return nil, fsOpErr("rg", err)
 	}
 	if err := checkRgVirtualRoot(env, abs); err != nil {
-		return nil, err
-	}
-	if err := env.CheckPath("rg", abs); err != nil {
 		return nil, err
 	}
 	if err := env.CheckPolicy("fs rg", abs, false); err != nil {
@@ -580,7 +562,7 @@ func rgEmit(next func() (int, string, bool), re *regexp.Regexp, rgCtx, maxRows i
 // rgSearch 实现内容搜索：逐文件扫描+上下文展开，全局 limit 截断。
 // includeMinified=false 时 minified 文件（isMinified）跳过并计入 attrs.skipped
 // （all=true 收录；显式单文件路径恒 includeMinified=true）。
-func rgSearch(env *Env, abs, pattern string, candidates []string, re *regexp.Regexp, limit, rgCtx int, includeMinified bool) (*Result, error) {
+func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limit, rgCtx int, includeMinified bool) (*Result, error) {
 	r := newResult("rg", abs)
 	// 预留最大 note 空间：内容写满即截断，收尾（数组闭合+可选 note）恒可写
 	jb := newRGJSONBuf(rgNoteMax)

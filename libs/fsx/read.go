@@ -39,9 +39,6 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err != nil {
 		return nil, fsOpErr("read", err)
 	}
-	if err := env.CheckPath("fs", abs); err != nil {
-		return nil, err
-	}
 	if err := env.CheckPolicy("fs read", abs, false); err != nil {
 		return nil, err
 	}

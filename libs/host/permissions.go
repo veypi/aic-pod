@@ -300,8 +300,9 @@ func (p *permissionState) fsSnapshotWith(sid string, protected []vbox.Rule) vbox
 }
 
 func (p *permissionState) fsSnapshotLocked(sid string, protected []vbox.Rule) vbox.FSRuleSet {
-	// 快照自身 fail-closed：启动配置无效时连便利根也不放行——入口各自
-	// 查 err() 是现状双保险，未来新调用点不再依赖该分散不变量。
+	// 启动配置无效时快照降级为「写全拒、读按 vbox 默认放行」——不是整体
+	// fail-closed；真正的硬拒由入口层查 err() 承担（dispatch 总闸拒绝一切
+	// 请求）。新调用点必须沿用该入口不变量，不得只信快照。
 	if p.invalid != nil {
 		return vbox.FSRuleSet{DefaultWrite: vbox.EffDeny}
 	}

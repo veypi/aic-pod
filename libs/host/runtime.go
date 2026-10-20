@@ -56,9 +56,3 @@ func Stop() {
 	}
 }
 
-// Running 报告 host 会话是否在运行。
-func Running() bool {
-	rtMu.Lock()
-	defer rtMu.Unlock()
-	return rtClient != nil
-}

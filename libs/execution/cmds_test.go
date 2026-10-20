@@ -56,6 +56,7 @@ func TestPlatformCommandsRegistered(t *testing.T) {
 			t.Fatalf("missing %q", name)
 		}
 	}
+	// 依赖未接线的命令不得注册；skill 已随 v6.2 收归独立工具（防回归）。
 	for _, name := range []string{"grant", "list_hosts", "send_user", "skill"} {
 		if _, ok := reg.Lookup(name); ok {
 			t.Fatalf("unsupported command %q registered", name)

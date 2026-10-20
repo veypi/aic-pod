@@ -36,20 +36,14 @@ func isVirtualRoot(name string) bool { return runtime.GOOS == "windows" && name 
 // toOS 把规范形路径映射为 OS 路径（非 Windows 为恒等映射；Windows 见 winToOS）。
 func toOS(p string) (string, error) {
 	if runtime.GOOS == "windows" {
-		p = protocol.NormalizeHostPath(p)
-		// /tmp 虚拟别名优先于盘根判定（winToOS 对非盘符绝对路径报错）。
-		if q, ok := protocol.WinTmpToOS(p, os.TempDir()); ok {
-			return q, nil
-		}
 		return winToOS(p)
 	}
 	return p, nil
 }
 
 // winToOS 把规范形路径映射为 Windows OS 路径（纯函数，跨平台可测）：
-//   - 归一与规则匹配层共用 protocol.NormalizeHostPath（本层兜底 ls/rg 递归拼接等
-//     绕过主入口的产物；多斜杠前缀 //c、旧输入形 C:/… 同样归一）；
-//   - /c → C:\（盘根）；/c/x → C:\x；
+// 映射本体在 protocol.HostPathToOS（归一 → /tmp 别名 → 盘符），本层只保留
+// 错误口径：
 //   - "/" → errVirtualRoot（Stat/ReadDir 特判，其余操作拒绝）；
 //   - 其余 /…（非盘符绝对路径）→ 错误：虚拟根下只有盘符挂载。
 func winToOS(p string) (string, error) {
@@ -57,16 +51,8 @@ func winToOS(p string) (string, error) {
 	if p == "/" {
 		return "", errVirtualRoot
 	}
-	drive, rest, ok := protocol.SplitDriveRoot(p)
-	if ok {
-		d := strings.ToUpper(string(drive)) + ":"
-		// 分隔符转换不能用 filepath.FromSlash（非 windows 上是恒等映射，
-		// 纯函数跨平台可测性会丢失）
-		rest = strings.ReplaceAll(rest, "/", `\`)
-		if rest == "" {
-			return d + `\`, nil
-		}
-		return d + `\` + rest, nil
+	if q, err := protocol.HostPathToOS(p, os.TempDir()); err == nil {
+		return q, nil
 	}
 	if strings.HasPrefix(p, "/") {
 		return "", fmt.Errorf("fs: windows path requires a drive root (/c/…); got %q", p)

@@ -36,8 +36,6 @@ type PlatformDeps struct {
 	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话；files 为附件路径
 // （云端 UFS 绝对路径，可多个），channelID 指定目标 channel（空=会话默认）。
 	SendUser func(ctx context.Context, sessionKey, message string, files []string, channelID string) error
-	// Skill 注册中心与设备包操作（v6；nil 子命令降级报错）。
-	Skill SkillDeps
 	// SSH is host-only. Nil implementations are never registered on cloud/page.
 	SSH SSHDeps
 	// Pull/Push 设备↔平台云盘文件传输（host-only；/fs/cloud HTTP 面 + 设备凭证，
@@ -49,17 +47,8 @@ type SSHDeps struct {
 	SSH, SCP, SFTP commands.CommandFunc
 }
 
-// SkillDeps operates on static content; loading never executes or registers it.
-type SkillDeps struct {
-	Search func(context.Context, string, string, int) (string, error)
-	Load   func(context.Context, string, string) (string, error)
-	Fork   func(context.Context, string, string) (string, error)
-	// Allow 命令准入薄检查（host 接线 exec 域规则门）：nil = 放行（cloud）。
-	Allow func(context.Context) bool
-}
-
 // RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
-// send_user / skill / ssh 族 / pull / push。全部自带 help 文本（--help/-h 或无参数子命令自答）。
+// send_user / ssh 族 / pull / push。全部自带 help 文本（--help/-h 或无参数子命令自答）。
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	list := []commands.Command{commands.DefineCommand("commands", deps.cmdCommands)}
 	add := func(name string, fn commands.CommandFunc) { list = append(list, commands.DefineCommand(name, fn)) }
@@ -88,9 +77,6 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 		if c.run != nil {
 			add(c.name, c.run)
 		}
-	}
-	if deps.Skill.Search != nil || deps.Skill.Load != nil || deps.Skill.Fork != nil {
-		add("skill", deps.cmdSkill)
 	}
 	for _, cmd := range list {
 		if err := reg.RegisterGuarded(cmd); err != nil {
@@ -168,11 +154,6 @@ func writeJSON(inv *commands.Invocation, v any) error {
 	return nil
 }
 
-// bgIdentity 取本次执行的任务归属（user, session）。
-func bgIdentity(ctx context.Context) (string, string) {
-	return OwnerFromContext(ctx), SessionFromContext(ctx)
-}
-
 func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error {
 	if len(inv.Args) == 0 || helpRequested(inv.Args) {
 		fmt.Fprintln(inv.Stdout, bgHelp)
@@ -181,7 +162,7 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 	if d.Tasks == nil {
 		return commands.Exitf(inv, 1, "bg: task table unavailable on this endpoint")
 	}
-	owner, session := bgIdentity(ctx)
+	owner, session := OwnerFromContext(ctx), SessionFromContext(ctx)
 	// --json 任意位置生效。
 	jsonOut := false
 	args := make([]string, 0, len(inv.Args))
@@ -191,6 +172,10 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 			continue
 		}
 		args = append(args, a)
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(inv.Stdout, bgHelp)
+		return nil
 	}
 	switch args[0] {
 	case "list":
@@ -360,87 +345,6 @@ func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation
 const sendUserHelp = `usage: send_user [--file <路径>]... [--channel <id>] <消息...> — 给用户发一条消息
   --file/-f  附件（云空间绝对路径），可重复
   --channel  指定目标 channel id（默认当前会话绑定）`
-
-const skillHelp = `usage:
- skill search [query] [--limit N]
- skill load <ref>
- skill fork <ref>
-
-Load returns static content; follow SKILL.md to install software separately.
-Fork creates an editable cloud copy.`
-
-// cmdSkill skill 注册中心与设备包管理（v6：skills 独立工具废除，动词归 vsh）。
-func (d PlatformDeps) cmdSkill(ctx context.Context, inv *commands.Invocation) error {
-	if helpRequested(inv.Args) {
-		fmt.Fprintln(inv.Stdout, skillHelp)
-		return nil
-	}
-	if len(inv.Args) == 0 {
-		return commands.Exitf(inv, 2, "usage: skill <search|load|fork>（--help 查看详情）")
-	}
-	if d.Skill.Allow != nil && !d.Skill.Allow(ctx) {
-		return commands.Exitf(inv, 126, "skill: command denied by exec rules（grant cmd skill 申请）")
-	}
-	sub, rest := inv.Args[0], inv.Args[1:]
-	sid := SessionFromContext(ctx)
-	switch sub {
-	case "search":
-		if d.Skill.Search == nil {
-			return commands.Exitf(inv, 1, "skill: 此端未接注册中心查询")
-		}
-		limit := 0
-		var words []string
-		for i := 0; i < len(rest); i++ {
-			if rest[i] == "--limit" && i+1 < len(rest) {
-				v, err := strconv.Atoi(rest[i+1])
-				if err != nil {
-					return commands.Exitf(inv, 2, "skill search: --limit 需为数字")
-				}
-				limit = v
-				i++
-				continue
-			}
-			words = append(words, rest[i])
-		}
-		text, err := d.Skill.Search(ctx, sid, strings.Join(words, " "), limit)
-		if err != nil {
-			return commands.Exitf(inv, 1, "skill search: %s", err)
-		}
-		if text != "" {
-			fmt.Fprintln(inv.Stdout, text)
-		}
-		return nil
-	case "load":
-		if d.Skill.Load == nil {
-			return commands.Exitf(inv, 1, "skill: 此端未接注册中心查询")
-		}
-		if len(rest) == 0 {
-			return commands.Exitf(inv, 2, "usage: skill load <ref>")
-		}
-		text, err := d.Skill.Load(ctx, sid, strings.Join(rest, " "))
-		if err != nil {
-			return commands.Exitf(inv, 1, "skill load: %s", err)
-		}
-		fmt.Fprintln(inv.Stdout, text)
-		return nil
-	case "fork":
-		if d.Skill.Fork == nil {
-			return commands.Exitf(inv, 1, "skill fork: only available in cloud")
-		}
-		if len(rest) != 1 {
-			return commands.Exitf(inv, 2, "skill fork <ref>")
-		}
-		result, err := d.Skill.Fork(ctx, sid, rest[0])
-		if err != nil {
-			return commands.Exitf(inv, 1, "skill fork: %s", err)
-		}
-		fmt.Fprintln(inv.Stdout, result)
-		return nil
-
-	default:
-		return commands.Exitf(inv, 2, "skill: 未知子命令 %q（search|load|download|fork）", sub)
-	}
-}
 
 func (d PlatformDeps) cmdSendUser(ctx context.Context, inv *commands.Invocation) error {
 	if helpRequested(inv.Args) {

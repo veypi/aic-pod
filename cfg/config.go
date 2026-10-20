@@ -76,16 +76,16 @@ type Options struct {
 	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
 	ExecRules  []string `json:"exec_rules" yaml:"exec_rules" desc:"ordered allow:name / deny:name rules (first match wins)"`
 	FsPolicy   string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write stance: deny (writable via rules/roots only) | open (all writes except deny rules); reads are open except deny rules"`
-	FsRules    []string `json:"fs_rules" yaml:"fs_rules" desc:"ordered fs rules: 'deny:|ro:|rw:' + path glob, last match wins; bare path covers its subtree; global patterns are rejected; permanent grants append here"`
+	FsRules    []string `json:"fs_rules" yaml:"fs_rules" desc:"ordered fs rules: 'deny:|ro:|rw:' + path glob, first match wins; bare path covers its subtree; global patterns are rejected; permanent grants prepend here"`
 	NetPolicy  string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
-	NetRules   []string `json:"net_rules" yaml:"net_rules" desc:"ordered net rules: 'allow:|deny:' + host[:port], last match wins (builtin allow localhost:* stays first); permanent grants append here"`
+	NetRules   []string `json:"net_rules" yaml:"net_rules" desc:"ordered net rules: 'allow:|deny:' + host[:port], first match wins (builtin allow localhost:* stays last); permanent grants prepend here"`
 	SshPolicy  string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
-	SshRules   []string `json:"ssh_rules" yaml:"ssh_rules" desc:"ordered ssh rules: 'allow:|deny:' + host[:port], last match wins; permanent grants append here"`
+	SshRules   []string `json:"ssh_rules" yaml:"ssh_rules" desc:"ordered ssh rules: 'allow:|deny:' + host[:port], first match wins; permanent grants prepend here"`
 }
 
-// Global 全局有效配置：NewOptions 初始化 → Load 填充文件值 →
-// flags.AutoRegister(Global) 叠加 flag/env；设置面的写操作（settings.Update.Apply）
-// 落盘后由调用方重启进程生效。
+// Global 全局有效配置：NewOptions 初始化（默认值）→ flags.AutoRegister(Global)
+// 叠加文件 < env < flag（flags.Parse 就地改写本实例，运行期只有这一份状态）；
+// 设置面的写操作（settings.Update.Apply）落盘后由调用方重启进程生效。
 var Global = NewOptions()
 
 // NewOptions 返回带默认值的配置实例。
@@ -265,15 +265,6 @@ func LoadFile() (*Options, error) {
 	}
 	o.Normalize()
 	return o, nil
-}
-
-// Load 安装配置；无效授权仍可通过设置面（aic config set）修复。
-func Load() (*Options, error) {
-	o, err := LoadFile()
-	if err == nil {
-		Global = o
-	}
-	return o, err
 }
 
 // AuthCfg 是四张首命中规则表的纯数据快照（permissionState 编译输入）。

@@ -43,9 +43,6 @@ func clockNow() time.Time {
 	return time.Now()
 }
 
-// clockNowMS 返回校准后的 unix 毫秒时间戳。
-func clockNowMS() int64 { return clockNow().UnixMilli() }
-
 // setClockOffset 更新校准偏移（毫秒；平台时间 − 本机时间）。
 func setClockOffset(offMS int64) { clockOffsetMS.Store(offMS) }
 

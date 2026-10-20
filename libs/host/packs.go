@@ -40,7 +40,6 @@ type packProgram struct {
 	Sets           string            `json:"sets,omitempty"`     // "command"：解析结果作为 Command
 	SetsEnv        string            `json:"sets_env,omitempty"` // 解析成功注入该 env（如 browser 的 Chrome）
 	DefaultCommand string            `json:"default_command,omitempty"`
-	Optional       bool              `json:"optional,omitempty"` // 解析不到不报错（sets_env 类）
 	PathEnv        string            `json:"path_env,omitempty"`
 	BundleEnv      string            `json:"bundle_env,omitempty"`
 	BundleDir      string            `json:"bundle_dir,omitempty"`    // 可执行文件旁的目录名

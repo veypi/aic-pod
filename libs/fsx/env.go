@@ -63,16 +63,10 @@ func (e *Env) resolve(p string, windows bool) (string, error) {
 	return path.Clean(p), nil
 }
 
-// CheckPath 是移植兼容层（vcore 的 Roots 收容）：fsx 的收容由 Gate 统一
-// 承担——读向检查（越 jail 在 Resolve 已拦，规则表读默认开放）。
-func (e *Env) CheckPath(action, abs string) error {
-	if e.Gate == nil {
-		return nil
-	}
-	return e.Gate(action, abs, false)
-}
-
-// CheckPolicy 规则表门（写判定）：op 形如 "fs write"。
+// CheckPolicy 规则表门：op 形如 "fs write"（仅进错误文案，判定只看 abs 与
+// write）。曾是 CheckPath + CheckPolicy 双判——读向两次同参同结果（冗余），
+// 写向两次参数不同（CheckPath 恒传 write=false，权威判定在第二次 write=true）；
+// Gate 无副作用（快照 + 匹配器纯函数），故收口为单次调用（2026-10-20 评审）。
 func (e *Env) CheckPolicy(op, abs string, write bool) error {
 	if e.Gate == nil {
 		return nil

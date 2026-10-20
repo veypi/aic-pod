@@ -101,6 +101,46 @@ func TestWinTmpToOS(t *testing.T) {
 	}
 }
 
+// HostPathToOS 固定向量（纯函数，跨平台可测）：规范形 → Windows 原生路径。
+// 覆盖盘根/子路径/旧输入形容错归一、/tmp 虚拟别名（优先于盘根判定），以及
+// 非盘符路径必须报错（错误口径由调用方包装——本函数只负责「拒绝」这一事实）。
+func TestHostPathToOS(t *testing.T) {
+	tmp := `C:\Users\x\AppData\Local\Temp`
+	cases := []struct {
+		in, want string
+		wantErr  bool
+	}{
+		{"/c", `C:\`, false},
+		{"/c/Users/x", `C:\Users\x`, false},
+		{"/d/work/a b.txt", `D:\work\a b.txt`, false},
+		// 旧输入形容错归一（与 libs/host winToOS 同口径）
+		{"/C:/x", `C:\x`, false},
+		{`C:\x`, `C:\x`, false},
+		{"c:/x", `C:\x`, false},
+		{"//c/x", `C:\x`, false},
+		// /tmp 虚拟别名
+		{"/tmp", tmp, false},
+		{"/tmp/a/b", tmp + `\a\b`, false},
+		// 非盘符路径：虚拟根 / 普通绝对路径 / 相对路径 / 盘符相对形态
+		{"/", "", true},
+		{"/users", "", true},
+		{"rel/x", "", true},
+		{"/C:foo", "", true},
+	}
+	for _, c := range cases {
+		got, err := HostPathToOS(c.in, tmp)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("HostPathToOS(%q) = %q, want error", c.in, got)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("HostPathToOS(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+}
+
 func TestWithinRoots(t *testing.T) {
 	roots := []string{"/users/u1", "/agents/a1", "/sessions/s1"}
 	in := []string{"/users/u1", "/users/u1/a/b", "/sessions/s1/x.txt", "/agents/a1"}

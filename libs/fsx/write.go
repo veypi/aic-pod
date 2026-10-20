@@ -58,9 +58,6 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err != nil {
 		return nil, fsOpErr("write", err)
 	}
-	if err := env.CheckPath("fs", abs); err != nil {
-		return nil, err
-	}
 	if err := env.CheckPolicy("fs write", abs, true); err != nil {
 		return nil, err
 	}
@@ -131,9 +128,6 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	abs, err := env.Resolve(p.Path)
 	if err != nil {
 		return nil, fsOpErr("edit", err)
-	}
-	if err := env.CheckPath("fs", abs); err != nil {
-		return nil, err
 	}
 	if err := env.CheckPolicy("fs edit", abs, true); err != nil {
 		return nil, err

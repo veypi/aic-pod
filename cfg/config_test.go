@@ -20,9 +20,19 @@ func isolateConfigDir(t *testing.T) string {
 	return dir
 }
 
+// load 装载文件配置并安装为 Global（生产侧只有 LoadFile；Global 安装由
+// flags 启动链负责，这里是测试内等价物）。
+func load() (*Options, error) {
+	o, err := LoadFile()
+	if err == nil {
+		Global = o
+	}
+	return o, err
+}
+
 func TestConfigLoadDefault(t *testing.T) {
 	isolateConfigDir(t)
-	o, err := Load()
+	o, err := load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +46,7 @@ func TestConfigLoadDefault(t *testing.T) {
 		t.Fatalf("default home_path = %q, want /", o.HomePath)
 	}
 	if Global != o {
-		t.Fatal("Load should set Global")
+		t.Fatal("load should set Global")
 	}
 }
 
@@ -52,7 +62,7 @@ func TestConfigSaveLoadRoundTrip(t *testing.T) {
 	if err := Save(&want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	got, err := load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +86,7 @@ func TestConfigSaveNormalizesHost(t *testing.T) {
 	if err := Save(&Options{Host: "  "}); err != nil {
 		t.Fatal(err)
 	}
-	o, _ := Load()
+	o, _ := load()
 	if o.Host != DefaultHost {
 		t.Fatalf("normalized host = %q, want %q", o.Host, DefaultHost)
 	}
@@ -161,7 +171,7 @@ func TestConfigExecutionPolicyRoundTrip(t *testing.T) {
 	if err := Save(o); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	got, err := load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +184,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 	if err := Save(&Options{FsPolicy: PolicyDeny}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(); err != nil {
+	if _, err := load(); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := Path()
@@ -186,7 +196,7 @@ func TestInvalidConfigFallsBackWithoutBlockingLoad(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		o, err := Load()
+		o, err := load()
 		if err != nil {
 			t.Fatalf("config must not block startup: %v", err)
 		}
@@ -255,7 +265,7 @@ func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 			if err := os.WriteFile(p, []byte(tc.body), 0600); err != nil {
 				t.Fatal(err)
 			}
-			o, err := Load()
+			o, err := load()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -278,7 +288,7 @@ func TestMalformedAuthorizationDoesNotBlockSave(t *testing.T) {
 				t.Fatalf("malformed content lost (want %q): %s", tc.keep, data)
 			}
 			// 重载：坏内容没有被静默修好（门控状态一致）
-			if _, err := Load(); err != nil {
+			if _, err := load(); err != nil {
 				t.Fatal(err)
 			}
 			if gated := Global.ValidateAuth() != nil; gated != tc.gated {
@@ -339,7 +349,7 @@ func TestUnreadableConfigFallsBack(t *testing.T) {
 	if err := os.MkdirAll(p, 0700); err != nil {
 		t.Fatal(err)
 	}
-	o, err := Load()
+	o, err := load()
 	if err != nil || o.Host != DefaultHost {
 		t.Fatalf("unreadable config blocked startup: %v", err)
 	}

@@ -481,12 +481,26 @@ func fault(err error) error {
 	}
 	return protocol.FSFail("filesystem_error", "Filesystem operation could not be completed")
 }
+// joinRoot 拼接 root 内的绝对路径（未解析符号链接的请求形态）。
+func joinRoot(r *root, segments []string) string {
+	return filepath.Join(append([]string{r.Path}, segments...)...)
+}
+
+// relWithin 返回 abs 相对 root 的路径；越出 root 一律 permission_denied。
+func relWithin(r *root, abs string) (string, error) {
+	rel, err := filepath.Rel(r.Path, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", protocol.FSFail("permission_denied", "Path is outside the filesystem root")
+	}
+	return rel, nil
+}
+
 func (f *FS) check(ctx context.Context, call Call, p protocol.FSPath, write bool) (*root, string, error) {
 	r := f.roots[p.RootID]
 	if r == nil {
 		return nil, "", protocol.FSFail("not_found", "Unknown filesystem root")
 	}
-	abs := filepath.Join(append([]string{r.Path}, p.Segments...)...)
+	abs := joinRoot(r, p.Segments)
 	if err := f.cfg.Check(ctx, call, abs, write); err != nil {
 		return nil, "", err
 	}
@@ -521,16 +535,15 @@ func (f *FS) locate(p protocol.FSPath) (*root, string, error) {
 	if !os.SameFile(current, opened) {
 		return nil, "", protocol.FSFail("expired", "Filesystem root identity changed")
 	}
-	resolved := filepath.Join(append([]string{r.Path}, p.Segments...)...)
+	resolved := joinRoot(r, p.Segments)
 	if len(p.Segments) > 0 {
 		resolved, err = resolveParentPath(resolved)
 		if err != nil {
 			return nil, "", err
 		}
 	}
-	rel, err := filepath.Rel(r.Path, resolved)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", protocol.FSFail("permission_denied", "Path is outside the filesystem root")
+	if _, err := relWithin(r, resolved); err != nil {
+		return nil, "", err
 	}
 	return r, resolved, nil
 }
@@ -556,9 +569,8 @@ func (f *FS) probe(p protocol.FSPath) (fs.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	rel, err := filepath.Rel(r.Path, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, protocol.FSFail("permission_denied", "Path is outside the filesystem root")
+	if _, err := relWithin(r, full); err != nil {
+		return nil, err
 	}
 	h2, name2, err := parent(r, full)
 	if err != nil {
@@ -590,9 +602,9 @@ func resolveParentPath(abs string) (string, error) {
 // Pin the already resolved and authorized path without following any more links.
 // Replacements with symlinks between resolution and open are rejected.
 func parent(r *root, abs string) (*os.Root, string, error) {
-	rel, err := filepath.Rel(r.Path, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, "", protocol.FSFail("permission_denied", "Path is outside the filesystem root")
+	rel, err := relWithin(r, abs)
+	if err != nil {
+		return nil, "", err
 	}
 	h, err := r.handle.OpenRoot(".")
 	if err != nil {
@@ -687,7 +699,7 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 		file.Close()
 		return nil, protocol.FSFail("source_changed", "File changed while being opened")
 	}
-	requested := filepath.Join(append([]string{r.Path}, p.Path.Segments...)...)
+	requested := joinRoot(r, p.Path.Segments)
 	src, err := f.cfg.Bytes.AddFile(call.Owner, file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
 		if err := f.cfg.Check(ctx, call, requested, false); err != nil {
 			return err
@@ -812,8 +824,8 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 		if !p.Hidden && (strings.HasPrefix(item.Name(), ".") || entryHidden(item)) {
 			continue
 		}
-		child := protocol.FSPath{RootID: p.Path.RootID, Segments: append(append([]string{}, p.Path.Segments...), item.Name())}
-		if _, _, e := f.check(ctx, call, child, false); e != nil {
+		cp := child(p.Path, item.Name())
+		if _, _, e := f.check(ctx, call, cp, false); e != nil {
 			continue
 		}
 		if visible < start {
@@ -836,7 +848,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 				continue
 			}
 		}
-		out = append(out, entry(child, stat))
+		out = append(out, entry(cp, stat))
 		visible++
 	}
 	after, err := dir.Stat(".")
@@ -1068,7 +1080,7 @@ func (f *FS) ResultPolicy(call Call) (func(context.Context) error, error) {
 		if err != nil {
 			return err
 		}
-		requested := filepath.Join(append([]string{r.Path}, path.Segments...)...)
+		requested := joinRoot(r, path.Segments)
 		paths = append(paths, target{requested, write}, target{abs, write})
 		return nil
 	}
@@ -1092,10 +1104,6 @@ func (f *FS) ResultPolicy(call Call) (func(context.Context) error, error) {
 	}, nil
 }
 
-type fsMethod struct {
-	InputSchema json.RawMessage
-	Effect      string
-}
 type Call struct {
 	Caller                 protocol.Caller
 	Owner, Command, Method string
@@ -1113,13 +1121,3 @@ func (f *FS) Run(ctx context.Context, call Call) (any, error) {
 	return f.run(ctx, call)
 }
 
-func (f *FS) Configure(home protocol.FSPath, osHome *protocol.FSPath, proxyLimit int64) {
-	if proxyLimit <= 0 {
-		proxyLimit = 64 << 20
-	}
-	f.mu.Lock()
-	f.cfg.Home = &home
-	f.cfg.OSHome = osHome
-	f.cfg.MaxProxyUploadBytes = proxyLimit
-	f.mu.Unlock()
-}

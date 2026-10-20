@@ -6,9 +6,6 @@ import (
 	"strconv"
 )
 
-// AllFSActions 是 fs 的全部 action（§4）：fs.actions 为 null/未声明时的默认全集。
-var AllFSActions = []string{"read", "write", "edit", "ls", "rg", "cp", "mv", "rm"}
-
 // Caps 是 host 能力声明（§6.3 caps v2），随 host 每次连接/重连发布，
 // 服务端以最近一次为准；host 离线即不可用，不依据过期 caps 转发。
 type Caps struct {
@@ -58,28 +55,11 @@ type DeviceInfo struct {
 }
 
 // FSCaps 声明 fs 能力。Actions 为指针以严格区分三形态（§6.3）：
-// nil（null/未声明）= 全部 8 个 action；空数组 = 不支持 fs。
+// nil（null/未声明）= 全部 action（v4.1 起全集 5 个：read/write/edit/ls/rg，
+// cp/mv/rm 移入 exec 内建）；空数组 = 不支持 fs。
 // MCP 起 FS 方法表为协议固定集，不再随 caps 逐项声明。
 type FSCaps struct {
 	Actions *[]string `json:"actions"`
-}
-
-// EffectiveActions 返回有效 fs action 集（nil → 全集）。
-func (c FSCaps) EffectiveActions() []string {
-	if c.Actions == nil {
-		return AllFSActions
-	}
-	return *c.Actions
-}
-
-// Supports 判定 fs action 是否可用。
-func (c FSCaps) Supports(action string) bool {
-	for _, a := range c.EffectiveActions() {
-		if a == action {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- 客户端版本门禁（§6.3） ----
