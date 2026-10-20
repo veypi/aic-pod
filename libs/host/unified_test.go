@@ -99,7 +99,11 @@ func decoded[T any](t *testing.T, v any) T {
 
 func fsRequest(method string, args any) protocol.Request {
 	raw, _ := json.Marshal(args)
-	return protocol.Request{Protocol: protocol.NatsProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionFS, FS: &protocol.FSInvocation{Method: method, Args: raw}}
+	action := ""
+	if strings.HasPrefix(method, "text.") {
+		action, method = strings.TrimPrefix(method, "text."), "text"
+	}
+	return protocol.Request{Protocol: protocol.NatsProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionFS, FS: &protocol.FSInvocation{Method: method, Action: action, Args: raw}}
 }
 func execRequest(script string, waitMS int64) protocol.Request {
 	return protocol.Request{Protocol: protocol.NatsProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionExec, Exec: &protocol.ExecPayload{Script: script, WaitMS: waitMS}}

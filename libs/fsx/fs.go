@@ -49,7 +49,7 @@ type editOp struct {
 // FSActions 是 fs 的全部 action（v4.1：五 action；cp/mv/rm 移入 exec 内建）。
 var FSActions = []string{"read", "write", "edit", "ls", "rg"}
 
-// RunFS 执行 fs action（原生 JSON 参数）。
+// RunFS 执行 fs action（原生 JSON 参数，action 在参数体内）。
 // 未知字段宽忽略（AI 按 schema 全量传参是常态，多传参数当看不见）。
 func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) {
 	var p fsParams
@@ -59,20 +59,37 @@ func RunFS(ctx context.Context, env *Env, raw json.RawMessage) (*Result, error) 
 	if p.Action == "" {
 		return nil, fsErr("", "action is required (supported: read, write, edit, ls, rg)")
 	}
+	return run(ctx, env, &p)
+}
+
+// RunAction 执行 fs action（action 由协议字段给出，参数体不再携带 action）。
+func RunAction(ctx context.Context, env *Env, action string, raw json.RawMessage) (*Result, error) {
+	var p fsParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fsErr("", "invalid params: %s", err)
+	}
+	if action == "" {
+		return nil, fsErr("", "action is required (supported: read, write, edit, ls, rg)")
+	}
+	p.Action = action
+	return run(ctx, env, &p)
+}
+
+func run(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if env.FS == nil {
 		return nil, fsUnsupportedErr(p.Action, "file service is not enabled")
 	}
 	switch p.Action {
 	case "read":
-		return fsRead(ctx, env, &p)
+		return fsRead(ctx, env, p)
 	case "write":
-		return fsWrite(ctx, env, &p)
+		return fsWrite(ctx, env, p)
 	case "edit":
-		return fsEdit(ctx, env, &p)
+		return fsEdit(ctx, env, p)
 	case "ls":
-		return fsLs(ctx, env, &p)
+		return fsLs(ctx, env, p)
 	case "rg":
-		return fsRg(ctx, env, &p)
+		return fsRg(ctx, env, p)
 	case "cp", "mv", "rm":
 		// 壳层动作下线（D11/v4.1）：引导 exec 内建（引擎 90 内建承接）。
 		return nil, fsUnsupportedErr(p.Action, "%s", "fs 不再提供 "+p.Action+"——壳层动作（cp/mv/rm）请用 exec（如 `exec cp a b`）；fs 只保留结构化读写编辑（read/write/edit/ls/rg）")

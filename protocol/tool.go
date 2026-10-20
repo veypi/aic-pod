@@ -47,8 +47,11 @@ type ExecPayload struct {
 }
 
 // FSInvocation 是 FS 数据面调用：{method, args} 直达 FS 服务。
+// Method="text" 走 AI fs 工具层（read/write/edit/ls/rg），Action 为其动作；
+// 其余 method 是 fs/1 结构化数据面方法（stat/list/write/...）。
 type FSInvocation struct {
 	Method string          `json:"method"`
+	Action string          `json:"action,omitempty"`
 	Args   json.RawMessage `json:"args"`
 }
 
@@ -172,6 +175,13 @@ func (r Request) Validate() error {
 	case ActionFS:
 		if r.FS == nil || !ValidName(r.FS.Method) {
 			return Fail("invalid_argument", "Invalid fs method")
+		}
+		if r.FS.Method == "text" {
+			if !ValidName(r.FS.Action) {
+				return Fail("invalid_argument", "Invalid text fs action")
+			}
+		} else if r.FS.Action != "" {
+			return Fail("invalid_argument", "fs action requires method=text")
 		}
 		var a map[string]any
 		if err := Decode(r.FS.Args, &a); err != nil {

@@ -24,6 +24,26 @@ func TestStructuredPathValidation(t *testing.T) {
 	}
 }
 
+func TestFSInvocationSurface(t *testing.T) {
+	args := []byte(`{}`)
+	for _, req := range []Request{
+		{ID: "r_1", Action: ActionFS, FS: &FSInvocation{Method: "text", Action: "read", Args: args}},
+		{ID: "r_2", Action: ActionFS, FS: &FSInvocation{Method: "stat", Args: args}},
+	} {
+		if err := req.Validate(); err != nil {
+			t.Fatalf("valid fs invocation rejected: %+v: %v", req.FS, err)
+		}
+	}
+	for _, req := range []Request{
+		{ID: "r_3", Action: ActionFS, FS: &FSInvocation{Method: "text", Args: args}},
+		{ID: "r_4", Action: ActionFS, FS: &FSInvocation{Method: "stat", Action: "read", Args: args}},
+	} {
+		if err := req.Validate(); err == nil {
+			t.Fatalf("invalid fs invocation accepted: %+v", req.FS)
+		}
+	}
+}
+
 func TestFSFaultClassification(t *testing.T) {
 	for _, tc := range []struct {
 		err  error

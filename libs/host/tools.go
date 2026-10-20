@@ -8,7 +8,6 @@ import (
 
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -68,14 +67,7 @@ func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *proto
 	if c.perms.err() != nil {
 		return nil, protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
 	}
-	if strings.HasPrefix(in.Method, "text.") {
-		action := strings.TrimPrefix(in.Method, "text.")
-		var params map[string]any
-		if err := protocol.Decode(in.Args, &params); err != nil {
-			return nil, err
-		}
-		params["action"] = action
-		raw, _ := json.Marshal(params)
+	if in.Method == "text" {
 		env := &fsx.Env{
 			FS:          c.files.View(ctx, caller),
 			Workdir:     filepath.ToSlash(c.options().WorkDir),
@@ -83,7 +75,7 @@ func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *proto
 			VirtualRoot: runtime.GOOS == "windows",
 			Gate:        c.fsGate(caller.Origin),
 		}
-		result, err := fsx.RunFS(ctx, env, raw)
+		result, err := fsx.RunAction(ctx, env, in.Action, in.Args)
 		if result != nil {
 			c.attachFileURL(result.Attrs)
 		}
