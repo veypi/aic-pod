@@ -394,3 +394,20 @@ func TestRegistryStreamHandler(t *testing.T) {
 		t.Fatal("stream channel survived Unregister")
 	}
 }
+
+// 重复 --image-preview 是参数面错误（exit 2），不是静默 last-wins——且必须
+// 先于任何真实调用（不支持的副作用不能先落地）。
+func TestDuplicateImagePreviewRejectedBeforeCall(t *testing.T) {
+	p := &fakeProvider{result: map[string]any{"ok": true}}
+	var out, errBuf strings.Builder
+	err := RunProvider(context.Background(), &commands.Invocation{
+		Args:   []string{"cap", "--image-preview", "64x64", "--image-preview", "32x32"},
+		Stdout: &out, Stderr: &errBuf,
+	}, "mcp", p)
+	if exitCode(err) != 2 {
+		t.Fatalf("duplicate --image-preview: %v", err)
+	}
+	if len(p.calls) != 0 {
+		t.Fatal("rejected flag parse must not reach the provider")
+	}
+}

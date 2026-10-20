@@ -145,6 +145,10 @@ func WithinRoots(absPath string, roots []string) bool {
 	absPath = path.Clean(absPath)
 	for _, r := range roots {
 		r = path.Clean(r)
+		if r == "/" {
+			// 前缀形态 "//" 永不命中——根为 "/" 时一切绝对路径都在根内。
+			return strings.HasPrefix(absPath, "/")
+		}
 		if absPath == r || strings.HasPrefix(absPath, r+"/") {
 			return true
 		}

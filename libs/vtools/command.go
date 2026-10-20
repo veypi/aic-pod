@@ -315,6 +315,9 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 			if n+1 >= len(args) {
 				return commands.Exitf(inv, 2, "%s: --image-preview requires a value", alias)
 			}
+			if preview != "" {
+				return commands.Exitf(inv, 2, "%s: --image-preview may only be specified once", alias)
+			}
 			preview = args[n+1]
 			n++
 		case strings.HasPrefix(a, "--"):

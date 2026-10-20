@@ -155,4 +155,8 @@ func TestWithinRoots(t *testing.T) {
 			t.Errorf("WithinRoots(%q) = true, want false", p)
 		}
 	}
+	// 根为 "/"：一切绝对路径都在根内（前缀形态 "//" 永不命中的特判）。
+	if !WithinRoots("/etc/passwd", []string{"/"}) || !WithinRoots("/", []string{"/"}) {
+		t.Error("root / must contain all absolute paths")
+	}
 }

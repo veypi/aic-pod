@@ -54,8 +54,10 @@ type Options struct {
 // 所有者配置与登记失败曝光同属一个快照。mcp list/add/remove/start/stop 只
 // 读写这里，不再各自维护第二份状态。
 type serviceState struct {
-	mu            sync.RWMutex
-	manager       *mcpx.Manager          // MCP 连接（nil = 未初始化）
+	mu      sync.RWMutex
+	manager *mcpx.Manager // MCP 连接（nil = 未初始化）
+	// registry 仅 initTools 写一次（先于任何并发读），此后不再变——不持锁
+	// 直接读；运行期 add/remove 走 Registry 自身方法，不换实例。
 	registry      *vtools.Registry       // 所有服务（MCP/TCP/内置）的 vsh 根命令
 	owner         map[string]mcpx.Config // 所有者显式配置（不含内置默认项）
 	rejected      map[string]serviceRejection
