@@ -4,11 +4,12 @@
 // 万能 Envelope）。按文件分组：
 //
 //   - tool.go：传输无关的工具请求/响应（Request/Response/Output/Fault/
-//     FSInvocation/ExecPayload）、错误模型（Fail/AsFault/Reply）、身份与
-//     边界校验（ValidID/ValidName/Decode/NewID/MaxMessageBytes）。
+//     FSInvocation{method,action,args}/ExecPayload）、错误模型（Fail/AsFault/
+//     Reply）、身份与边界校验（ValidID/ValidName/Decode/NewID/MaxMessageBytes）。
 //   - caller.go：已认证请求的调用者身份（Caller），经执行上下文传递。
-//   - fs.go：FS 数据面类型（FSContract/FSPath/FSEntry/FSCondition/
-//     FSResourceRef/FSMaxSafeInteger/FSFail——FSFail 保留 Effect=none 语义）。
+//   - fs.go：FS 数据面类型（FSContract/FSPath/FSEntry/FSCondition、
+//     FSResourceRef/FSMaxSafeInteger、FSFail/FSFault，以及 roots/list/find/
+//     remove/copy/source 的类型化结果）。
 //   - hosts_nats.go：hosts_nats/3 签名信封（NatsProtocol/NatsRequest/
 //     NatsSubject/NatsSign/NatsVerify）。
 //   - hosts_rtc.go：hosts_rtc/3 设备数据通道信封（RtcProtocol/RtcChannel/
