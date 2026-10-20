@@ -30,8 +30,9 @@ func TestExecResultResponsePolicy(t *testing.T) {
 		return map[string]string{"action": "exec", "output": "/o", "error_output": "/e"}
 	}
 
+	logs := execution.NewLogPair("/o", "/e")
 	// NATS：超 1000 行 → 行截断 + truncated 标记。
-	r := execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: mkLines(1001)}, attrs(), false)
+	r := logs.Captured(&execution.ExecResult{ExitCode: 0, Stdout: mkLines(1001)}, attrs(), false)
 	if r.Attrs["truncated"] != "true" {
 		t.Fatal("NATS line truncation must set truncated")
 	}
@@ -40,19 +41,18 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	}
 
 	// NATS：stderr 超 100 行 → 预览截断 + truncated；引擎采集截断也置标记。
-	r = execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: "ok", Stderr: mkLines(101)}, attrs(), false)
+	r = logs.Captured(&execution.ExecResult{ExitCode: 0, Stdout: "ok", Stderr: mkLines(101)}, attrs(), false)
 	if r.Attrs["truncated"] != "true" || strings.Count(r.Attrs["stderr"], "\n") != 100 {
 		t.Fatalf("NATS stderr preview: %+v", r.Attrs)
 	}
-	r = execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: "ok", StdoutTruncated: true}, attrs(), false)
+	r = logs.Captured(&execution.ExecResult{ExitCode: 0, Stdout: "ok", StdoutTruncated: true}, attrs(), false)
 	if r.Attrs["truncated"] != "true" {
 		t.Fatal("NATS engine capture truncation must set truncated")
 	}
 
-	// RTC formatter receives full streams after completion recovery. Successful
-	// responses have no truncated marker; recovery failures are explicit errors.
+	// RTC captured formatter receives full streams; no truncated marker.
 	big := mkLines(5000)
-	r = execResultResponse(&execution.ExecResult{ExitCode: 0, Stdout: big, Stderr: "diag"}, attrs(), true)
+	r = logs.Captured(&execution.ExecResult{ExitCode: 0, Stdout: big, Stderr: "diag"}, attrs(), true)
 	if r.Content != big {
 		t.Fatalf("RTC content must be full (got %d bytes, want %d)", len(r.Content), len(big))
 	}
@@ -61,7 +61,7 @@ func TestExecResultResponsePolicy(t *testing.T) {
 	}
 
 	// exit_code 逐码透出（两通道同）。
-	r = execResultResponse(&execution.ExecResult{ExitCode: 42, Stdout: ""}, attrs(), true)
+	r = logs.Captured(&execution.ExecResult{ExitCode: 42, Stdout: ""}, attrs(), true)
 	if r.Attrs["exit_code"] != "42" {
 		t.Fatalf("exit_code: %+v", r.Attrs)
 	}
@@ -85,9 +85,10 @@ func TestCompletedExecResultRestoresStreams(t *testing.T) {
 		ExitCode: 42, Stdout: outText[:4], Stderr: errText[:4],
 		StdoutTruncated: true, StderrTruncated: true,
 	}
-	logs := closeExecLogs(stdout, stderr, res)
-	attrs := map[string]string{"action": "exec", "output": filepath.Join(dir, "stdout.log"), "error_output": filepath.Join(dir, "stderr.log")}
-	got, err := completedExecResultResponse(res, attrs, true, logs)
+	pair := execution.LogPair{Stdout: stdout, Stderr: stderr, OutPath: filepath.Join(dir, "stdout.log"), ErrPath: filepath.Join(dir, "stderr.log")}
+	snap := pair.CloseResult(res)
+	attrs := map[string]string{"action": "exec", "output": pair.OutPath, "error_output": pair.ErrPath}
+	got, err := pair.Completed(res, attrs, true, snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,18 +112,19 @@ func TestCompletedExecResultRecoveryFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, code string
 		res              execution.ExecResult
-		logs             execLogSnapshot
+		logs             execution.LogSnapshot
 	}{
-		{"stdout-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: protocol.RtcToolResponseLimit + 1}},
-		{"combined-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", Stderr: "!", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: protocol.RtcToolResponseLimit}},
-		{"missing", path + ".missing", "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: 10}},
-		{"file-shortened", path, "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: 10}},
-		{"snapshot-shorter-than-capture", path, "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execLogSnapshot{stdoutBytes: 5}},
-		{"stderr-missing", path + ".missing", "internal", execution.ExecResult{Stdout: "ok", Stderr: "prefix", StderrTruncated: true}, execLogSnapshot{stderrBytes: 10}},
+		{"stdout-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execution.LogSnapshot{StdoutBytes: protocol.RtcToolResponseLimit + 1}},
+		{"combined-limit", path, "overloaded", execution.ExecResult{Stdout: "prefix", Stderr: "!", StdoutTruncated: true}, execution.LogSnapshot{StdoutBytes: protocol.RtcToolResponseLimit}},
+		{"missing", path + ".missing", "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execution.LogSnapshot{StdoutBytes: 10}},
+		{"file-shortened", path, "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execution.LogSnapshot{StdoutBytes: 10}},
+		{"snapshot-shorter-than-capture", path, "internal", execution.ExecResult{Stdout: "prefix", StdoutTruncated: true}, execution.LogSnapshot{StdoutBytes: 5}},
+		{"stderr-missing", path + ".missing", "internal", execution.ExecResult{Stdout: "ok", Stderr: "prefix", StderrTruncated: true}, execution.LogSnapshot{StderrBytes: 10}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			attrs := map[string]string{"action": "exec", "output": tc.path, "error_output": tc.path}
-			got, err := completedExecResultResponse(&tc.res, attrs, true, tc.logs)
+			pair := execution.LogPair{OutPath: tc.path, ErrPath: tc.path}
+			got, err := pair.Completed(&tc.res, attrs, true, tc.logs)
 			if err == nil || protocol.AsFault(err).Code != tc.code {
 				t.Fatalf("error = %v, want %s", err, tc.code)
 			}
@@ -137,7 +139,7 @@ func TestCompletedExecResultNATSDoesNotReadLogs(t *testing.T) {
 	t.Parallel()
 	res := &execution.ExecResult{Stdout: "captured", Stderr: "diagnostic", StdoutTruncated: true, StderrTruncated: true}
 	attrs := map[string]string{"action": "exec", "output": "/missing", "error_output": "/missing"}
-	got, err := completedExecResultResponse(res, attrs, false, execLogSnapshot{stdoutBytes: protocol.RtcToolResponseLimit + 1, err: os.ErrNotExist})
+	got, err := (&execution.LogPair{}).Completed(res, attrs, false, execution.LogSnapshot{StdoutBytes: protocol.RtcToolResponseLimit + 1, Err: os.ErrNotExist})
 	if err != nil || got.Content != "captured" || got.Attrs["stderr"] != "diagnostic" || got.Attrs["truncated"] != "true" {
 		t.Fatalf("NATS must keep bounded capture without reading logs: response=%+v, error=%v", got, err)
 	}

@@ -28,16 +28,34 @@ var ErrWaitElapsed = errors.New("exec: foreground wait elapsed; execution contin
 // 已创建的日志地址（hosts-vsh-redesign §2.4）。
 var ErrCapacity = errors.New("exec: background capacity exceeded")
 
+// OutcomeKind 是编排结果的控制流分类（调用方按 Kind 分支，不再用哨兵错误
+// 拼控制流）。
+type OutcomeKind uint8
+
+const (
+	// OutcomeCompleted 执行已结束（Result 可用；Err 非空表示引擎层失败）。
+	OutcomeCompleted OutcomeKind = iota
+	// OutcomeBackground 前台等待到期，同一记录已登记为后台任务。
+	OutcomeBackground
+	// OutcomeWaitElapsed 前台等待到期且未登记后台（RTC 语义，执行继续）。
+	OutcomeWaitElapsed
+	// OutcomeCapacity 转后台容量不足，本次执行已取消。
+	OutcomeCapacity
+	// OutcomeInterrupted 调用方 ctx 结束（断连/预算到期），执行继续。
+	OutcomeInterrupted
+)
+
 // Outcome 是编排一次执行的结果。
 type Outcome struct {
+	Kind OutcomeKind
 	// Run 是本次执行的唯一运行记录（任务表持有；不是副本）——调用方
 	// 等待结束后执行仍在运行时，取消/查询经任务表（CancelByRequest/
 	// CancelConnection），Result/Done 仅供收尾同步。
-	Run        *Run
-	Result     *ExecResult
-	Err        error
-	Background bool // 前台等待到期，已登记后台
-	Task       Task // Background=true 时的登记快照
+	Run    *Run
+	Result *ExecResult
+	Err    error
+	// Task 仅 Kind=OutcomeBackground 时的登记快照。
+	Task Task
 }
 
 // Execute 运行脚本（后台墙钟）并前台等待 wait；到期仍未完成时：
@@ -82,16 +100,16 @@ func Execute(ctx context.Context, eng *Engine, req ExecRequest, wait time.Durati
 	select {
 	case <-r.Done():
 		res, err := r.Result()
-		return &Outcome{Run: r, Result: res, Err: err}
+		return &Outcome{Kind: OutcomeCompleted, Run: r, Result: res, Err: err}
 	case <-ctx.Done():
 		// 调用方 ctx 结束（传输断连/预算到期）：结束等待但不取消执行、
 		// 不转后台（§2.6：断线不是取消）——执行 goroutine 继续跑完写
 		// 日志，取消唯一来源仍是 cancel/bg kill（记录）或墙钟到期。
-		return &Outcome{Run: r, Err: ctx.Err()}
+		return &Outcome{Kind: OutcomeInterrupted, Run: r, Err: ctx.Err()}
 	case <-timer.C:
 	}
 	if !adoptOnTimeout {
-		return &Outcome{Run: r, Err: ErrWaitElapsed}
+		return &Outcome{Kind: OutcomeWaitElapsed, Run: r, Err: ErrWaitElapsed}
 	}
 	// 等待到期：同一记录标记 bg（完成与超时的竞争在记录锁内裁决——
 	// 已完成则直接返回完成结果，不产生 bg 记录）。
@@ -99,14 +117,14 @@ func Execute(ctx context.Context, eng *Engine, req ExecRequest, wait time.Durati
 	if err != nil {
 		if errors.Is(err, errRunFinished) {
 			res, rerr := r.Result()
-			return &Outcome{Run: r, Result: res, Err: rerr}
+			return &Outcome{Kind: OutcomeCompleted, Run: r, Result: res, Err: rerr}
 		}
 		// 容量不足：取消本次执行，不让未登记的执行继续运行。取消是异步
 		// 的——执行 goroutine 仍在收尾写日志，日志关闭由调用方在记录
 		// 实际结束时完成（与转后台路径一致）。
 		r.Cancel()
 		res, _ := r.Result()
-		return &Outcome{Run: r, Result: res, Err: fmt.Errorf("%w: %v", ErrCapacity, err)}
+		return &Outcome{Kind: OutcomeCapacity, Run: r, Result: res, Err: fmt.Errorf("%w: %v", ErrCapacity, err)}
 	}
-	return &Outcome{Run: r, Background: true, Task: task}
+	return &Outcome{Kind: OutcomeBackground, Run: r, Task: task}
 }

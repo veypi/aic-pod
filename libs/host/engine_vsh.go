@@ -4,13 +4,11 @@ package host
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/veypi/aic-pod/protocol"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -177,8 +175,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	}
 	// 惰性落盘（§2.5）：构造不触碰文件系统，溢出/强制时才建文件。
 	logOut, logErr := c.execLogPaths(sid, reqID)
-	outSpill := execution.NewLogSpiller(logOut, execution.MaxStdoutBytes)
-	errSpill := execution.NewLogSpiller(logErr, execution.MaxStderrBytes)
+	logs := execution.NewLogPair(logOut, logErr)
 
 	inherited := os.Environ()
 	if !p.NoSandbox && !c.options().NoSandbox {
@@ -199,10 +196,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	// 归属统一从 caller.Subject 派生（与 cancelExec 的归属检查同源——
 	// NATS 信封 Caller 与 RTC 票据 Subject 都是已认证用户身份；不能用
 	// 设备属主 c.uid，否则跨用户归属判定与任务表脱节）。
-
-	// Written by onDone before the run record settles completion. Incomplete
-	// outcomes must not inspect this snapshot or read the still-open execution logs.
-	var logs execLogSnapshot
+	var snapshot execution.LogSnapshot
 	wait := time.Duration(p.WaitMS) * time.Millisecond
 	outcome := execution.Execute(ctx, engine, execution.ExecRequest{
 		SessionKey:    sid,
@@ -213,8 +207,8 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		GrantApproved: caller.GrantApproved,
 		NoSandbox:     p.NoSandbox,
 		Stdin:         stdin,
-		Stdout:        outSpill,
-		Stderr:        errSpill,
+		Stdout:        logs.Stdout,
+		Stderr:        logs.Stderr,
 		Timeout:       c.options().ExecTimeout,
 	}, wait, execution.TaskMeta{
 		Owner: caller.Subject, Session: sid, RequestID: reqID, ConnectionID: caller.ConnectionID,
@@ -222,18 +216,18 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		// 转后台（bg）只服务 NATS/AI 通道；RTC 直连等待超时返回
 		// ErrWaitElapsed——执行继续、不产生 bg 记录。
 	}, !caller.Direct, func(res *execution.ExecResult) {
-		logs = closeExecLogs(outSpill, errSpill, res)
+		snapshot = logs.CloseResult(res)
 	})
 
 	attrs := map[string]string{"action": "exec"}
 	// spillLogs 在执行晚于响应返回的分支强制落盘并挂出日志地址（响应发出
 	// 后执行仍可能续写——路径必须先存在且持续可写）。
 	spillLogs := func() {
-		if err := errors.Join(outSpill.Spill(), errSpill.Spill()); err == nil {
-			attrs["output"], attrs["error_output"] = logOut, logErr
-		}
+		_ = logs.SpillAll()
+		logs.AttachPaths(attrs)
 	}
-	if errors.Is(outcome.Err, execution.ErrWaitElapsed) {
+	switch outcome.Kind {
+	case execution.OutcomeWaitElapsed:
 		// RTC 直连等待超时：执行继续（前台记录保留——cancel(request_id)
 		// 与 DisconnectTools 仍可终止）；日志在实际结束时关闭。
 		spillLogs()
@@ -241,8 +235,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 			Content: fmt.Sprintf("execution still running; output: %s（cancel(request_id) 可终止）", logOut),
 			Attrs:   attrs,
 		}, protocol.Fail("deadline_exceeded", "exec: wait elapsed; execution continues (cancel to stop)")
-	}
-	if outcome.Background {
+	case execution.OutcomeBackground:
 		// 超时转 bg：同一记录标记 bg（任务继续，独立墙钟）；日志文件在
 		// 执行结束时关闭。后台执行的取消走任务表 Kill/CancelByRequest，
 		// DisconnectTools 只取消前台执行（断线/停止等待不是取消）。
@@ -253,47 +246,37 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 			Content: fmt.Sprintf("execution backgrounded (id=%s); output: %s", outcome.Task.ID, logOut),
 			Attrs:   attrs,
 		}, nil
-	}
-	// 容量不足取消（转后台登记失败，§2.4）：h.Cancel 是异步的，执行
-	// goroutine 仍在收尾写日志——与转后台路径一致，日志由实际执行结束
-	// 时关闭；错误响应仍携带本次执行已创建的日志地址（Reply 保留
-	// Result）。错误码用资源类 overloaded（与连接/页面/排队上限同码）。
-	if errors.Is(outcome.Err, execution.ErrCapacity) {
+	case execution.OutcomeCapacity:
+		// 容量不足取消（转后台登记失败，§2.4）：Cancel 是异步的，执行
+		// goroutine 仍在收尾写日志——与转后台路径一致，日志由实际执行结束
+		// 时关闭；错误响应仍携带本次执行已创建的日志地址（Reply 保留
+		// Result）。错误码用资源类 overloaded（与连接/页面/排队上限同码）。
 		spillLogs()
 		err := protocol.Fail("overloaded", "exec: "+outcome.Err.Error())
 		if outcome.Result == nil {
 			return &protocol.Output{Attrs: attrs}, err
 		}
-		return execResultResponse(outcome.Result, attrs, caller.Direct), err
-	}
-	// 调用方 ctx 结束（传输断连/前台预算到期，§2.6）：断线不是取消——
-	// 停止等待但执行继续（前台记录保留），日志在实际执行结束时关闭。
-	if errors.Is(outcome.Err, context.Canceled) || errors.Is(outcome.Err, context.DeadlineExceeded) {
+		return logs.Captured(outcome.Result, attrs, caller.Direct), err
+	case execution.OutcomeInterrupted:
+		// 调用方 ctx 结束（传输断连/前台预算到期，§2.6）：断线不是取消——
+		// 停止等待但执行继续（前台记录保留），日志在实际执行结束时关闭。
 		spillLogs()
 		if outcome.Result == nil {
 			return &protocol.Output{Attrs: attrs}, outcome.Err
 		}
-		return execResultResponse(outcome.Result, attrs, caller.Direct), outcome.Err
+		return logs.Captured(outcome.Result, attrs, caller.Direct), outcome.Err
 	}
-	// 前台完成（日志关闭已由完成回调处理）：执行已终结，部分产出只活
-	// 在日志里——错误响应保留其地址（Reply 保留 Result）。
+	// OutcomeCompleted：前台完成（日志关闭已由完成回调处理）。执行已终结，
+	// 部分产出只活在日志里——错误响应保留其地址（Reply 保留 Result）。
 	if outcome.Err != nil {
 		if outcome.Result == nil {
-			_ = outSpill.Spill()
-			_ = errSpill.Spill()
-			if outSpill.Spilled() {
-				attrs["output"] = logOut
-			}
-			if errSpill.Spilled() {
-				attrs["error_output"] = logErr
-			}
+			spillLogs()
 			return &protocol.Output{Attrs: attrs}, protocol.Fail("internal", "exec: "+outcome.Err.Error())
 		}
-		// 执行完成但引擎层报错：结果与错误一并带出（Reply 保留 Result）。
-		if err := settleExecLogs(attrs, logOut, logErr, outSpill, errSpill, outcome.Result, !caller.Direct); err != nil {
+		if err := logs.Settle(attrs, outcome.Result, !caller.Direct); err != nil {
 			return &protocol.Output{Attrs: attrs}, err
 		}
-		res, outputErr := completedExecResultResponse(outcome.Result, attrs, caller.Direct, logs)
+		res, outputErr := logs.Completed(outcome.Result, attrs, caller.Direct, snapshot)
 		if outputErr != nil {
 			return res, outputErr
 		}
@@ -303,176 +286,8 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 	if res == nil {
 		return nil, protocol.Fail("internal", "exec: no result")
 	}
-	if err := settleExecLogs(attrs, logOut, logErr, outSpill, errSpill, res, !caller.Direct); err != nil {
+	if err := logs.Settle(attrs, res, !caller.Direct); err != nil {
 		return &protocol.Output{Attrs: attrs}, err
 	}
-	return completedExecResultResponse(res, attrs, caller.Direct, logs)
-}
-
-// settleExecLogs 同步完成收口：落盘失败的执行明确报错；引擎采集截断的
-// 流必须在执行中已溢出落盘（tee 在采集截断后仍写 writer——未落盘 = 输
-// 出尾部丢失，明确报错不静默）；NATS 行预览截断的流补建文件（全量在
-// 内存）。attrs 按「文件存在」挂载 output/error_output。
-func settleExecLogs(attrs map[string]string, logOut, logErr string, outSpill, errSpill *execution.LogSpiller, res *execution.ExecResult, natsPreview bool) error {
-	if err := errors.Join(outSpill.Err(), errSpill.Err()); err != nil {
-		return protocol.Fail("internal", "exec: write log: "+err.Error())
-	}
-	if res.StdoutTruncated && !outSpill.Spilled() {
-		return protocol.Fail("internal", "exec: stdout capture truncated without log spill")
-	}
-	if res.StderrTruncated && !errSpill.Spilled() {
-		return protocol.Fail("internal", "exec: stderr capture truncated without log spill")
-	}
-	if natsPreview {
-		if _, cut := headLines(res.Stdout, previewStdoutLines); cut {
-			if err := outSpill.Spill(); err != nil {
-				return protocol.Fail("internal", "exec: spill log: "+err.Error())
-			}
-		}
-		if _, cut := headLines(res.Stderr, previewStderrLines); cut {
-			if err := errSpill.Spill(); err != nil {
-				return protocol.Fail("internal", "exec: spill log: "+err.Error())
-			}
-		}
-	}
-	if outSpill.Spilled() {
-		attrs["output"] = logOut
-	}
-	if errSpill.Spilled() {
-		attrs["error_output"] = logErr
-	}
-	return nil
-}
-
-// execLogSnapshot records stream lengths of truncated streams at close.
-// Completion publishes it only after both spillers have closed.
-type execLogSnapshot struct {
-	stdoutBytes int64
-	stderrBytes int64
-	err         error
-}
-
-func closeExecLogs(stdout, stderr *execution.LogSpiller, res *execution.ExecResult) execLogSnapshot {
-	var logs execLogSnapshot
-	if res != nil {
-		for _, stream := range []struct {
-			sp        *execution.LogSpiller
-			truncated bool
-			size      *int64
-		}{{stdout, res.StdoutTruncated, &logs.stdoutBytes}, {stderr, res.StderrTruncated, &logs.stderrBytes}} {
-			if stream.truncated {
-				size, err := stream.sp.Size()
-				if err != nil {
-					logs.err = errors.Join(logs.err, err)
-				} else {
-					*stream.size = size
-				}
-			}
-		}
-	}
-	logs.err = errors.Join(logs.err, stdout.Close(), stderr.Close())
-	return logs
-}
-
-// completedExecResultResponse recovers full RTC streams from this execution's
-// closed logs when the engine's bounded in-memory captures were truncated.
-// Errors retain log paths, but never advertise a partial JSON payload as success.
-func completedExecResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool, logs execLogSnapshot) (*protocol.Output, error) {
-	if !rtcFull {
-		return execResultResponse(res, attrs, false), nil
-	}
-	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
-	fail := func(code, message string) (*protocol.Output, error) {
-		delete(attrs, "stderr")
-		return &protocol.Output{Attrs: attrs}, protocol.Fail(code, "exec: "+message)
-	}
-	if logs.err != nil {
-		return fail("internal", "finish output logs: "+logs.err.Error())
-	}
-	stdoutBytes, stderrBytes := int64(len(res.Stdout)), int64(len(res.Stderr))
-	if res.StdoutTruncated {
-		stdoutBytes = logs.stdoutBytes
-	}
-	if res.StderrTruncated {
-		stderrBytes = logs.stderrBytes
-	}
-	if stdoutBytes < int64(len(res.Stdout)) || stderrBytes < int64(len(res.Stderr)) {
-		return fail("internal", "complete output log is shorter than the captured output")
-	}
-	if stdoutBytes < 0 || stderrBytes < 0 || stdoutBytes > protocol.RtcToolResponseLimit || stderrBytes > protocol.RtcToolResponseLimit-stdoutBytes {
-		return fail("overloaded", fmt.Sprintf("output exceeds %d bytes; full output is available in the execution logs", protocol.RtcToolResponseLimit))
-	}
-	// Copy the result so restoring output never changes shared engine/task state.
-	full := *res
-	for _, stream := range []struct {
-		path      string
-		truncated bool
-		size      int64
-		value     *string
-	}{{attrs["output"], res.StdoutTruncated, stdoutBytes, &full.Stdout}, {attrs["error_output"], res.StderrTruncated, stderrBytes, &full.Stderr}} {
-		if !stream.truncated {
-			continue
-		}
-		file, err := os.Open(stream.path)
-		if err != nil {
-			return fail("internal", "read complete output log: "+err.Error())
-		}
-		data := make([]byte, int(stream.size))
-		_, readErr := io.ReadFull(file, data)
-		closeErr := file.Close()
-		if err := errors.Join(readErr, closeErr); err != nil {
-			return fail("internal", "read complete output log: "+err.Error())
-		}
-		*stream.value = string(data)
-	}
-	full.StdoutTruncated, full.StderrTruncated = false, false
-	return execResultResponse(&full, attrs, true), nil
-}
-
-// execResultResponse 构造响应（§3.1 统一输出形状）：attrs 恒含
-// action/exit_code；output/error_output 由调用方在日志文件存在时挂载。
-// 输出策略按通道分：
-//   - NATS（AI 消费）：有界预览——content=stdout 前 1000 行、attrs.stderr
-//     前 100 行；任一截断（行/引擎采集）置 truncated，全量经
-//     attrs.output/error_output 日志读取。
-//   - RTC 直连（viewer 等非 AI 消费）：成功响应的完整输出须先经
-//     completedExecResultResponse 恢复；没有 truncated 标记。
-func execResultResponse(res *execution.ExecResult, attrs map[string]string, rtcFull bool) *protocol.Output {
-	attrs["exit_code"] = strconv.Itoa(res.ExitCode)
-	if rtcFull {
-		if res.Stderr != "" {
-			attrs["stderr"] = res.Stderr
-		}
-		return &protocol.Output{Content: res.Stdout, Attrs: attrs}
-	}
-	truncated := res.StdoutTruncated || res.StderrTruncated
-	content, cut := headLines(res.Stdout, previewStdoutLines)
-	truncated = truncated || cut
-	if res.Stderr != "" {
-		errHead, errCut := headLines(res.Stderr, previewStderrLines)
-		attrs["stderr"] = errHead
-		truncated = truncated || errCut
-	}
-	if truncated {
-		attrs["truncated"] = "true"
-	}
-	return &protocol.Output{Content: content, Attrs: attrs}
-}
-
-// headLines 截取前 n 行；发生截取时返回 truncated=true。
-// 预览行数上限（与平台侧 aic/fs.ExecMaxLines 约定一致；跨仓无法共享常量）。
-const (
-	previewStdoutLines = 1000
-	previewStderrLines = 100
-)
-
-func headLines(s string, n int) (string, bool) {
-	if n <= 0 || s == "" {
-		return s, false
-	}
-	lines := strings.SplitAfter(s, "\n")
-	if len(lines) <= n {
-		return s, false
-	}
-	return strings.Join(lines[:n], ""), true
+	return logs.Completed(res, attrs, caller.Direct, snapshot)
 }

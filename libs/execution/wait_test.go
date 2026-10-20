@@ -39,7 +39,7 @@ func TestForegroundNoBGRecord(t *testing.T) {
 	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "echo hi",
 	}, 5*time.Second, TaskMeta{Owner: "u:t1", Session: "s1"}, true, nil)
-	if out.Err != nil || out.Background || out.Result.ExitCode != 0 {
+	if out.Err != nil || out.Kind != OutcomeCompleted || out.Result.ExitCode != 0 {
 		t.Fatalf("out = %+v", out)
 	}
 	if strings.TrimSpace(out.Result.Stdout) != "hi" {
@@ -58,7 +58,7 @@ func TestNoAdoptRTC(t *testing.T) {
 	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late",
 	}, 50*time.Millisecond, TaskMeta{Owner: "u:t1", Session: "s1"}, false, nil)
-	if !errors.Is(out.Err, ErrWaitElapsed) || out.Background || out.Result != nil {
+	if !errors.Is(out.Err, ErrWaitElapsed) || out.Kind != OutcomeWaitElapsed || out.Result != nil {
 		t.Fatalf("out = %+v", out)
 	}
 	if got := e.Tasks.List("u:t1", "s1"); len(got) != 0 {
@@ -87,7 +87,7 @@ func TestTimeoutAdoptsOnce(t *testing.T) {
 	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "s1", Owner: "u:t1", Script: "sleep 0.3; echo late",
 	}, 50*time.Millisecond, TaskMeta{Owner: "u:t1", Session: "s1", LogOut: "/log/o", LogErr: "/log/e"}, true, nil)
-	if out.Err != nil || !out.Background {
+	if out.Err != nil || out.Kind != OutcomeBackground {
 		t.Fatalf("out = %+v", out)
 	}
 	id := out.Task.ID
@@ -127,7 +127,7 @@ func TestContextCancelStopsWaitingOnly(t *testing.T) {
 	var out *Outcome
 	select {
 	case out = <-done:
-		if !errors.Is(out.Err, context.Canceled) || out.Background || out.Result != nil {
+		if !errors.Is(out.Err, context.Canceled) || out.Kind != OutcomeInterrupted || out.Result != nil {
 			t.Fatalf("out = %+v", out)
 		}
 	case <-time.After(5 * time.Second):
@@ -170,11 +170,8 @@ func TestCapacityCancel(t *testing.T) {
 	if out.Err == nil || !strings.Contains(out.Err.Error(), "task table full") {
 		t.Fatalf("out.Err = %v", out.Err)
 	}
-	if !errors.Is(out.Err, ErrCapacity) {
-		t.Fatalf("容量错误必须携带 ErrCapacity 哨兵: %v", out.Err)
-	}
-	if out.Background {
-		t.Fatal("容量不足不应登记后台")
+	if !errors.Is(out.Err, ErrCapacity) || out.Kind != OutcomeCapacity {
+		t.Fatalf("容量错误必须带 ErrCapacity 且 Kind=OutcomeCapacity: %v", out.Err)
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Fatal("未登记的执行未被取消（sleep 30 跑满）")
@@ -193,7 +190,7 @@ func TestCompletionAfterWait(t *testing.T) {
 		}
 		completed.Add(1)
 	})
-	if !errors.Is(out.Err, ErrWaitElapsed) || completed.Load() != 0 {
+	if !errors.Is(out.Err, ErrWaitElapsed) || out.Kind != OutcomeWaitElapsed || completed.Load() != 0 {
 		t.Fatalf("premature completion: %+v", out)
 	}
 	select {
@@ -211,7 +208,7 @@ func TestConfiguredExecutionTimeout(t *testing.T) {
 	out := Execute(context.Background(), e, ExecRequest{
 		SessionKey: "timeout", Script: "sleep 30", Timeout: 50 * time.Millisecond,
 	}, 5*time.Second, TaskMeta{}, false, nil)
-	if out.Background || out.Result == nil || out.Result.ExitCode != 124 {
+	if out.Kind != OutcomeCompleted || out.Result == nil || out.Result.ExitCode != 124 {
 		t.Fatalf("timeout not enforced: %+v", out)
 	}
 }
