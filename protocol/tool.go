@@ -79,7 +79,6 @@ type Response struct {
 }
 type Fault struct {
 	Effect  string `json:"effect,omitempty"`
-	Retry   string `json:"retry,omitempty"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Details any    `json:"details,omitempty"`

@@ -258,7 +258,8 @@ func TestManagedSFTPTransfersAndRules(t *testing.T) {
 	}
 	// 输出下游提前关闭（`| head`）：与内建命令同一约定，按 SIGPIPE 收尾（141）——
 	// 不是批处理某一行失败，不打印 stderr；管道整体状态仍取末命令，脚本继续。
-	closed := strings.Repeat("pwd\n", 500)
+	// 批输出必须超过管道缓冲（64 KiB），否则 sftp 在 head 退出前写完、看不到 EPIPE。
+	closed := strings.Repeat("pwd\n", 4000)
 	if r := runManagedScript(t, c, "sftp -b - fixture | head -1; echo after:$? ps:${PIPESTATUS[@]}", closed); r.ExitCode != 0 || r.Stderr != "" || !strings.HasSuffix(r.Stdout, "after:0 ps:141 0\n") {
 		t.Fatalf("closed pipe %+v", r)
 	}

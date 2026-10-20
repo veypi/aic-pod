@@ -26,7 +26,8 @@ manifest for the built-in packs (browser/cua/blender).
 - `libs/` — `execution` (exec runner), `fsx` (fs tool layer), `host` (host engine: connect,
   dispatch, deny rules, browser stream, vsh engine), `hostfs` (os.Root-backed backend and path
   canonicalization), `mcpx` (official MCP Go SDK wrapper), `vtools` (protocol-agnostic service
-  registration as vsh root commands), `rtc`, `imageutil`.
+  registration as vsh root commands), `sshx` (managed ssh/scp/sftp), `gitx` (managed git ssh
+  transport), `rtc`, `imageutil`.
 - `protocol/` — transport-independent contracts: `tool.go` (the request/action face), `caps.go`,
   `fs.go`, `hosts_nats.go`, `hosts_rtc.go`, `path.go`, `sign.go`, `subject.go`, RTC signal/ticket.
 - `docs/` — Chinese design and operational docs: `host_sandbox.md` (security/authorization

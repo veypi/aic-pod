@@ -9,7 +9,10 @@ Pod 是设备执行端，负责身份验证、原生命令、文件服务、官�
 | cli / desktop | 入口、设备设置、Go 后端生命周期 |
 | cfg | 配置读取/校验/修改/原子保存、设备绑定与本机设置面（`aic config get|set`）；MCP 配置是设备所有者提供的固定启动信息 |
 | libs/host | 装配身份、执行器、文件服务与 mcp command；唯一运行权限状态 permissionState（FS/net/SSH/cmd 一份编译基表 + 会话临时授权，vbox 提供匹配） |
-| libs/mcpx | 官方 SDK 服务连接管理与一个 vsh mcp 命令 |
+| libs/mcpx | 官方 SDK 服务连接管理 |
+| libs/vtools | 协议无关的服务登记层（MCP/TCP → vsh 根命令） |
+| libs/sshx | 托管 ssh/scp/sftp（系统 OpenSSH + ssh 域门） |
+| libs/gitx | 托管的 git ssh 传输（复用 sshx 授权与硬化选项） |
 | protocol | 全部线上契约单包：tool 请求/响应与错误、FS 数据面类型、hosts_nats/hosts_rtc 签名与认证信封、RTC 票据与信令、subject/caps/凭证、路径可解析层（批次 2 合包；NATS/RTC 信封各自存在，类型 Nats*/Rtc*/FS* 前缀区分） |
 | libs/execution | vsh、日志、前台等待/bg、唯一运行记录表（前台/后台同一记录，cancel/bg kill/断连同表） |
 | vbox | 原生进程和 OS 沙箱、取消回收 |
