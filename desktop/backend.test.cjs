@@ -57,3 +57,31 @@ test('主动 stop 不算启动失败', async () => {
   child.emit('exit', 1, 'SIGTERM')
   assert.equal(fatal, 0)
 })
+
+test('并发 start+stop 串行化：start 等 stop 完成后再拉起', async () => {
+  const children = [fakeChild(), fakeChild()]
+  let spawnCount = 0
+  const order = []
+  const ctl = createBackend({
+    spawn: () => {
+      spawnCount++
+      order.push('spawn')
+      return children[spawnCount - 1]
+    },
+    binary: 'aic-backend',
+    env: {},
+    waitForStartup: async () => {},
+    onFatal: () => {},
+  })
+  await ctl.start()
+  // stop 的 kill 不立即触发 close（模拟慢退出）：start 必须排队等它
+  const slow = children[0]
+  slow.kill = () => { order.push('kill'); setTimeout(() => { slow.signalCode = 'SIGTERM'; slow.emit('close', null, 'SIGTERM') }, 20) }
+  const stopping = ctl.stop()
+  const starting = ctl.start() // 并发到达：应排在 stop 之后
+  await Promise.all([stopping, starting])
+  assert.deepEqual(order, ['spawn', 'kill', 'spawn'])
+  assert.equal(spawnCount, 2)
+  assert.equal(ctl.alive(), true)
+  assert.equal(ctl.child, children[1])
+})

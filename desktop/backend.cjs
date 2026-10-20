@@ -6,12 +6,21 @@ function createBackend({ spawn, binary, env, waitForStartup, onFatal }) {
   let child = null
   let ready = false // 就绪后异常退出才算启动失败（主动 stop/restart 不算）
   let restarting = null
+  let queue = Promise.resolve()
+
+  // start/stop/restart 串行化：任一时刻最多一个生命周期操作在途——并发
+  // start+stop 不会出现「stop 刚置空 child、start 又起新进程」的新旧并存。
+  function enqueue(job) {
+    const run = queue.then(job, job)
+    queue = run.then(() => {}, () => {})
+    return run
+  }
 
   function alive() {
     return !!child && !child.killed && child.exitCode == null && child.signalCode == null
   }
 
-  async function start() {
+  async function startNow() {
     child = spawn(binary, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
     child.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
     child.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
@@ -28,12 +37,15 @@ function createBackend({ spawn, binary, env, waitForStartup, onFatal }) {
     return child
   }
 
-  async function stop() {
+  async function stopNow() {
     const current = child
     ready = false // 主动停止：退出不再算启动失败
     child = null
     if (!current || current.exitCode != null || current.signalCode != null) return
     await new Promise((resolve) => {
+      // 'close' 可能已先于监听注册触发（exit 已记录即已关闭，上面已拦）——
+      // 复查一次避免白等满超时。
+      if (current.exitCode != null || current.signalCode != null) return resolve()
       current.once('close', () => resolve())
       try { current.kill('SIGTERM') } catch (e) { /* 已退出 */ }
       const timer = setTimeout(() => {
@@ -44,9 +56,12 @@ function createBackend({ spawn, binary, env, waitForStartup, onFatal }) {
     })
   }
 
+  const start = () => enqueue(startNow)
+  const stop = () => enqueue(stopNow)
+
   function restart() {
     if (!restarting) {
-      restarting = (async () => { await stop(); await start() })().finally(() => { restarting = null })
+      restarting = enqueue(async () => { await stopNow(); await startNow() }).finally(() => { restarting = null })
     }
     return restarting
   }
