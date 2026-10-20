@@ -14,6 +14,7 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/gitx"
 	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/vbox"
@@ -54,6 +55,16 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			return c.perms != nil && c.perms.sshAllowed(execution.SessionFromContext(ctx), hostport)
 		},
 		CheckLocal: c.preflightSSHLocal,
+	})
+	c.git = gitx.New(gitx.Deps{
+		SSH:       c.ssh,
+		Processes: c.procs,
+		Run: func(ctx context.Context, opts vbox.StartOptions, in io.Reader, out, errout io.Writer) (int, error) {
+			if c.gitRun != nil {
+				return c.gitRun(ctx, opts, in, out, errout)
+			}
+			return c.procs.RunProcess(ctx, opts, in, out, errout)
+		},
 	})
 	engine, err := execution.NewEngine(execution.EngineConfig{
 		Registry: reg,

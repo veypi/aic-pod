@@ -24,6 +24,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/fsx"
+	"github.com/veypi/aic-pod/libs/gitx"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/libs/sshx"
@@ -89,6 +90,7 @@ type Client struct {
 	perms           *permissionState // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
 	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
 	ssh             *sshx.Runner     // 托管 ssh/scp/sftp
+	git             *gitx.Runner     // 托管 git 的 ssh 传输
 	sshRun          sshProcessRunner // nil uses the managed native process runner
 	gitRun          sshProcessRunner // nil uses the managed native process runner（managed git 传输）
 	rtcMu           sync.RWMutex

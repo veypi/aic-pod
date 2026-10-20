@@ -1,6 +1,6 @@
-package host
+package gitx
 
-// gitcmd.go — managed git：把 git 的 ssh 传输层收编进 pod（A-MVP）。
+// git.go — managed git：把 git 的 ssh 传输层收编进 pod（A-MVP）。
 //
 // 背景：沙箱内原生 git 的 ssh 传输必然撞三面墙——内建 deny 覆盖 **/.ssh/**、
 // env 清洗剥掉 SSH_AUTH_SOCK、net 域需单独授权。旧出路只有 grant fs ~/.ssh
@@ -36,13 +36,26 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/veypi/aic-pod/libs/sshx"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
 
-// managedGit 拦截原生 git（nativeExec 按解析名调用）。handled=true 表示
-// 本调用已终态（含拒绝与用法错误）；false = 交还原生沙箱路径。
-func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool, error) {
+// Deps 是 gitx 的宿主依赖。
+type Deps struct {
+	SSH       *sshx.Runner
+	Processes *vbox.Manager
+	Run       sshx.ProcessRunner // 测试注入；nil 用 Processes
+}
+
+// Runner 是 managed git 的执行器。
+type Runner struct{ deps Deps }
+
+func New(deps Deps) *Runner { return &Runner{deps: deps} }
+
+// Managed 拦截原生 git（nativeExec 按解析名调用）。handled=true 表示本调用
+// 已终态（含拒绝与用法错误）；false = 交还原生沙箱路径。
+func (r *Runner) Managed(ctx context.Context, inv *commands.Invocation) (bool, error) {
 	if runtime.GOOS == "windows" {
 		return false, nil // MVP 仅 unix（GIT_SSH wrapper 为 sh 形态）
 	}
@@ -64,11 +77,11 @@ func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool
 	}
 	// ssh.Options 含 ssh 域授权检查（错误文案即 grant 指引）、ssh config
 	// 解析（alias/IdentityFile）与全部硬化选项；Exec 是钉死参数的 ssh argv。
-	sshOpts, err := c.ssh.Options(ctx, raw, 0)
+	sshOpts, err := r.deps.SSH.Options(ctx, raw, 0)
 	if err != nil {
 		return true, commands.Exitf(inv, 126, "git: %v", err)
 	}
-	gitBin, err := trustedGitBinary()
+	gitBin, err := TrustedBinary()
 	if err != nil {
 		return true, commands.Exitf(inv, 126, "git: managed 传输不可用：%v", err)
 	}
@@ -94,7 +107,7 @@ func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 	)
-	code, err := c.runGit(ctx, vbox.StartOptions{
+	code, err := r.run(ctx, vbox.StartOptions{
 		Exec: argv, Env: env, ReplaceEnv: true,
 		NoSandbox: true, Workdir: cwd,
 	}, inv.Stdin, inv.Stdout, inv.Stderr)
@@ -107,18 +120,21 @@ func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool
 	return true, nil
 }
 
-// runGit 默认走托管进程入口；测试经 c.gitRun 注入替身（对齐 runSSH/sshRun）。
-func (c *Client) runGit(ctx context.Context, opts vbox.StartOptions, in io.Reader, out, errout io.Writer) (int, error) {
-	if c.gitRun != nil {
-		return c.gitRun(ctx, opts, in, out, errout)
+// run 默认走托管进程入口；Deps.Run 供测试注入。
+func (r *Runner) run(ctx context.Context, opts vbox.StartOptions, in io.Reader, out, errout io.Writer) (int, error) {
+	if r.deps.Run != nil {
+		return r.deps.Run(ctx, opts, in, out, errout)
 	}
-	return c.procs.RunProcess(ctx, opts, in, out, errout)
+	if r.deps.Processes == nil {
+		return 0, fmt.Errorf("git: process manager unavailable")
+	}
+	return r.deps.Processes.RunProcess(ctx, opts, in, out, errout)
 }
 
-// trustedGitBinary 受管传输只信任系统拥有的 git（与 trustedSSHBinary 同原则：
+// TrustedBinary 受管传输只信任系统拥有的 git（与 trustedSSHBinary 同原则：
 // NoSandbox 执行的二进制不得落在用户可写前缀——homebrew 等位置任何登录进程
 // 都可替换，会把受管传输变成提权入口）。
-func trustedGitBinary() (string, error) {
+func TrustedBinary() (string, error) {
 	candidates := []string{"/usr/bin/git", "/bin/git"}
 	if runtime.GOOS == "windows" {
 		candidates = []string{filepath.Join(os.Getenv("ProgramFiles"), "Git", "cmd", "git.exe")}

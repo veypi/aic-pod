@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/gitx"
 	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/vbox"
@@ -28,7 +29,7 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 	// 注意：受管路径只按解析名触发，执行体恒为 trustedGitBinary（系统
 	// git），resolvedPath 指向的同名伪造二进制不会被 pod 侧运行。
 	if name == "git" && c.perms != nil {
-		if handled, err := c.managedGit(ctx, inv); handled {
+		if handled, err := c.git.Managed(ctx, inv); handled {
 			return err
 		}
 	}
@@ -53,6 +54,14 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 
 // trustedSSHBinary 保留 host 侧测试入口（实现已迁 libs/sshx）。
 func trustedSSHBinary() (string, error) { return sshx.TrustedBinary() }
+
+// managedGit 保留 host 测试入口（实现已迁 libs/gitx）。
+func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool, error) {
+	return c.git.Managed(ctx, inv)
+}
+
+// trustedGitBinary 保留 host 集成测试入口（实现已迁 libs/gitx）。
+func trustedGitBinary() (string, error) { return gitx.TrustedBinary() }
 
 func reservedSSHNative(name string) bool {
 	switch name {

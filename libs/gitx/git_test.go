@@ -1,4 +1,4 @@
-package host
+package gitx
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/sshx"
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
@@ -308,17 +308,19 @@ func TestShellQuoteArg(t *testing.T) {
 
 // ---- managedGit 分流与受管执行 ----
 
-func gitTestClient(t *testing.T) (*Client, string) {
-	t.Helper()
-	c, _ := testClient(t)
-	return c, c.options().WorkDir
+func newTestRunner(allowed bool, run sshx.ProcessRunner) *Runner {
+	return New(Deps{
+		SSH: sshx.New(sshx.Deps{Allowed: func(context.Context, string) bool { return allowed }}),
+		Run: run,
+	})
 }
 
 func TestManagedGitFallthrough(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed git 未接入 windows")
 	}
-	c, wd := gitTestClient(t)
+	r := newTestRunner(true, nil)
+	wd := t.TempDir()
 	inv := &commands.Invocation{Cwd: wd, Stdout: &strings.Builder{}, Stderr: &strings.Builder{}}
 	for _, args := range [][]string{
 		{"status"}, {"log", "--oneline"}, {"commit", "-m", "x"}, {"diff"},
@@ -329,7 +331,7 @@ func TestManagedGitFallthrough(t *testing.T) {
 		{"submodule", "update"},      // 非白名单子命令
 		{"remote", "update"},         // 非白名单子命令
 	} {
-		handled, err := c.managedGit(context.Background(), &commands.Invocation{
+		handled, err := r.Managed(context.Background(), &commands.Invocation{
 			Args: args, Cwd: inv.Cwd, Stdout: inv.Stdout, Stderr: inv.Stderr})
 		if handled || err != nil {
 			t.Errorf("%v: handled=%v err=%v（应交还原生）", args, handled, err)
@@ -343,13 +345,13 @@ func TestManagedGitDeniedWithoutGrant(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed git 未接入 windows")
 	}
-	c, wd := gitTestClient(t)
+	r := newTestRunner(false, nil)
 	var out, errOut strings.Builder
 	inv := &commands.Invocation{
 		Args: []string{"clone", "git@gitlab.com:veypi/aic.git"},
-		Cwd:  wd, Stdout: &out, Stderr: &errOut,
+		Cwd:  t.TempDir(), Stdout: &out, Stderr: &errOut,
 	}
-	handled, err := c.managedGit(context.Background(), inv)
+	handled, err := r.Managed(context.Background(), inv)
 	if !handled {
 		t.Fatal("ssh 传输未接管")
 	}
@@ -361,46 +363,16 @@ func TestManagedGitDeniedWithoutGrant(t *testing.T) {
 	}
 }
 
-// TestManagedGitBuiltinDeniedByOwnerRule 内建放行 github.com:22 可被所有者
-// cfg deny 行压过（排表 temp grant → cfg 规则 → 内建，首命中）。
-func TestManagedGitBuiltinDeniedByOwnerRule(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("managed git 未接入 windows")
-	}
-	withGlobal(t, nil)
-	c, wd := gitTestClient(t)
-	cfg.Global.SshRules = []string{"deny:github.com:22"}
-	publishGlobal(t, c.perms)
-	var out, errOut strings.Builder
-	inv := &commands.Invocation{
-		Args: []string{"clone", "git@github.com:veypi/aic.git"},
-		Cwd:  wd, Stdout: &out, Stderr: &errOut,
-	}
-	handled, err := c.managedGit(context.Background(), inv)
-	if !handled {
-		t.Fatal("ssh 传输未接管")
-	}
-	if code, _ := commands.ExitCode(err); code != 126 {
-		t.Fatalf("所有者 deny 未压过内建放行: code=%d err=%v", code, err)
-	}
-	if !strings.Contains(errOut.String(), "grant ssh github.com:22") {
-		t.Fatalf("拒绝文案缺 grant 指引: %q", errOut.String())
-	}
-}
-
 // TestManagedGitManagedRun 授权后：受管执行用系统 git、钉住 hooksPath 与
 // GIT_SSH wrapper；wrapper 内嵌授权目标；结束后临时目录清理。
 func TestManagedGitManagedRun(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed git 未接入 windows")
 	}
-	c, wd := gitTestClient(t)
-	if _, err := c.grantTarget("", "ssh", "github.com:22", false); err != nil {
-		t.Fatal(err)
-	}
+	wd := t.TempDir()
 	var captured vbox.StartOptions
 	var wrapperPath string
-	c.gitRun = func(_ context.Context, opts vbox.StartOptions, _ io.Reader, _, _ io.Writer) (int, error) {
+	r := newTestRunner(true, func(_ context.Context, opts vbox.StartOptions, _ io.Reader, _, _ io.Writer) (int, error) {
 		captured = opts
 		for _, e := range opts.Env {
 			if strings.HasPrefix(e, "GIT_SSH=") {
@@ -423,17 +395,17 @@ func TestManagedGitManagedRun(t *testing.T) {
 			}
 		}
 		return 0, nil
-	}
+	})
 	var out, errOut strings.Builder
 	inv := &commands.Invocation{
 		Args: []string{"clone", "--depth", "1", "git@github.com:veypi/aic.git", "dst"},
 		Cwd:  wd, Stdout: &out, Stderr: &errOut,
 	}
-	handled, err := c.managedGit(context.Background(), inv)
+	handled, err := r.Managed(context.Background(), inv)
 	if !handled || err != nil {
 		t.Fatalf("handled=%v err=%v stderr=%q", handled, err, errOut.String())
 	}
-	gitBin, _ := trustedGitBinary()
+	gitBin, _ := TrustedBinary()
 	wantArgv := []string{gitBin, "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1", "git@github.com:veypi/aic.git", "dst"}
 	if strings.Join(captured.Exec, "\x00") != strings.Join(wantArgv, "\x00") {
 		t.Fatalf("argv=%v want %v", captured.Exec, wantArgv)
@@ -463,18 +435,14 @@ func TestManagedGitExitCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed git 未接入 windows")
 	}
-	c, wd := gitTestClient(t)
-	if _, err := c.grantTarget("", "ssh", "github.com:22", false); err != nil {
-		t.Fatal(err)
-	}
-	c.gitRun = func(context.Context, vbox.StartOptions, io.Reader, io.Writer, io.Writer) (int, error) {
+	r := newTestRunner(true, func(context.Context, vbox.StartOptions, io.Reader, io.Writer, io.Writer) (int, error) {
 		return 128, nil
-	}
+	})
 	inv := &commands.Invocation{
 		Args: []string{"clone", "git@github.com:x/y.git"},
-		Cwd:  wd, Stdout: &strings.Builder{}, Stderr: &strings.Builder{},
+		Cwd:  t.TempDir(), Stdout: &strings.Builder{}, Stderr: &strings.Builder{},
 	}
-	handled, err := c.managedGit(context.Background(), inv)
+	handled, err := r.Managed(context.Background(), inv)
 	if code, _ := commands.ExitCode(err); !handled || code != 128 {
 		t.Fatalf("handled=%v code=%d err=%v", handled, code, err)
 	}
