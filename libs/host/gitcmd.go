@@ -62,9 +62,9 @@ func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool
 	if kind != gitRemoteSSH {
 		return false, nil // https/本地路径等：交还原生（现状不变）
 	}
-	// sshOptions 含 sshAllowed 授权检查（错误文案即 grant 指引）、ssh config
+	// ssh.Options 含 ssh 域授权检查（错误文案即 grant 指引）、ssh config
 	// 解析（alias/IdentityFile）与全部硬化选项；Exec 是钉死参数的 ssh argv。
-	sshOpts, err := c.sshOptions(ctx, raw, 0)
+	sshOpts, err := c.ssh.Options(ctx, raw, 0)
 	if err != nil {
 		return true, commands.Exitf(inv, 126, "git: %v", err)
 	}

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
@@ -49,6 +50,9 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 	}
 	return nil
 }
+
+// trustedSSHBinary 保留 host 侧测试入口（实现已迁 libs/sshx）。
+func trustedSSHBinary() (string, error) { return sshx.TrustedBinary() }
 
 func reservedSSHNative(name string) bool {
 	switch name {

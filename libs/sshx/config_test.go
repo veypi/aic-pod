@@ -1,4 +1,4 @@
-package host
+package sshx
 
 import (
 	"os"
@@ -6,6 +6,13 @@ import (
 	"strings"
 	"testing"
 )
+
+// 测试沿用旧短名，避免逐处改写；生产入口是 ResolveTarget / ParseTarget。
+func resolveSSHTarget(raw, home string, port int) (Target, error) {
+	return ResolveTarget(raw, home, port)
+}
+
+func parseSSHTarget(raw string) (Target, error) { return ParseTarget(raw) }
 
 func writeSSHTestConfig(t *testing.T, home, text string) string {
 	t.Helper()

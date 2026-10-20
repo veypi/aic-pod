@@ -26,6 +26,7 @@ import (
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/libs/sshx"
 	"github.com/veypi/aic-pod/libs/vtools"
 
 	"github.com/veypi/aic-pod/libs/rtc"
@@ -62,6 +63,8 @@ type serviceState struct {
 	browserCancel context.CancelFunc
 }
 
+type sshProcessRunner = sshx.ProcessRunner
+
 // Client 是 host agent 客户端。
 type Client struct {
 	sessionRoot string
@@ -85,6 +88,7 @@ type Client struct {
 	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
 	perms           *permissionState // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
 	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
+	ssh             *sshx.Runner     // 托管 ssh/scp/sftp
 	sshRun          sshProcessRunner // nil uses the managed native process runner
 	gitRun          sshProcessRunner // nil uses the managed native process runner（managed git 传输）
 	rtcMu           sync.RWMutex

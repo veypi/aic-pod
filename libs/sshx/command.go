@@ -1,4 +1,7 @@
-package host
+// Package sshx implements the managed ssh/scp/sftp surface: system OpenSSH
+// client, ssh-domain authorization, and local fs preflight delegated to the
+// embedding host.
+package sshx
 
 import (
 	"context"
@@ -20,21 +23,41 @@ import (
 	"github.com/veypi/vsh/commands"
 )
 
-type sshProcessRunner func(context.Context, vbox.StartOptions, io.Reader, io.Writer, io.Writer) (int, error)
+// ProcessRunner 是 SSH 传输进程的执行入口（host 注入 procs 或测试替身）。
+type ProcessRunner func(context.Context, vbox.StartOptions, io.Reader, io.Writer, io.Writer) (int, error)
 
-func (c *Client) sshOptions(ctx context.Context, raw string, port int) (vbox.StartOptions, error) {
+// Deps 是 Runner 的宿主依赖。
+type Deps struct {
+	Processes *vbox.Manager
+	// Run 覆盖进程执行（测试注入）；nil 用 Processes。
+	Run ProcessRunner
+	// Allowed 判定 ssh 域目标准入（host 接 permissionState.sshAllowed）。
+	Allowed func(ctx context.Context, hostport string) bool
+	// CheckLocal 是本地路径的 fs 域预检（scp/sftp 读写前）。
+	CheckLocal func(ctx context.Context, inv *commands.Invocation, name string, write bool) error
+}
+
+// Runner 是托管 SSH 命令面的执行器（ssh/scp/sftp 共用）。
+type Runner struct {
+	deps Deps
+}
+
+func New(deps Deps) *Runner { return &Runner{deps: deps} }
+
+// Options 构造一次 SSH 调用的进程参数（含授权检查与 ssh 配置解析）。
+func (r *Runner) Options(ctx context.Context, raw string, port int) (vbox.StartOptions, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return vbox.StartOptions{}, err
 	}
-	t, err := resolveSSHTarget(raw, home, port)
+	target, err := ResolveTarget(raw, home, port)
 	if err != nil {
 		return vbox.StartOptions{}, err
 	}
-	if c.perms == nil || !c.perms.sshAllowed(execution.SessionFromContext(ctx), net.JoinHostPort(t.Host, strconv.Itoa(t.Port))) {
-		return vbox.StartOptions{}, fmt.Errorf("%w: SSH %q resolves to %s (user %s); request grant ssh %s", fs.ErrPermission, raw, t.address(), t.User, t.address())
+	if r.deps.Allowed != nil && !r.deps.Allowed(ctx, net.JoinHostPort(target.Host, strconv.Itoa(target.Port))) {
+		return vbox.StartOptions{}, fmt.Errorf("%w: SSH %q resolves to %s (user %s); request grant ssh %s", fs.ErrPermission, raw, target.address(), target.User, target.address())
 	}
-	binary, err := trustedSSHBinary()
+	binary, err := TrustedBinary()
 	if err != nil {
 		return vbox.StartOptions{}, err
 	}
@@ -52,14 +75,25 @@ func (c *Client) sshOptions(ctx context.Context, raw string, port int) (vbox.Sta
 	} {
 		args = append(args, "-o", option)
 	}
-	if t.IdentitiesOnly {
+	if target.IdentitiesOnly {
 		args = append(args, "-o", "IdentitiesOnly=yes")
 	}
-	for _, p := range t.Identities {
+	for _, p := range target.Identities {
 		args = append(args, "-i", strings.ReplaceAll(p, "%", "%%"))
 	}
-	args = append(args, "-p", strconv.Itoa(t.Port), "-l", t.User, "--", t.Host)
+	args = append(args, "-p", strconv.Itoa(target.Port), "-l", target.User, "--", target.Host)
 	return vbox.StartOptions{Exec: args, Env: sshClientEnv(home), ReplaceEnv: true, NoSandbox: true, RawOutput: true, Workdir: home}, nil
+}
+
+// Run 执行一次 SSH 传输进程。
+func (r *Runner) Run(ctx context.Context, opts vbox.StartOptions, in io.Reader, out, errout io.Writer) (int, error) {
+	if r.deps.Run != nil {
+		return r.deps.Run(ctx, opts, in, out, errout)
+	}
+	if r.deps.Processes == nil {
+		return 0, fmt.Errorf("ssh: process manager unavailable")
+	}
+	return r.deps.Processes.RunProcess(ctx, opts, in, out, errout)
 }
 
 // sshEnvPassthrough 是唯一允许从 pod 设备环境透传给 OpenSSH 客户端的变量（不传脚本
@@ -88,7 +122,8 @@ func sshOptionPath(p string) string {
 	return `"` + strings.ReplaceAll(p, `"`, `\"`) + `"`
 }
 
-func trustedSSHBinary() (string, error) {
+// TrustedBinary 返回系统 OpenSSH 客户端的绝对路径。
+func TrustedBinary() (string, error) {
 	candidates := []string{"/usr/bin/ssh", "/bin/ssh"}
 	if runtime.GOOS == "windows" {
 		candidates = []string{filepath.Join(os.Getenv("SYSTEMROOT"), "System32", "OpenSSH", "ssh.exe")}
@@ -104,13 +139,6 @@ func trustedSSHBinary() (string, error) {
 	return "", fmt.Errorf("system OpenSSH client is unavailable")
 }
 
-func (c *Client) runSSH(ctx context.Context, opts vbox.StartOptions, in io.Reader, out, errout io.Writer) (int, error) {
-	if c.sshRun != nil {
-		return c.sshRun(ctx, opts, in, out, errout)
-	}
-	return c.procs.RunProcess(ctx, opts, in, out, errout)
-}
-
 func sshHelp(inv *commands.Invocation, usage string) bool {
 	if len(inv.Args) == 1 && (inv.Args[0] == "--help" || inv.Args[0] == "-h") {
 		fmt.Fprintln(inv.Stdout, usage)
@@ -121,22 +149,23 @@ func sshHelp(inv *commands.Invocation, usage string) bool {
 
 const sshUsage = "usage: ssh <[user@]host[:port]|alias> <remote command...>\nManaged host SSH: public-key authentication, known_hosts required, no TTY/options/forwarding. Remote command arguments are joined with spaces; quote the entire remote shell command. Authorization: grant ssh host:port."
 
-func (c *Client) managedSSH(ctx context.Context, inv *commands.Invocation) error {
+// SSH 执行 ssh <target> <remote command>。
+func (r *Runner) SSH(ctx context.Context, inv *commands.Invocation) error {
 	if sshHelp(inv, sshUsage) {
 		return nil
 	}
 	if len(inv.Args) < 2 || strings.HasPrefix(inv.Args[0], "-") || strings.TrimSpace(strings.Join(inv.Args[1:], " ")) == "" {
 		return commands.Exitf(inv, 2, "%s", sshUsage)
 	}
-	if _, err := parseSSHTarget(inv.Args[0]); err != nil {
+	if _, err := ParseTarget(inv.Args[0]); err != nil {
 		return commands.Exitf(inv, 2, "ssh: %v", err)
 	}
-	opts, err := c.sshOptions(ctx, inv.Args[0], 0)
+	opts, err := r.Options(ctx, inv.Args[0], 0)
 	if err != nil {
 		return commands.Exitf(inv, 126, "ssh: %v", err)
 	}
 	opts.Exec = append(opts.Exec, strings.Join(inv.Args[1:], " "))
-	code, err := c.runSSH(ctx, opts, inv.Stdin, inv.Stdout, inv.Stderr)
+	code, err := r.Run(ctx, opts, inv.Stdin, inv.Stdout, inv.Stderr)
 	if err != nil {
 		return commands.Exitf(inv, 126, "ssh: %v", err)
 	}
@@ -148,7 +177,7 @@ func (c *Client) managedSSH(ctx context.Context, inv *commands.Invocation) error
 
 // withSFTP owns every pipe and the process. Context cancellation also closes
 // protocol pipes: killing ssh alone cannot unblock every io.Pipe operation.
-func (c *Client) withSFTP(ctx context.Context, opts vbox.StartOptions, stderr io.Writer, fn func(*sftp.Client) error) error {
+func (r *Runner) withSFTP(ctx context.Context, opts vbox.StartOptions, stderr io.Writer, fn func(*sftp.Client) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Insert -s before --; no user arguments are appended as SSH options.
@@ -168,7 +197,7 @@ func (c *Client) withSFTP(ctx context.Context, opts vbox.StartOptions, stderr io
 	defer stop()
 	done := make(chan error, 1)
 	go func() {
-		code, err := c.runSSH(ctx, opts, inR, outW, stderr)
+		code, err := r.Run(ctx, opts, inR, outW, stderr)
 		if err == nil && code != 0 {
 			err = fmt.Errorf("SSH transport exited %d", code)
 		}

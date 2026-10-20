@@ -1,4 +1,4 @@
-package host
+package sshx
 
 import (
 	"bufio"
@@ -15,9 +15,6 @@ import (
 	"strings"
 
 	"github.com/pkg/sftp"
-	"github.com/veypi/aic-pod/libs/execution"
-
-	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -107,7 +104,7 @@ func parseSSHOperand(s string) (sshOperand, error) {
 		}
 		if ch == ':' && !bracket {
 			o = sshOperand{target: s[:i], name: s[i+1:], remote: true}
-			if _, err := parseSSHTarget(o.target); err != nil {
+			if _, err := ParseTarget(o.target); err != nil {
 				return o, err
 			}
 			if err := literalRemotePath(o.name); err != nil {
@@ -126,16 +123,12 @@ func sshLocalPath(s string) string {
 	return s
 }
 
-func (c *Client) preflightSSHLocal(ctx context.Context, inv *commands.Invocation, name string, write bool) error {
-	op := vbox.OpRead
-	if write {
-		op = vbox.OpWrite
+// checkLocal 委托宿主的 fs 域预检（未注入 = 放行，仅测试夹具）。
+func (s *Runner) checkLocal(ctx context.Context, inv *commands.Invocation, name string, write bool) error {
+	if s.deps.CheckLocal == nil {
+		return nil
 	}
-	abs := inv.FS.Resolve(name)
-	if !c.perms.fsSnapshot(execution.SessionFromContext(ctx)).Match(abs, op).Allow {
-		return fmt.Errorf("%w: request grant fs %s", execution.ErrRuleDenied, abs)
-	}
-	return nil
+	return s.deps.CheckLocal(ctx, inv, name, write)
 }
 
 func literalRemotePath(s string) error {
@@ -196,7 +189,8 @@ func safeTransferName(s string) bool {
 	return true
 }
 
-func (c *Client) managedSCP(ctx context.Context, inv *commands.Invocation) error {
+// SCP 执行 scp [-r] <src> <dst>（恰一端为远端）。
+func (s *Runner) SCP(ctx context.Context, inv *commands.Invocation) error {
 	if sshHelp(inv, scpUsage) {
 		return nil
 	}
@@ -219,7 +213,7 @@ func (c *Client) managedSCP(ctx context.Context, inv *commands.Invocation) error
 	if src.remote {
 		target = src.target
 	}
-	opts, err := c.sshOptions(ctx, target, o.port)
+	opts, err := s.Options(ctx, target, o.port)
 	if err != nil {
 		return commands.Exitf(inv, 126, "scp: %v", err)
 	}
@@ -227,7 +221,7 @@ func (c *Client) managedSCP(ctx context.Context, inv *commands.Invocation) error
 	if src.remote {
 		local = dst.name
 	}
-	if err := c.preflightSSHLocal(ctx, inv, local, src.remote); err != nil {
+	if err := s.checkLocal(ctx, inv, local, src.remote); err != nil {
 		return transferError(inv, "scp", err)
 	}
 	if !src.remote {
@@ -235,7 +229,7 @@ func (c *Client) managedSCP(ctx context.Context, inv *commands.Invocation) error
 			return transferError(inv, "scp", err)
 		}
 	}
-	err = c.withSFTP(ctx, opts, inv.Stderr, func(remote *sftp.Client) error {
+	err = s.withSFTP(ctx, opts, inv.Stderr, func(remote *sftp.Client) error {
 		cwd, err := remote.Getwd()
 		if err != nil {
 			return err
@@ -320,7 +314,8 @@ func parseSFTPBatch(r io.Reader) ([]sftpOperation, error) {
 	return ops, s.Err()
 }
 
-func (c *Client) managedSFTP(ctx context.Context, inv *commands.Invocation) error {
+// SFTP 执行 sftp -b <file|-> <target>（批模式）。
+func (s *Runner) SFTP(ctx context.Context, inv *commands.Invocation) error {
 	if sshHelp(inv, sftpUsage) {
 		return nil
 	}
@@ -344,22 +339,22 @@ func (c *Client) managedSFTP(ctx context.Context, inv *commands.Invocation) erro
 	if err != nil {
 		return commands.Exitf(inv, 2, "sftp: %v", err)
 	}
-	opts, err := c.sshOptions(ctx, o.args[0], o.port)
+	opts, err := s.Options(ctx, o.args[0], o.port)
 	if err != nil {
 		return commands.Exitf(inv, 126, "sftp: %v", err)
 	}
 	for _, op := range ops {
 		if op.command == "get" {
-			err = c.preflightSSHLocal(ctx, inv, op.args[1], true)
+			err = s.checkLocal(ctx, inv, op.args[1], true)
 		}
 		if op.command == "put" {
-			err = c.preflightSSHLocal(ctx, inv, op.args[0], false)
+			err = s.checkLocal(ctx, inv, op.args[0], false)
 		}
 		if err != nil {
 			return transferError(inv, "sftp", err)
 		}
 	}
-	err = c.withSFTP(ctx, opts, inv.Stderr, func(remote *sftp.Client) error {
+	err = s.withSFTP(ctx, opts, inv.Stderr, func(remote *sftp.Client) error {
 		cwd, err := remote.Getwd()
 		if err != nil {
 			return err

@@ -1,4 +1,4 @@
-package host
+package sshx
 
 // Configuration is parsed as data. Never run ssh -G against ambient config:
 // Match exec is evaluated even when no connection is made.
@@ -18,7 +18,8 @@ import (
 
 const sshConfigLimit = 1 << 20
 
-type sshTarget struct {
+// Target 是解析后的 SSH 目标（host/port/user/密钥）。
+type Target struct {
 	Host, User     string
 	Port           int
 	Identities     []string
@@ -26,10 +27,11 @@ type sshTarget struct {
 	Home           string
 }
 
-func (t sshTarget) address() string { return net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) }
+func (t Target) address() string { return net.JoinHostPort(t.Host, strconv.Itoa(t.Port)) }
 
-func parseSSHTarget(raw string) (sshTarget, error) {
-	t := sshTarget{}
+// ParseTarget 解析 [user@]host[:port]（不含 ssh config 展开）。
+func ParseTarget(raw string) (Target, error) {
+	t := Target{}
 	if i := strings.LastIndexByte(raw, '@'); i >= 0 {
 		t.User, raw = raw[:i], raw[i+1:]
 		if !sshUserValid(t.User) {
@@ -183,7 +185,7 @@ func sshWords(s string) ([]string, error) {
 }
 
 type sshConfigReader struct {
-	target      *sshTarget
+	target      *Target
 	alias, root string
 	active      bool
 	seen        map[string]bool
@@ -191,8 +193,9 @@ type sshConfigReader struct {
 	stack       map[string]bool
 }
 
-func resolveSSHTarget(raw, home string, port int) (sshTarget, error) {
-	t, err := parseSSHTarget(raw)
+// ResolveTarget 按 ssh config 展开目标（只解析数据，不执行 ssh -G）。
+func ResolveTarget(raw, home string, port int) (Target, error) {
+	t, err := ParseTarget(raw)
 	if err != nil {
 		return t, err
 	}
@@ -415,7 +418,7 @@ func (r *sshConfigReader) includePath(name string) (string, error) {
 	return filepath.Clean(name), nil
 }
 
-func expandSSHIdentity(s string, t sshTarget) (string, error) {
+func expandSSHIdentity(s string, t Target) (string, error) {
 	if s == "none" {
 		return s, nil
 	}

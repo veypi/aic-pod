@@ -6,9 +6,11 @@ import (
 	"github.com/veypi/aic-pod/protocol"
 	"path/filepath"
 
+	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/hostfs"
 
 	"github.com/veypi/vbox"
+	"github.com/veypi/vsh/commands"
 )
 
 // fsDecision 是 fs 数据面与 fsx 共用的规则表判定入口：快照每次调用取当次
@@ -35,6 +37,19 @@ func (c *Client) fsGate(sid string) func(op, abs string, write bool) error {
 		}
 		return nil
 	}
+}
+
+// preflightSSHLocal 是 scp/sftp 本地路径的 fs 域预检（sshx.Deps.CheckLocal）。
+func (c *Client) preflightSSHLocal(ctx context.Context, inv *commands.Invocation, name string, write bool) error {
+	op := vbox.OpRead
+	if write {
+		op = vbox.OpWrite
+	}
+	abs := inv.FS.Resolve(name)
+	if !c.perms.fsSnapshot(execution.SessionFromContext(ctx)).Match(abs, op).Allow {
+		return fmt.Errorf("%w: request grant fs %s", execution.ErrRuleDenied, abs)
+	}
+	return nil
 }
 
 func (c *Client) initFilesystem() error {

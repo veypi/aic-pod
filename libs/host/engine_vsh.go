@@ -14,6 +14,7 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
@@ -41,6 +42,19 @@ func hostCanonical(p string) string {
 }
 
 func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, error) {
+	c.ssh = sshx.New(sshx.Deps{
+		Processes: c.procs,
+		Run: func(ctx context.Context, opts vbox.StartOptions, in io.Reader, out, errout io.Writer) (int, error) {
+			if c.sshRun != nil {
+				return c.sshRun(ctx, opts, in, out, errout)
+			}
+			return c.procs.RunProcess(ctx, opts, in, out, errout)
+		},
+		Allowed: func(ctx context.Context, hostport string) bool {
+			return c.perms != nil && c.perms.sshAllowed(execution.SessionFromContext(ctx), hostport)
+		},
+		CheckLocal: c.preflightSSHLocal,
+	})
 	engine, err := execution.NewEngine(execution.EngineConfig{
 		Registry: reg,
 		BaseEnv:  hostIdentityBaseEnv(),
@@ -68,7 +82,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		Platform: execution.PlatformDeps{
 			Grant:       c.vshGrant,
 			GrantStatus: c.vshGrantStatus,
-			SSH:         execution.SSHDeps{SSH: c.managedSSH, SCP: c.managedSCP, SFTP: c.managedSFTP},
+			SSH:         execution.SSHDeps{SSH: c.ssh.SSH, SCP: c.ssh.SCP, SFTP: c.ssh.SFTP},
 			// Host 不提供 ListHosts/SendUser，因此不注册这两个命令。
 			// mcp 是服务管理面（list/add/remove/start/stop/restart + 调试直通）；
 			// 工具调用走服务自身的 vsh 根命令（vtools 登记，见 services.go）。
