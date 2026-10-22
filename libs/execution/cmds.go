@@ -36,6 +36,9 @@ type PlatformDeps struct {
 	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话；files 为附件路径
 // （云端 UFS 绝对路径，可多个），channelID 指定目标 channel（空=会话默认）。
 	SendUser func(ctx context.Context, sessionKey, message string, files []string, channelID string) error
+	// Sessions 会话自查命令（只读，cloud 专属）。nil = 不注册（host/page）。
+	// 平台侧只提供执行面（CommandFunc），查询与派生逻辑在 aic 的 libs/sessionkit。
+	Sessions commands.CommandFunc
 	// SSH is host-only. Nil implementations are never registered on cloud/page.
 	SSH SSHDeps
 	// Pull/Push 设备↔平台云盘文件传输（host-only；/fs/cloud HTTP 面 + 设备凭证，
@@ -66,6 +69,9 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	}
 	if deps.SendUser != nil {
 		add("send_user", deps.cmdSendUser)
+	}
+	if deps.Sessions != nil {
+		add("sessions", deps.Sessions)
 	}
 	for _, c := range []struct {
 		name string

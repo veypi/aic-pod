@@ -15,6 +15,8 @@
 
 ## Unreleased
 
+- **`sessions` 平台命令注册位（2026-10-22）**：`PlatformDeps` 新增 `Sessions commands.CommandFunc`——平台侧只提供执行面（命令函数由 aic 注入，查询/派生逻辑在 aic 的 `libs/sessionkit`），非 nil 才注册 `sessions`，host/page 传 nil 即不注册（与其余平台命令同一约定）。只读命令，不改 pod 端行为。
+
 - **send_user 支持附件与指定 channel（破坏性，2026-10-19）**：`PlatformDeps.SendUser` 签名扩为 `func(ctx, sessionKey, message string, files []string, channelID string) error`；`send_user` 命令新增 `--file/-f <路径>`（可重复，云空间绝对路径）与 `--channel <id>`，仅附件无文本合法。此前模型调 `send_user --file x y` 会被当纯文本原样发出（4000 微信实测踩坑）。aic 侧接线（engine_cloud → gateway.SendUser）同步更新。
 
 - **blender 工具面跟到 addon 0.3.0（2026-10-16）**：`blender --help` 的工具清单补 `render`（渲一帧 PNG 落盘，支持临时机位/引擎/采样/裁剪面并渲完还原）与 `execute_code --file` 提示，细节指向 aic-skills 手册。addon 与手册本体在 aic-skills 仓（blender 0.2.1→0.3.0），pod 经内嵌包分发，**需重建 pod 才生效**。

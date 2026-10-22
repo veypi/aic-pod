@@ -3,6 +3,7 @@ package execution
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -57,10 +58,43 @@ func TestPlatformCommandsRegistered(t *testing.T) {
 		}
 	}
 	// 依赖未接线的命令不得注册；skill 已随 v6.2 收归独立工具（防回归）。
-	for _, name := range []string{"grant", "list_hosts", "send_user", "skill"} {
+	for _, name := range []string{"grant", "list_hosts", "send_user", "skill", "sessions"} {
 		if _, ok := reg.Lookup(name); ok {
 			t.Fatalf("unsupported command %q registered", name)
 		}
+	}
+}
+
+// sessions（会话自查，只读）：接线才注册；未接线不注册（host/page 端）。
+func TestSessionsCommandRegistration(t *testing.T) {
+	t.Parallel()
+	reg := commands.NewRegistry()
+	if err := RegisterPlatformCommands(reg, PlatformDeps{Tasks: NewTaskTable()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.Lookup("sessions"); ok {
+		t.Fatal("sessions must not register without wiring")
+	}
+	wired := commands.NewRegistry()
+	err := RegisterPlatformCommands(wired, PlatformDeps{
+		Tasks: NewTaskTable(),
+		Sessions: func(ctx context.Context, inv *commands.Invocation) error {
+			fmt.Fprintln(inv.Stdout, "ok")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wired.Lookup("sessions"); !ok {
+		t.Fatal("sessions must register when wired")
+	}
+	out, _, err := runCmd(t, wired, "sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(out) != "ok" {
+		t.Fatalf("sessions out = %q", out)
 	}
 }
 
