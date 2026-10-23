@@ -5,7 +5,7 @@
 // 进程内路径权威）、NetClient（netclient.go）、静态分析（analyze.go）、
 // 平台命令（cmds.go）、显式 NativeExec 注入。
 //
-// hosts-vsh-redesign 要点：
+// 执行面要点（契约见 docs/hosts-tools.md）：
 //   - 每次 exec 使用独立派生会话（共享 backing FS，独立内存层）——脚本执行
 //     不持有跨调用的会话锁，bg 查询/取消与组合脚本永不被另一执行阻塞
 //     （不靠单指令特判）。跨 exec 的 cwd/变量不持久（外层每次显式传 workdir）。

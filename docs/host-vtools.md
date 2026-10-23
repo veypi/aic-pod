@@ -1,6 +1,6 @@
 # host-vtools：通用工具服务注册机制（2026-10-16 定稿）
 
-> 地位同 hosts-vsh-redesign.md：本文件是「服务注册进 vsh」的契约源。
+> 地位同 hosts-tools.md：本文件是「服务注册进 vsh」的契约源。
 > 动机：MCP 只是一种协议。任何协议（MCP / TCP / …）的工具适配成
 > `vtools.Provider` 后直接注册为 vsh 根命令；`mcp` 命令退化为纯管理面
 >（add/remove/start/stop/list + 调试直通），不再是工具调用的中转层。

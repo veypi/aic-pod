@@ -31,8 +31,9 @@ manifest for the built-in packs (browser/cua/blender).
 - `protocol/` — transport-independent contracts: `tool.go` (the request/action face), `caps.go`,
   `fs.go`, `hosts_nats.go`, `hosts_rtc.go`, `path.go`, `sign.go`, `subject.go`, RTC signal/ticket.
 - `docs/` — Chinese design and operational docs: `host_sandbox.md` (security/authorization
-  contract), `hosts-tools.md` (tool and MCP surface), `design.md`, `managed-ssh.md`,
-  `release-architecture.md`.
+  contract), `hosts-tools.md` (tool and MCP surface + execution boundary), `browser.md`
+  (device-side Browser/CUA runtime), `design.md`, `managed-ssh.md`, `managed-git.md`,
+  `host-vtools.md`, `release-architecture.md`.
 - `Makefile`, `Dockerfile`, `resources/` (icons + `winres.json`), `desktop/scripts/` (packaging hooks), `dist/` (build output).
 
 ## Build & test

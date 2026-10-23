@@ -35,7 +35,7 @@ browser/CUA are built into the Pod — registered by default and started on dema
 
 The browser runs a real Chrome in the background with a consistent UA, Client Hints,
 automation markers and window size, and reuses a dedicated profile; details in
-[Browser runtime](docs/hosts-tools.md#browser-运行环境).
+[Browser runtime](docs/browser.md).
 
 ## Quick start
 
@@ -55,6 +55,7 @@ docker run -d --name aic-pod -e KEY="<your-key>" veypi/aic-pod:latest
 - Security model: [docs/host_sandbox.md](docs/host_sandbox.md)
 - Architecture: [docs/design.md](docs/design.md)
 - Tools and MCP: [docs/hosts-tools.md](docs/hosts-tools.md)
+- Browser/CUA runtime: [docs/browser.md](docs/browser.md)
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## Configuration
@@ -120,7 +121,7 @@ no-sandbox flag must carry its own approval.
 
 ### Install
 
-Download the binary for your platform from [Releases](../../releases) and put it in `PATH`.
+Download the binary for your platform from [Releases](https://github.com/veypi/aic-pod/releases) and put it in `PATH`.
 
 ### Usage
 

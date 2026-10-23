@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Caller 是已认证请求的调用者身份（hosts-vsh-redesign §3：身份和会话来自
+// Caller 是已认证请求的调用者身份（契约见 docs/hosts-tools.md；身份和会话来自
 // 已认证请求，经执行上下文传递；不再有数字等级）。
 //
 // Subject=用户 id；Origin=会话 id（RTC 由票据绑定，不能由请求字段冒认）；

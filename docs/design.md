@@ -1,6 +1,6 @@
 # AIC Pod 架构
 
-现行实现：2026-10-05。调用契约见 [设备 MCP](hosts-tools.md)。
+现行实现：2026-10-23。调用契约见 [设备执行与工具服务](hosts-tools.md)；browser/CUA 设备侧接入见 [browser](browser.md)。
 
 Pod 是设备执行端，负责身份验证、原生命令、文件服务、官方 browser/CUA 与第三方 MCP 连接。技能内容位于 cloud，Pod 不维护技能安装表，不托管技能 UI/API。
 
@@ -11,12 +11,15 @@ Pod 是设备执行端，负责身份验证、原生命令、文件服务、官�
 | libs/host | 装配身份、执行器、文件服务与 mcp command；唯一运行权限状态 permissionState（FS/net/SSH/cmd 一份编译基表 + 会话临时授权，vbox 提供匹配） |
 | libs/mcpx | 官方 SDK 服务连接管理 |
 | libs/vtools | 协议无关的服务登记层（MCP/TCP → vsh 根命令） |
+| libs/rtc | hosts_rtc/3 传输：认证票据 + 可靠有序 DataChannel（aic-tools 与通用流通道），不做业务分发 |
 | libs/sshx | 托管 ssh/scp/sftp（系统 OpenSSH + ssh 域门） |
 | libs/gitx | 托管的 git ssh 传输（复用 sshx 授权与硬化选项） |
 | protocol | 全部线上契约单包：tool 请求/响应与错误、FS 数据面类型、hosts_nats/hosts_rtc 签名与认证信封、RTC 票据与信令、subject/caps/凭证、路径可解析层（批次 2 合包；NATS/RTC 信封各自存在，类型 Nats*/Rtc*/FS* 前缀区分） |
 | libs/execution | vsh、日志、前台等待/bg、唯一运行记录表（前台/后台同一记录，cancel/bg kill/断连同表） |
 | vbox | 原生进程和 OS 沙箱、取消回收 |
-| libs/hostfs | 文件数据面 |
+| libs/hostfs | 文件数据面（fs/1 provider：字节以会话级 source 返回，不拼工具文本） |
+| libs/fsx | 文件服务公共件（读/列/改/图片等操作与编辑诊断） |
+| libs/imageutil | 图片判定、编解码与设备端预览缩放（与 SDK 共用单一实现） |
 | runtime、desktop/vendor | 固定版本的上游程序与发行资源，不实现工具 |
 | ../aic-skills | 静态技能内容、云端 UI/API、普通脚本资源 |
 

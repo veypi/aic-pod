@@ -1,4 +1,4 @@
-// Execute 是 exec 接入层的执行编排（hosts-vsh-redesign §2.4）：
+// Execute 是 exec 接入层的执行编排（契约见 docs/hosts-tools.md）：
 // 前台等待 W，等待到期按通道策略二选一——登记后台（NATS/AI：bg 机制服务
 // AI 跨 tool call 管理）或返回 ErrWaitElapsed（RTC：超时即超时，执行继续、
 // 不产生 bg 记录）。
@@ -25,7 +25,7 @@ var ErrWaitElapsed = errors.New("exec: foreground wait elapsed; execution contin
 
 // ErrCapacity 标记转后台登记容量不足（任务表满）：本次执行已被取消（不让
 // 未登记的执行游离运行），调用方据此返回资源类错误码（overloaded）并保留
-// 已创建的日志地址（hosts-vsh-redesign §2.4）。
+// 已创建的日志地址（契约见 docs/hosts-tools.md）。
 var ErrCapacity = errors.New("exec: background capacity exceeded")
 
 // OutcomeKind 是编排结果的控制流分类（调用方按 Kind 分支，不再用哨兵错误

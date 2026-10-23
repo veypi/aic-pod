@@ -10,7 +10,7 @@ func execReq() Request {
 }
 
 // hosts_nats/3：签名覆盖完整请求（含 grant_approved 标记与脚本正文）——
-// 篡改任一字段验签必失败（hosts-vsh-redesign §4.2）。
+// 篡改任一字段验签必失败（签名信封见 protocol/sign.go）。
 func TestSignatureBindsEveryExecutionField(t *testing.T) {
 	subject, _ := NatsSubject("u1", "h1")
 	r := NatsRequest{HostID: "h1", Subject: subject, Caller: "u1", Nonce: "nonce", Deadline: time.Now().Add(time.Minute).UnixMilli(), AuthorizationUntil: time.Now().Add(2 * time.Minute).UnixMilli(), Request: execReq()}

@@ -1,6 +1,6 @@
 # Host 执行权限与原生沙箱
 
-状态：2026-09-28 已实施（hosts-vsh-redesign 阶段 1-6）。本文替代旧等级检查流程；总契约见 [hosts-vsh-redesign.md](hosts-vsh-redesign.md)。
+状态：2026-09-28 已实施（原设计稿阶段 1-6）。本文替代旧等级检查流程；总契约见 [hosts-tools.md](hosts-tools.md)。
 
 ## 1. 边界
 

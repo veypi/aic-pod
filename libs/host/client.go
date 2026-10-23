@@ -1,4 +1,4 @@
-// Package host 是 AIC host agent 运行时（hosts-vsh-redesign）：
+// Package host 是 AIC host agent 运行时（契约见 docs/hosts-tools.md）：
 // NATS 连接与认证、能力上报、心跳、请求分发、执行管理器装配。
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——

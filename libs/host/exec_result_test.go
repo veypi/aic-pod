@@ -1,6 +1,6 @@
 package host
 
-// exec_result_test.go 锁定 exec 完成响应的输出策略（hosts-vsh-redesign §3.1 +
+// exec_result_test.go 锁定 exec 完成响应的输出策略（输出策略见 docs/hosts-tools.md +
 // 2026-09-28 用户裁定）：截断预览只针对 NATS（AI 消费）；RTC 直连全量返回
 // content+attrs——不截断、不转后台、没有 truncated 标记。
 

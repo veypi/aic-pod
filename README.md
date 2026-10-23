@@ -31,7 +31,7 @@ aic-pod 是 AIC 平台的设备端客户端：它通过 NATS WebSocket 主动连
 技能是云端静态内容；browser/CUA 随 Pod 内置，默认注册并按需启动。
 
 Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，
-并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/hosts-tools.md#browser-运行环境)。
+并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/browser.md)。
 
 ## 快速开始
 
@@ -51,6 +51,7 @@ docker run -d --name aic-pod -e KEY="<你的 KEY>" veypi/aic-pod:latest
 - 安全模型：[docs/host_sandbox.md](docs/host_sandbox.md)
 - 架构：[docs/design.md](docs/design.md)
 - 工具与 MCP：[docs/hosts-tools.md](docs/hosts-tools.md)
+- Browser/CUA 接入：[docs/browser.md](docs/browser.md)
 - 版本变更：[CHANGELOG.md](CHANGELOG.md)
 
 ## 配置
@@ -107,7 +108,7 @@ desktop 设置窗经 Electron IPC spawn 同一套子命令；保存后重启后�
 
 ### 安装
 
-从 [Releases](../../releases) 下载对应平台二进制，放入 `PATH` 即可。
+从 [Releases](https://github.com/veypi/aic-pod/releases) 下载对应平台二进制，放入 `PATH` 即可。
 
 ### 用法
 

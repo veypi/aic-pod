@@ -1,6 +1,6 @@
 // AIC Desktop — Electron 主进程（纯远程壳：Chromium 渲染平台 + Go 后端子进程）。
 //
-// 架构（固定视口 browser，设计见 aic/docs/os_native_windows.md）：
+// 架构（固定视口 browser，设计见 aic/docs/remote-screen.md）：
 //
 // Electron Main (Node)
 //   ├─ spawn Go 后端；设置/凭证经 `aic-backend config|bind` 子命令读写 config.yaml

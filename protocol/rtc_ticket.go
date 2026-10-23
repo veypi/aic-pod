@@ -29,7 +29,7 @@ type RtcTicket struct {
 	PCID              string `json:"pc_id"`
 	Fingerprint       string `json:"fingerprint"`
 	ConnectionID      string `json:"connection_id,omitempty"`
-	// SessionID 绑定 RTC 请求归属会话（hosts-vsh-redesign §2.4：RTC 的
+	// SessionID 绑定 RTC 请求归属会话（契约见 docs/hosts-tools.md；RTC 的
 	// session_id 必须由票据绑定，不能由脚本或未经核验的请求字段冒认）。
 	SessionID  string `json:"session_id,omitempty"`
 	ID         string `json:"jti"`
