@@ -3,7 +3,7 @@
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
 // vsh 默认 registry + contrib 命令（jq/awk/html-to-markdown）+ 平台命令
-// （commands/bg/grant/mcp/skill/ssh/scp/sftp）由引擎 Registry 收口；服务
+// （commands/bg/grant/mcp/ssh/scp/sftp）由引擎 Registry 收口；服务
 // （MCP/TCP 等）经 vtools 登记为 vsh 根命令（mcp 退化为管理面，browser 与
 // cua 是内置服务）；原生命令按 exec_rules 首命中判定；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处

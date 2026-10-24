@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/veypi/vsh/commands"
@@ -30,15 +29,6 @@ type PlatformDeps struct {
 	// GrantStatus 返回各域授权姿态与规则表（grant status——只读，不要求
 	// grant_approved）。nil = 降级报错。
 	GrantStatus func(ctx context.Context, sessionKey string) (string, error)
-	// ListHosts 返回预格式化的主机表文本（表格形态由平台定——cloud 给
-	// Markdown 表；host 端通常 nil 降级）。sessionKey=调用会话。
-	ListHosts func(ctx context.Context, sessionKey string) (string, error)
-	// SendUser 给用户发消息（通知通道）。sessionKey=调用会话；files 为附件路径
-// （云端 UFS 绝对路径，可多个），channelID 指定目标 channel（空=会话默认）。
-	SendUser func(ctx context.Context, sessionKey, message string, files []string, channelID string) error
-	// Sessions 会话自查命令（只读，cloud 专属）。nil = 不注册（host/page）。
-	// 平台侧只提供执行面（CommandFunc），查询与派生逻辑在 aic 的 libs/sessionkit。
-	Sessions commands.CommandFunc
 	// SSH is host-only. Nil implementations are never registered on cloud/page.
 	SSH SSHDeps
 	// Pull/Push 设备↔平台云盘文件传输（host-only；/fs/cloud HTTP 面 + 设备凭证，
@@ -50,8 +40,9 @@ type SSHDeps struct {
 	SSH, SCP, SFTP commands.CommandFunc
 }
 
-// RegisterPlatformCommands 注册平台命令：commands / bg / grant / list_hosts /
-// send_user / ssh 族 / pull / push。全部自带 help 文本（--help/-h 或无参数子命令自答）。
+// RegisterPlatformCommands 注册通用平台命令：commands / bg / grant /
+// ssh 族 / pull / push。cloud 专属命令（sessions/list_hosts/send_user）由
+// 各平台在引擎建好后通过 Registry 自行注册。
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	list := []commands.Command{commands.DefineCommand("commands", deps.cmdCommands)}
 	add := func(name string, fn commands.CommandFunc) { list = append(list, commands.DefineCommand(name, fn)) }
@@ -63,15 +54,6 @@ func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	}
 	if deps.Grant != nil || deps.GrantStatus != nil {
 		add("grant", deps.cmdGrant)
-	}
-	if deps.ListHosts != nil {
-		add("list_hosts", deps.cmdListHosts)
-	}
-	if deps.SendUser != nil {
-		add("send_user", deps.cmdSendUser)
-	}
-	if deps.Sessions != nil {
-		add("sessions", deps.Sessions)
 	}
 	for _, c := range []struct {
 		name string
@@ -327,67 +309,5 @@ func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) er
 		msg = fmt.Sprintf("grant %s %s: 已授权", domain, target)
 	}
 	fmt.Fprintln(inv.Stdout, msg)
-	return nil
-}
-
-const listHostsHelp = `usage: list_hosts — 列出可执行 host exec 的主机（id/name/os/在线状态）`
-
-func (d PlatformDeps) cmdListHosts(ctx context.Context, inv *commands.Invocation) error {
-	if helpRequested(inv.Args) {
-		fmt.Fprintln(inv.Stdout, listHostsHelp)
-		return nil
-	}
-	if d.ListHosts == nil {
-		return commands.Exitf(inv, 1, "list_hosts: 此端未接主机目录")
-	}
-	text, err := d.ListHosts(ctx, SessionFromContext(ctx))
-	if err != nil {
-		return commands.Exitf(inv, 1, "list_hosts: %s", err)
-	}
-	fmt.Fprintln(inv.Stdout, text)
-	return nil
-}
-
-const sendUserHelp = `usage: send_user [--file <路径>]... [--channel <id>] <消息...> — 给用户发一条消息
-  --file/-f  附件（云空间绝对路径），可重复
-  --channel  指定目标 channel id（默认当前会话绑定）`
-
-func (d PlatformDeps) cmdSendUser(ctx context.Context, inv *commands.Invocation) error {
-	if helpRequested(inv.Args) {
-		fmt.Fprintln(inv.Stdout, sendUserHelp)
-		return nil
-	}
-	var files []string
-	var channelID string
-	var words []string
-	for i := 0; i < len(inv.Args); i++ {
-		switch inv.Args[i] {
-		case "--file", "-f":
-			if i+1 >= len(inv.Args) {
-				return commands.Exitf(inv, 2, "send_user: --file 缺路径")
-			}
-			files = append(files, inv.Args[i+1])
-			i++
-		case "--channel":
-			if i+1 >= len(inv.Args) {
-				return commands.Exitf(inv, 2, "send_user: --channel 缺 id")
-			}
-			channelID = inv.Args[i+1]
-			i++
-		default:
-			words = append(words, inv.Args[i])
-		}
-	}
-	message := strings.Join(words, " ")
-	if message == "" && len(files) == 0 {
-		return commands.Exitf(inv, 2, "usage: send_user [--file <路径>]... <消息...>")
-	}
-	if d.SendUser == nil {
-		return commands.Exitf(inv, 1, "send_user: 此端未接通知通道")
-	}
-	if err := d.SendUser(ctx, SessionFromContext(ctx), message, files, channelID); err != nil {
-		return commands.Exitf(inv, 1, "send_user: %s", err)
-	}
-	fmt.Fprintln(inv.Stdout, "sent")
 	return nil
 }

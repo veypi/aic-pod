@@ -38,7 +38,7 @@ type UFSAdapterConfig struct {
 	Rules func() vbox.FSRuleSet
 	// NormalizePath is supplied only by an OS backing; logical UFS paths stay logical.
 	NormalizePath func(string, bool) string
-	// JailRoots jail 根集（cloud = /u/{uid} + /skill）：代码硬约束，规则表管不到
+	// JailRoots jail 根集（cloud = /u/{uid} + /skills + /public）：代码硬约束，规则表管不到
 	// 界外——界外路径即使写入规则行也不生效。空 = 不启用（host）。cwd = 首根。
 	JailRoots []string
 	// MemPrefixes 内存层前缀集（cloud = /dev /proc）：伪系统目录，
@@ -110,56 +110,6 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	}
 
 	return a, nil
-}
-
-// CloudFSConfig cloud 会话文件系统参数。
-type CloudFSConfig struct {
-	// UserRoot = /u/{uid}（HOME；jail 首根=cwd）。
-	UserRoot string
-	// JailExtra 额外 jail 根（当前 = ["/skills", "/public"]：skill 包与云盘同层，
-	// public 是可读公共面；具体深度/读写由规则表表达）。
-	JailExtra []string
-	// Backing UFS 直通（调用方已包 QuotaFS）。
-	Backing ufs.FS
-	// Rules vbox 规则表快照源（行序：temp → 便利根 rw 会话目录 → ro 行；
-	// DefaultWrite deny）。
-	Rules func() vbox.FSRuleSet
-	// Aliases 路径别名（/tmp → /u/{uid}/.sessions/{sid}/tmp），见
-	// UFSAdapterConfig.Aliases。
-	Aliases map[string]string
-	// SysFiles 合成只读系统文件（/etc/passwd、/etc/group；内容由 aic 按
-	// 会话身份合成），见 UFSAdapterConfig.SysFiles。
-	SysFiles map[string][]byte
-}
-
-// CloudMemPrefixes cloud 内存层伪系统目录（per-exec，用完即弃，UFS 零污染）。
-// 导出供 aic 预检使用（F1：字面写目标落内存层前缀 = 运行期放行、永不落
-// UFS，预检不应拦）。/etc 不在此列——写 /etc 与 host 同语义，吃规则表
-// 硬拒（SysFiles 只为 /etc/passwd、/etc/group 开放**读**，写同样硬拒）；
-// /tmp 由 Aliases 重定向到会话空间（跨 exec 持久、过配额闸门）。
-var CloudMemPrefixes = []string{"/dev", "/proc"}
-
-// NewCloudFS cloud：UFS 直通 + 系统目录内存层 + 用户根 jail + vbox 规则表门。
-// 用户根在此确保存在（构造期直写 backing，不经规则表门——平台初始化动作；
-// 引擎 init 的 MkdirAll(HOME/workDir) 走门且依赖已存在的根）。
-func NewCloudFS(cfg CloudFSConfig) (gbfs.FileSystem, error) {
-	if cfg.UserRoot == "" {
-		return nil, fmt.Errorf("vsh glue: cloud user root required")
-	}
-	if cfg.Backing == nil {
-		return nil, fmt.Errorf("vsh glue: ufs backing required")
-	}
-	if err := cfg.Backing.MkdirAll(cfg.UserRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("vsh glue: init user root: %w", err)
-	}
-	return NewUFSAdapter(UFSAdapterConfig{
-		Backing:     cfg.Backing,
-		Rules:       cfg.Rules,
-		JailRoots:   append([]string{cfg.UserRoot}, cfg.JailExtra...),
-		MemPrefixes: CloudMemPrefixes,
-		Aliases:     cfg.Aliases,
-		SysFiles:    cfg.SysFiles,
-	})
 }
 
 // resolve 把引擎传入路径（可相对）归一为绝对逻辑路径（posix 语义），

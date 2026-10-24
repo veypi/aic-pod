@@ -101,7 +101,7 @@ func newQuotaTestEngine(t *testing.T, q *quotaTestFS) *Engine {
 	e, err := NewEngine(EngineConfig{
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
 		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewCloudFS(CloudFSConfig{
+			fsys, err := newCloudFSForTest(cloudFSTestConfig{
 				UserRoot: "/u/u1",
 				Backing:  q,
 				Rules:    func() vbox.FSRuleSet { return vbox.FSRuleSet{DefaultWrite: vbox.EffRW} },

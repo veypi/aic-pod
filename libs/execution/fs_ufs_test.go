@@ -14,6 +14,31 @@ import (
 	gbfs "github.com/veypi/vsh/fs"
 )
 
+// cloudFSTestConfig 是测试用的 cloud 形态适配器参数（生产构造器 NewCloudFS
+// 已移到 AIC；这里直接装配共享 UFSAdapter，保持适配器覆盖在 pod 内）。
+type cloudFSTestConfig struct {
+	UserRoot  string
+	JailExtra []string
+	Backing   ufs.FS
+	Rules     func() vbox.FSRuleSet
+	Aliases   map[string]string
+	SysFiles  map[string][]byte
+}
+
+func newCloudFSForTest(cfg cloudFSTestConfig) (gbfs.FileSystem, error) {
+	if err := cfg.Backing.MkdirAll(cfg.UserRoot, 0o755); err != nil {
+		return nil, err
+	}
+	return NewUFSAdapter(UFSAdapterConfig{
+		Backing:     cfg.Backing,
+		Rules:       cfg.Rules,
+		JailRoots:   append([]string{cfg.UserRoot}, cfg.JailExtra...),
+		MemPrefixes: []string{"/dev", "/proc"},
+		Aliases:     cfg.Aliases,
+		SysFiles:    cfg.SysFiles,
+	})
+}
+
 // newCloudAdapter 构造 cloud 适配器：localFS backing + jail /u/u1 +
 // 规则表（便利根 rw 会话目录 → ro 用户根；DefaultWrite deny）。
 func newCloudAdapter(t *testing.T) (gbfs.FileSystem, ufs.FS) {
@@ -26,7 +51,7 @@ func newCloudAdapter(t *testing.T) (gbfs.FileSystem, ufs.FS) {
 		{Pattern: "/u/u1/.sessions/s1", Effect: vbox.EffRW, Class: vbox.ClassConvenience},
 		{Pattern: "/u/u1", Effect: vbox.EffRO, Class: vbox.ClassCfg},
 	}, vbox.EffDeny)
-	fsys, err := NewCloudFS(CloudFSConfig{
+	fsys, err := newCloudFSForTest(cloudFSTestConfig{
 		UserRoot: "/u/u1",
 		Backing:  backing,
 		Rules:    func() vbox.FSRuleSet { return rules },
@@ -170,7 +195,7 @@ func TestCloudFSSysFilesReadOnly(t *testing.T) {
 	}
 	rules := vbox.NewFSRuleSet(nil, vbox.EffDeny)
 	const content = "u1:x:1000:1000:u1:/u/u1:/bin/sh\n"
-	fsys, err := NewCloudFS(CloudFSConfig{
+	fsys, err := newCloudFSForTest(cloudFSTestConfig{
 		UserRoot: "/u/u1",
 		Backing:  backing,
 		Rules:    func() vbox.FSRuleSet { return rules },
@@ -237,7 +262,7 @@ func TestCloudFSDynamicRuleReason(t *testing.T) {
 				return vbox.Resolution{Handled: true, Effect: vbox.EffDeny, Reason: "公开包是发布物：任何人不允许改写，grant 也不可授"}
 			}},
 	}, vbox.EffDeny)
-	fsys, err := NewCloudFS(CloudFSConfig{
+	fsys, err := newCloudFSForTest(cloudFSTestConfig{
 		UserRoot:  "/u/u1",
 		JailExtra: []string{"/skills"},
 		Backing:   backing,
@@ -255,7 +280,7 @@ func TestCloudFSDynamicRuleReason(t *testing.T) {
 	}
 	// 静态行/兜底的统一文案仍在（报错引导 grant）。
 	static := vbox.NewFSRuleSet(nil, vbox.EffDeny)
-	fsys2, err := NewCloudFS(CloudFSConfig{
+	fsys2, err := newCloudFSForTest(cloudFSTestConfig{
 		UserRoot: "/u/u1", Backing: backing,
 		Rules: func() vbox.FSRuleSet { return static },
 	})
@@ -439,7 +464,7 @@ func TestCloudFSJailRootMetadataTraversable(t *testing.T) {
 		{Pattern: "/skills/ok", Effect: vbox.EffRO, Class: vbox.ClassCfg},
 		{Pattern: "/skills", Effect: vbox.EffDeny, Class: vbox.ClassCfg},
 	}, vbox.EffDeny)
-	fsys, err := NewCloudFS(CloudFSConfig{
+	fsys, err := newCloudFSForTest(cloudFSTestConfig{
 		UserRoot:  "/u/u1",
 		JailExtra: []string{"/skills"},
 		Backing:   backing,

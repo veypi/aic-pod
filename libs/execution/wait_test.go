@@ -22,7 +22,7 @@ func newWaitTestEngine(t *testing.T) *Engine {
 	e, err := NewEngine(EngineConfig{
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
 		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
+			fsys, err := newCloudFSForTest(cloudFSTestConfig{UserRoot: "/u/u1", Backing: backing})
 			return fsys, "/u/u1", err
 		},
 	})

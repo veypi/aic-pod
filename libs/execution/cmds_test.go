@@ -3,7 +3,6 @@ package execution
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -65,39 +64,6 @@ func TestPlatformCommandsRegistered(t *testing.T) {
 	}
 }
 
-// sessions（会话自查，只读）：接线才注册；未接线不注册（host/page 端）。
-func TestSessionsCommandRegistration(t *testing.T) {
-	t.Parallel()
-	reg := commands.NewRegistry()
-	if err := RegisterPlatformCommands(reg, PlatformDeps{Tasks: NewTaskTable()}); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := reg.Lookup("sessions"); ok {
-		t.Fatal("sessions must not register without wiring")
-	}
-	wired := commands.NewRegistry()
-	err := RegisterPlatformCommands(wired, PlatformDeps{
-		Tasks: NewTaskTable(),
-		Sessions: func(ctx context.Context, inv *commands.Invocation) error {
-			fmt.Fprintln(inv.Stdout, "ok")
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := wired.Lookup("sessions"); !ok {
-		t.Fatal("sessions must register when wired")
-	}
-	out, _, err := runCmd(t, wired, "sessions")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(out) != "ok" {
-		t.Fatalf("sessions out = %q", out)
-	}
-}
-
 func TestCmdCommandsListsRegistry(t *testing.T) {
 	t.Parallel()
 	reg := commands.NewRegistry()
@@ -120,20 +86,20 @@ func TestCmdCommandsDisplayFilter(t *testing.T) {
 	_ = RegisterPlatformCommands(reg, PlatformDeps{
 		Tasks:        NewTaskTable(),
 		Discoverable: func(name string) bool { return core[name] },
-		SendUser:     func(context.Context, string, string, []string, string) error { return nil },
+		Pull:         func(context.Context, *commands.Invocation) error { return nil },
 	})
 	out, _, err := runCmd(t, reg, "commands")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, "list_hosts") || strings.Contains(out, "send_user") {
+	if strings.Contains(out, "pull") {
 		t.Fatalf("filtered out = %q", out)
 	}
 	if !strings.Contains(out, "commands") {
 		t.Fatalf("commands out = %q", out)
 	}
 	// 未列出照常可执行
-	if _, _, err := runCmd(t, reg, "send_user", "hello"); err != nil {
+	if _, _, err := runCmd(t, reg, "pull"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -362,50 +328,5 @@ func TestBGWaitBudget(t *testing.T) {
 	ctx3 := context.WithValue(ctx, execRunKey{}, self)
 	if _, _, err := runCmdCtx(ctx3, t, reg, "bg", "wait", "bg-self", "1"); err == nil {
 		t.Fatal("wait on self must fail")
-	}
-}
-
-func TestCmdSendUserAndHosts(t *testing.T) {
-	t.Parallel()
-	reg := commands.NewRegistry()
-	var sent string
-	var sentFiles []string
-	var sentChannel string
-	_ = RegisterPlatformCommands(reg, PlatformDeps{
-		Tasks: NewTaskTable(),
-		SendUser: func(ctx context.Context, sessionKey, msg string, files []string, channelID string) error {
-			sent = msg
-			sentFiles = files
-			sentChannel = channelID
-			return nil
-		},
-		ListHosts: func(ctx context.Context, sessionKey string) (string, error) {
-			return "| id | name |\n| h1 | mbp |\n", nil
-		},
-	})
-	ctx := identityCtx("u1", "s1", false)
-	out, _, err := runCmdCtx(ctx, t, reg, "send_user", "hello", "world")
-	if err != nil || sent != "hello world" || !strings.Contains(out, "sent") {
-		t.Fatalf("send_user: %q %q %v", out, sent, err)
-	}
-	// --file/--channel 解析：文件归附件、文本归消息、不串味
-	out, _, err = runCmdCtx(ctx, t, reg, "send_user", "--file", "/u/admin/a.md", "-f", "/b.png", "--channel", "ch-9", "look", "this")
-	if err != nil || sent != "look this" || sentChannel != "ch-9" || !strings.Contains(out, "sent") {
-		t.Fatalf("send_user flags: %q %q %q %v", out, sent, sentChannel, err)
-	}
-	if len(sentFiles) != 2 || sentFiles[0] != "/u/admin/a.md" || sentFiles[1] != "/b.png" {
-		t.Fatalf("send_user files: %v", sentFiles)
-	}
-	// 仅附件无文本合法（发送端自行决定是否要求文本）
-	if _, _, err = runCmdCtx(ctx, t, reg, "send_user", "--file", "/x"); err != nil {
-		t.Fatalf("send_user files-only: %v", err)
-	}
-	// --file 缺路径 → exit 2
-	if _, _, err = runCmdCtx(ctx, t, reg, "send_user", "--file"); err == nil {
-		t.Fatal("send_user --file without path should fail")
-	}
-	out, _, err = runCmdCtx(ctx, t, reg, "list_hosts")
-	if err != nil || !strings.Contains(out, "h1") {
-		t.Fatalf("list_hosts: %q %v", out, err)
 	}
 }

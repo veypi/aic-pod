@@ -21,7 +21,7 @@ func newTestEngine(t *testing.T) *Engine {
 		// HOME=/u/{uid}、PATH 钉死（env 由平台每次注入）。
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
 		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
+			fsys, err := newCloudFSForTest(cloudFSTestConfig{UserRoot: "/u/u1", Backing: backing})
 			return fsys, "/u/u1", err
 		},
 	})
@@ -219,7 +219,7 @@ func TestEngineTrustedContext(t *testing.T) {
 	e, err := NewEngine(EngineConfig{
 		BaseEnv: map[string]string{"HOME": "/u/u1", "PATH": "/usr/bin:/bin"},
 		NewSessionFS: func(ctx context.Context, key string) (gbfs.FileSystem, string, error) {
-			fsys, err := NewCloudFS(CloudFSConfig{UserRoot: "/u/u1", Backing: backing})
+			fsys, err := newCloudFSForTest(cloudFSTestConfig{UserRoot: "/u/u1", Backing: backing})
 			return fsys, "/u/u1", err
 		},
 		Platform: PlatformDeps{

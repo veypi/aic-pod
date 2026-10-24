@@ -5,6 +5,15 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **cloud 文件系统构造与路径策略移出 execution（2026-10-25，用户定）**：删除 `CloudFSConfig` / `NewCloudFS` / `CloudMemPrefixes` 与 `CloudPathPolicy`，保留共享 `UFSAdapter` / `ApplyAlias`；cloud 装配归 AIC `tools/exec/cloudfs.go`，cloud 调用路径策略归 `tools/fs/cloudpath.go`。pod 测试改用本地 `cloudFSTestConfig` helper，继续覆盖共享适配器。验证：`go build ./...`；`go test ./libs/execution` 全绿。**无运行时行为变化。**
+
+- **cloud 专属命令移出 execution（2026-10-25，用户定）**：`PlatformDeps` 删除 `Sessions` / `ListHosts` / `SendUser` 字段，`RegisterPlatformCommands` 只保留通用命令 `commands` / `bg` / `grant` / `ssh` 族 / `pull` / `push`。`sessions`、`list_hosts`、`send_user` 的注册与命令解析由 aic 在 `execution.NewEngine` 返回后通过 `Registry()` 自行注册（`aic/tools/exec/internal/cloudcmd`）。`libs/host/engine_vsh.go` 的注释同步。验证：`go test ./libs/execution/...` 全绿；`libs/host` 既有 SSH/MCP/RTC 环境性失败与本次无关。**无运行时行为变化。**
+
+- **依赖升级 + 内建 mv 权限档修复（2026-10-24）**：`veypi/vsh` v0.3.1→**v0.3.2**（身份键 UID/EUID 导出到命令可见环境：此前内建拿不到真实身份会回落虚拟身份 1000，在真实属主非 1000 的设备上（macOS 桌面用户 uid=501）按 POSIX 权限档判定会落 group 档而非属主档，把属主可写的目录误判为不可写——症状：0755 目录里内建 `mv` 报 `Permission denied`，同目录原生 `/bin/mv` 正常）。新增回归用例 `libs/host/builtin_rename_test.go`（0755 目录内建 mv 必须成功）。
+- **桌宠路由白名单同步（2026-10-24）**：`desktop/main.js` 进入桌宠的白名单从旧 `/a/{aid}/pet` 改为 `/agents/{aid}/pet`，与平台前端路由 `/agents/:agent_id/pet` 对齐；非法页面仍回落 `/pet`。**重建 Desktop 壳后生效。**
+
 ## v0.9.2 — 2026-10-19
 
 - **发布说明（2026-10-19）**：破坏性版本，与 aic **v0.17.0** 同批发（服务端 `cfg.MinPodVersion` 已提到 v0.9.2，低于此版会被 caps 门禁拒服务）。

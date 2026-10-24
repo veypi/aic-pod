@@ -60,7 +60,7 @@ function registerSettingsProtocol() {
 
 let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
 let platformView = null // 平台页视图（恒占满 contentView）
-let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /a/{aid}/pet）
+let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /agents/{aid}/pet）
 let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
 let keepWin = null // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
 let keepExpectedUrl = '' // keepWin 当前期望地址（did-fail-load 延迟重试的竞态护栏）
@@ -626,8 +626,10 @@ function createMainWindow(init) {
   mainWin = new BaseWindow({
     width: 1280,
     height: 800,
-    minWidth: 800,
-    minHeight: 600,
+    // 2026-10-23：minWidth 800 → 480、minHeight 600 → 480
+    // 下限太高时「窄高」窗口（左右分屏）永远造不出来，auto dock 也就永远走不到横道
+    minWidth: 480,
+    minHeight: 480,
     frame: false,
     show: false,
     // fullscreen 键只在需要启动即全屏时传 true——显式传 false 会让 macOS frameless
@@ -810,7 +812,7 @@ function resizePet(dir) {
   savePetPosDebounced()
 }
 
-// ---- 桌宠：独立透明小窗，与主窗口共存（主窗口不动），加载 /pet 或 /a/{aid}/pet ----
+// ---- 桌宠：独立透明小窗，与主窗口共存（主窗口不动），加载 /pet 或 /agents/{aid}/pet ----
 function enterPet(page) {
   if (!mainWin) return state()
   if (petWin) return state()
@@ -834,9 +836,9 @@ function enterPet(page) {
   })
   petWin.on('focus', syncAltSpace)
   petWin.on('blur', syncAltSpace)
-  // 平台桌宠页（仅放行 /pet 与 /a/{aid}/pet，query 透传）；remote-preload 注入（host 白名单）
+  // 平台桌宠页（仅放行 /pet 与 /agents/{aid}/pet，query 透传）；remote-preload 注入（host 白名单）
   const raw = String(page || '')
-  const p = /^\/pet($|\?)|^\/a\/[^/]+\/pet($|\?)/.test(raw) ? raw : '/pet'
+  const p = /^\/pet($|\?)|^\/agents\/[^/]+\/pet($|\?)/.test(raw) ? raw : '/pet'
   petWin.loadURL(host.replace(/\/+$/, '') + p)
   // 位置：优先恢复上次缓存（仍在显示器内），无缓存/失效居中于鼠标
   if (Number.isFinite(st.x) && Number.isFinite(st.y) && petPosOnScreen(st.x, st.y)) {

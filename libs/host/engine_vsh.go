@@ -94,7 +94,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			Grant:       c.vshGrant,
 			GrantStatus: c.vshGrantStatus,
 			SSH:         execution.SSHDeps{SSH: c.ssh.SSH, SCP: c.ssh.SCP, SFTP: c.ssh.SFTP},
-			// Host 不提供 ListHosts/SendUser，因此不注册这两个命令。
+			// cloud 专属命令（sessions/list_hosts/send_user）由 AIC 自己注册。
 			// mcp 是服务管理面（list/add/remove/start/stop/restart + 调试直通）；
 			// 工具调用走服务自身的 vsh 根命令（vtools 登记，见 services.go）。
 			MCP: c.cmdMCP,
