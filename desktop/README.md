@@ -25,6 +25,8 @@ Electron Main (Node, main.js)
  │    settings-ui/settings.html；settings-preload 暴露设置桥 → IPC 'local:api' → 主进程 spawn
  │    子命令；托盘「本地配置」直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；
  │    保存/绑定后自动重启后端子进程并原地重载设置页
+ ├─ 平台不可达 / 主框架加载失败：主窗停留 loading 页并按 10s→20s→30s 复查 {host}/root.html，
+ │    恢复即自动载入平台（等待态按「重新加载」= 立即复查）——平台恢复后不需要重启应用
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
@@ -51,7 +53,7 @@ npm start
 平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/settings.html 单文件静态页，
 无框架/无构建、数据全走 IPC 桥）与 main.js/preload.js 改动需重启 electron。
 browser/CUA 使用上游独立程序，没有自研 server 或工具适配层。
-`mcp.servers` 可完整替换默认配置或添加第三方服务。协议见 [设备 MCP](../docs/hosts-tools.md)。
+`mcp.servers` 可完整替换默认配置或添加第三方服务。协议见 [设备 MCP](../docs/reference/hosts-tools.md)。
 开发依赖分别由 `npm run agent-browser-sync`、`npm run browser-sync`、`npm run cua-sync` 同步。
 版本在 `agent-browser.json`、`browser.json`、`cua.json` 固定。
 

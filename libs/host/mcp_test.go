@@ -33,7 +33,7 @@ func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	if servers["browser"].Command != filepath.Join(root, "agent-browser", binary) || !reflect.DeepEqual(servers["browser"].Args, []string{"mcp", "--tools", "core,tabs"}) {
+	if servers["browser"].Command != filepath.Join(root, "agent-browser", binary) || !reflect.DeepEqual(servers["browser"].Args, []string{"mcp", "--tools", "core,tabs,mobile,state"}) {
 		t.Fatalf("browser must launch upstream directly: %+v", servers["browser"])
 	}
 	if servers["cua"].Command != filepath.Join(root, "cua-driver") || !reflect.DeepEqual(servers["cua"].Args, []string{"mcp"}) {
@@ -87,7 +87,7 @@ func TestMCPHasNoPlatformServer(t *testing.T) {
 	}
 }
 
-func TestMCPConfiguredServiceFromNativeExecAndUI(t *testing.T) {
+func TestMCPConfiguredServiceFromFileCommandAndUI(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
 	cfg.Global.ExecPolicy, cfg.Global.NetPolicy = cfg.PolicyOpen, cfg.PolicyOpen

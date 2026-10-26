@@ -8,9 +8,9 @@ package gitx
 // 都违背最小权限。
 //
 // 设计（与 managed ssh 同构）：
-//   - vsh 的 git 仍走 PATH fallback；nativeExec 按解析名拦截。传输类子命令
+//   - Pod 显式注册普通 git 命令。传输类子命令
 //    （clone/fetch/pull/push/ls-remote）且 remote 为 ssh 形态时由 pod 侧
-//     NoSandbox 执行；其余一律交还原生沙箱路径（handled=false，行为与现状
+//     NoSandbox 执行；其他子命令由同一实现交给 trusted binary + vbox（handled=false，行为与现状
 //     完全一致）。
 //   - 传输授权复用 ssh 域：URL 解析出 user@host:port 后直接复用 sshOptions
 //    （内含 sshAllowed 检查与全套硬化选项）；未授权时报错即 managed ssh 同
@@ -53,8 +53,8 @@ type Runner struct{ deps Deps }
 
 func New(deps Deps) *Runner { return &Runner{deps: deps} }
 
-// Managed 拦截原生 git（nativeExec 按解析名调用）。handled=true 表示本调用
-// 已终态（含拒绝与用法错误）；false = 交还原生沙箱路径。
+// Managed 是 Pod git 命令的 SSH 传输部分。handled=true 表示本调用已终态
+// （含拒绝与用法错误）；false 由调用方在同一实现中走 trusted binary + vbox。
 func (r *Runner) Managed(ctx context.Context, inv *commands.Invocation) (bool, error) {
 	if runtime.GOOS == "windows" {
 		return false, nil // MVP 仅 unix（GIT_SSH wrapper 为 sh 形态）

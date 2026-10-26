@@ -20,22 +20,26 @@ keeping that power on a leash:
 
 - **Outbound only** — no inbound listener, no public IP, no firewall holes.
 - **Sandbox that fails closed** — macOS Seatbelt / Linux bubblewrap / Windows restricted token; with no usable backend the command is refused, never run bare.
-- **Three-domain authorization + human approval** — fs / net / ssh each carry their own stance and allow-list; a no-sandbox request escalates to separate human approval.
+- **Uniform exec admission + command policies + human approval** — every registered command passes through `exec_policy` before its implementation applies its own FS/NET/SSH policy; a no-sandbox request escalates to separate human approval.
 
 [中文](README.md) | **English**
 
 | Client | Form | Capabilities |
 | --- | --- | --- |
-| **desktop** (main product) | Electron shell + Go backend child process | exec (sandboxed, three-domain authorization), fs, browser, cua (native GUI automation) |
-| **cli** | single binary `aic` | exec (sandboxed, three-domain authorization, incl. browser/cua/ssh/scp), fs |
+| **desktop** (main product) | Electron shell + Go backend child process | exec (uniform admission + command policies + native sandbox), fs, browser, cua (native GUI automation) |
+| **cli** | single binary `aic` | exec (uniform admission + command policies + native sandbox, incl. browser/cua/ssh/scp), fs |
 
 Device `fs`/`exec` calls go straight to the executor and file service; standalone services are
-reached over [MCP connections](docs/hosts-tools.md). Skills are static cloud content;
+reached over [MCP connections](docs/reference/hosts-tools.md). Skills are static cloud content;
 browser/CUA are built into the Pod — registered by default and started on demand.
+
+This document describes the current unified command and policy model dated 2026-10-26.
+The core migration is complete; caching, the darwin proxy and real-platform validation are
+tracked in [docs/development/todo.md](docs/development/todo.md).
 
 The browser runs a real Chrome in the background with a consistent UA, Client Hints,
 automation markers and window size, and reuses a dedicated profile; details in
-[Browser runtime](docs/browser.md).
+[Browser runtime](docs/guides/browser.md).
 
 ## Quick start
 
@@ -52,10 +56,13 @@ docker run -d --name aic-pod -e KEY="<your-key>" veypi/aic-pod:latest
 
 ## Further reading
 
-- Security model: [docs/host_sandbox.md](docs/host_sandbox.md)
-- Architecture: [docs/design.md](docs/design.md)
-- Tools and MCP: [docs/hosts-tools.md](docs/hosts-tools.md)
-- Browser/CUA runtime: [docs/browser.md](docs/browser.md)
+- Documentation map: [docs/index.md](docs/index.md)
+- Security model: [docs/reference/host-sandbox.md](docs/reference/host-sandbox.md)
+- Architecture: [docs/architecture/overview.md](docs/architecture/overview.md) (current unified command model, 2026-10-26; remaining work in [docs/development/todo.md](docs/development/todo.md))
+- Tools and MCP: [docs/reference/hosts-tools.md](docs/reference/hosts-tools.md)
+- Browser/CUA runtime: [docs/guides/browser.md](docs/guides/browser.md)
+- Managed SSH / git: [docs/guides/managed-ssh.md](docs/guides/managed-ssh.md), [docs/guides/managed-git.md](docs/guides/managed-git.md)
+- Build and release: [docs/guides/release.md](docs/guides/release.md)
 - Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## Configuration
@@ -81,17 +88,18 @@ atomic writes and only adds business validation of device parameters.
 | `WORK_DIR` | `-work_dir` | `work_dir` | system temp dir | Working directory for command execution |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | Background execution timeout |
 | `HOME_PATH` | `-home_path` | `home_path` | `/` | Default page the desktop client opens (path after the host, e.g. `/`, `/a`) |
-| `FS_POLICY` | `-fs_policy` | `fs_policy` | `deny` | Default file-write stance: `deny` (built-in roots + `fs_allow` only) or `open` (everything except `fs_deny`) |
+| `EXEC_POLICY` | `-exec_policy` | `exec_policy` | `open` | Uniform admission stance for every registered command; a denial prevents the implementation from being called |
+| `FS_POLICY` | `-fs_policy` | `fs_policy` | `deny` | Default file-write stance for vbox-backed commands: `deny` (built-in roots + `fs_allow` only) or `open` (everything except `fs_deny`) |
 | `FS_DENY` / `FS_ALLOW` | `-fs_deny` / `-fs_allow` | `fs_deny` / `fs_allow` | — | Path globs to deny / explicitly allow (an allow can override a deny; a bare path covers its subtree, globs match exactly) |
-| `NET_POLICY` | `-net_policy` | `net_policy` | `open` | Egress stance of sandboxed processes: `open` or `deny` (localhost only) |
-| `NET_DENY` / `NET_ALLOW` | `-net_deny` / `-net_allow` | `net_deny` / `net_allow` | — | Egress targets `host:port` to deny / allow (deny always wins; `localhost:*` is built in) |
-| `SSH_POLICY` | `-ssh_policy` | `ssh_policy` | `deny` | ssh/scp target stance: `deny` or `open` |
-| `SSH_DENY` / `SSH_ALLOW` | `-ssh_deny` / `-ssh_allow` | `ssh_deny` / `ssh_allow` | — | ssh targets `host[:port]` to deny / allow (deny always wins) |
+| `NET_POLICY` | `-net_policy` | `net_policy` | `open` | Network stance for vbox-backed commands and the Pod `curl` command: `open` or `deny`; each path enforces it independently without `tool:` |
+| `NET_DENY` / `NET_ALLOW` | `-net_deny` / `-net_allow` | `net_deny` / `net_allow` | — | Egress targets `host:port` to deny / allow (target matching uses level + original order; `localhost:*` is built in) |
+| `NET_UPSTREAM_PROXY` | `-net_upstream_proxy` | `net_upstream_proxy` | — | Explicit `http://`, `socks5://` or `socks5h://` upstream for the darwin deny egress proxy; included in netKey, never inherited from host proxy env |
+| `SSH_POLICY` | `-ssh_policy` | `ssh_policy` | `deny` | Target stance for Pod `ssh/scp/sftp` commands: `deny` or `open`; does not constrain `/bin/ssh` |
+| `SSH_DENY` / `SSH_ALLOW` | `-ssh_deny` / `-ssh_allow` | `ssh_deny` / `ssh_allow` | — | Pod SSH command targets `host[:port]` to deny / allow; see the permission doc for matching semantics |
 | `NO_SANDBOX` | `-no_sandbox` | `no_sandbox` | `false` | Hidden: skip the exec sandbox globally (equivalent to giving up process-level isolation; use with care; config file/flag/env only) |
 
-> The full decision rules for the three domains (fs/net/ssh × policy/deny/allow), the built-in
-> roots and the session-scoped temporary grants are documented in
-> [docs/host_sandbox.md](docs/host_sandbox.md).
+> Uniform exec admission, fs/net/ssh configuration ownership, built-in roots and session-scoped
+> temporary grants are documented in [docs/reference/host-sandbox.md](docs/reference/host-sandbox.md).
 
 Nothing is exposed on a local port (the local management API was removed on 2026-09-22): the
 settings surface *is* `UserConfigDir/aic/config.yaml`, and the CLI reads and writes it through
@@ -101,21 +109,21 @@ restart to take effect.
 
 ## Security model
 
-Host capabilities sit behind two gates:
+Host capabilities are separated into three boundaries:
 
-- **Three-domain authorization** (fs / net / ssh × policy / deny / allow): each domain has a
-  default stance (`deny`/`open`), a deny list and an explicit allow list (deny always wins; an
-  explicit allow may override a deny). There are three classes of built-in roots (workspace,
-  session directory, system temp) plus session-scoped temporary grants
-  (`grant <domain> <target>`, add `--permanent` to persist).
-- **Process sandbox** (exec calls): macOS `sandbox-exec` (Seatbelt) / Linux bubblewrap /
-  Windows restricted token. The profile (read-only or workspace-write) follows the granted
-  level and is combined with environment scrubbing, resource limits and the network egress
-  gate. With no usable backend it **fails closed** — the command is not run, never run bare.
+- **Uniform command admission**: every registered command passes through vsh's `exec_policy`;
+  a denial prevents the implementation from being called.
+- **Command-owned policies**: vbox-backed commands use FS/NET, Pod `curl` uses NET, and Pod SSH
+  commands use SSH. Built-in roots cover the workspace, session directory and system temp;
+  session grants can be made permanent.
+- **Native-process sandbox**: vbox-backed commands use macOS Seatbelt / Linux bubblewrap /
+  Windows restricted tokens to enforce FS/NET, with environment scrubbing and resource limits.
+  With no usable backend or an unsupported policy, the dependent command **fails closed** — no
+  dropped rules, rerouting or unrelated command outage.
 
-A request may ask for `nosandbox` explicitly: it always escalates to Critical(4) and therefore
-to human approval, and an approved request does not by itself waive the sandbox — the
-no-sandbox flag must carry its own approval.
+A request may ask for `nosandbox` only through explicit human approval; an ordinary approval
+does not itself waive the sandbox. Uniform exec admission and command-owned policies remain
+in force, with no SSH/Git-specific exception.
 
 ## CLI
 

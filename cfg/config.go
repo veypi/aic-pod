@@ -25,7 +25,7 @@ const DefaultHost = "https://ivec-ai.com"
 
 // Version 客户端版本：Makefile -X github.com/veypi/aic-pod/cfg.Version 注入 git
 // 版本，未注入时以此兑底。发版只改本变量；desktop 版本由构建同步。
-var Version = "v0.9.3"
+var Version = "v0.9.4"
 
 // DeviceType 客户端类型（cli/desktop），启动时固定（desktop main 覆盖为 "desktop"）。
 var DeviceType = "cli"
@@ -41,7 +41,7 @@ var DeviceType = "cli"
 //   - desc tag：-h 帮助文案
 //
 // 落盘位置：$HOME/.aic/config.yaml（flags.DumpCfg，原子写；Path/StateDir/
-// LogPath 同根，见 design.md 目录契约），
+// LogPath 同根，见 docs/architecture/overview.md 目录契约），
 // cli 与 desktop 读写同一份——任一端的修改（编辑文件 / 页面绑定）另一端启动即生效。
 //
 // 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
@@ -71,14 +71,15 @@ type Options struct {
 	HostsSources          int   `json:"hosts_sources,omitempty" yaml:"hosts_sources" desc:"maximum retained filesystem byte sources"`
 
 	// Execution policies: deny first, then operation-covering allow, then default.
-	ExecPolicy string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
-	ExecRules  []string `json:"exec_rules" yaml:"exec_rules" desc:"ordered allow:name / deny:name rules (first match wins)"`
-	FsPolicy   string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write stance: deny (writable via rules/roots only) | open (all writes except deny rules); reads are open except deny rules"`
-	FsRules    []string `json:"fs_rules" yaml:"fs_rules" desc:"ordered fs rules: 'deny:|ro:|rw:' + path glob, first match wins; bare path covers its subtree; global patterns are rejected; permanent grants prepend here"`
-	NetPolicy  string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
-	NetRules   []string `json:"net_rules" yaml:"net_rules" desc:"ordered net rules: 'allow:|deny:' + host[:port], first match wins (builtin allow localhost:* stays last); permanent grants prepend here"`
-	SshPolicy  string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
-	SshRules   []string `json:"ssh_rules" yaml:"ssh_rules" desc:"ordered ssh rules: 'allow:|deny:' + host[:port], first match wins; permanent grants prepend here"`
+	ExecPolicy       string   `json:"exec_policy" yaml:"exec_policy" default:"open" desc:"registered command stance: deny | open"`
+	ExecRules        []string `json:"exec_rules" yaml:"exec_rules" desc:"ordered allow:name / deny:name rules (first match wins)"`
+	FsPolicy         string   `json:"fs_policy" yaml:"fs_policy" default:"deny" desc:"fs write stance: deny (writable via rules/roots only) | open (all writes except deny rules); reads are open except deny rules"`
+	FsRules          []string `json:"fs_rules" yaml:"fs_rules" desc:"ordered fs rules: 'deny:|ro:|rw:' + path glob, first match wins; bare path covers its subtree; global patterns are rejected; permanent grants prepend here"`
+	NetPolicy        string   `json:"net_policy" yaml:"net_policy" default:"open" desc:"sandboxed process outbound stance: open (default) | deny (localhost-only lockdown)"`
+	NetRules         []string `json:"net_rules" yaml:"net_rules" desc:"ordered net rules: 'allow:|deny:' + host[:port], first match wins (builtin allow localhost:* stays last); permanent grants prepend here"`
+	NetUpstreamProxy string   `json:"net_upstream_proxy" yaml:"net_upstream_proxy" desc:"explicit upstream proxy for the darwin deny-posture egress proxy (http:// or socks5://; never inherited from ambient env)"`
+	SshPolicy        string   `json:"ssh_policy" yaml:"ssh_policy" default:"deny" desc:"ssh tool target stance: deny | open"`
+	SshRules         []string `json:"ssh_rules" yaml:"ssh_rules" desc:"ordered ssh rules: 'allow:|deny:' + host[:port], first match wins; permanent grants prepend here"`
 }
 
 // Global 全局有效配置：NewOptions 初始化（默认值）→ flags.AutoRegister(Global)
@@ -150,7 +151,8 @@ func (o *Options) ApplyConfigIssues(issues []flags.ConfigIssue) {
 		"exec_policy": &o.ExecPolicy, "exec_rules": &o.ExecRules,
 		"fs_policy": &o.FsPolicy, "fs_rules": &o.FsRules,
 		"net_policy": &o.NetPolicy, "net_rules": &o.NetRules,
-		"ssh_policy": &o.SshPolicy, "ssh_rules": &o.SshRules,
+		"net_upstream_proxy": &o.NetUpstreamProxy,
+		"ssh_policy":         &o.SshPolicy, "ssh_rules": &o.SshRules,
 	}
 	for _, issue := range issues {
 		for name, field := range fields {
@@ -290,7 +292,7 @@ func (o *Options) ValidateAuth() error {
 	return AuthCfg{
 		ExecPolicy: o.ExecPolicy, ExecRules: o.ExecRules,
 		FsPolicy: o.FsPolicy, FsRules: o.FsRules,
-		NetPolicy: o.NetPolicy, NetRules: o.NetRules,
+		NetPolicy: o.NetPolicy, NetRules: o.NetRules, NetUpstreamProxy: o.NetUpstreamProxy,
 		SshPolicy: o.SshPolicy, SshRules: o.SshRules,
 	}.Validate()
 }

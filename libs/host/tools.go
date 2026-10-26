@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
+	"github.com/veypi/aic-pod/libs/hostfs"
 	"github.com/veypi/aic-pod/libs/vtools"
 )
 
@@ -26,8 +27,8 @@ func (c *Client) initTools() {
 		return
 	}
 	// vtools 登记表先于 configureMCP 创建：服务（MCP/TCP）登记为 vsh 根命令。
-	// SessionOf 注入执行层的会话键取法（vtools 不反向依赖 execution）。
-	c.svc.registry = vtools.NewRegistry(reg, vtools.Options{Gate: c.mcpGate, SessionOf: execution.SessionFromContext, Logf: c.logf})
+	// 命令准入由 vsh 统一处理；独立 RTC 流通道保留自己的开启门。
+	c.svc.registry = vtools.NewRegistry(reg, vtools.Options{StreamGate: c.serviceStreamGate, Logf: c.logf})
 	// 平台命令先占位（RegisterGuarded 撞名即拒）：之后服务登记撞名只会被
 	// 拒并记日志跳过；反过来（服务先登记）会让撞名的平台命令注册失败、
 	// initErr 直接打挂整机（Connect 返回 initErr）。
@@ -45,10 +46,14 @@ func (c *Client) initTools() {
 }
 
 // DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务继续，
-// 其取消显式走 cancel/bg kill；stream 随 RTC 通道关闭由对端清理）。
+// 其取消显式走 cancel/bg kill；stream 随 RTC 通道关闭由对端清理），并只回收
+// 该连接创建的字节源。授权 owner 仍按 Subject+Origin 共享，其他 RTC/NATS 不受影响。
 func (c *Client) DisconnectTools(caller protocol.Caller) {
 	if engine, err := c.engine(); err == nil {
 		engine.Tasks.CancelConnection(caller.ConnectionID)
+	}
+	if c.bytes != nil {
+		c.bytes.CloseCreator(hostfs.Creator(caller))
 	}
 }
 
@@ -64,8 +69,8 @@ func (c *Client) handleToolsMsg(msg *nats.Msg) {
 }
 
 func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *protocol.FSInvocation) (any, error) {
-	if c.perms.err() != nil {
-		return nil, protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
+	if c.perms.err("fs") != nil {
+		return nil, protocol.Fail("permission_denied", "Device filesystem authorization configuration is invalid; repair local settings")
 	}
 	if in.Method == "text" {
 		env := &fsx.Env{
@@ -92,10 +97,6 @@ func (c *Client) dispatch(ctx context.Context, caller protocol.Caller, r protoco
 	}
 	if err := caller.Validate(ctx); err != nil {
 		return protocol.Reply(r.Protocol, r.ID, nil, err)
-	}
-	// 授权配置损坏 fail-closed（修复本地设置前拒绝一切执行/文件请求）。
-	if c.perms.err() != nil {
-		return protocol.Reply(r.Protocol, r.ID, nil, protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings"))
 	}
 	// 文件代理原有 fs-only 范围继续有效：不能借文件入口执行命令。
 	if caller.Scope == "fs" && r.Action != protocol.ActionFS {

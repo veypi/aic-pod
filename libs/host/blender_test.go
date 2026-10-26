@@ -188,7 +188,7 @@ func TestBlenderCommandEndToEnd(t *testing.T) {
 	}
 }
 
-// blender 的门：deny 策略下工具/launch 126；doctor 是只读探测，免门。
+// blender 的所有命令都经过统一 exec；独立诊断没有额外准入口。
 func TestBlenderGate(t *testing.T) {
 	saved := cfg.Global
 	cfg.Global = cfg.NewOptions()
@@ -201,15 +201,18 @@ func TestBlenderGate(t *testing.T) {
 		r := callTool(t, c, context.Background(), testCaller(), execRequest(script, 30000))
 		return decoded[protocol.Output](t, r.Result)
 	}
-	if out := run("blender ping"); out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], "mcp.blender") {
+	if out := run("blender ping"); out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp.blender" denied`) {
 		t.Fatalf("tool gate: %+v", out)
 	}
 	if out := run("blender launch"); out.Attrs["exit_code"] != "126" {
 		t.Fatalf("launch gate: %+v", out)
 	}
-	// doctor 免门：落到 L1 分级错误（exit 1），不是 126
+	if out := run("blender doctor"); out.Attrs["exit_code"] != "126" {
+		t.Fatalf("doctor bypassed unified exec: %+v", out)
+	}
+	c.perms.grantCmd("s1", "mcp.blender")
 	if out := run("blender doctor"); out.Attrs["exit_code"] != "1" || !strings.Contains(out.Content, "blender_not_installed") {
-		t.Fatalf("doctor must be gate-exempt: %+v", out)
+		t.Fatalf("granted doctor did not reach its diagnostic: %+v", out)
 	}
 }
 

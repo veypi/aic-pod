@@ -5,7 +5,19 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.9.4 — 2026-10-27
+
+- **统一文档架构**：根目录只留 README / README.en / CHANGELOG / AGENTS；`TODO.md` → `docs/development/todo.md`（基线数据同迁 `development/baselines/`），`docs/design.md` → `docs/architecture/overview.md`，`host_sandbox.md` / `hosts-tools.md` / `host-vtools.md` → `docs/reference/`（`host_sandbox` 更名 `host-sandbox`），`browser.md` / `managed-git.md` / `managed-ssh.md` / `release-architecture.md`（更名 `release.md`）→ `docs/guides/`；新增 [docs/index.md](docs/index.md) 文档地图，README / AGENTS / desktop README 与代码注释中的 `docs/...` 指针同轮更新。**纯文档调整，无运行时行为变化。**
+- **统一命令策略与 darwin 出站代理**：注册、内建、MCP 与原生文件命令共用 vsh
+  `exec_policy`；FS/NET 规则按 level + 原表序消费。新增 `net_upstream_proxy`，由 Pod
+  显式下发到 vbox net 快照及 netKey；darwin deny 姿态的非 loopback 连接可使用内建
+  HTTP/SOCKS5 代理，open 与 nosandbox 不创建代理，不继承宿主 ambient proxy。
+
+- **平台恢复后自动进入，不再必须重启桌宠态（2026-10-26）**：`desktop/main.js` 启动链原本只探测一次平台，`probeRoot` 失败即停在 loading 页，**之后没有任何复查**——平台事后恢复、甚至 Cmd+R（只重载静态 `loading.html`）都无效，只能重启应用。现在：① 不可达 → 进入等待态，按 10s→20s→30s 退避复查 `{host}/root.html`，可达即 `loadMain`（host/home_path 每轮现取，期间在设置窗改地址也会被带上）；② 菜单/快捷键「重新加载」在等待态 = 立即复查一次；③ `platformView` 主框架 `did-fail-load`（排除 -3 主动打断）→ 回落 loading 页并恢复复查，避免停在 Chromium 错误页。**桌面壳重建/重启后生效。**
+
+## v0.9.3 — 2026-10-25
+
+（本节收下原先散记在两处「未发布」的已发布条目：cloud 装配归还 aic、依赖升级 vsh v0.3.2、桌宠路由白名单，以及 sessions / send_user / blender / vtools 等 10-16～10-22 期间的变更。）
 
 - **cloud 文件系统构造与路径策略移出 execution（2026-10-25，用户定）**：删除 `CloudFSConfig` / `NewCloudFS` / `CloudMemPrefixes` 与 `CloudPathPolicy`，保留共享 `UFSAdapter` / `ApplyAlias`；cloud 装配归 AIC `tools/exec/cloudfs.go`，cloud 调用路径策略归 `tools/fs/cloudpath.go`。pod 测试改用本地 `cloudFSTestConfig` helper，继续覆盖共享适配器。验证：`go build ./...`；`go test ./libs/execution` 全绿。**无运行时行为变化。**
 
@@ -13,16 +25,6 @@
 
 - **依赖升级 + 内建 mv 权限档修复（2026-10-24）**：`veypi/vsh` v0.3.1→**v0.3.2**（身份键 UID/EUID 导出到命令可见环境：此前内建拿不到真实身份会回落虚拟身份 1000，在真实属主非 1000 的设备上（macOS 桌面用户 uid=501）按 POSIX 权限档判定会落 group 档而非属主档，把属主可写的目录误判为不可写——症状：0755 目录里内建 `mv` 报 `Permission denied`，同目录原生 `/bin/mv` 正常）。新增回归用例 `libs/host/builtin_rename_test.go`（0755 目录内建 mv 必须成功）。
 - **桌宠路由白名单同步（2026-10-24）**：`desktop/main.js` 进入桌宠的白名单从旧 `/a/{aid}/pet` 改为 `/agents/{aid}/pet`，与平台前端路由 `/agents/:agent_id/pet` 对齐；非法页面仍回落 `/pet`。**重建 Desktop 壳后生效。**
-
-## v0.9.2 — 2026-10-19
-
-- **发布说明（2026-10-19）**：破坏性版本，与 aic **v0.17.0** 同批发（服务端 `cfg.MinPodVersion` 已提到 v0.9.2，低于此版会被 caps 门禁拒服务）。
-  - **设备凭证迁进 vbase 静态秘钥（破坏性）**：认证根 = vbase `auth_keys`（kind=`aic:device`，复合凭据 `<host_id>.<四段 credential>`），旧 secret 无法迁移——**每台设备都要在平台设备页重新创建/重置凭证，把新复合凭据写进 pod 配置**；NATS fetch 通道同时退役，改走 pull/push。
-  - **`send_user` 支持附件与指定 channel（破坏性）**：`PlatformDeps.SendUser` 签名扩为 `(ctx, sessionKey, message, files []string, channelID string) error`，新增 `--file/-f`（可重复）与 `--channel`。
-  - **依赖升级（CI 无 go.work，按已发布模块解析）**：`veypi/vsh` v0.3.0→**v0.3.1**（`network.Request.Insecure` / curl `-k` 等）、`veypi/vbox` v0.3.1→**v0.3.3**（`CheckNetPolicy`/`ParseNetRule`/`NetRule.ToolOnly`，net 规则内核可执行性分类）、`veypi/vigo` v0.7.7→**v0.8.1**。
-  - 发版要求：必须推 tag **v0.9.2**（二进制版本由 `git describe` 注入，无 tag 会报 v0.9.1 被服务端拒）。
-
-## Unreleased
 
 - **`sessions` 平台命令注册位（2026-10-22）**：`PlatformDeps` 新增 `Sessions commands.CommandFunc`——平台侧只提供执行面（命令函数由 aic 注入，查询/派生逻辑在 aic 的 `libs/sessionkit`），非 nil 才注册 `sessions`，host/page 传 nil 即不注册（与其余平台命令同一约定）。只读命令，不改 pod 端行为。
 
@@ -73,6 +75,14 @@
   上限 = 响应上限）。测试：`netclient_stream_test.go`（流式投递、缺省下 70 MiB 流式下载
   成功、显式上限跨线中止）；`TestQuotaBypassCurlDownload` 改为流式口径（首块跨线计入
   用量后中止、不留半截文件、后续写锁死）。生效需重建 pod（vsh 改动一并构建）。
+
+## v0.9.2 — 2026-10-19
+
+- **发布说明（2026-10-19）**：破坏性版本，与 aic **v0.17.0** 同批发（服务端 `cfg.MinPodVersion` 已提到 v0.9.2，低于此版会被 caps 门禁拒服务）。
+  - **设备凭证迁进 vbase 静态秘钥（破坏性）**：认证根 = vbase `auth_keys`（kind=`aic:device`，复合凭据 `<host_id>.<四段 credential>`），旧 secret 无法迁移——**每台设备都要在平台设备页重新创建/重置凭证，把新复合凭据写进 pod 配置**；NATS fetch 通道同时退役，改走 pull/push。
+  - **`send_user` 支持附件与指定 channel（破坏性）**：`PlatformDeps.SendUser` 签名扩为 `(ctx, sessionKey, message, files []string, channelID string) error`，新增 `--file/-f`（可重复）与 `--channel`。
+  - **依赖升级（CI 无 go.work，按已发布模块解析）**：`veypi/vsh` v0.3.0→**v0.3.1**（`network.Request.Insecure` / curl `-k` 等）、`veypi/vbox` v0.3.1→**v0.3.3**（`CheckNetPolicy`/`ParseNetRule`/`NetRule.ToolOnly`，net 规则内核可执行性分类）、`veypi/vigo` v0.7.7→**v0.8.1**。
+  - 发版要求：必须推 tag **v0.9.2**（二进制版本由 `git describe` 注入，无 tag 会报 v0.9.1 被服务端拒）。
 
 ## v0.9.1 — 2026-10-10
 
@@ -214,7 +224,7 @@
 - browser/cua 改为 hosts_tools/1 typed 方法声明，RTC 和 NATS 共用鉴权与调用分发器；宿主不再托管其业务 session/operation/resource。
 - browser 迁入 Go，自管独立 Chrome 与 pipe CDP；删除 Electron browser 引擎、TCP provider 和旧调用入口。Desktop 只注入 Chrome 默认路径。
 - cua 驱动、窗口、快照状态迁入独立工具。前端 browser viewer 改为只读帧流和显式输入接管。
-- 当前协议、配置、测试和范围见 [hosts-tools.md](docs/hosts-tools.md)。文件管理与普通 exec 本次不迁移。
+- 当前协议、配置、测试和范围见 [hosts-tools.md](docs/reference/hosts-tools.md)。文件管理与普通 exec 本次不迁移。
 - 移除会话授权撤销与断线清空：删除 `authorization.revoke` 动作、origin 拉黑窗口与 NATS 断线自清；临时授权改为纯进程内存态（按 Session 隔离，仅随进程退出/重启清空），无调用方的 `fsauth/netauth.ResetTemporary` 一并删除。
 
 - **host 执行等待语义回归（破坏性）**：执行等待 = 请求 `timeout_ms`——到点未完成即返回执行记录（background=true + id），进程继续运行，运行预算回归执行管理器自有超时；删除 `execution.wait_ms` 与 `execution.output`（含显式日志留存），执行日志统一由 exec 分配、随记录过期清理；控制方法（commands/bg_*/grant）直呼不建执行记录；幂等摘要只绑定调用内容与授权等级（等待时长可改）。

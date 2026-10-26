@@ -28,13 +28,16 @@ func denyCommon() []string {
 		// seatbeltArgs）、linux 须 socket 覆盖挂载（见 overlayArgs）。
 		"**/docker.sock", "**/podman.sock", "**/containerd.sock",
 		"/var/run/docker.sock",
-		// browser state 目录级拒绝：全量 cookie 库 browser.json 及其
-		// 保存流程临时文件（.cli-tmp/.merge-tmp，含同等全量状态）一并覆盖。
-		// 用 ~ 而非 $HOME：~ 走 os.UserHomeDir()（Windows 回退 USERPROFILE），
-		// $HOME 是 unix 惯例变量——Windows GUI/schtasks 进程没有它，会让本表
-		// 整表编译失败（2026-10-04 win 实机：rule 30: cannot expand）。
+	}
+}
+
+// hardProtectionPaths 是 Pod 自有的 level 1 保护集合：配置与设备凭证、
+// SSH 配置/密钥和 browser 状态。普通凭证 deny 不在这个集合里。
+func hardProtectionPaths() []string {
+	return []string{
 		"~/.aic/browser/**",
 		"~/.aic/config.yaml",
-		"~/.aic/ssh_config", "~/.aic/ssh/**",
+		"~/.aic/ssh_config",
+		"~/.aic/ssh/**",
 	}
 }

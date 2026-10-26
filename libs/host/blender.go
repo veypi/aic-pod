@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/vtools"
 	"github.com/veypi/vsh/commands"
 )
@@ -319,9 +318,6 @@ func (c *Client) blenderDoctor(ctx context.Context, inv *commands.Invocation) er
 const blenderReadyTimeout = 60 * time.Second
 
 func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) error {
-	if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), "blender"); err != nil {
-		return commands.Exitf(inv, 126, "%s", err)
-	}
 	out := inv.Stdout
 	m, err := c.blenderPack()
 	if err != nil {
@@ -426,9 +422,6 @@ func (c *Client) blenderLaunch(ctx context.Context, inv *commands.Invocation) er
 // ---- install ----
 
 func (c *Client) blenderInstall(ctx context.Context, inv *commands.Invocation) error {
-	if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), "blender"); err != nil {
-		return commands.Exitf(inv, 126, "%s", err)
-	}
 	out := inv.Stdout
 	m, err := c.blenderPack()
 	if err != nil {

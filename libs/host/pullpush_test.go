@@ -174,11 +174,10 @@ func TestPushFileAndDirRejected(t *testing.T) {
 
 func TestPullPushExecRuleGate(t *testing.T) {
 	c, _, _ := setupPullPush(t, []string{"deny:pull", "deny:push"})
-	if _, err := runPullPush(t, c, "pull", "/u/u1/file.txt", filepath.Join(t.TempDir(), "x")); err == nil {
-		t.Fatal("pull should be denied by exec rules")
-	}
-	if _, err := runPullPush(t, c, "push", "x", "/u/u1/y"); err == nil {
-		t.Fatal("push should be denied by exec rules")
+	for _, name := range []string{"pull", "push"} {
+		if err := c.perms.AllowExec(context.Background(), policy.ExecRequest{Name: name}); err == nil {
+			t.Fatalf("%s should be denied by unified exec rules", name)
+		}
 	}
 }
 

@@ -1,6 +1,6 @@
 package host
 
-// Host execution assembles FS/network policy, platform commands and explicit native execution.
+// Host execution assembles FS/network policy, unified command admission and vbox-backed commands.
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
 	gbfs "github.com/veypi/vsh/fs"
+	vshpolicy "github.com/veypi/vsh/policy"
 )
 
 // vshState host 引擎装配态（Client 持有，初始化时直接装配）。
@@ -66,18 +67,23 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			return c.procs.RunProcess(ctx, opts, in, out, errout)
 		},
 	})
+	if err := c.registerManagedGit(reg); err != nil {
+		return nil, err
+	}
 	engine, err := execution.NewEngine(execution.EngineConfig{
 		Registry: reg,
 		BaseEnv:  hostIdentityBaseEnv(),
 		NewSessionFS: func(ctx context.Context, sid string) (gbfs.FileSystem, string, error) {
+			workdir := hostCanonical(c.options().WorkDir)
 			fsys, err := execution.NewHostFS(execution.HostFSConfig{
-				Backing: OSVFS{},
-				Rules:   func() vbox.FSRuleSet { return c.perms.fsSnapshot(sid) },
+				Backing:    OSVFS{},
+				Rules:      func() vbox.FSRuleSet { return c.perms.fsSnapshot(sid) },
+				WorkingDir: workdir,
 			})
 			if err != nil {
 				return nil, "", err
 			}
-			return fsys, hostCanonical(c.options().WorkDir), nil
+			return fsys, workdir, nil
 		},
 		Network: execution.NewNetClient(execution.NetClientConfig{
 			AllowPrivate: true, // host LAN 合法（私网阻断仅 cloud）
@@ -99,7 +105,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			// 工具调用走服务自身的 vsh 根命令（vtools 登记，见 services.go）。
 			MCP: c.cmdMCP,
 			// pull/push：设备↔平台云盘传输（/fs/cloud HTTP 面；skill 命令已随
-			// NATS fetch 通道一并退役——包装载改用 pull，docs/skill.md §9.2）。
+			// NATS fetch 通道一并退役——包装载改用 pull，aic docs/reference/skill.md §9.2）。
 			Pull: c.cmdPull,
 			Push: c.cmdPush,
 
@@ -114,12 +120,22 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 				return c.serviceRegistered(name)
 			},
 		},
-		NativeExec: c.nativeExec,
+		FileCommands: commands.FileCommandResolverFunc(c.resolveFileCommand),
+		ExecPolicy:   c,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return engine, nil
+}
+
+// AllowExec 把已注册服务 alias 映射到 mcp.<alias>，其他命令身份原样
+// 交给权限快照。绝对路径不经过服务别名映射。
+func (c *Client) AllowExec(ctx context.Context, req vshpolicy.ExecRequest) error {
+	if c.serviceRegistered(req.Name) {
+		req.Name = "mcp." + req.Name
+	}
+	return c.perms.AllowExec(ctx, req)
 }
 
 // vshGrantStatus 是 grant status 的执行体：四域姿态 + 规则表 + 会话级
@@ -141,9 +157,6 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 		return c.grantTarget(sid, domain, target, permanent)
 	case "cmd":
 		name := strings.TrimSpace(target)
-		if reservedSSHNative(name) {
-			return "", fmt.Errorf("grant cmd %s: reserved SSH command; use grant ssh host:port", name)
-		}
 		if err := cfg.ValidateCommandName(name); err != nil {
 			return "", fmt.Errorf("grant cmd: invalid command name %q", target)
 		}
@@ -160,11 +173,10 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 	}
 }
 
-// nativePolicy 组合当次配置与会话授权，供原生与 skill 进程共用。net 域用
-// 原生快照（剔除 tool-only 行——它们仅工具层执行，内核不落地）。
+// nativePolicy 组合当次完整配置与会话授权，供 vbox 支撑命令使用。
 func (c *Client) nativePolicy(ctx context.Context, workdir, cmd string) vbox.Policy {
 	sid := execution.SessionFromContext(ctx)
-	return vbox.Policy{FS: c.perms.fsSnapshotForNative(sid, workdir, cmd), Net: c.perms.netSnapshotForNative(sid)}
+	return vbox.Policy{FS: c.perms.fsSnapshotForNative(sid, workdir, cmd), Net: c.perms.netSnapshot(sid)}
 }
 
 // --- exec 动作的统一外层（§2.4 前台等待/超时登记 + §2.5 统一日志） ---

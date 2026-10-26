@@ -1,6 +1,6 @@
 package host
 
-// 内置工具包装载（技能包 = 插件单元，aic docs/skill.md）：pod 只读各包的
+// 内置工具包装载（技能包 = 插件单元，aic docs/reference/skill.md）：pod 只读各包的
 // cli/ 维度——cli/manifest.json 声明设备服务（协议 kind / 别名 / 程序解析 /
 // 生命周期动词 / stream 通道），程序源码经 aicskills embed 随 pod 分发。
 //

@@ -1,8 +1,9 @@
 # 托管 SSH
 
-关联：[managed-git](managed-git.md)（同一信任模型的 git 传输收编）、[host 沙箱](host_sandbox.md)。
+状态：SSH 族命令能力已实施；2026-10-26 统一命令边界已落地。
+关联：[managed-git](managed-git.md)、[host 沙箱](../reference/host-sandbox.md)。
 
-host 的 vsh 平台命令提供 `ssh`、`scp`、`sftp`。cloud/page 不注册这些能力。
+host 的 vsh 平台命令提供 `ssh`、`scp`、`sftp`。cloud/page 不注册这些能力。三者与其他注册命令一样先经过 `exec_policy`；准入通过后，SSH 目标再由命令实现使用 `ssh_policy` 判断。`ssh_policy` 是这些 Pod 命令的配置，不是原生进程的 net 配置。
 三者使用系统 OpenSSH 客户端完成认证和加密；文件传输通过
 `ssh -s sftp` 的二进制管道和 `github.com/pkg/sftp` 完成，本地文件由 pod 的
 会话文件系统访问，不启动原生 scp/sftp 读取宿主文件。
@@ -19,7 +20,7 @@ scp -r deploy@server.example.com:/srv/reports ./reports
 sftp -b ./transfer.batch deploy@server.example.com
 ```
 
-`grant` 仍需现有发送前审批；SSH 命令不新增审批类别。主机密钥应由设备所有者
+`grant` 仍需现有发送前审批；SSH 命令不新增审批类别，但仍须先通过统一的 `exec_policy`。主机密钥应由设备所有者
 预先核实并写入 `~/.ssh/known_hosts`。连接授权不等于接受未知主机密钥。
 加密私钥须事先在设备 agent 中解锁；托管调用不会询问密码或私钥口令。
 
@@ -102,31 +103,34 @@ KnownHostsCommand 等）显式报错。不会删除不支持的跳板配置后�
 
 ## 授权与执行边界
 
-1. 解析并冻结最终 host、port、user 和身份文件引用。
-2. 按最终规范化 `host:port` 检查 ssh 域；拒绝时展示别名、目标和 `grant ssh` 指引。
-3. 对已知本地传输路径预检 fs 域，执行中每个文件操作再次通过同一规则源。
-4. 固定系统 SSH 路径，`-F none`，设备最小环境，内部 `NoSandbox=true`。
+1. vsh 先按 `exec_policy` 完成命令准入；拒绝时不调用 SSH 命令实现。
+2. 解析并冻结最终 host、port、user 和身份文件引用。
+3. 按最终规范化 `host:port` 检查 `ssh_policy`；拒绝时展示别名、目标和 `grant ssh` 指引。
+4. 对已知本地传输路径预检 fs 域，执行中每个文件操作再次通过同一规则源。
+5. 固定系统 SSH 路径，`-F none`，设备最小环境，内部 `NoSandbox=true`。内部执行方式不改变外层统一准入。
 
 固定选项关闭代理、TCP/agent/X11/tunnel 转发、本地命令、已知主机命令、连接复用、
 自行后台化和交互认证；仅 publickey。连接超时 10 秒。主机校验固定为
 `StrictHostKeyChecking=yes`，使用用户 known_hosts，不自动添加/更新主机密钥，
 不读取全局 known_hosts。未知或变化的主机密钥都导致失败。
 
-ssh 域范围仍为 host+port，不限制远端 user、命令或远端路径。域名规则表达域名
-身份，不锁定 DNS 解析 IP。已建立连接不因后续规则变化自动断开，需 cancel/bg kill。
+`ssh_policy` 的范围仍为 host+port，不限制远端 user、命令或远端路径，也不约束
+`/bin/ssh` 等 vbox 支撑命令。域名规则表达域名身份，不锁定 DNS 解析 IP。已建立连接
+不因后续规则变化自动断开，需 cancel/bg kill。
 
 **内建放行 `github.com:22`（2026-10-16）**：git over ssh 是最高频托管 ssh 目标，
 免每会话 `grant ssh github.com:22`。威胁模型需明确：托管 ssh 使用所有者密钥，
-因此任何 AI 会话默认即可对所有者**有写权限的任何 GitHub 仓库**执行 push（含
-force push、删分支），无需逐次审批。排表顺序为 temp grant → cfg 规则 → 内建，
+因此在 `exec_policy` 允许相应命令后，AI 会话默认即可对所有者**有写权限的任何
+GitHub 仓库**执行 push（含 force push、删分支），无需逐次审批。排表顺序为 temp grant → cfg 规则 → 内建，
 首命中语义下所有者 `ssh_rules` 加 `deny:github.com:22` 可压过内建收回该放行。
 与 net 域内建 `localhost:*` 同一机制（`libs/host/permissions.go`）。
 
-直接原生执行按 basename 拒绝 `ssh/scp/sftp/slogin/ssh-copy-id/ssh-keyscan`，
-不受 exec allow 或 nosandbox 豁免。`grant cmd` 对这些名字提示改用 ssh 域。
-vsh 内建 env/xargs/timeout/bash 的子执行回到引擎；外部原生解释器、Git/rsync
-子进程及改名程序不受这道名称门的完整约束。本功能不提供全设备 SSH egress 隔离。
-`ssh-keygen/ssh-add/ssh-agent` 继续受 exec 域管理。
+当前模型不再设置原生 SSH 名称门。`/bin/ssh` 等绝对路径解析为 vbox 支撑命令，
+与其他命令一样先过 `exec_policy`，再由 vbox 使用 `fs_policy/net_policy`；不读取
+`ssh_policy`，不重定向到 `sshx`，也不因 basename 或 nosandbox 获得特殊语义。
+Pod 的 `ssh` 命令与 `/bin/ssh` 是两个命令实例，不做隐式失败回退。
+`ssh-keygen/ssh-add/ssh-agent` 等 vbox 支撑命令同样使用统一 exec + FS/NET 模型。
+本功能不提供全设备 SSH egress 隔离。
 
 ## 文件与生命周期
 
@@ -159,8 +163,8 @@ scp/sftp 操作失败退出 1。外层取消/墙钟超时保持现有 130/124 �
 ## 验证
 
 host 测试包含静态解析、配置副作用拒绝、Include、IPv6、批语法、会话隔离、
-本地端口上的真实 OpenSSH 客户端与测试 SSH/SFTP 服务、未知主机密钥、原生名称门、
-内建包装命令、二进制往返、目录内 deny、临时文件清理、握手取消，以及文件/父目录
+本地端口上的真实 OpenSSH 客户端与测试 SSH/SFTP 服务、未知主机密钥、统一 exec 准入、
+绝对路径原生命令独立性、内建包装命令、二进制往返、目录内 deny、临时文件清理、握手取消，以及文件/父目录
 在检查后的替换。vbox 测试覆盖无换行二进制握手、流所有权与写错误传播。
 Linux/Windows 需要在目标平台运行测试；跨平台编译不等价于运行验证。
 另有 OrbStack 外部 Include 兼容性回归，以及模拟 Windows 盘符目录的 SFTP 协议

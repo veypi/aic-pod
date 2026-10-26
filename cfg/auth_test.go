@@ -43,3 +43,27 @@ func TestSettingsApplyRejectsInvalidRulesWithField(t *testing.T) {
 		t.Fatalf("Apply() = %v, want fs_rules InvalidArg", err)
 	}
 }
+
+func TestAuthCfgValidatesUpstreamProxy(t *testing.T) {
+	for _, raw := range []string{"", "http://127.0.0.1:7897", "socks5://127.0.0.1:1080", "socks5h://proxy.example:1080"} {
+		if err := (AuthCfg{NetUpstreamProxy: raw}).Validate(); err != nil {
+			t.Errorf("valid net_upstream_proxy %q rejected: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"ftp://127.0.0.1:21",
+		"http://127.0.0.1:99999",
+		"http://127.0.0.1:7897/not-a-proxy-path",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			err := (AuthCfg{NetUpstreamProxy: raw}).Validate()
+			if err == nil {
+				t.Fatalf("invalid net_upstream_proxy %q passed AuthCfg.Validate", raw)
+			}
+			field, ok := err.(*AuthFieldError)
+			if !ok || field.Field != "net_upstream_proxy" {
+				t.Fatalf("error=%T %+v, want net_upstream_proxy field error", err, err)
+			}
+		})
+	}
+}

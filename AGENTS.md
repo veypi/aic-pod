@@ -8,11 +8,13 @@ is [README.md](README.md) (Chinese) / [README.en.md](README.en.md) (English).
 The **device-side client** of the AIC platform: it connects out over NATS WebSocket / WebRTC and
 exposes the host's capabilities (exec, fs, browser, cua, ssh/scp) as tools an LLM can call.
 
-This repo owns: sandbox and authorization enforcement, the exec/fs tool layer, the transport
-contracts, the desktop packaging and the CLI. It does **not** own: the platform side (accounts,
-approvals, prompts), or skills — skills are static cloud content and the in-repo skill runner/registry
-mechanism (`libs/skillrun`, `libs/uiscript`, `protocol/hosts_tools`) was removed on purpose; do not
-reintroduce it. The `aic-skills` Go module stays on purpose: `libs/host/packs.go` reads its embedded
+This repo owns: configuration and grant lifetimes, execution scheduling, command registration
+and command implementations, the exec/fs tool layer, transport contracts, desktop packaging and
+the CLI. It is the integration point for vsh (virtual shell and uniform `exec_policy` admission)
+and vbox (native-process FS/NET sandboxing); those libraries do not own each other's concerns.
+It does **not** own: the platform side (accounts, approvals, prompts), or skills — skills are static
+cloud content and the in-repo skill runner/registry mechanism (`libs/skillrun`, `libs/uiscript`,
+`protocol/hosts_tools`) was removed on purpose; do not reintroduce it. The `aic-skills` Go module stays on purpose: `libs/host/packs.go` reads its embedded
 manifest for the built-in packs (browser/cua/blender).
 
 ## Layout
@@ -23,17 +25,24 @@ manifest for the built-in packs (browser/cua/blender).
   packaging (`electron-builder.yml`, `agent-browser.json`, `cua.json`). `node_modules/` and
   `vendor/` are build artifacts: do not scan, link or "fix" them.
 - `cfg/` — config schema/defaults and `Version` (the only place the version number lives).
-- `libs/` — `execution` (exec runner), `fsx` (fs tool layer), `host` (host engine: connect,
-  dispatch, deny rules, browser stream, vsh engine), `hostfs` (os.Root-backed backend and path
-  canonicalization), `mcpx` (official MCP Go SDK wrapper), `vtools` (protocol-agnostic service
-  registration as vsh root commands), `sshx` (managed ssh/scp/sftp), `gitx` (managed git ssh
-  transport), `rtc`, `imageutil`.
+- `libs/` — `execution` (vsh assembly, logs and run records), `fsx` (fs tool layer), `host`
+  (host engine: connect, configuration/grant snapshots, command registration, vbox-backed
+  commands, browser stream), `hostfs` (os.Root-backed backend and path canonicalization),
+  `mcpx` (official MCP Go SDK wrapper), `vtools` (protocol-agnostic service registration as
+  vsh commands), `sshx` (Pod ssh/scp/sftp commands using `ssh_policy`), `gitx` (optional Pod
+  `git` command implementation; never an interceptor for vbox-backed `/usr/bin/git`), `rtc`,
+  `imageutil`.
 - `protocol/` — transport-independent contracts: `tool.go` (the request/action face), `caps.go`,
   `fs.go`, `hosts_nats.go`, `hosts_rtc.go`, `path.go`, `sign.go`, `subject.go`, RTC signal/ticket.
-- `docs/` — Chinese design and operational docs: `host_sandbox.md` (security/authorization
-  contract), `hosts-tools.md` (tool and MCP surface + execution boundary), `browser.md`
-  (device-side Browser/CUA runtime), `design.md`, `managed-ssh.md`, `managed-git.md`,
-  `host-vtools.md`, `release-architecture.md`.
+- `docs/` — Chinese design and operational docs, unified layout (shared across the ivec
+  repos): `index.md` is the map; `architecture/overview.md` (current architecture),
+  `reference/` (`host-sandbox.md` = security/authorization contract, `hosts-tools.md` =
+  tool and MCP surface + execution boundary, `host-vtools.md` = service registration),
+  `guides/` (`browser.md`, `managed-ssh.md`, `managed-git.md`, `release.md`),
+  `development/` (`todo.md`, `baselines/`). Root holds only READMEs, `CHANGELOG.md` and
+  this file; completed changes go to the changelog, future plans only to
+  `docs/development/todo.md`. Move a document ⇒ update every `docs/...` pointer in code
+  comments in the same turn.
 - `Makefile`, `Dockerfile`, `resources/` (icons + `winres.json`), `desktop/scripts/` (packaging hooks), `dist/` (build output).
 
 ## Build & test
@@ -65,13 +74,24 @@ make docker-build ; make docker-push ; make release ; make clean ; make help
 - **Sandbox fails closed**: with no usable backend the command is not run — never run bare.
 - **`nosandbox` is request-level and separately approved**: it always escalates to Critical(4) and
   an approval does not by itself waive the sandbox.
-- **Four-domain authorization** (fs/net/ssh/exec, each a policy + an ordered **first-match** rule
-  list): session temp grants prepend to the head and therefore CAN override an earlier deny ("deny
-  always wins" is not the model); built-in rules (net `localhost:*`, ssh `github.com:22`, credential
-  denies) sit at the tail so owner cfg lines still beat them; built-in writable roots are workspace /
-  session dir / system temp; session grants (`grant <domain> <target> [--permanent]`) are the only
-  ad-hoc widening, and `--permanent` prepends into the persisted `<domain>_rules`. Changing the
-  decision formula means updating `docs/host_sandbox.md` in the same turn.
+- **Uniform command admission (current)**: every registered command — builtins, Pod
+  commands, MCP commands and vbox-backed native-program commands — passes through the same
+  `exec_policy` gate in vsh before its implementation runs. No SSH-only, native-only or
+  management-command bypass channel. Rejection means the implementation is not called.
+- **Policies belong to command implementations**: vbox-backed commands encapsulate FS/NET and
+  call vbox; Pod `ssh` uses `ssh_policy`; Pod `curl` uses `net_policy`. Native-program commands
+  are ordinary registered commands from vsh's perspective. `ssh_policy` never constrains
+  `/bin/ssh`, and `/usr/bin/git` is never intercepted by `gitx`.
+- **Configuration and grants**: Pod owns fs/net/ssh/exec configuration, session grants and
+  permanent grants. Target FS/NET matching is `level + original order`; AI/session/permanent
+  grants are level 0, built-in hard protection is level 1, and direct owner configuration may
+  explicitly use higher levels. `Class` never derives level. Built-in writable roots are workspace
+  / session dir / system temp. Changing the decision formula means updating
+  `docs/reference/host-sandbox.md` in the same turn.
+- **No execution-layer rule patches**: `tool:` / `ToolOnly` are removed. Syntax errors and
+  unsupported platform capabilities are distinct; an unsupported vbox policy rejects only the
+  dependent native command before launch and never disables unrelated commands, drops rules or
+  reroutes to another command implementation.
 - **No local listening port**: the settings surface is the shared config file plus
   `aic config`/`aic bind` (the desktop window spawns the same subcommands over Electron IPC). Do
   not reintroduce a local management API.

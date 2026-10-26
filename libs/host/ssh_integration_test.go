@@ -22,7 +22,6 @@ import (
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/vbox"
-	"github.com/veypi/vsh/commands"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -200,14 +199,17 @@ func TestManagedSSHNativeIntegration(t *testing.T) {
 	if r := runManagedScript(t, c, "ssh fixture exit-seven", ""); r.ExitCode != 7 {
 		t.Fatalf("exit %+v", r)
 	}
-	for _, script := range []string{"ssh fixture", "ssh -o x fixture binary", "grant cmd ssh"} {
+	for _, script := range []string{"ssh fixture", "ssh -o x fixture binary"} {
 		if r := runManagedScript(t, c, script, ""); r.ExitCode == 0 {
 			t.Fatalf("accepted %s", script)
 		}
 	}
+	if r := runManagedScript(t, c, "grant cmd ssh", ""); r.ExitCode != 0 {
+		t.Fatalf("grant cmd ssh should be an ordinary grant: %+v", r)
+	}
 	if runtime.GOOS != "windows" {
-		if r := runManagedScript(t, c, "/usr/bin/ssh fixture binary", ""); r.ExitCode != 126 {
-			t.Fatalf("native bypass %+v", r)
+		if r := runManagedScript(t, c, "/usr/bin/ssh fixture binary", ""); strings.Contains(r.Stderr, "native SSH command is reserved") {
+			t.Fatalf("absolute native ssh hit a reserved-name gate: %+v", r)
 		}
 	}
 	// Unknown host keys never enroll themselves.
@@ -340,17 +342,6 @@ func TestManagedSSHSessionIsolationAndStalledTransport(t *testing.T) {
 	_, _ = e.Exec(ctx, execution.ExecRequest{SessionKey: "one", Script: "sftp -b - test", Stdin: strings.NewReader("pwd\n")})
 	if calls != 1 || time.Since(start) > 2*time.Second {
 		t.Fatal("stalled protocol did not cancel")
-	}
-}
-
-func TestManagedSSHNativeNames(t *testing.T) {
-	c := &Client{}
-	for _, name := range []string{"ssh", "scp", "sftp", "slogin", "ssh-copy-id", "ssh-keyscan"} {
-		var stderr strings.Builder
-		err := c.nativeExec(context.Background(), "/bin/"+name, &commands.Invocation{Stderr: &stderr})
-		if code, _ := commands.ExitCode(err); code != 126 {
-			t.Fatalf("%s: %v", name, err)
-		}
 	}
 }
 

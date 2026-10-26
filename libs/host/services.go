@@ -13,15 +13,11 @@ import (
 	"github.com/veypi/aic-pod/protocol"
 )
 
-// 本文件是 vtools 注册层的 host 接线（docs/host-vtools.md）：
+// 本文件是 vtools 注册层的 host 接线（docs/reference/host-vtools.md）：
 // 服务（MCP / TCP / …）登记为 vsh 根命令，mcp 命令退化为管理面。
 
-// mcpGate 是工具命令与流通道的调用门：exec 规则 mcp.<alias>（与原
-// mcpSession 门同一条规则，授权语义不变——grant cmd mcp.<alias> 放行该
-// 服务的全部工具与流）。session = 会话键（会话级 temp 授权的查找键）：
-// 命令路径传 SessionFromContext(ctx)，流通道路径传 caller.Origin（peer
-// ctx 不携带会话，取错键会让会话 grant 在锁死设备上静默失效）。
-func (c *Client) mcpGate(_ context.Context, session, alias string) error {
+// serviceStreamGate 只保护独立 RTC 流通道；vsh 命令由统一 exec 准入处理。
+func (c *Client) serviceStreamGate(_ context.Context, session, alias string) error {
 	if !c.execAllowed(session, "mcp."+alias) {
 		return fmt.Errorf("mcp.%s: denied by exec rules; request grant cmd mcp.%s", alias, alias)
 	}

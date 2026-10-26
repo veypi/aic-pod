@@ -2,9 +2,9 @@
 
 - 文档状态：现行实现（2026-10-23 整理）
 - 说明：设备侧怎么把官方 browser/CUA 跑起来、怎么把画面转给平台、怎么回收。
-  跨端画面契约见 [aic/docs/remote-screen.md](../../aic/docs/remote-screen.md)；
-  执行与工具服务总契约见 [hosts-tools.md](hosts-tools.md)，服务注册机制见 [host-vtools.md](host-vtools.md)；
-  构建与分发见 [release-architecture.md](release-architecture.md)。
+  跨端画面契约见 [aic/docs/reference/remote-screen.md](../../../aic/docs/reference/remote-screen.md)；
+  执行与工具服务总契约见 [hosts-tools.md](../reference/hosts-tools.md)，服务注册机制见 [host-vtools.md](../reference/host-vtools.md)；
+  构建与分发见 [release.md](release.md)。
 
 ## 1. 进程模型
 
@@ -12,7 +12,7 @@
 
 | 服务 | 上游 | 形态 |
 | --- | --- | --- |
-| `browser` | `agent-browser mcp --tools core,tabs`（0.38.2） | 内置服务，注册为 vsh 根命令 `browser` |
+| `browser` | `agent-browser mcp --tools core,tabs,mobile,state`（0.38.2） | 内置服务，注册为 vsh 根命令 `browser` |
 | `cua` | `cua-driver mcp`（0.33.2） | 内置服务，注册为 vsh 根命令 `cua` |
 | `blender` | Blender addon 通道 | `tcp://127.0.0.1:9866`，含 doctor/launch/install 生命周期动词（详见 blender 技能手册） |
 
@@ -30,7 +30,7 @@ Pod 退出时清理专用运行目录中的上游 daemon。服务或启动权限
 
 内建 Browser UI 的 `aic-browser` RTC data channel 复用同一 peer 的设备认证与 `mcp.browser` 命令权限，双向转发该 agent-browser daemon 的原生 WebSocket 消息。Pod 只做分片传输，不解析浏览器工具、不建立 CDP 连接。
 
-- 通道注册走通用流机制：`rtc.Config.Streams` 按 DataChannel 标签现查 vtools 登记表，任何实现 `vtools.Streamer` 的服务都能获得同形态通道（见 [host-vtools.md](host-vtools.md) §4）。
+- 通道注册走通用流机制：`rtc.Config.Streams` 按 DataChannel 标签现查 vtools 登记表，任何实现 `vtools.Streamer` 的服务都能获得同形态通道（见 [host-vtools.md](../reference/host-vtools.md) §4）。
 - 上游连接地址从 Pod 专用运行目录的 `aic.stream` 读取（动态绑定端口），固定连回环地址。
 - 帧格式：4 字节大端长度头 + 16 KiB 连续片段，单消息上限 16 MiB；UI 绘制完当前帧后才把 ACK 原样回上游，Pod 不提前确认。
 - 连接请求 `pacing=ack&maxFps=15`；慢链路至多积压一帧。

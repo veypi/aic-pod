@@ -256,7 +256,7 @@ func (v *fileView) commit(name string, r io.Reader, size int64, condition protoc
 	if err != nil {
 		return err
 	}
-	source, err := v.f.cfg.Bytes.Upload(v.ctx, v.call.Owner, r, &size, "", "")
+	source, err := v.f.cfg.Bytes.UploadFor(v.ctx, v.call.Owner, v.call.creator(), r, &size, "", "")
 	if err != nil {
 		return err
 	}

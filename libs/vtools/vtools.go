@@ -2,13 +2,12 @@
 // Provider 后即可注册为 vsh 根命令——`mcp` 命令因此退化为纯管理面
 // （add/remove/start/stop/list），工具调用不再经它中转。
 //
-// 形态（已定稿，见 docs/host-vtools.md）：
+// 形态（已定稿，见 docs/reference/host-vtools.md）：
 //   - 每个服务 alias 注册一个 vsh 根命令（RegisterGuarded 撞名即拒）：
 //     `<alias> <tool> [--flag value]... [--input JSON|-] [--json]`；
 //     无参打印工具目录；`<alias> <tool> --help` 按 inputSchema 渲染参数表。
 //   - 注册即时、连接懒惰：命令进 Registry 不 connect，首次执行才连接。
-//   - 调用门在命令边界（Gate，host 接线 exec 规则 mcp.<alias>）；Provider
-//     层不再各自设门。
+//   - 命令准入由 vsh 统一处理；独立 RTC 流通道保留 StreamGate。
 //   - Streamer 是可选能力：实现它的服务获得一条 RTC 专用 DataChannel
 //     （消息边界保持的纯转发，权限复查与保活由实现方负责）。
 package vtools
@@ -82,11 +81,8 @@ func (s StreamerFunc) Stream(ctx context.Context, caller protocol.Caller, input 
 	return s.Relay(ctx, caller, input, send)
 }
 
-// Gate 是调用门：每次命令执行 / 流通道开启前检查（host 接线 exec 规则
-// mcp.<alias>）。session = 会话键（会话级 temp 授权的查找键）：命令路径取
-// Options.SessionOf(ctx)；流通道路径传 caller.Origin——peer ctx 派生自
-// Background，不携带会话，直接用 ctx 取会让会话 grant 在开门处静默失效。
-// nil = 放行。
+// Gate 是独立 RTC 流通道的开启门。命令执行不经过它；命令准入由调用方
+// 在 vsh 层统一处理。session = 会话键（流通道使用 caller.Origin）。nil = 放行。
 type Gate func(ctx context.Context, session, alias string) error
 
 type entry struct {
@@ -96,21 +92,16 @@ type entry struct {
 
 // Options 是登记表的装配参数。
 type Options struct {
-	// Gate 是调用门（命令执行 / 流通道开启前检查）。nil = 放行。
-	Gate Gate
-	// SessionOf 从命令执行上下文取会话键（host 注入 execution.SessionFromContext）：
-	// 会话键是会话级临时授权的查找键，本层不假设它以什么形式挂在 ctx 上。
-	// nil = 命令路径恒空串（无会话级授权区分）。
-	SessionOf func(context.Context) string
-	Logf      func(string, ...any)
+	// StreamGate 是独立 RTC 流通道的开启门。nil = 放行。
+	StreamGate Gate
+	Logf       func(string, ...any)
 }
 
 // Registry 是服务登记表：vsh 命令注册与 RTC 流通道查询共用这一处。
 type Registry struct {
-	cmds      *commands.Registry
-	gate      Gate
-	sessionOf func(context.Context) string
-	logf      func(string, ...any)
+	cmds       *commands.Registry
+	streamGate Gate
+	logf       func(string, ...any)
 
 	mu       sync.RWMutex
 	entries  map[string]*entry
@@ -121,11 +112,8 @@ func NewRegistry(cmds *commands.Registry, opts Options) *Registry {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	if opts.SessionOf == nil {
-		opts.SessionOf = func(context.Context) string { return "" }
-	}
 	return &Registry{
-		cmds: cmds, gate: opts.Gate, sessionOf: opts.SessionOf, logf: opts.Logf,
+		cmds: cmds, streamGate: opts.StreamGate, logf: opts.Logf,
 		entries: map[string]*entry{}, channels: map[string]string{},
 	}
 }
@@ -299,9 +287,9 @@ func (r *Registry) StreamHandler(label string) (StreamRelay, bool) {
 		return nil, false
 	}
 	return func(ctx context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error {
-		if r.gate != nil {
+		if r.streamGate != nil {
 			// 流通道开门：会话键取 caller.Origin（peer ctx 不携带会话）
-			if err := r.gate(ctx, caller.Origin, alias); err != nil {
+			if err := r.streamGate(ctx, caller.Origin, alias); err != nil {
 				return err
 			}
 		}

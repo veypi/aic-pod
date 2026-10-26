@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+// sourceTTL 是字节源的存活期：客户端没显式 source.release 的泄漏源只能靠它兜底回收。
+// 30 分钟太长——页面刷新/断连丢一次释放就占住一个槽位半小时，几十次刷新即可把
+// MaxSources 打满、连写操作一起拒掉（2026-10-26 实测）。消费者（预览/下载/流式读）
+// 都是秒级到分钟级行为，5 分钟足够宽裕。
+const sourceTTL = 5 * time.Minute
+
 type ByteSource struct {
 	Ref       protocol.FSResourceRef `json:"ref"`
 	Size      int64                  `json:"size"`
@@ -25,7 +31,8 @@ type ByteSource struct {
 }
 type byteSource struct {
 	mu         sync.RWMutex
-	owner      string
+	owner      string // Subject+Origin：授权与跨通道共享
+	creator    string // Owner+ConnectionID：断连回收边界
 	descriptor ByteSource
 	file       *os.File
 	temp       string
@@ -41,16 +48,16 @@ type BytesConfig struct {
 	MaxSources     int
 }
 type Bytes struct {
-	mu            sync.Mutex
-	cfg           BytesConfig
-	epoch         string
-	dir           string
-	sources       map[string]*byteSource
-	used          int64
-	pending       int
-	pendingOwners map[string]int
-	closingOwners map[string]bool
-	closed        bool
+	mu              sync.Mutex
+	cfg             BytesConfig
+	epoch           string
+	dir             string
+	sources         map[string]*byteSource
+	used            int64
+	pending         int
+	pendingCreators map[string]int
+	closingCreators map[string]bool
+	closed          bool
 }
 
 func NewBytes(cfg BytesConfig) (*Bytes, error) {
@@ -68,28 +75,28 @@ func NewBytes(cfg BytesConfig) (*Bytes, error) {
 		return nil, err
 	}
 	epoch := protocol.NewID("bytes_")
-	return &Bytes{cfg: cfg, dir: dir, epoch: epoch, sources: map[string]*byteSource{}, pendingOwners: map[string]int{}, closingOwners: map[string]bool{}}, nil
+	return &Bytes{cfg: cfg, dir: dir, epoch: epoch, sources: map[string]*byteSource{}, pendingCreators: map[string]int{}, closingCreators: map[string]bool{}}, nil
 }
-func (b *Bytes) reservation(owner string) error {
+func (b *Bytes) reservation(creator string) error {
 	b.Reap()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed || b.closingOwners[owner] {
+	if b.closed || b.closingCreators[creator] {
 		return protocol.FSFail("expired", "Byte store closed")
 	}
 	if len(b.sources)+b.pending >= b.cfg.MaxSources {
 		return protocol.FSFail("overloaded", "Byte source quota reached")
 	}
 	b.pending++
-	b.pendingOwners[owner]++
+	b.pendingCreators[creator]++
 	return nil
 }
-func (b *Bytes) finishReservation(owner string) {
+func (b *Bytes) finishReservation(creator string) {
 	b.pending--
-	b.pendingOwners[owner]--
-	if b.pendingOwners[owner] == 0 {
-		delete(b.pendingOwners, owner)
-		delete(b.closingOwners, owner)
+	b.pendingCreators[creator]--
+	if b.pendingCreators[creator] == 0 {
+		delete(b.pendingCreators, creator)
+		delete(b.closingCreators, creator)
 	}
 }
 func (b *Bytes) reserveBytes(n int64) error {
@@ -105,10 +112,19 @@ func (b *Bytes) reserveBytes(n int64) error {
 	return nil
 }
 
-// Upload stages raw bytes on disk and exposes a source only after size and hash
-// verification. A caller must already be authenticated and bound to owner.
+// Upload stages raw bytes with owner as both authorization and lifecycle key.
 func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size *int64, sha string, mediaType string) (ByteSource, error) {
+	return b.UploadFor(ctx, owner, owner, reader, size, sha, mediaType)
+}
+
+// UploadFor stages raw bytes on disk and exposes a source only after size and
+// hash verification. owner authorizes later access; creator bounds disconnect
+// cleanup. A caller must already be authenticated and bound to owner.
+func (b *Bytes) UploadFor(ctx context.Context, owner, creator string, reader io.Reader, size *int64, sha string, mediaType string) (ByteSource, error) {
 	limit := b.sourceLimit()
+	if creator == "" {
+		creator = owner
+	}
 	if !protocol.ValidID(owner) || reader == nil {
 		return ByteSource{}, protocol.FSFail("invalid_argument", "Invalid upload owner or body")
 	}
@@ -121,14 +137,14 @@ func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size
 		}
 		sha = strings.ToLower(sha)
 	}
-	if err := b.reservation(owner); err != nil {
+	if err := b.reservation(creator); err != nil {
 		return ByteSource{}, err
 	}
 	var charged int64
 	success := false
 	defer func() {
 		b.mu.Lock()
-		b.finishReservation(owner)
+		b.finishReservation(creator)
 		if !success {
 			b.used -= charged
 		}
@@ -190,19 +206,27 @@ func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size
 	}
 	descriptor := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: charged, MediaType: mediaType, Seekable: true, Immutable: true, SHA256: sum, Lifetime: "fs_source"}
 	b.mu.Lock()
-	if b.closed || b.closingOwners[owner] {
+	if b.closed || b.closingCreators[creator] {
 		b.mu.Unlock()
 		return ByteSource{}, protocol.FSFail("expired", "Byte store closed")
 	}
-	b.sources[id] = &byteSource{expires: time.Now().Add(30 * time.Minute), owner: owner, descriptor: descriptor, file: file, temp: file.Name()}
+	b.sources[id] = &byteSource{expires: time.Now().Add(sourceTTL), owner: owner, creator: creator, descriptor: descriptor, file: file, temp: file.Name()}
 	success = true
 	b.mu.Unlock()
 	return descriptor, nil
 }
 
-// AddFile transfers ownership of file, including on failure. verify rechecks
-// both policy and source identity before/during/after a range read.
+// AddFile transfers ownership of file with owner as both authorization and lifecycle key.
 func (b *Bytes) AddFile(owner string, file *os.File, size int64, version, mediaType string, verify func(context.Context) error) (ByteSource, error) {
+	return b.AddFileFor(owner, owner, file, size, version, mediaType, verify)
+}
+
+// AddFileFor transfers ownership of file, including on failure. verify rechecks
+// both policy and source identity before/during/after a range read.
+func (b *Bytes) AddFileFor(owner, creator string, file *os.File, size int64, version, mediaType string, verify func(context.Context) error) (ByteSource, error) {
+	if creator == "" {
+		creator = owner
+	}
 	if file == nil {
 		return ByteSource{}, protocol.FSFail("invalid_argument", "Missing source file")
 	}
@@ -215,10 +239,10 @@ func (b *Bytes) AddFile(owner string, file *os.File, size int64, version, mediaT
 	if !protocol.ValidID(owner) || size < 0 || size > protocol.FSMaxSafeInteger || verify == nil {
 		return ByteSource{}, protocol.FSFail("invalid_argument", "Invalid source")
 	}
-	if err := b.reservation(owner); err != nil {
+	if err := b.reservation(creator); err != nil {
 		return ByteSource{}, err
 	}
-	defer func() { b.mu.Lock(); b.finishReservation(owner); b.mu.Unlock() }()
+	defer func() { b.mu.Lock(); b.finishReservation(creator); b.mu.Unlock() }()
 	id := protocol.NewID("src_")
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
@@ -226,10 +250,10 @@ func (b *Bytes) AddFile(owner string, file *os.File, size int64, version, mediaT
 	descriptor := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: size, Version: version, MediaType: mediaType, Seekable: true, Lifetime: "fs_source"}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed || b.closingOwners[owner] {
+	if b.closed || b.closingCreators[creator] {
 		return ByteSource{}, protocol.FSFail("expired", "Byte store closed")
 	}
-	b.sources[id] = &byteSource{expires: time.Now().Add(30 * time.Minute), owner: owner, descriptor: descriptor, file: file, verify: verify}
+	b.sources[id] = &byteSource{expires: time.Now().Add(sourceTTL), owner: owner, creator: creator, descriptor: descriptor, file: file, verify: verify}
 	success = true
 	return descriptor, nil
 }
@@ -338,32 +362,43 @@ func (b *Bytes) Release(owner string, ref protocol.FSResourceRef) error {
 	}
 	return nil
 }
-func (b *Bytes) CloseOwner(owner string) {
+
+// CloseCreator releases only sources created by one connection and prevents an
+// in-flight creation from publishing after that connection closes.
+func (b *Bytes) CloseCreator(creator string) {
 	b.mu.Lock()
-	if b.pendingOwners[owner] > 0 {
-		b.closingOwners[owner] = true
+	if b.pendingCreators[creator] > 0 {
+		b.closingCreators[creator] = true
 	}
-	var refs []protocol.FSResourceRef
+	type ownedRef struct {
+		owner string
+		ref   protocol.FSResourceRef
+	}
+	var refs []ownedRef
 	for _, s := range b.sources {
-		if s.owner == owner {
-			refs = append(refs, s.descriptor.Ref)
+		if s.creator == creator {
+			refs = append(refs, ownedRef{owner: s.owner, ref: s.descriptor.Ref})
 		}
 	}
 	b.mu.Unlock()
 	for _, ref := range refs {
-		_ = b.Release(owner, ref)
+		_ = b.Release(ref.owner, ref.ref)
 	}
 }
 func (b *Bytes) Close() error {
 	b.mu.Lock()
 	b.closed = true
-	owners := map[string]bool{}
+	type ownedRef struct {
+		owner string
+		ref   protocol.FSResourceRef
+	}
+	var refs []ownedRef
 	for _, s := range b.sources {
-		owners[s.owner] = true
+		refs = append(refs, ownedRef{owner: s.owner, ref: s.descriptor.Ref})
 	}
 	b.mu.Unlock()
-	for owner := range owners {
-		b.CloseOwner(owner)
+	for _, ref := range refs {
+		_ = b.Release(ref.owner, ref.ref)
 	}
 	return os.RemoveAll(b.dir)
 }

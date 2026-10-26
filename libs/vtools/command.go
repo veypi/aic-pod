@@ -101,7 +101,7 @@ func (d *schemaDoc) required(name string) bool {
 }
 
 // convertFlag 把 flag 原文按 schema 类型转换。explicit 区分「--flag=」
-//（显式空值）与裸 flag：string 类型的显式空串合法，裸 flag 仅布尔合法。
+// （显式空值）与裸 flag：string 类型的显式空串合法，裸 flag 仅布尔合法。
 func convertFlag(name, raw string, explicit bool, prop schemaProp) (any, error) {
 	switch typ := scalarType(prop.Type); typ {
 	case "boolean":
@@ -254,14 +254,9 @@ func (r *Registry) commandFunc(alias string) commands.CommandFunc {
 	}
 }
 
-// RunTool 是已登记服务的工具调用入口（调用门 + 查找 + RunProvider）。
+// RunTool 是已登记服务的工具调用入口（查找 + RunProvider）。
+// 命令准入由 vsh 在调用本函数之前统一完成。
 func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias string) error {
-	if r.gate != nil {
-		// 会话键取自注入的 SessionOf（host = execution.SessionFromContext）。
-		if err := r.gate(ctx, r.sessionOf(ctx), alias); err != nil {
-			return commands.Exitf(inv, 126, "%s", err)
-		}
-	}
 	r.mu.RLock()
 	e := r.entries[alias]
 	r.mu.RUnlock()
@@ -276,12 +271,12 @@ func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias 
 // 负责（Registry.RunTool 或已认证的调试入口）。
 func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p Provider) error {
 	var (
-		positional []string
-		input      string
-		hasInput   bool
-		jsonOut    bool
-		preview    string
-		help       bool
+		positional   []string
+		input        string
+		hasInput     bool
+		jsonOut      bool
+		preview      string
+		help         bool
 		flagValues   = map[string]string{}
 		flagExplicit = map[string]bool{} // 显式给值（--flag=v / --flag v / --flag=）vs 裸 flag
 		flagNames    []string

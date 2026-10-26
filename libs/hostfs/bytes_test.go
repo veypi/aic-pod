@@ -43,7 +43,7 @@ func TestBytesRoundTripRangeAndOwnership(t *testing.T) {
 	if err = store.Release("another_session", src.Ref); err == nil {
 		t.Fatal("cross-session release")
 	}
-	store.CloseOwner("session_1")
+	store.CloseCreator("session_1")
 	if _, err = store.Describe("session_1", src.Ref); err == nil {
 		t.Fatal("released source remained accessible")
 	}
@@ -88,7 +88,7 @@ type readFunc func([]byte) (int, error)
 
 func (f readFunc) Read(p []byte) (int, error) { return f(p) }
 
-func TestSessionCloseDuringUploadDoesNotPublishSource(t *testing.T) {
+func TestCreatorCloseDuringUploadDoesNotPublishSource(t *testing.T) {
 	store, err := NewBytes(BytesConfig{TempDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -105,12 +105,12 @@ func TestSessionCloseDuringUploadDoesNotPublishSource(t *testing.T) {
 		done <- err
 	}()
 	<-started
-	store.CloseOwner("session_1")
+	store.CloseCreator("session_1")
 	close(release)
 	if err := <-done; err == nil {
 		t.Fatal("upload published after its session closed")
 	}
-	if store.used != 0 || store.pending != 0 || len(store.sources) != 0 || len(store.pendingOwners) != 0 || len(store.closingOwners) != 0 {
+	if store.used != 0 || store.pending != 0 || len(store.sources) != 0 || len(store.pendingCreators) != 0 || len(store.closingCreators) != 0 {
 		t.Fatal("closed upload leaked storage or bookkeeping")
 	}
 }

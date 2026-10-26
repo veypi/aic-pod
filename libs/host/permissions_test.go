@@ -127,33 +127,65 @@ func TestPermsExecAllowedPublishAndGrants(t *testing.T) {
 	}
 }
 
-// 启动配置无效：工具 fail-closed；发布有效基表（修复后重启的等效）恢复。
-func TestPermsInvalidStartupFailsClosed(t *testing.T) {
+// FS 启动配置无效只使 FS 快照 fail-closed；其他域和有效发布不受影响。
+func TestPermsInvalidStartupFailsOnlyFS(t *testing.T) {
 	withGlobal(t, func(o *cfg.Options) {
-		o.FsRules = []string{"rw:**"} // 全域模式被拒
+		o.FsRules = []string{"rw:**"}
+		o.SshPolicy = cfg.PolicyOpen
 	})
 	p := newTestPerms(t, "")
-	if p.err() == nil {
-		t.Fatal("invalid startup config not recorded")
+	if p.err("fs") == nil {
+		t.Fatal("invalid fs config not recorded")
 	}
-	if p.execAllowed("s1", "git") {
-		t.Fatal("invalid config admitted command")
+	if !p.execAllowed("s1", "git") {
+		t.Fatal("fs error blocked the exec domain")
 	}
-	if p.sshAllowed("s1", "example.com:22") {
-		t.Fatal("invalid config admitted ssh")
+	if !p.sshAllowed("s1", "example.com:22") {
+		t.Fatal("fs error blocked the ssh domain")
 	}
-	// 快照自身 fail-closed：便利根也不放行（不依赖入口各自查 err）。
+	if !p.netSnapshot("s1").Match("example.com:443") {
+		t.Fatal("fs error blocked the net domain")
+	}
 	rs := p.fsSnapshot("s1")
-	if len(rs.Rules) != 0 || rs.DefaultWrite != vbox.EffDeny {
-		t.Fatalf("invalid config snapshot not empty-deny: %d rules, default %v", len(rs.Rules), rs.DefaultWrite)
+	if len(rs.Rules) != 0 || rs.DefaultWrite != vbox.EffDeny || rs.Err == nil {
+		t.Fatalf("invalid config snapshot not error-deny: %d rules, default %v, err=%v", len(rs.Rules), rs.DefaultWrite, rs.Err)
 	}
-	if d := rs.Match(filepath.ToSlash(os.TempDir())+"/x", vbox.OpWrite); d.Allow {
+	target := filepath.ToSlash(os.TempDir()) + "/x"
+	if d := rs.Match(target, vbox.OpWrite); d.Allow {
 		t.Fatal("invalid config snapshot admitted temp-root write")
+	}
+	if d := rs.Match(target, vbox.OpRead); d.Allow {
+		t.Fatal("invalid config snapshot admitted read")
 	}
 	withGlobal(t, nil)
 	publishGlobal(t, p)
-	if p.err() != nil {
-		t.Fatal("valid publish did not clear invalid state")
+	if p.err("fs") != nil {
+		t.Fatal("valid publish did not clear fs error")
+	}
+}
+
+func TestHardProtectionLevelAndOwnerOverride(t *testing.T) {
+	withGlobal(t, nil)
+	p := newTestPerms(t, "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	target := filepath.ToSlash(filepath.Join(home, ".aic", "config.yaml"))
+	cfg.Global.FsRules = []string{"rw:" + target}
+	publishGlobal(t, p)
+	p.grantFS("s1", filepath.ToSlash(filepath.Join(home, ".aic")))
+	if d := p.fsSnapshot("s1").Match(target, vbox.OpRead); d.Allow || d.Level != 1 {
+		t.Fatalf("hard protection did not win at level 1: %+v", d)
+	}
+	if d := p.fsSnapshot("s1").Match(target, vbox.OpWrite); d.Allow {
+		t.Fatalf("level-0 grant overrode hard protection: %+v", d)
+	}
+
+	cfg.Global.FsRules = []string{"!!rw:" + target}
+	publishGlobal(t, p)
+	if d := p.fsSnapshot("s1").Match(target, vbox.OpWrite); !d.Allow || d.Level != 2 {
+		t.Fatalf("owner level-2 rule did not override hard protection: %+v", d)
 	}
 }
 
@@ -284,7 +316,7 @@ func TestPermsGrantStatusMarksUngrantableWriteRoot(t *testing.T) {
 		return nil
 	}
 	out := p.grantStatus("s1")
-	if !strings.Contains(out, "rw:/opt/bad [cfg] [沙箱内不可写: Access is denied.]") {
+	if !strings.Contains(out, "rw:/opt/bad [cfg level=0] [沙箱内不可写: Access is denied.]") {
 		t.Fatalf("grant status missing sandbox marker:\n%s", out)
 	}
 	if probed["/opt/bad"] != 1 {
@@ -294,7 +326,7 @@ func TestPermsGrantStatusMarksUngrantableWriteRoot(t *testing.T) {
 	if probed["/data/*/keep"] != 0 {
 		t.Fatalf("glob row must not be probed: %v", probed)
 	}
-	if strings.Contains(out, "rw:/data/*/keep [cfg] [") {
+	if strings.Contains(out, "rw:/data/*/keep [cfg level=0] [沙箱内不可写") {
 		t.Fatalf("glob row must not be annotated:\n%s", out)
 	}
 }

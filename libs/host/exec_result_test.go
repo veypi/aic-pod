@@ -1,6 +1,6 @@
 package host
 
-// exec_result_test.go 锁定 exec 完成响应的输出策略（输出策略见 docs/hosts-tools.md +
+// exec_result_test.go 锁定 exec 完成响应的输出策略（输出策略见 docs/reference/hosts-tools.md +
 // 2026-09-28 用户裁定）：截断预览只针对 NATS（AI 消费）；RTC 直连全量返回
 // content+attrs——不截断、不转后台、没有 truncated 标记。
 
@@ -188,7 +188,7 @@ func TestExecScriptRTCRestoresLargeJSON(t *testing.T) {
 	if !ok {
 		t.Fatalf("NATS result type = %T", r.Result)
 	}
-	if len(got.Content) != execution.MaxStdoutBytes || !strings.HasPrefix(stdout, got.Content) || strings.Count(got.Attrs["stderr"], "\n") != 100 || got.Attrs["truncated"] != "true" {
+	if len(got.Content) != execution.PreviewStdoutBytes || !strings.HasPrefix(stdout, got.Content) || strings.Count(got.Attrs["stderr"], "\n") != 100 || got.Attrs["truncated"] != "true" {
 		t.Fatalf("NATS policy changed: stdout bytes=%d, stderr lines=%d, truncated=%q", len(got.Content), strings.Count(got.Attrs["stderr"], "\n"), got.Attrs["truncated"])
 	}
 }

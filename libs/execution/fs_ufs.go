@@ -36,6 +36,9 @@ type UFSAdapterConfig struct {
 	// Rules 规则表快照源：每次 IO 取当次值（grant temp 动态行即时生效）。
 	// nil = 不挂规则表（仅测试）。
 	Rules func() vbox.FSRuleSet
+	// WorkingDir 可选初始 cwd。host 会同时返回它给引擎；配置错误时只允许
+	// 这个目录的启动元数据，文件内容与其他路径仍由 Err fail-closed。
+	WorkingDir string
 	// NormalizePath is supplied only by an OS backing; logical UFS paths stay logical.
 	NormalizePath func(string, bool) string
 	// JailRoots jail 根集（cloud = /u/{uid} + /skills + /public）：代码硬约束，规则表管不到
@@ -96,6 +99,9 @@ func NewUFSAdapter(cfg UFSAdapterConfig) (gbfs.FileSystem, error) {
 	}
 	if len(a.jails) > 0 {
 		a.cwd = a.jails[0]
+	}
+	if cfg.WorkingDir != "" {
+		a.cwd = gbfs.Clean(cfg.WorkingDir)
 	}
 	for _, dir := range cfg.MemPrefixes {
 		if err := a.mem.MkdirAll(context.Background(), dir, 0755); err != nil {
@@ -251,6 +257,11 @@ func ruleDeniedText(abs, reason string) string {
 // `/skills`，若此处按规则表 deny 即整条命令失败。jail 根是收容边界，元数据
 // 可遍历是正确语义。
 func (a *ufsAdapter) gateMeta(abs string) error {
+	if a.rules != nil && abs == a.cwd && a.rules().Err != nil {
+		// vsh 初始化要 Chdir/Stat 当前工作目录；只允许这一项元数据，
+		// 不开放文件内容、目录列表或任何其他路径。
+		return nil
+	}
 	if !a.inJail(abs) {
 		for _, j := range a.jails {
 			if strings.HasPrefix(j, abs+"/") {
@@ -626,7 +637,7 @@ func (a *ufsAdapter) Chdir(name string) error {
 	if a.isMem(abs) {
 		fi, err = a.mem.Stat(ctx, abs)
 	} else {
-		if gerr := a.gate(abs, vbox.OpRead, false); gerr != nil {
+		if gerr := a.gateMeta(abs); gerr != nil {
 			return gerr
 		}
 		fi, err = a.backing.Stat(abs)

@@ -63,8 +63,8 @@ func (c *Client) initFilesystem() error {
 		return err
 	}
 	files, err := hostfs.New(hostfs.Config{Roots: roots, Home: &home, OSHome: osHomePtr(osHome), Bytes: store, MaxProxyUploadBytes: c.options().Transfers.ProxyUploadBytes, Check: func(ctx context.Context, call hostfs.Call, path string, write bool) error {
-		if c.perms.err() != nil {
-			return protocol.Fail("permission_denied", "Device authorization configuration is invalid; repair local settings")
+		if c.perms.err("fs") != nil {
+			return protocol.Fail("permission_denied", "Device filesystem authorization configuration is invalid; repair local settings")
 		}
 		if err := ctx.Err(); err != nil {
 			return err

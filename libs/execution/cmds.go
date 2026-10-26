@@ -109,7 +109,9 @@ const bgHelp = `usage:
   bg wait <id> [秒] [--json]  有界等待任务并报告其状态（共享本次 exec 前台预算）
   bg kill <id>            终止任务（与 cancel 同一执行句柄）
 
-后台任务唯一来源是 exec 前台等待超时；输出读取用 FS 或 cat/tail 读日志路径。`
+后台任务只有一个来源：exec 前台等待超时自动转入。想主动后台执行，把 exec 的 timeout
+设为 1（秒）——调用立即返回任务 id 与日志路径，脚本在后台继续跑（墙钟上限 30 分钟）。
+输出不占消息：用 fs read 或 cat/tail 读任务报告的日志路径。`
 
 // bgJSON 是 bg list/wait --json 的固定输出形状（§4.5 黄金样例）：
 // id/state/script/output/error_output 恒在；已完成时有 exit_code。

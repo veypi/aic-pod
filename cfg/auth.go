@@ -6,16 +6,18 @@ import (
 	"github.com/veypi/vbox"
 )
 
-// AuthCfg 是四张首命中规则表的纯数据快照（permissionState 编译输入）。
+// AuthCfg 是四张规则表的纯数据快照（permissionState 编译输入）。exec 使用
+// 原表序，FS/NET/SSH 使用 level + 原表序。
 type AuthCfg struct {
-	ExecPolicy string
-	ExecRules  []string
-	FsPolicy   string
-	FsRules    []string
-	NetPolicy  string
-	NetRules   []string
-	SshPolicy  string
-	SshRules   []string
+	ExecPolicy       string
+	ExecRules        []string
+	FsPolicy         string
+	FsRules          []string
+	NetPolicy        string
+	NetRules         []string
+	NetUpstreamProxy string
+	SshPolicy        string
+	SshRules         []string
 }
 
 // AuthFrom 从 Options 取授权快照（纯函数；host permissionState 的启动构建
@@ -26,7 +28,8 @@ func AuthFrom(o *Options) AuthCfg {
 		ExecPolicy: NormalizePolicy(o.ExecPolicy, PolicyOpen), ExecRules: append([]string(nil), o.ExecRules...),
 		FsPolicy: NormalizePolicy(o.FsPolicy, PolicyDeny), FsRules: append([]string(nil), o.FsRules...),
 		NetPolicy: NormalizePolicy(o.NetPolicy, PolicyOpen), NetRules: append([]string(nil), o.NetRules...),
-		SshPolicy: NormalizePolicy(o.SshPolicy, PolicyDeny), SshRules: append([]string(nil), o.SshRules...),
+		NetUpstreamProxy: o.NetUpstreamProxy,
+		SshPolicy:        NormalizePolicy(o.SshPolicy, PolicyDeny), SshRules: append([]string(nil), o.SshRules...),
 	}
 }
 
@@ -63,6 +66,11 @@ func (a AuthCfg) Validate() error {
 	}
 	if err := vbox.ValidateTargetRules(a.NetRules); err != nil {
 		return &AuthFieldError{Field: "net_rules", Err: err}
+	}
+	if a.NetUpstreamProxy != "" {
+		if err := vbox.ValidateUpstreamProxy(a.NetUpstreamProxy); err != nil {
+			return &AuthFieldError{Field: "net_upstream_proxy", Err: err}
+		}
 	}
 	if err := vbox.ValidateTargetRules(a.SshRules); err != nil {
 		return &AuthFieldError{Field: "ssh_rules", Err: err}

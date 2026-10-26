@@ -17,6 +17,8 @@ type HostFSConfig struct {
 	// Rules vbox 规则表快照源（host 行序：temp → cfg/permanent → builtin deny
 	// → 便利根）。用户态执行与 OS 沙箱同源（一套策略源，两种执行机制）。
 	Rules func() vbox.FSRuleSet
+	// WorkingDir 是引擎随后使用的同一初始 cwd。
+	WorkingDir string
 }
 
 // NewHostFS host：OS backing + vbox 规则表门，不引内存覆盖层（host 会话目录
@@ -27,8 +29,9 @@ func NewHostFS(cfg HostFSConfig) (gbfs.FileSystem, error) {
 		return nil, fmt.Errorf("vsh glue: host backing required")
 	}
 	return NewUFSAdapter(UFSAdapterConfig{
-		Backing: cfg.Backing,
-		Rules:   cfg.Rules,
+		Backing:    cfg.Backing,
+		Rules:      cfg.Rules,
+		WorkingDir: cfg.WorkingDir,
 		NormalizePath: func(p string, noFollow bool) string {
 			if noFollow {
 				return vbox.CanonicalNoFollow(p)

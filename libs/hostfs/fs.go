@@ -704,7 +704,7 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 		return nil, protocol.FSFail("source_changed", "File changed while being opened")
 	}
 	requested := joinRoot(r, p.Path.Segments)
-	src, err := f.cfg.Bytes.AddFile(call.Owner, file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
+	src, err := f.cfg.Bytes.AddFileFor(call.Owner, call.creator(), file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
 		if err := f.cfg.Check(ctx, call, requested, false); err != nil {
 			return err
 		}
@@ -1067,6 +1067,20 @@ type Call struct {
 func Owner(c protocol.Caller) string {
 	h := sha256.Sum256([]byte(c.Subject + "\x00" + c.Origin))
 	return hex.EncodeToString(h[:16])
+}
+
+// Creator identifies the connection that created a byte source. It is separate
+// from Owner so one RTC disconnect cannot reclaim another RTC/NATS request's sources.
+func Creator(c protocol.Caller) string {
+	h := sha256.Sum256([]byte(c.Subject + "\x00" + c.Origin + "\x00" + c.ConnectionID))
+	return hex.EncodeToString(h[:16])
+}
+
+func (c Call) creator() string {
+	if c.Caller.ConnectionID == "" {
+		return c.Owner
+	}
+	return Creator(c.Caller)
 }
 func (f *FS) Run(ctx context.Context, call Call) (any, error) {
 	if err := f.Authorize(ctx, call); err != nil {

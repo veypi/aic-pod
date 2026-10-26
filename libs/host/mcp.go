@@ -3,7 +3,6 @@ package host
 import (
 	"context"
 	"fmt"
-	"github.com/veypi/aic-pod/protocol"
 	"net"
 	"net/http"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/protocol"
 
 	"github.com/veypi/vbox"
 )
@@ -104,7 +104,7 @@ type mcpRoundTripper struct {
 }
 
 func (t *mcpRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
-	if err := t.client.perms.err(); err != nil {
+	if err := t.client.perms.err("net"); err != nil {
 		return nil, fmt.Errorf("invalid authorization configuration")
 	}
 	port := r.URL.Port()

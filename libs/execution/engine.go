@@ -3,9 +3,9 @@
 // 职责：Engine 生命周期（Runtime 单例 + per-exec 派生会话 + limits/墙钟 +
 // panic recover + 后台任务登记表）、FS 适配器（fs_ufs.go / fs_host.go，唯一
 // 进程内路径权威）、NetClient（netclient.go）、静态分析（analyze.go）、
-// 平台命令（cmds.go）、显式 NativeExec 注入。
+// 平台命令（cmds.go）、统一 exec 准入与文件命令解析器注入。
 //
-// 执行面要点（契约见 docs/hosts-tools.md）：
+// 执行面要点（契约见 docs/reference/hosts-tools.md）：
 //   - 每次 exec 使用独立派生会话（共享 backing FS，独立内存层）——脚本执行
 //     不持有跨调用的会话锁，bg 查询/取消与组合脚本永不被另一执行阻塞
 //     （不靠单指令特判）。跨 exec 的 cwd/变量不持久（外层每次显式传 workdir）。
@@ -96,10 +96,28 @@ type EngineConfig struct {
 	Platform PlatformDeps
 	// BaseEnv 每次 exec 注入的基础环境（HOME/PATH 钉死由调用方给；
 	// 不跨 exec 持久，ExecRequest.Env 覆盖同名键）。
-	BaseEnv    map[string]string
-	NativeExec func(context.Context, string, *commands.Invocation) error
+	BaseEnv      map[string]string
+	FileCommands commands.FileCommandResolver
+	ExecPolicy   ExecPolicy
 	// Logf 可选日志。
 	Logf func(format string, args ...any)
+}
+
+// ExecPolicy 是调用方提供的统一命令准入实现。
+type ExecPolicy interface {
+	AllowExec(ctx context.Context, req vshpolicy.ExecRequest) error
+}
+
+type enginePolicy struct {
+	*vshpolicy.Static
+	exec ExecPolicy
+}
+
+func (p enginePolicy) AllowExec(ctx context.Context, req vshpolicy.ExecRequest) error {
+	if p.exec != nil {
+		return p.exec.AllowExec(ctx, req)
+	}
+	return p.Static.AllowExec(ctx, req)
 }
 
 // Engine 是 vsh Runtime 单例 + 后台任务登记表。
@@ -132,12 +150,13 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	if err := RegisterPlatformCommands(reg, cfg.Platform); err != nil {
 		return nil, fmt.Errorf("vsh glue: register platform commands: %w", err)
 	}
-	pol := vshpolicy.NewStatic(&vshpolicy.Config{
+	basePolicy := vshpolicy.NewStatic(&vshpolicy.Config{
 		Limits: engineLimits(),
 		// v4.1 强制项：放行型 symlink——FS 适配器 canonicalize-then-check
-		// 是唯一进程内路径权威；命令准入由 Registry 收口（127），不经 Policy。
+		// 是唯一进程内路径权威。
 		SymlinkMode: vshpolicy.SymlinkFollow,
 	})
+	pol := enginePolicy{Static: basePolicy, exec: cfg.ExecPolicy}
 	factory := gbfs.FactoryFunc(func(ctx context.Context) (gbfs.FileSystem, error) {
 		fsys, _ := ctx.Value(sessionFSKey{}).(gbfs.FileSystem)
 		if fsys == nil {
@@ -149,7 +168,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		vshcore.WithRegistry(reg),
 		vshcore.WithPolicy(pol),
 		vshcore.WithBaseEnv(cfg.BaseEnv),
-		vshcore.WithNativeExec(cfg.NativeExec),
+		vshcore.WithFileCommandResolver(cfg.FileCommands),
 		vshcore.WithFileSystem(vshcore.CustomFileSystem(factory, "/")),
 		vshcore.WithTracing(vshcore.TraceConfig{Mode: vshcore.TraceRedacted}),
 	}

@@ -2,18 +2,49 @@ package host
 
 import (
 	"context"
+	"path"
+	"runtime"
+	"strings"
+
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/gitx"
 	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
-	"path"
-	"runtime"
-	"strings"
 )
 
-func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *commands.Invocation) error {
+// resolveFileCommand constructs an ordinary vsh command for a resolved file.
+// Admission has already been centralized in the engine; this resolver performs
+// no SSH/Git/name-based interception and never executes during resolution.
+func (c *Client) resolveFileCommand(_ context.Context, req commands.FileCommandRequest) (commands.Command, error) {
+	name := nativeCommandName(req.Path, req.InvokedName)
+	return commands.DefineCommand(name, func(ctx context.Context, inv *commands.Invocation) error {
+		return c.runFileCommand(ctx, req.Path, inv)
+	}), nil
+}
+
+// registerManagedGit explicitly registers the optional Pod git command. SSH
+// transport belongs to gitx; other subcommands use the trusted system binary
+// through the same vbox-backed implementation. Absolute native git never enters it.
+func (c *Client) registerManagedGit(reg *commands.Registry) error {
+	gitPath, err := gitx.TrustedBinary()
+	if err != nil {
+		return nil
+	}
+	return reg.RegisterGuarded(commands.DefineCommand("git", func(ctx context.Context, inv *commands.Invocation) error {
+		handled, err := c.git.Managed(ctx, inv)
+		if handled {
+			return err
+		}
+		return c.runFileCommand(ctx, gitPath, inv)
+	}))
+}
+
+func nativeCommandName(resolvedPath, invokedName string) string {
+	if strings.Contains(invokedName, "/") {
+		return resolvedPath
+	}
 	name := path.Base(resolvedPath)
 	if runtime.GOOS == "windows" {
 		name = strings.ToLower(name)
@@ -21,27 +52,16 @@ func (c *Client) nativeExec(ctx context.Context, resolvedPath string, inv *comma
 			name = strings.TrimSuffix(name, ext)
 		}
 	}
-	if reservedSSHNative(name) {
-		return commands.Exitf(inv, 126, "%s: native SSH command is reserved; use managed ssh/scp/sftp and grant ssh host:port", resolvedPath)
-	}
-	// managed git：ssh 传输类子命令由 pod 侧受管执行（授权在 ssh 域，不经
-	// cmd 域——本地子命令 managedGit 返回 false，继续走下面的 cmd 闸）。
-	// 注意：受管路径只按解析名触发，执行体恒为 trustedGitBinary（系统
-	// git），resolvedPath 指向的同名伪造二进制不会被 pod 侧运行。
-	if name == "git" && c.perms != nil {
-		if handled, err := c.git.Managed(ctx, inv); handled {
-			return err
-		}
-	}
-	if !c.execAllowed(execution.SessionFromContext(ctx), name) {
-		return commands.Exitf(inv, 126, "%s: command denied by exec rules (grant cmd %s)", resolvedPath, name)
-	}
+	return name
+}
+
+func (c *Client) runFileCommand(ctx context.Context, resolvedPath string, inv *commands.Invocation) error {
 	wd := vbox.HostPathToOS(inv.Cwd)
 	code, err := c.procs.RunProcess(ctx, vbox.StartOptions{
 		Exec:  append([]string{vbox.HostPathToOS(resolvedPath)}, inv.Args...),
 		Argv0: inv.Argv0,
 		Env:   HostEnvToOS(inv.Env), ReplaceEnv: true, Workdir: wd,
-		NoSandbox: execution.NoSandboxFromContext(ctx), Policy: c.nativePolicy(ctx, wd, name),
+		NoSandbox: execution.NoSandboxFromContext(ctx), Policy: c.nativePolicy(ctx, wd, nativeCommandName(resolvedPath, "")),
 	}, inv.Stdin, inv.Stdout, inv.Stderr)
 	if err != nil {
 		return commands.Exitf(inv, 126, "%s: %v", resolvedPath, err)
@@ -62,11 +82,3 @@ func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool
 
 // trustedGitBinary 保留 host 集成测试入口（实现已迁 libs/gitx）。
 func trustedGitBinary() (string, error) { return gitx.TrustedBinary() }
-
-func reservedSSHNative(name string) bool {
-	switch name {
-	case "ssh", "scp", "sftp", "slogin", "ssh-copy-id", "ssh-keyscan":
-		return true
-	}
-	return false
-}

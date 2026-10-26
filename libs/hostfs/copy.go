@@ -107,7 +107,7 @@ func (f *FS) copyFile(ctx context.Context, call Call, src, dst protocol.FSPath, 
 		w.CloseWithError(err)
 		done <- err
 	}()
-	sealed, err := f.cfg.Bytes.Upload(ctx, call.Owner, r, &live.Size, "", live.MediaType)
+	sealed, err := f.cfg.Bytes.UploadFor(ctx, call.Owner, call.creator(), r, &live.Size, "", live.MediaType)
 	r.CloseWithError(err)
 	readErr := <-done
 	if err != nil {

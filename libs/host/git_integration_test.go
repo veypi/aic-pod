@@ -231,9 +231,9 @@ func TestManagedGitSSHIntegration(t *testing.T) {
 		t.Skip(err)
 	}
 	c := newManagedSSHTestClient(t)
-	// cmd 域默认 deny：验证 https/本地子命令交还原生路径后的确定性结果
-	//（不依赖外部网络）。managed 传输不经 cmd 域，不受影响。
+	// cmd 域默认 deny：git 必须先通过统一 exec；SSH 目标再由 ssh_policy 判定。
 	cfg.Global.ExecPolicy = cfg.PolicyDeny
+	cfg.Global.ExecRules = []string{"allow:git", "allow:grant", "allow:cd"}
 	publishGlobal(t, c.perms)
 	home, _ := os.UserHomeDir()
 	address, calls := startGitPackSSHFixture(t, home)
@@ -245,14 +245,13 @@ func TestManagedGitSSHIntegration(t *testing.T) {
 		!strings.Contains(r.Stderr, "grant ssh "+address) || calls.Load() != 0 {
 		t.Fatalf("denial %+v connections=%d", r, calls.Load())
 	}
-	// https / 本地子命令不受 managed 接管：走原生 cmd 闸。
-	if r := runGitScript(t, c, "git clone https://example.com/x.git y"); r.ExitCode != 126 ||
-		!strings.Contains(r.Stderr, "grant cmd git") {
-		t.Fatalf("https passthrough %+v", r)
+	// https / 本地子命令与 managed 传输共用统一 exec；允许 git 后，后续失败
+	// 只能来自 Git 自身，不能再由 exec 拦成 126。
+	if r := runGitScript(t, c, "git clone https://example.com/x.git y"); r.ExitCode == 126 {
+		t.Fatalf("https passthrough hit unified exec: %+v", r)
 	}
-	if r := runGitScript(t, c, "git status"); r.ExitCode != 126 ||
-		!strings.Contains(r.Stderr, "grant cmd git") {
-		t.Fatalf("local passthrough %+v", r)
+	if r := runGitScript(t, c, "git status"); r.ExitCode == 126 {
+		t.Fatalf("local passthrough hit unified exec: %+v", r)
 	}
 	// 选项白名单：破坏性/危险选项 fail-closed，不接触网络。
 	if r := runGitScript(t, c, "git push --force"); r.ExitCode != 2 || !strings.Contains(r.Stderr, "破坏性") {

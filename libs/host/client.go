@@ -1,4 +1,4 @@
-// Package host 是 AIC host agent 运行时（契约见 docs/hosts-tools.md）：
+// Package host 是 AIC host agent 运行时（契约见 docs/reference/hosts-tools.md）：
 // NATS 连接与认证、能力上报、心跳、请求分发、执行管理器装配。
 //
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
@@ -138,8 +138,8 @@ func New(opts Options) *Client {
 	procs := vbox.NewManager()
 	procs.SetNoSandbox(opts.NoSandbox)
 	procs.SetLogf(logf)
-	// 唯一运行权限状态：启动参数（cfg.Global 授权字段 + work_dir）编译为基表；
-	// 配置无效不阻断连接——状态带 invalid，设备工具 fail-closed（修复并重启恢复）。
+	// 唯一运行权限状态：启动参数（cfg.Global 授权字段 + work_dir）按域编译；
+	// 单个配置域无效只使该域 fail-closed，不阻断连接或其他域。
 	perms, err := newPermissionState(opts.WorkDir, cfg.Global)
 	c := &Client{
 		opts:   opts,

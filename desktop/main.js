@@ -1,6 +1,6 @@
 // AIC Desktop — Electron 主进程（纯远程壳：Chromium 渲染平台 + Go 后端子进程）。
 //
-// 架构（固定视口 browser，设计见 aic/docs/remote-screen.md）：
+// 架构（固定视口 browser，设计见 aic/docs/reference/remote-screen.md）：
 //
 // Electron Main (Node)
 //   ├─ spawn Go 后端；设置/凭证经 `aic-backend config|bind` 子命令读写 config.yaml
@@ -20,6 +20,7 @@ const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, sh
 const { spawn } = require('child_process')
 const { waitForStartup } = require('./backend-startup.cjs')
 const { createBackend } = require('./backend.cjs')
+const { capturePlatform } = require('./screenshot.cjs')
 const { composeLocalStatus } = require('./host-state.cjs')
 const fs = require('fs')
 const net = require('net')
@@ -39,6 +40,8 @@ const trayIcon = process.platform === 'darwin'
   : path.join(__dirname, 'assets', 'tray.png')
 let petSize = 100 // 桌宠窗口边长（右键菜单缩放 50–400，随 pet-pos.json 持久化）
 const probeTimeout = 5000 // {host}/root.html 探测超时
+const platformRetryMin = 10000 // 平台不可达复查起步间隔
+const platformRetryMax = 30000 // 复查退避上限
 const DEFAULT_HOST = 'https://ivec-ai.com'
 // LEGACY_HOSTS：旧平台域名（ivec.ai 现 301 至 ivec-ai.com），作为受信任 host 保留，
 // 兼容旧配置与跳转后的页面 origin。
@@ -70,6 +73,11 @@ let petDragOff = null // 桌宠拖动：鼠标相对窗口偏移
 let petPos = null // 桌宠当前位置 {x, y}（内存缓存，创建/拖动时更新）
 let petPosTimer = null // 桌宠位置写盘防抖 timer
 let host = DEFAULT_HOST // 平台地址（配置读取）
+let homePath = '/' // 平台首页路径（配置 home_path；启动与复查跳转共用）
+let platformWaiting = false // 主视图停在 loading、平台不可达复查中
+let platformWaitTimer = null // 复查定时器
+let platformProbing = false // 复查探测进行中（防并发探测）
+let platformRetryMs = platformRetryMin // 当前复查间隔（10s 起步，×2 退避到 30s）
 
 const backendCtl = createBackend({
   spawn,
@@ -138,7 +146,8 @@ if (process.platform === 'darwin') {
       // 会找 focusedWindow().webContents → undefined 抛异常（2026-09-10 实测报错）——
       // 三个能力全部改成显式 handler。
       submenu: [
-        { label: '重新加载', accelerator: 'CmdOrCtrl+R', click: () => platformView?.webContents.reload() },
+        // 等待平台中 → 「重新加载」= 立即复查（重载 loading.html 本身不会重新探测）
+        { label: '重新加载', accelerator: 'CmdOrCtrl+R', click: () => (platformWaiting ? retryPlatform() : platformView?.webContents.reload()) },
         { label: '开发者工具', accelerator: process.platform === 'darwin' ? 'Alt+Cmd+I' : 'Ctrl+Shift+I', click: () => platformView?.webContents.toggleDevTools() },
         { type: 'separator' },
         { label: '切换全屏', accelerator: process.platform === 'darwin' ? 'Ctrl+Cmd+F' : 'F11', click: () => { if (mainWin && !mainWin.isDestroyed()) mainWin.setFullScreen(!mainWin.isFullScreen()) } },
@@ -183,18 +192,19 @@ async function start() {
   if (cfg && cfg.host) host = cfg.host
   hostPolicy.replace(host)
   // 默认打开地址：host + home_path（默认 /；非法值回退 /）
-  let homePath = (cfg && cfg.home_path) || '/'
+  homePath = (cfg && cfg.home_path) || '/'
   if (typeof homePath !== 'string' || !homePath.startsWith('/') || homePath.startsWith('//')) homePath = '/'
 
   setStep('正在检测平台 ' + host + ' …')
   const reachable = await probeRoot(host)
 
-  // 3. 跳转：平台可达 → host + homePath；否则停留 loading 提示 + 独立本地配置窗口（首配）
+  // 3. 跳转：平台可达 → host + homePath；否则停留 loading + 独立本地配置窗口（首配）
+  //    并进入自动复查（平台恢复后自动进入，无需重启应用）
   if (reachable) {
-    loadMain(host.replace(/\/+$/, '') + homePath)
+    loadMain(platformUrl())
   } else {
-    setStep('平台不可达——请在「本地配置」窗口中检查地址后重试')
     openSettings()
+    schedulePlatformRetry(true)
   }
 
   try {
@@ -380,6 +390,58 @@ async function probeRoot(url) {
   }
 }
 
+// ---- 平台不可达 → 自动复查（2026-10-26）----
+// 旧实现只在启动链里探测一次：平台事后恢复后主视图永远停在 loading（Ctrl/Cmd+R 只是重载
+// 静态 loading.html，同样无效），只能重启应用。现在等待态按 10s→20s→30s 退避复查
+// {host}/root.html，可达即载入平台；host/homePath 每轮现取，期间在设置窗改地址也会被带上。
+function platformUrl() {
+  return host.replace(/\/+$/, '') + homePath
+}
+
+function clearPlatformRetry() {
+  clearTimeout(platformWaitTimer)
+  platformWaitTimer = null
+  platformWaiting = false
+}
+
+function paintWaitingStep() {
+  setStep('平台不可达——每 ' + platformRetryMs / 1000 + 's 自动重试（也可在「本地配置」窗口检查地址）')
+}
+
+function schedulePlatformRetry(first) {
+  if (platformWaitTimer || quitting) return
+  if (!first) platformRetryMs = Math.min(platformRetryMs * 2, platformRetryMax)
+  platformWaiting = true
+  platformWaitTimer = setTimeout(retryPlatform, platformRetryMs)
+  paintWaitingStep()
+}
+
+async function retryPlatform() {
+  clearTimeout(platformWaitTimer)
+  platformWaitTimer = null
+  if (quitting || !platformView || platformProbing) return
+  platformProbing = true
+  let reachable = false
+  try {
+    reachable = await probeRoot(host)
+  } finally {
+    platformProbing = false
+  }
+  if (quitting) return
+  if (!reachable) {
+    schedulePlatformRetry(false)
+    return
+  }
+  platformRetryMs = platformRetryMin
+  setStep('平台已连接，正在打开…')
+  loadMain(platformUrl())
+}
+
+// failedUrl 是否落在当前平台 origin（did-fail-load 只对自家平台回落 loading）
+function samePlatform(url) {
+  try { return new URL(url).origin === new URL(host).origin } catch (_) { return false }
+}
+
 // ---- 本地指令通道（aic wake 子指令 → pet 组件事件）----
 // unix socket：$HOME/.aic/desktop.sock（0600，仅本机同用户进程可连；
 // 路径与 Go 端 cfg.StateDir() 同位置）。协议 = 换行分隔 JSON 请求/应答。
@@ -532,6 +594,12 @@ function registerIpc() {
   ipcMain.handle('window:pet', (e, page) => (hostPolicy.isPlatformFrame(e) ? enterPet(page) : state()))
   ipcMain.handle('window:restore', (e) => (hostPolicy.isPlatformFrame(e) ? leavePet() : state()))
 
+  // AI page screenshot：只截平台 WebContents，不开放整个显示器或任意窗口。
+  ipcMain.handle('platform:screenshot', async (e) => {
+    if (!hostPolicy.isPlatformFrame(e) || e.sender !== platformView?.webContents) throw new Error('forbidden')
+    return capturePlatform(platformView)
+  })
+
   // 外链 → 系统默认浏览器（平台页拦截普通外链）
   ipcMain.handle('open:external', (e, url) => {
     if (!hostPolicy.isPlatformFrame(e)) return false
@@ -659,6 +727,16 @@ function createMainWindow(init) {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+  // 主框架网络级加载失败（平台重启/网络中断；-3=ERR_ABORTED 属正常打断）→ 回落 loading 页
+  // 并进入自动复查：否则停在 Chromium 错误页，平台恢复后刷新也看不到东西。
+  platformView.webContents.on('did-fail-load', (_e, code, _desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame || code === -3 || quitting || !samePlatform(failedUrl)) return
+    // 回 loading 页后重画等待文案（loading 页尚无 __setStep 时，落页后补一次）
+    platformView.webContents.once('did-finish-load', () => { if (platformWaiting) paintWaitingStep() })
+    platformView.webContents.loadFile(path.join(__dirname, 'loading.html'))
+    // 连续加载失败（探测通过但页面仍起不来）走退避，避免 10s 级无限重载
+    schedulePlatformRetry(false)
+  })
 
   layoutMain()
   mainWin.on('resize', layoutMain)
@@ -688,6 +766,7 @@ function layoutMain() {
 
 function loadMain(url) {
   if (!platformView) return
+  clearPlatformRetry()
   platformView.webContents.loadURL(url)
   keepWorkerAlive(url) // 保活窗口跟随平台地址：持 nc SharedWorker 端口，平台页刷新不再销毁 worker/WS
   mainWin?.show()

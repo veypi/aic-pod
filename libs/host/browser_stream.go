@@ -22,7 +22,7 @@ func (c *Client) streamBrowser(parent context.Context, caller protocol.Caller, i
 		if err := caller.Validate(parent); err != nil {
 			return err
 		}
-		if !caller.Direct || caller.Scope != "" || c.perms.err() != nil || !c.execAllowed(caller.Origin, "mcp.browser") {
+		if !caller.Direct || caller.Scope != "" || !c.execAllowed(caller.Origin, "mcp.browser") {
 			return protocol.Fail("permission_denied", "Browser access denied; request grant cmd mcp.browser")
 		}
 		return nil

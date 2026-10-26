@@ -3,7 +3,6 @@ package vtools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -55,7 +54,7 @@ func newFixture(t *testing.T, gate Gate) (*Registry, *fakeProvider) {
 		},
 		result: map[string]any{"ok": true},
 	}
-	r := NewRegistry(commands.NewRegistry(), Options{Gate: gate})
+	r := NewRegistry(commands.NewRegistry(), Options{StreamGate: gate})
 	if err := r.Register("echo", p); err != nil {
 		t.Fatal(err)
 	}
@@ -90,23 +89,10 @@ func TestCommandCatalog(t *testing.T) {
 	}
 }
 
-func TestCommandGateDeny(t *testing.T) {
-	r, _ := newFixture(t, func(context.Context, string, string) error {
-		return fmt.Errorf("denied by exec rules; request grant cmd mcp.echo")
-	})
-	_, _, err := run(t, r, "echo", "ping")
-	if exitCode(err) != 126 || !strings.Contains(err.Error(), "denied by exec rules") {
-		t.Fatalf("gate: %v", err)
-	}
-}
-
-// 命令路径的会话键来自注入的 Options.SessionOf（vtools 不反向依赖执行层）：
-// 键取错会让会话级 grant cmd 在锁死的设备上静默失效。
-func TestCommandGateSessionFromSessionOf(t *testing.T) {
-	var got string
+func TestCommandExecutionDoesNotInvokeStreamGate(t *testing.T) {
+	called := false
 	r := NewRegistry(commands.NewRegistry(), Options{
-		Gate:      func(_ context.Context, session, _ string) error { got = session; return nil },
-		SessionOf: func(context.Context) string { return "s-42" },
+		StreamGate: func(context.Context, string, string) error { called = true; return nil },
 	})
 	if err := r.Register("echo", &fakeProvider{result: map[string]any{"ok": true}}); err != nil {
 		t.Fatal(err)
@@ -114,8 +100,8 @@ func TestCommandGateSessionFromSessionOf(t *testing.T) {
 	if _, _, err := run(t, r, "echo", "ping"); err != nil {
 		t.Fatal(err)
 	}
-	if got != "s-42" {
-		t.Fatalf("gate session = %q, want Options.SessionOf", got)
+	if called {
+		t.Fatal("command execution invoked the RTC stream gate")
 	}
 }
 

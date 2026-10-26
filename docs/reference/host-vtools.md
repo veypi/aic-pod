@@ -130,7 +130,7 @@ mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样�
 
 ## 5. 内置服务 = 技能包的 cli/ 维度（2026-10-16 起）
 
-技能包即插件单元（aic docs/skill.md）：`cli/manifest.json` 声明设备服务
+技能包即插件单元（aic docs/reference/skill.md）：`cli/manifest.json` 声明设备服务
 （协议 kind / 别名 / 程序解析 programs / stream 通道；blender 另有私有扩展
 verbs 声明生命周期动词，非通用维度），程序源码随包入库。pod 启动时经 aicskills embed 读内嵌集的清单注册服务
 （`libs/host/packs.go`）：mcp-stdio 进连接管理器，tcp 由注册层直接接管；

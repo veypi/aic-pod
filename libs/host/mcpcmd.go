@@ -15,7 +15,7 @@ import (
 	"github.com/veypi/vsh/commands"
 )
 
-// mcp 命令 = 服务管理面（docs/host-vtools.md）：工具调用不再经它中转——
+// mcp 命令 = 服务管理面（docs/reference/host-vtools.md）：工具调用不再经它中转——
 // 服务登记后直接 <alias> <tool> [flags]。tools/describe/call/read 保留为
 // 调试直通：tools/describe 透传上游 schema，call 复用 vtools 参数面。
 
@@ -50,14 +50,10 @@ func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
 		return c.mcpDebug(ctx, inv)
 	}
 	op, rest := args[0], args[1:]
-	sid := execution.SessionFromContext(ctx)
 	switch op {
 	case "list":
 		return c.mcpList(inv, rest)
 	case "add", "remove":
-		if !c.execAllowed(sid, "mcp") {
-			return commands.Exitf(inv, 126, "mcp %s: denied by exec rules（引入新能力/改配置需 grant cmd mcp）", op)
-		}
 		if op == "add" {
 			return c.mcpAdd(ctx, inv, rest)
 		}
@@ -66,8 +62,8 @@ func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
 		if len(rest) != 1 {
 			return commands.Exitf(inv, 2, "usage: mcp %s <alias>", op)
 		}
-		if err := c.mcpGate(ctx, execution.SessionFromContext(ctx), rest[0]); err != nil {
-			return commands.Exitf(inv, 126, "%s", err)
+		if !c.execAllowed(execution.SessionFromContext(ctx), "mcp."+rest[0]) {
+			return commands.Exitf(inv, 126, "mcp %s: denied by exec rules; request grant cmd mcp.%s", op, rest[0])
 		}
 		return c.mcpStartStop(ctx, inv, op, rest[0])
 	default:

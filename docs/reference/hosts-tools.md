@@ -34,7 +34,7 @@ mcp:
       url: https://service.example/mcp
 ```
 
-browser/CUA/blender 是内置服务，默认项由 aic-skills 对应包的 `cli/manifest.json` 声明（pod 经 embed 读取，不再硬编码）：分别启动官方 `agent-browser mcp --tools core,tabs` 与 `cua-driver mcp`，blender 是 `tcp://127.0.0.1:9866` 的 addon 通道（含 doctor/launch/install 生命周期动词与分级报错，详见 blender 技能手册）。browser/CUA 默认 30m `idle_timeout`；所有者显式配置同名项会整体替换内置项（含默认有效期与权限），`disabled: true` 关闭。Desktop 分发运行依赖；独立 CLI 按技能说明安装上游软件。`disabled: true` 无需填写 command。其他启用的服务 command 与 url 二选一；cwd 必须绝对路径。可设 disabled:true 或进程 no_sandbox:true。url 另接受 `tcp://host:port`（vtools/tcp v1 行分隔 JSON 协议——非 MCP 服务，由注册层直接接管，不进连接管理器）。配置只由设备所有者维护，不从技能或工具参数加载；亦可用 `mcp add/remove [--persist]` 在会话里增删（需 exec 规则放行 `mcp`；不带 --persist 进程级生效）。当前远程 HTTP 使用设备网络规则、不继承 shell env、不跟随重定向；没有 OAuth/token 管理器。
+browser/CUA/blender 是内置服务，默认项由 aic-skills 对应包的 `cli/manifest.json` 声明（pod 经 embed 读取，不再硬编码）：分别启动官方 `agent-browser mcp --tools core,tabs,mobile,state` 与 `cua-driver mcp`，blender 是 `tcp://127.0.0.1:9866` 的 addon 通道（含 doctor/launch/install 生命周期动词与分级报错，详见 blender 技能手册）。browser/CUA 默认 30m `idle_timeout`；所有者显式配置同名项会整体替换内置项（含默认有效期与权限），`disabled: true` 关闭。Desktop 分发运行依赖；独立 CLI 按技能说明安装上游软件。`disabled: true` 无需填写 command。其他启用的服务 command 与 url 二选一；cwd 必须绝对路径。可设 disabled:true 或进程 no_sandbox:true。url 另接受 `tcp://host:port`（vtools/tcp v1 行分隔 JSON 协议——非 MCP 服务，由注册层直接接管，不进连接管理器）。配置只由设备所有者维护，不从技能或工具参数加载；亦可用 `mcp add/remove [--persist]` 在会话里增删（需 exec 规则放行 `mcp`；不带 --persist 进程级生效）。当前远程 HTTP 使用设备网络规则、不继承 shell env、不跟随重定向；没有 OAuth/token 管理器。
 
 stdio 服务懒启动并复用一个 SDK session。进程由 vbox 负责；manager 只拥有配置与连接。一次取消不关闭服务；退出后的下一次显式调用可重新建连，失败写操作不自动重放。服务或启动权限配置更新时关闭旧连接，撤销相关临时服务授权。
 
@@ -58,7 +58,7 @@ exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`
 
 Browser UI 调用上游工具并通过下述 `aic-browser` 通道查看与控制画面；CUA UI 使用截图预览和上游输入工具，并保留 `check_permissions({prompt:false})` 只读诊断。
 
-依赖与用法见 [browser](../../aic-skills/browser/SKILL.md)、[CUA](../../aic-skills/cua/SKILL.md) 与 [构建发行](release-architecture.md)。
+依赖与用法见 [browser](../../../aic-skills/browser/SKILL.md)、[CUA](../../../aic-skills/cua/SKILL.md) 与 [构建发行](../guides/release.md)。
 
 内建 Browser UI 的 `aic-browser` RTC data channel 复用同一 peer 的设备认证和 `mcp.browser` 命令权限，双向转发该 agent-browser daemon 的原生 WebSocket 消息。Pod 仅做分片传输，不解析浏览器工具、不建立 CDP 连接。UI 绘制帧后才把 ACK 转回上游；关闭此通道不影响命令连接。（2026-10-16 起该通道走通用流注册：rtc.Config.Streams 按 DataChannel 标签现查 vtools 登记表，任何实现 vtools.Streamer 的服务都能获得同形态通道；见 host-vtools.md §4。）
 

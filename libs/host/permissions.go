@@ -6,9 +6,8 @@ package host
 // SSH、grant status 全部从它读取；匹配算法由 vbox 提供。
 //
 // 基表生命周期：
-//   - 启动：由 cfg.Global 编译（newPermissionState）；配置无效 → invalid
-//     非 nil，一切设备工具 fail-closed（修复本地设置并重启后恢复），
-//     客户端照常连接。
+//   - 启动：由 cfg.Global 按域编译（newPermissionState）；单个配置域无效
+//     只使该域 fail-closed，其他域继续工作，客户端照常连接。
 //   - permanent grant：受串行保护的更新（persistGrant）——构造候选配置 →
 //     完整编译校验（compileAuth）→ 成功保存 → 原子发布（publish）；
 //     任一步失败均不发布部分规则。
@@ -17,6 +16,7 @@ package host
 // cfg.Global 只是启动参数，不再是第二份并发运行权限状态；运行中修改
 // cfg.Global 不影响本状态（设置继续重启生效）。
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,7 +26,9 @@ import (
 	"sync"
 
 	"github.com/veypi/aic-pod/cfg"
+	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/vbox"
+	vshpolicy "github.com/veypi/vsh/policy"
 )
 
 // sessionGrants 按域保存一个会话的临时授权。
@@ -39,14 +41,16 @@ type sessionGrants struct {
 
 // compiledAuth 是一次完整编译校验后的基表（publish 的输入）。
 type compiledAuth struct {
-	fsOpen    bool
-	fsRules   []vbox.Rule // cfg 规则 + 内建 deny（首命中）
-	netOpen   bool
-	netRules  []vbox.NetRule
-	sshOpen   bool
-	sshRules  []vbox.NetRule
-	execMode  string
-	execRules []string
+	fsOpen           bool
+	fsRules          []vbox.Rule // cfg 规则 + 内建 deny（首命中）
+	netOpen          bool
+	netRules         []vbox.NetRule
+	netUpstreamProxy string
+	sshOpen          bool
+	sshRules         []vbox.NetRule
+	execMode         string
+	execRules        []string
+	errs             map[string]error // 每个配置域独立的语法/编译错误
 }
 
 type permissionState struct {
@@ -55,7 +59,6 @@ type permissionState struct {
 	baseRoots, decideCaches       []string
 	base                          compiledAuth
 	grants                        map[string]*sessionGrants
-	invalid                       error // 启动配置无效：工具 fail-closed
 }
 
 // netBuiltin 是 net 域内建放行（本机回环）。
@@ -73,10 +76,51 @@ var nativeNetPlatform = runtime.GOOS
 
 // compileAuth 完整编译校验一份授权配置（纯函数，不触碰运行状态）。
 func compileAuth(a cfg.AuthCfg) (*compiledAuth, error) {
-	if err := a.Validate(); err != nil {
-		return nil, err
+	base := &compiledAuth{
+		fsOpen:           a.FsPolicy == cfg.PolicyOpen,
+		netOpen:          a.NetPolicy == cfg.PolicyOpen,
+		netUpstreamProxy: a.NetUpstreamProxy,
+		sshOpen:          a.SshPolicy == cfg.PolicyOpen,
+		execMode:         a.ExecPolicy,
+		execRules:        append([]string(nil), a.ExecRules...),
+		errs:             map[string]error{},
 	}
-	rules, err := vbox.CompileFSRules(a.FsRules, vbox.ClassCfg)
+	if err := validateAuthPolicy(a.ExecPolicy); err != nil {
+		base.setError("exec", "exec_policy", err)
+	} else if err := cfg.ValidateExecRules(a.ExecRules); err != nil {
+		base.setError("exec", "exec_rules", err)
+	}
+	if err := validateAuthPolicy(a.FsPolicy); err != nil {
+		base.setError("fs", "fs_policy", err)
+	} else if rules, err := compileFSBase(a.FsRules); err != nil {
+		base.setError("fs", "fs_rules", err)
+	} else {
+		base.fsRules = rules
+	}
+	if err := validateAuthPolicy(a.NetPolicy); err != nil {
+		base.setError("net", "net_policy", err)
+	} else if rules, err := compileNetRules(a.NetRules); err != nil {
+		base.setError("net", "net_rules", err)
+	} else {
+		base.netRules = rules
+	}
+	if base.errs["net"] == nil && a.NetUpstreamProxy != "" {
+		if err := vbox.ValidateUpstreamProxy(a.NetUpstreamProxy); err != nil {
+			base.setError("net", "net_upstream_proxy", err)
+		}
+	}
+	if err := validateAuthPolicy(a.SshPolicy); err != nil {
+		base.setError("ssh", "ssh_policy", err)
+	} else if rules, err := compileNetRules(a.SshRules); err != nil {
+		base.setError("ssh", "ssh_rules", err)
+	} else {
+		base.sshRules = rules
+	}
+	return base, base.err()
+}
+
+func compileFSBase(raws []string) ([]vbox.Rule, error) {
+	rules, err := vbox.CompileFSRules(raws, vbox.ClassCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -88,53 +132,37 @@ func compileAuth(a cfg.AuthCfg) (*compiledAuth, error) {
 	if err != nil {
 		return nil, err
 	}
-	net, err := compileNetRules(a.NetRules)
+	hard := hardProtectionPaths()
+	for i := range hard {
+		hard[i] = "!deny:" + hard[i]
+	}
+	protected, err := vbox.CompileFSRules(hard, vbox.ClassBuiltin)
 	if err != nil {
 		return nil, err
 	}
-	ssh, err := compileNetRules(a.SshRules)
-	if err != nil {
-		return nil, err
-	}
-	// 平台能力闸（2026-10-10）：net 基表按本平台原生沙箱能力预检——tool:
-	// 行不进原生快照（工具层照常执行）；既不可落实也不可吸收的行（典型：
-	// linux/windows 上的选择性 deny）在编译期拒绝，不再等 exec 期暴雷。
-	// 被吸收的行（deny 姿态下的 allow 等）由 grant status 逐条标注（重算口径，
-	// 见 grantStatus 的 net 域注记）。
-	netOpen := a.NetPolicy == cfg.PolicyOpen
-	_, err = vbox.CheckNetPolicy(nativeNetPlatform, vbox.NetRuleSet{
-		Rules:   append(nativeNetRows(net), netBuiltin...),
-		Default: netOpen,
-	})
-	if err != nil {
-		// 姿态级失败（windows 无网络落地能力）姿态本身加不了 tool: 前缀，
-		// 与行级失败（选择性 deny / loopback 冲突）分开指引。
-		if strings.Contains(err.Error(), "does not implement network rules") {
-			return nil, fmt.Errorf("net_policy=deny 在本平台（%s）原生沙箱无法落实: %w——若只需约束工具层（curl/MCP），请改用 net_policy=open + tool:deny: 规则行", nativeNetPlatform, err)
-		}
-		return nil, fmt.Errorf("net_rules 在本平台（%s）原生沙箱无法落实: %w——若只需约束工具层（curl/MCP），请给该行加 tool: 前缀（或统一 loopback 拼写）", nativeNetPlatform, err)
-	}
-	return &compiledAuth{
-		fsOpen:    a.FsPolicy == cfg.PolicyOpen,
-		fsRules:   append(rules, builtin...),
-		netOpen:   netOpen,
-		netRules:  net,
-		sshOpen:   a.SshPolicy == cfg.PolicyOpen,
-		sshRules:  ssh,
-		execMode:  a.ExecPolicy,
-		execRules: append([]string(nil), a.ExecRules...),
-	}, nil
+	return append(append(rules, builtin...), protected...), nil
 }
 
-// nativeNetRows 过滤出进入原生沙箱快照的 net 行（剔除 tool-only 行）。
-func nativeNetRows(rows []vbox.NetRule) []vbox.NetRule {
-	kept := make([]vbox.NetRule, 0, len(rows))
-	for _, r := range rows {
-		if !r.ToolOnly {
-			kept = append(kept, r)
+func validateAuthPolicy(value string) error {
+	if value != "" && value != cfg.PolicyOpen && value != cfg.PolicyDeny {
+		return fmt.Errorf("invalid policy %q (want deny | open)", value)
+	}
+	return nil
+}
+
+func (b *compiledAuth) setError(domain, field string, err error) {
+	if err != nil {
+		b.errs[domain] = &cfg.AuthFieldError{Field: field, Err: err}
+	}
+}
+
+func (b *compiledAuth) err() error {
+	for _, domain := range []string{"exec", "fs", "net", "ssh"} {
+		if err := b.errs[domain]; err != nil {
+			return err
 		}
 	}
-	return kept
+	return nil
 }
 
 func compileNetRules(rows []string) ([]vbox.NetRule, error) {
@@ -149,11 +177,8 @@ func compileNetRules(rows []string) ([]vbox.NetRule, error) {
 	return compiled, nil
 }
 
-// newPermissionState 构建启动权限状态。StateDir 失败是环境错误（返回
-// error，同旧 fsauth.New 的 initErr 语义）；授权配置无效不报错——状态带
-// invalid，工具 fail-closed（修复并重启后恢复），客户端照常运行。
-// 校验按原始值（o.ValidateAuth）：非法 policy 取值等不能被读点归一化
-// 吞掉；编译输入 AuthFrom 才做安全侧归一。
+// newPermissionState 构建启动权限状态。StateDir 失败是环境错误；每个授权
+// 配置域独立编译，错误只使对应快照 fail-closed，不阻断其他域或设备连接。
 func newPermissionState(workDir string, o *cfg.Options) (*permissionState, error) {
 	p := &permissionState{grants: map[string]*sessionGrants{}}
 	dir, err := cfg.StateDir()
@@ -163,16 +188,22 @@ func newPermissionState(workDir string, o *cfg.Options) (*permissionState, error
 	p.stateDir = vbox.Canonical(dir)
 	p.sessionDir = p.stateDir + "/sessions"
 	p.setWorkDir(workDir)
-	if err := o.ValidateAuth(); err != nil {
-		p.invalid = fmt.Errorf("invalid authorization configuration: %w", err)
-		return p, nil
+	auth := cfg.AuthFrom(o)
+	// 非空 policy 保留原值参与校验；空值才使用 AuthFrom 的默认姿态。
+	if o.ExecPolicy != "" {
+		auth.ExecPolicy = o.ExecPolicy
 	}
-	base, err := compileAuth(cfg.AuthFrom(o))
-	if err != nil {
-		p.invalid = fmt.Errorf("invalid authorization configuration: %w", err)
-	} else {
-		p.base = *base
+	if o.FsPolicy != "" {
+		auth.FsPolicy = o.FsPolicy
 	}
+	if o.NetPolicy != "" {
+		auth.NetPolicy = o.NetPolicy
+	}
+	if o.SshPolicy != "" {
+		auth.SshPolicy = o.SshPolicy
+	}
+	base, _ := compileAuth(auth)
+	p.base = *base
 	return p, nil
 }
 
@@ -195,14 +226,13 @@ func (p *permissionState) publish(base *compiledAuth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.base = *base
-	p.invalid = nil
 }
 
-// err 返回启动配置无效错误（nil = 配置有效）。
-func (p *permissionState) err() error {
+// err 返回指定配置域的错误；其他域不受影响。
+func (p *permissionState) err(domain string) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.invalid
+	return p.base.errs[domain]
 }
 
 func (p *permissionState) session(sid string) *sessionGrants {
@@ -214,7 +244,7 @@ func (p *permissionState) session(sid string) *sessionGrants {
 	return g
 }
 
-// ---- 临时授权（会话隔离；temp 行插表头、首命中压一切） ----
+// ---- 临时授权（会话隔离；level 0，同 level 按原表序） ----
 
 func (p *permissionState) grantFS(sid, target string) {
 	p.mu.Lock()
@@ -284,11 +314,8 @@ func (p *permissionState) fsSnapshotWith(sid string, protected []vbox.Rule) vbox
 }
 
 func (p *permissionState) fsSnapshotLocked(sid string, protected []vbox.Rule) vbox.FSRuleSet {
-	// 启动配置无效时快照降级为「写全拒、读按 vbox 默认放行」——不是整体
-	// fail-closed；真正的硬拒由入口层查 err() 承担（dispatch 总闸拒绝一切
-	// 请求）。新调用点必须沿用该入口不变量，不得只信快照。
-	if p.invalid != nil {
-		return vbox.FSRuleSet{DefaultWrite: vbox.EffDeny}
+	if err := p.base.errs["fs"]; err != nil {
+		return vbox.FSRuleSet{DefaultWrite: vbox.EffDeny, Err: err}
 	}
 	var rules []vbox.Rule
 	if g := p.grants[sid]; g != nil {
@@ -320,20 +347,8 @@ func (p *permissionState) netSnapshot(sid string) vbox.NetRuleSet {
 	return p.netSnapshotLocked(sid)
 }
 
-// netSnapshotForNative 是原生进程沙箱的 net 快照：与工具层同一基表，但剔除
-// tool-only 行（它们由工具层自行执行，内核不落地；vbox 侧 CheckNetPolicy /
-// Seatbelt 输出同口径跳过）。
-func (p *permissionState) netSnapshotForNative(sid string) vbox.NetRuleSet {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	s := p.netSnapshotLocked(sid)
-	return vbox.NetRuleSet{Rules: nativeNetRows(s.Rules), Default: s.Default}
-}
-
 func (p *permissionState) netSnapshotLocked(sid string) vbox.NetRuleSet {
-	// 与 fs 快照同一不变量：启动配置无效时快照自身 fail-closed（含内建
-	// localhost 放行也不下发）——未来新调用点不再依赖入口各自查 err()。
-	if p.invalid != nil {
+	if p.base.errs["net"] != nil {
 		return vbox.NetRuleSet{}
 	}
 	var rows []vbox.NetRule
@@ -344,7 +359,7 @@ func (p *permissionState) netSnapshotLocked(sid string) vbox.NetRuleSet {
 	}
 	rows = append(rows, p.base.netRules...)
 	rows = append(rows, netBuiltin...)
-	return vbox.NetRuleSet{Rules: rows, Default: p.base.netOpen}
+	return vbox.NetRuleSet{Rules: rows, Default: p.base.netOpen, UpstreamProxy: p.base.netUpstreamProxy}
 }
 
 func (p *permissionState) sshSnapshot(sid string) vbox.NetRuleSet {
@@ -354,8 +369,7 @@ func (p *permissionState) sshSnapshot(sid string) vbox.NetRuleSet {
 }
 
 func (p *permissionState) sshSnapshotLocked(sid string) vbox.NetRuleSet {
-	// 同上：invalid 时快照自身 fail-closed。
-	if p.invalid != nil {
+	if p.base.errs["ssh"] != nil {
 		return vbox.NetRuleSet{}
 	}
 	var rows []vbox.NetRule
@@ -370,18 +384,29 @@ func (p *permissionState) sshSnapshotLocked(sid string) vbox.NetRuleSet {
 }
 
 func (p *permissionState) sshAllowed(sid, hostport string) bool {
-	if p.err() != nil {
+	if p.err("ssh") != nil {
 		return false
 	}
 	return p.sshSnapshot(sid).Match(hostport)
 }
 
-// execAllowed 判定 cmd 域准入（会话 temp 授权行在基表之前，首命中）。
-// 启动配置无效时一律拒绝。
+// AllowExec 是 vsh 的统一命令准入入口。解析名和解析路径使用同一张 exec 表；
+// 命令实现、来源和内部策略不改变这里的判定。
+func (p *permissionState) AllowExec(ctx context.Context, req vshpolicy.ExecRequest) error {
+	if !p.execAllowedIdentity(execution.SessionFromContext(ctx), req.Name, req.Path) {
+		return &vshpolicy.DeniedError{Subject: fmt.Sprintf("command %q", req.Name), Reason: "not in allowlist"}
+	}
+	return nil
+}
+
 func (p *permissionState) execAllowed(sid, name string) bool {
+	return p.execAllowedIdentity(sid, name, "")
+}
+
+func (p *permissionState) execAllowedIdentity(sid, name, resolvedPath string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.invalid != nil {
+	if p.base.errs["exec"] != nil {
 		return false
 	}
 	var rows []string
@@ -391,7 +416,11 @@ func (p *permissionState) execAllowed(sid, name string) bool {
 		}
 	}
 	rows = append(rows, p.base.execRules...)
-	return cfg.CommandAllowed(p.base.execMode, rows, name)
+	identities := []string{name}
+	if resolvedPath != "" && resolvedPath != name {
+		identities = append(identities, resolvedPath)
+	}
+	return cfg.CommandAllowed(p.base.execMode, rows, identities...)
 }
 
 // sandboxWritableProbe 是「该路径能否在 OS 沙箱内被授为可写根」的探测入口
@@ -474,21 +503,29 @@ func (p *permissionState) grantStatus(sessionKey string) string {
 		{"net", base.netOpen, p.netSnapshotLocked(sessionKey)},
 		{"ssh", base.sshOpen, p.sshSnapshotLocked(sessionKey)},
 	}
-	// net 域的原生沙箱落地标注（锁外纯函数计算）：与 nativePolicy 同口径的
-	// 快照（剔除 tool-only 行）过平台能力分类，收窄行逐条标注。
-	netNative := vbox.NetRuleSet{Rules: nativeNetRows(domains[0].rows.Rules), Default: domains[0].open}
+	// net 域的完整快照在锁外做原生落地诊断；诊断不改变规则或阻塞其他域。
+	netNative := domains[0].rows
 	p.mu.RUnlock()
 
-	netLandNotes := map[string]string{}
+	netLandNotes := map[int]string{}
 	landings, landErr := vbox.CheckNetPolicy(nativeNetPlatform, netNative)
 	if landErr == nil {
-		for _, l := range landings {
-			if !l.Landed && !l.Noop {
-				effect := "deny"
-				if l.Rule.Allow {
-					effect = "allow"
-				}
-				netLandNotes[effect+":"+l.Rule.HostPort] = " [原生沙箱内不可达: " + l.Reason + "]"
+		for i, l := range landings {
+			var kinds []string
+			if l.Kernel {
+				kinds = append(kinds, "kernel")
+			}
+			if l.Proxy {
+				kinds = append(kinds, "proxy")
+			}
+			if l.Reserved {
+				kinds = append(kinds, "reserved")
+			}
+			if l.Absorbed {
+				kinds = append(kinds, "absorbed")
+			}
+			if len(kinds) > 0 {
+				netLandNotes[i] = " [" + strings.Join(kinds, "+") + ": " + l.Reason + "]"
 			}
 		}
 	}
@@ -499,30 +536,27 @@ func (p *permissionState) grantStatus(sessionKey string) string {
 	fmt.Fprintf(&b, "exec_policy: %s", base.execMode)
 	fmt.Fprintf(&b, "\nexec_rules (%d): %s", len(base.execRules), strings.Join(base.execRules, " "))
 	fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
+	for _, domain := range []string{"exec", "fs", "net", "ssh"} {
+		if err := base.errs[domain]; err != nil {
+			fmt.Fprintf(&b, "\n%s_config_error: %v", domain, err)
+		}
+	}
 	fmt.Fprintf(&b, "\n\nfs_policy: %s", policyName(base.fsOpen))
-	fmt.Fprintf(&b, "\nfs_rules (%d, first match wins):", len(fsRows))
+	fmt.Fprintf(&b, "\nfs_rules (%d, level + original order):", len(fsRows))
 	probes := newWriteRootProbeCache()
 	for i, row := range fsRows {
-		fmt.Fprintf(&b, "\n  %d. %s:%s [%s]%s", i+1, row.Effect, row.Pattern, row.Class, probes.note(row))
+		fmt.Fprintf(&b, "\n  %d. %s:%s [%s level=%d]%s", i+1, row.Effect, row.Pattern, row.Class, row.Level, probes.note(row))
 	}
 	b.WriteString(probes.skippedNote())
 	for _, domain := range domains {
-		fmt.Fprintf(&b, "\n\n%s_policy: %s\n%s_rules (first match wins):", domain.name, policyName(domain.open), domain.name)
+		fmt.Fprintf(&b, "\n\n%s_policy: %s\n%s_rules (level + original order):", domain.name, policyName(domain.open), domain.name)
 		if domain.name == "net" && landErr != nil {
 			fmt.Fprintf(&b, "\n  [原生沙箱无法落实当前规则表: %v]", landErr)
 		}
 		for i, row := range domain.rows.Rules {
 			note := ""
 			if domain.name == "net" {
-				if row.ToolOnly {
-					note = " [仅工具层生效]"
-				} else {
-					effect := "deny"
-					if row.Allow {
-						effect = "allow"
-					}
-					note = netLandNotes[effect+":"+row.HostPort]
-				}
+				note = netLandNotes[i]
 			}
 			fmt.Fprintf(&b, "\n  %d. %s%s", i+1, row.String(), note)
 		}

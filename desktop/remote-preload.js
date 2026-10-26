@@ -23,6 +23,8 @@ if (allowedHosts.includes(location.host)) {
     fullscreen: () => ipcRenderer.invoke('window:fullscreen'),
     pet: (page) => ipcRenderer.invoke('window:pet', page),
     restore: () => ipcRenderer.invoke('window:restore'),
+    // 平台页原生截图（AI page screenshot；主进程限定 platformView 自身）
+    screenshot: () => ipcRenderer.invoke('platform:screenshot'),
     // 外链 → 系统默认浏览器（仅 http/https，主进程校验）
     openExternal: (url) => ipcRenderer.invoke('open:external', url),
     // 桌宠拖动（pet 页 mousedown/mousemove 屏幕坐标）与右键菜单

@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -211,9 +210,6 @@ func (c *Client) cmdPull(ctx context.Context, inv *commands.Invocation) error {
 		fmt.Fprintln(inv.Stdout, pullHelp)
 		return nil
 	}
-	if !c.execAllowed(execution.SessionFromContext(ctx), "pull") {
-		return commands.Exitf(inv, 126, "pull: denied by exec rules (grant cmd pull to allow)")
-	}
 	remote, err := cloudPathArg(inv.Args[0])
 	if err != nil {
 		return commands.Exitf(inv, 2, "pull: %v", err)
@@ -266,9 +262,6 @@ func (c *Client) cmdPush(ctx context.Context, inv *commands.Invocation) error {
 	if len(inv.Args) == 0 || inv.Args[0] == "--help" || inv.Args[0] == "-h" {
 		fmt.Fprintln(inv.Stdout, pushHelp)
 		return nil
-	}
-	if !c.execAllowed(execution.SessionFromContext(ctx), "push") {
-		return commands.Exitf(inv, 126, "push: denied by exec rules (grant cmd push to allow)")
 	}
 	if len(inv.Args) < 2 {
 		return commands.Exitf(inv, 2, "push: <本地路径> <云端路径> both required")

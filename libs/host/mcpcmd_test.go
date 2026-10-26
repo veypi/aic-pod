@@ -119,12 +119,12 @@ func TestVtoolsGates(t *testing.T) {
 		return decoded[protocol.Output](t, r.Result)
 	}
 	out := run("mcp add fixture --url http://127.0.0.1:1/mcp")
-	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], "grant cmd mcp") {
+	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp" denied`) {
 		t.Fatalf("add gate: %+v", out)
 	}
 	// 内置 browser 的工具命令同样过 exec 规则门（mcp.browser）
 	out = run("browser")
-	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], "mcp.browser") {
+	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp.browser" denied`) {
 		t.Fatalf("alias gate: %+v", out)
 	}
 	// 放行后不再被门拦（连接失败是后话：不是 126）
@@ -132,7 +132,7 @@ func TestVtoolsGates(t *testing.T) {
 	if out = run("browser"); out.Attrs["exit_code"] == "126" {
 		t.Fatalf("granted alias still gated: %+v", out)
 	}
-	// mcp list 只读放行
+	c.perms.grantCmd("s1", "mcp")
 	if out = run("mcp list"); out.Attrs["exit_code"] != "0" {
 		t.Fatalf("list: %+v", out)
 	}

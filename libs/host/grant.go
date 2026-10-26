@@ -103,15 +103,15 @@ func (c *Client) nativeNetNote(sid, domain string, e vbox.Entry) string {
 	if domain != "net" {
 		return ""
 	}
-	snap := c.perms.netSnapshotForNative(sid)
+	snap := c.perms.netSnapshot(sid)
 	landings, err := vbox.CheckNetPolicy(nativeNetPlatform, snap)
 	if err != nil {
 		return fmt.Sprintf("\n  warn: 本平台（%s）原生沙箱无法落实当前 net 规则表: %v；本次授权仅工具层生效", nativeNetPlatform, err)
 	}
 	for _, l := range landings {
 		if l.Rule.Allow && l.Rule.HostPort == e.String() {
-			if !l.Landed && !l.Noop {
-				return fmt.Sprintf("\n  note: 原生沙箱内不生效（%s）；工具层（curl/MCP）照常", l.Reason)
+			if l.Absorbed {
+				return fmt.Sprintf("\n  note: 原生沙箱未逐条落地（%s）；Pod curl/MCP 仍按 net_policy 判定", l.Reason)
 			}
 			return ""
 		}

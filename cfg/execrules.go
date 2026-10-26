@@ -5,10 +5,11 @@ package cfg
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
-// ParseExecRule accepts one exact name. Whole-domain behavior belongs to policy.
+// ParseExecRule accepts one exact command identity: a bare name or canonical absolute path.
 func ParseExecRule(raw string) (allow bool, name string, err error) {
 	effect, name, ok := strings.Cut(raw, ":")
 	if !ok || (effect != "allow" && effect != "deny") || ValidateCommandName(name) != nil {
@@ -17,10 +18,17 @@ func ParseExecRule(raw string) (allow bool, name string, err error) {
 	return effect == "allow", name, nil
 }
 
-// ValidateCommandName 校验单个命令名（无路径/空白/通配）。
+// ValidateCommandName 校验单个命令身份：裸名不含路径；绝对路径必须是
+// 规范 POSIX 形（Windows 在引擎入口已转为 /c/...），不含空白、反斜杠或通配。
 func ValidateCommandName(name string) error {
-	if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, "/\\ \t\r\n\x00*?") {
+	if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, " \t\r\n\x00*?") {
 		return fmt.Errorf("invalid exec command %q", name)
+	}
+	if strings.Contains(name, "\\") {
+		return fmt.Errorf("invalid exec command %q", name)
+	}
+	if strings.Contains(name, "/") && (!path.IsAbs(name) || path.Clean(name) != name || name == "/") {
+		return fmt.Errorf("invalid exec command path %q", name)
 	}
 	return nil
 }
@@ -35,9 +43,20 @@ func ValidateExecRules(rows []string) error {
 	return nil
 }
 
-// CommandAllowed 按首命中判定命令准入（rows 有序，先判先赢）。
-func CommandAllowed(mode string, rows []string, name string) bool {
-	if (mode != "open" && mode != "deny") || ValidateCommandName(name) != nil {
+// CommandAllowed 按首命中判定命令准入。调用方可同时提供解析名与解析路径；
+// 任一身份命中当前行即由该行决定，后续行不再读取。
+func CommandAllowed(mode string, rows []string, names ...string) bool {
+	if mode != "open" && mode != "deny" {
+		return false
+	}
+	valid := false
+	for _, name := range names {
+		if ValidateCommandName(name) == nil {
+			valid = true
+			break
+		}
+	}
+	if !valid {
 		return false
 	}
 	for _, raw := range rows {
@@ -45,8 +64,10 @@ func CommandAllowed(mode string, rows []string, name string) bool {
 		if err != nil {
 			return false
 		}
-		if target == name {
-			return allow
+		for _, name := range names {
+			if ValidateCommandName(name) == nil && target == name {
+				return allow
+			}
 		}
 	}
 	return mode == "open"

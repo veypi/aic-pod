@@ -82,7 +82,7 @@ func (f *FS) handleBytes(ctx context.Context, call Call) (value any, ok bool, er
 		if call.Caller.Scope == "fs" && limit > 0 && a.Size > limit {
 			return nil, true, protocol.FSFail("overloaded", "Proxy upload quota")
 		}
-		v, err := f.cfg.Bytes.beginUpload(call.Owner, a)
+		v, err := f.cfg.Bytes.beginUpload(call.Owner, call.creator(), a)
 		return v, true, err
 	case "upload.write":
 		var a WriteRangeArgs
@@ -101,7 +101,10 @@ func (f *FS) handleBytes(ctx context.Context, call Call) (value any, ok bool, er
 	}
 	return nil, false, nil
 }
-func (b *Bytes) beginUpload(owner string, a UploadArgs) (ByteSource, error) {
+func (b *Bytes) beginUpload(owner, creator string, a UploadArgs) (ByteSource, error) {
+	if creator == "" {
+		creator = owner
+	}
 	if a.Size < 0 || a.Size > b.sourceLimit() {
 		return ByteSource{}, protocol.FSFail("overloaded", "Upload exceeds byte quota")
 	}
@@ -111,10 +114,10 @@ func (b *Bytes) beginUpload(owner string, a UploadArgs) (ByteSource, error) {
 		}
 	}
 	b.Reap()
-	if err := b.reservation(owner); err != nil {
+	if err := b.reservation(creator); err != nil {
 		return ByteSource{}, err
 	}
-	defer func() { b.mu.Lock(); b.finishReservation(owner); b.mu.Unlock() }()
+	defer func() { b.mu.Lock(); b.finishReservation(creator); b.mu.Unlock() }()
 	if err := b.reserveBytes(a.Size); err != nil {
 		return ByteSource{}, err
 	}
@@ -129,13 +132,13 @@ func (b *Bytes) beginUpload(owner string, a UploadArgs) (ByteSource, error) {
 	desc := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: a.Size, MediaType: a.MediaType, Seekable: true, Lifetime: "fs_source", SHA256: strings.ToLower(a.SHA256)}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed {
+	if b.closed || b.closingCreators[creator] {
 		file.Close()
 		os.Remove(file.Name())
 		b.used -= a.Size
 		return ByteSource{}, protocol.FSFail("expired", "Byte store closed")
 	}
-	b.sources[id] = &byteSource{owner: owner, descriptor: desc, file: file, temp: file.Name(), expires: time.Now().Add(30 * time.Minute)}
+	b.sources[id] = &byteSource{owner: owner, creator: creator, descriptor: desc, file: file, temp: file.Name(), expires: time.Now().Add(sourceTTL)}
 	return desc, nil
 }
 func (b *Bytes) writeRange(ctx context.Context, owner string, a WriteRangeArgs) (int64, error) {

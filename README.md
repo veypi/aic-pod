@@ -18,20 +18,23 @@ aic-pod 是 AIC 平台的设备端客户端：它通过 NATS WebSocket 主动连
 
 - **只有出站连接**：不接受入站连接，不需要公网 IP，不用开防火墙。
 - **沙箱 fail-closed**：macOS Seatbelt / Linux bubblewrap / Windows 受限令牌；没有可用后端时**拒绝执行，绝不裸跑**。
-- **三域授权 + 人工审批**：fs / net / ssh 各域独立立场与显式白名单；免沙箱请求单独提级人工审批。
+- **统一 exec 准入 + 命令策略 + 人工审批**：所有注册命令先过 `exec_policy`，随后由命令实现落实 FS/NET/SSH 等自身策略；免沙箱请求单独提级人工审批。
 
 **中文** | [English](README.en.md)
 
 | 客户端 | 形态 | 核心能力 |
 | --- | --- | --- |
-| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（沙箱 + 三域授权）、fs、browser、cua（原生 GUI 自动化） |
-| **cli** | 单二进制 `aic` | exec（沙箱 + 三域授权，含 browser/cua/ssh/scp）、fs |
+| **desktop**（主产品） | Electron 壳 + Go 后端子进程 | exec（统一准入 + 命令策略 + 原生沙箱）、fs、browser、cua（原生 GUI 自动化） |
+| **cli** | 单二进制 `aic` | exec（统一准入 + 命令策略 + 原生沙箱，含 browser/cua/ssh/scp）、fs |
 
-设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/hosts-tools.md)。
+设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/reference/hosts-tools.md)。
 技能是云端静态内容；browser/CUA 随 Pod 内置，默认注册并按需启动。
 
+本文描述 2026-10-26 的现行统一命令与策略模型，核心迁移已完成；缓存、darwin 代理和
+实机收尾见 [docs/development/todo.md](docs/development/todo.md)。
+
 Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，
-并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/browser.md)。
+并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/guides/browser.md)。
 
 ## 快速开始
 
@@ -48,10 +51,13 @@ docker run -d --name aic-pod -e KEY="<你的 KEY>" veypi/aic-pod:latest
 
 ## 延伸阅读
 
-- 安全模型：[docs/host_sandbox.md](docs/host_sandbox.md)
-- 架构：[docs/design.md](docs/design.md)
-- 工具与 MCP：[docs/hosts-tools.md](docs/hosts-tools.md)
-- Browser/CUA 接入：[docs/browser.md](docs/browser.md)
+- 文档地图：[docs/index.md](docs/index.md)
+- 安全模型：[docs/reference/host-sandbox.md](docs/reference/host-sandbox.md)
+- 架构：[docs/architecture/overview.md](docs/architecture/overview.md)（2026-10-26 现行统一命令模型；剩余工作见 [docs/development/todo.md](docs/development/todo.md)）
+- 工具与 MCP：[docs/reference/hosts-tools.md](docs/reference/hosts-tools.md)
+- Browser/CUA 接入：[docs/guides/browser.md](docs/guides/browser.md)
+- 托管 SSH / git：[docs/guides/managed-ssh.md](docs/guides/managed-ssh.md)、[docs/guides/managed-git.md](docs/guides/managed-git.md)
+- 构建与发行：[docs/guides/release.md](docs/guides/release.md)
 - 版本变更：[CHANGELOG.md](CHANGELOG.md)
 
 ## 配置
@@ -75,16 +81,18 @@ YAML 整体损坏时使用默认配置启动，仍可用 `aic config get|set` �
 | `WORK_DIR` | `-work_dir` | `work_dir` | 系统临时目录 | 命令执行工作目录 |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | 后台执行超时 |
 | `HOME_PATH` | `-home_path` | `home_path` | `/` | 桌面端默认打开地址（host 后的路径，如 `/`、`/a`） |
-| `FS_POLICY` | `-fs_policy` | `fs_policy` | `deny` | 文件写默认立场：`deny`（仅内置根 + `fs_allow`）\| `open`（除 `fs_deny` 全放） |
+| `EXEC_POLICY` | `-exec_policy` | `exec_policy` | `open` | 所有注册命令的统一准入立场；拒绝时命令实现不调用 |
+| `FS_POLICY` | `-fs_policy` | `fs_policy` | `deny` | vbox 支撑命令的文件写默认立场：`deny`（仅内置根 + `fs_allow`）\| `open`（除 `fs_deny` 全放） |
 | `FS_DENY` / `FS_ALLOW` | `-fs_deny` / `-fs_allow` | `fs_deny` / `fs_allow` | — | 路径 glob 拒绝 / 显式允许（允许可覆盖拒绝；裸路径覆盖子树，glob 精确匹配） |
-| `NET_POLICY` | `-net_policy` | `net_policy` | `open` | 沙箱进程出站立场：`open` \| `deny`（仅 localhost） |
-| `NET_DENY` / `NET_ALLOW` | `-net_deny` / `-net_allow` | `net_deny` / `net_allow` | — | 出站目标 `host:port` 拒绝 / 允许（拒绝恒优先；内建 localhost:*） |
-| `SSH_POLICY` | `-ssh_policy` | `ssh_policy` | `deny` | ssh/scp 目标立场：`deny` \| `open` |
-| `SSH_DENY` / `SSH_ALLOW` | `-ssh_deny` / `-ssh_allow` | `ssh_deny` / `ssh_allow` | — | ssh 目标 `host[:port]` 拒绝 / 允许（拒绝恒优先） |
+| `NET_POLICY` | `-net_policy` | `net_policy` | `open` | vbox 支撑命令与 Pod `curl` 的网络立场：`open` \| `deny`；两个执行路径分别落实，不使用 `tool:` |
+| `NET_DENY` / `NET_ALLOW` | `-net_deny` / `-net_allow` | `net_deny` / `net_allow` | — | 出站目标 `host:port` 拒绝 / 允许（目标按 level + 原表序匹配；内建 localhost:*） |
+| `NET_UPSTREAM_PROXY` | `-net_upstream_proxy` | `net_upstream_proxy` | — | darwin deny 出站代理的显式 `http://` / `socks5://` / `socks5h://` 上游；进入 netKey，不继承宿主代理环境 |
+| `SSH_POLICY` | `-ssh_policy` | `ssh_policy` | `deny` | Pod `ssh/scp/sftp` 命令的目标立场：`deny` \| `open`；不约束 `/bin/ssh` |
+| `SSH_DENY` / `SSH_ALLOW` | `-ssh_deny` / `-ssh_allow` | `ssh_deny` / `ssh_allow` | — | Pod SSH 命令目标 `host[:port]` 拒绝 / 允许；匹配语义见权限文档 |
 | `NO_SANDBOX` | `-no_sandbox` | `no_sandbox` | `false` | 隐藏项：全局跳过 exec 沙箱（等同放弃进程级隔离，慎用；仅配置文件/flag/env 可改） |
 
-> 三域授权（fs/net/ssh × policy/deny/allow）的完整判定式、内置根与会话级临时 grant
-> 语义见 [docs/host_sandbox.md](docs/host_sandbox.md)。
+> 统一 exec 准入、fs/net/ssh 配置归属、内置根与会话级临时 grant 语义见
+> [docs/reference/host-sandbox.md](docs/reference/host-sandbox.md)。
 
 本机不监听任何端口（2026-09-22 去本地管理 API）：设置面 = `UserConfigDir/aic/config.yaml`，
 CLI 用 `aic config get|set` / `aic bind|unbind` 读写（JSON/凭证走 stdin/stdout），
@@ -92,17 +100,17 @@ desktop 设置窗经 Electron IPC spawn 同一套子命令；保存后重启后�
 
 ## 安全模型
 
-本机能力默认受两道闸控制：
+本机能力按三层边界控制：
 
-- **三域授权**（fs / net / ssh × policy / deny / allow）：每个域有默认立场（`deny`/`open`）、
-  拒绝列表与显式允许列表（拒绝恒优先，显式允许可覆盖拒绝）；另有三类内置根（工作区、
-  会话目录、系统临时目录）与会话级临时 grant（`grant <域> <目标>` 可加 `--permanent` 落盘）。
-- **进程沙箱**（exec 调用）：darwin `sandbox-exec`（Seatbelt）/ linux bubblewrap /
-  windows 受限令牌；按授予等级选 profile（read-only / workspace-write），叠加环境变量
-  清洗、资源限制与网络出站闸。无可用后端时 **fail-closed**（命令不执行，绝不裸跑）。
+- **统一命令准入**：所有注册命令都先经过 vsh 的 `exec_policy`，拒绝时不调用命令实现。
+- **命令内部策略**：vbox 支撑命令使用 FS/NET，Pod `curl` 使用 NET，Pod SSH 族使用 SSH；
+  另有三类内置根（工作区、会话目录、系统临时目录）与会话级临时 grant。
+- **原生进程沙箱**：vbox 支撑命令由 darwin Seatbelt / linux bubblewrap / windows 受限令牌
+  落实 FS/NET，叠加环境清洗与资源限制。无可用后端或策略暂不支持时 **fail-closed**，
+  对应命令不执行，不过滤规则、不改道，也不影响无关命令。
 
-请求级 `nosandbox` 可显式申请免沙箱：required 恒提升 Critical(4) ⇒ 必转人工审批，
-且审批通过（granted 9）本身不豁免沙箱——免沙箱必须携带该标记单独审批。
+请求级 `nosandbox` 必须显式申请并经人工审批；普通审批通过本身不豁免沙箱。统一 exec
+准入与命令内部策略仍然有效，不为 SSH/Git 等程序设置例外。
 
 ## CLI
 
