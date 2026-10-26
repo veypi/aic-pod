@@ -5,6 +5,17 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.9.5 — 2026-10-27
+
+- **依赖对齐到同批发布版本（CI/发行构建修复）**：go.mod `vsh` v0.3.2→**v0.3.3**
+  （`AllowExec` / `FileCommandResolver`，v0.9.4 代码已在用）、`vbox` v0.3.3→**v0.3.4**
+  （`NetRuleSet.UpstreamProxy`）、`aic-skills` v0.2.1→**v0.3.1**（browser 工具面
+  `core,tabs,mobile,state`）、`vigo` v0.8.1→**v0.8.2**。此前 go.mod 停在旧版：本地
+  go.work 用兄弟目录能构建，CI 按已发布模块解析会缺新 API。`desktop/package-lock.json`
+  版本号同步（v0.9.4 漏改）。验证：`GOWORK=off go mod tidy && go build ./...` 通过；
+  CI 子集 `go test ./protocol ./libs/fsx ./libs/execution ./libs/hostfs ./cfg` 全绿。
+  依赖内容即 v0.9.4 开发时实际使用的代码，无新增行为变化。
+
 ## v0.9.4 — 2026-10-27
 
 - **统一文档架构**：根目录只留 README / README.en / CHANGELOG / AGENTS；`TODO.md` → `docs/development/todo.md`（基线数据同迁 `development/baselines/`），`docs/design.md` → `docs/architecture/overview.md`，`host_sandbox.md` / `hosts-tools.md` / `host-vtools.md` → `docs/reference/`（`host_sandbox` 更名 `host-sandbox`），`browser.md` / `managed-git.md` / `managed-ssh.md` / `release-architecture.md`（更名 `release.md`）→ `docs/guides/`；新增 [docs/index.md](docs/index.md) 文档地图，README / AGENTS / desktop README 与代码注释中的 `docs/...` 指针同轮更新。**纯文档调整，无运行时行为变化。**

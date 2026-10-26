@@ -10,10 +10,10 @@ require (
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/aic-skills v0.2.1
-	github.com/veypi/vbox v0.3.3
-	github.com/veypi/vigo v0.8.1
-	github.com/veypi/vsh v0.3.2
+	github.com/veypi/aic-skills v0.3.1
+	github.com/veypi/vbox v0.3.4
+	github.com/veypi/vigo v0.8.2
+	github.com/veypi/vsh v0.3.3
 	github.com/veypi/vsh/contrib/awk v0.1.0
 	github.com/veypi/vsh/contrib/htmltomarkdown v0.1.0
 	github.com/veypi/vsh/contrib/jq v0.1.0
