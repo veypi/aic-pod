@@ -5,6 +5,14 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.9.6 — 2026-10-27
+
+- **桌面打包白名单补齐新模块（CI check-asar 修复）**：`main.js` 拆出的
+  `backend.cjs` / `platform-hosts.cjs` / `settings-protocol.cjs` 未加入
+  `desktop/electron-builder.yml` 的 `files`，asar 里缺失 → 主进程启动即崩。
+  v0.9.5 四个桌面目标在 `check-asar` 全部报「缺失/无法解析: /main.js → ./backend.cjs
+  等」；现逐个补入白名单（沿用显式清单，不改通配，避免把 `*.test.cjs` 打进包）。
+
 ## v0.9.5 — 2026-10-27
 
 - **依赖对齐到同批发布版本（CI/发行构建修复）**：go.mod `vsh` v0.3.2→**v0.3.3**

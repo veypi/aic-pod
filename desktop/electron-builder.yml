@@ -7,7 +7,10 @@ directories:
 files:
   - main.js
   - backend-startup.cjs
+  - backend.cjs
   - host-state.cjs
+  - platform-hosts.cjs
+  - settings-protocol.cjs
   - loading.html
   - remote-preload.js
   - screenshot.cjs
