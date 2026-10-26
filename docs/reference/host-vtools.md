@@ -105,8 +105,8 @@ mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样�
 ```
 
 - `add/remove` 引入新能力/改配置：exec 规则门 `mcp`（126 + `grant cmd mcp`
- 引导，与 skill 命令同形）；`start/stop/restart` 要求 `mcp.<alias>` 已授权；
- `list` 只读放行。
+ 引导，与 skill 命令同形）；`start/stop/restart` 要求 `mcp.<alias>` 已授权。
+ `list` 不增加额外管理子门，但 `mcp` 根命令仍须通过统一 `exec_policy`；锁死设备上也需先 `grant cmd mcp`。
 - `--persist` 写 config.yaml `mcp.servers`（cfg.LoadFile→改→cfg.Save，原子写
  0600）；不带 = 进程级，重启失效。内置 browser/cua/blender 不可 remove（禁用
  走配置 `disabled: true`）。`no_sandbox` 只能所有者手改配置。
@@ -122,11 +122,25 @@ mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样�
  `streamChannel`（原 browserChannel 泛化）：帧格式 uint32 大端长度 + 有序
  16 KiB 分块；单消息 ≤16 MiB；入方向必须 string ≤64 KiB，拥塞即断；
  同一 peer 每个标签至多一条。
+- 内置 pack 的 `stream.channel` 是实际路由配置源，不是展示元数据。host 用
+ `RegisterWithStream` / `RegisterCustomWithStream` 将服务命令和显式 Streamer
+ 原子登记，再经上述 resolver 接入 RTC；Provider 自带的另一 `StreamChannel`
+ 不会抢先生效。Browser 使用同一链路，转发实现仍是 pod 的 `streamBrowser`，
+ 不再在 Go 登记处硬编码 `aic-browser`。
+- **通道声明不等于流能力**：除 Browser 这个明确的独立适配器外，声明流的
+ Provider 必须实现 `vtools.Streamer`，否则登记显式失败（配置态服务以
+ `rejected` 曝光），不能只留下一条看似可用的通道。所有者覆盖内置同名服务
+ 时不继承内置流声明；禁用、删除、换型、换址或换通道会同步摘除旧路由。
+- 通道标签必须非空、为合法 UTF-8、无首尾空白/控制字符且 ≤65535 字节；
+ `aic-tools` 保留给请求-响应，服务流显式拒绝。不同 alias 抢同一标签即拒，
+ 原路由不动；全量同步按 alias 排序，冲突结果不受 map 迭代顺序影响。
 - 权限：通道开启时过一道 `mcp.<alias>` 门；逐消息复查由 Streamer 实现方
  负责（browser 的 streamBrowser 保持逐消息复查）。挂流期间的 idle 保活
 （Touch）同理由实现方负责。
 - 前端 `BrowserStream`（ui/hosts/browser_stream.js）标签参数化
 （`options.channel`，默认 `aic-browser`），重组/背压/15s ready 语义不变。
+ 这个默认值与内置 browser 清单当前的 `stream.channel` 一致；它是前端默认
+ 配置，不是 host 的流登记实现。若定制清单通道，前端也必须显式传同一标签。
 
 ## 5. 内置服务 = 技能包的 cli/ 维度（2026-10-16 起）
 
@@ -138,7 +152,8 @@ verbs 声明生命周期动词，非通用维度），程序源码随包入库�
 
 - browser/cua 的默认项是 `aic-skills/{browser,cua}/cli/manifest.json` 的数据
  （不再是 Go 硬编码）；程序解析按 path_env → bundle → 默认名（darwin 可回退
-  /Applications 布局）。
+  /Applications 布局）。browser 的 `stream.channel` 同样由清单提供；当前默认
+ 为 `aic-browser`，实际 RTC resolver 按该值找到 pod 的 Streamer。
 - blender（`kind: tcp`）带生命周期动词：`blender doctor/launch/install`
  （自定义命令分发后透传 `Registry.RunTool`），分级报错
   blender_not_installed → blender_not_running → addon_not_connected 是产品
@@ -153,8 +168,9 @@ verbs 声明生命周期动词，非通用维度），程序源码随包入库�
 
 ## 6. 明确不做（v1 边界）
 
-- 流式端点的通用配置声明（端口文件/env/固定 URL）等第二个流式服务再抽象
- （v1 只有 browser 一个 Streamer 实例：转发机制在 pod，清单只声明 channel）。
+- 流式端点的通用配置声明（端口文件/env/固定 URL）等第二个流式服务再抽象。
+ 当前通用化的是 `stream.channel` → `Streamer` → RTC 的链路；browser 的上游
+ WebSocket 发现与转发仍是 pod 内置实现，普通 Provider 则必须自行实现 Streamer。
 - `aic-tools` 不加增量响应（请求-响应 + 日志补全已够用）。
 - Pod 永不解析流内容（消息边界保持的纯转发）。
 - `aic`（cloud）侧不变：机制仅落在物理 host（libs/host）。

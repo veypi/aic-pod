@@ -215,13 +215,7 @@ func (c *Client) registerPackService(alias string, m *packManifest) error {
 			}
 			p = tcp
 		}
-		var err error
-		if cmd != nil {
-			err = c.svc.registry.RegisterCustom(alias, p, cmd)
-		} else {
-			err = c.svc.registry.Register(alias, p)
-		}
-		if err != nil {
+		if err := c.registerServiceProvider(alias, p, cmd, m); err != nil {
 			return fmt.Errorf("pack %s: %w", alias, err)
 		}
 		return nil

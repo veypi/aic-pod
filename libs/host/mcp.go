@@ -16,6 +16,10 @@ import (
 )
 
 func (c *Client) configureMCP(settings mcpx.Settings) error {
+	// 从读取目标配置到 manager/owner/registry 切换完成是一个线性化过程；
+	// 否则并发 add/remove 会被旧 servers 快照误删或复活。
+	c.svc.registrationMu.Lock()
+	defer c.svc.registrationMu.Unlock()
 	servers, err := mcpServers(settings.Servers, c.options().WorkDir)
 	if err != nil {
 		return err
@@ -59,7 +63,7 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	c.svc.manager = manager
 	c.svc.mu.Unlock()
 	// 服务登记为 vsh 根命令（vtools；含 TCP 条目与 browser 流通道）。
-	c.syncServiceRegistrations(servers)
+	c.syncServiceRegistrationsLocked(servers)
 	return nil
 }
 

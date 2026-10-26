@@ -11,9 +11,7 @@
 
 剩余工作：
 
-- vbox 的 Manager 缓存与 darwin 出站代理已实现；Pod 通过 `net_upstream_proxy` → `AuthCfg` → `compiledAuth` → net 快照显式下发 `Policy.Net.UpstreamProxy` 并纳入 netKey，不继承宿主 ambient proxy。真实 Seatbelt 验收按 vbox `docs/development/todo.md` 收尾。
-- Linux / Windows 实机验证 FS/NET 后端、level 优先级、终局写根和命令行为；跨平台编译或 vet 不算行为验证。
-- 最终发布收口：更新 CHANGELOG、必要的 `aic/docs` 契约同步与版本号确认。
+- Linux / Windows 实机验证 FS/NET 后端、level 优先级、终局写根和命令行为；跨平台编译或 vet 不算行为验证。darwin 已在 mbp 的非嵌套沙箱环境完成真实 Seatbelt、双代理和工作区/hard protection 验收。
 
 ### 附属设备（attached device）—— 设计草案，未实现
 
@@ -21,7 +19,7 @@
 
 ### 真实环境验收
 
-- browser / CUA 真机（macOS / Windows）联调：画面通道、坐标缩放、权限诊断、退出清理。
+- browser / CUA Windows 真机联调：画面通道、坐标缩放、权限诊断、退出清理。mbp 的 browser manifest 通道、真实画面与人工操作已在 v0.9.6-dirty 运行实例验收。
 - quota_provider 额度查询在真实账号上的余额 / 套餐语义核对。
 
 ### 待拍板 / 待确认（继承自 v0.18 大版本审查）

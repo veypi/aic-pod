@@ -51,6 +51,8 @@ type packProgram struct {
 }
 
 type packStream struct {
+	// Channel 是实际 RTC 路由，不是能力声明的替代品：登记时还必须接到
+	// Provider 的 Streamer（browser 使用 pod 内置独立 Streamer 适配器）。
 	Channel string `json:"channel"`
 }
 

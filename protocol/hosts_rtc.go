@@ -3,6 +3,9 @@ package protocol
 
 const RtcProtocol = "hosts_rtc/3"
 const RtcChannel = "aic-tools"
+
+// RtcBrowserChannel 是前端与内置 browser 清单的默认流标签；host 实际登记
+// 以 cli/manifest.json 的 stream.channel 为准。
 const RtcBrowserChannel = "aic-browser"
 
 // RtcStreamMessageLimit 是流转发通道的单消息上限（通用，非 browser 专属）。

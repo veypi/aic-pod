@@ -60,7 +60,9 @@ Browser UI 调用上游工具并通过下述 `aic-browser` 通道查看与控制
 
 依赖与用法见 [browser](../../../aic-skills/browser/SKILL.md)、[CUA](../../../aic-skills/cua/SKILL.md) 与 [构建发行](../guides/release.md)。
 
-内建 Browser UI 的 `aic-browser` RTC data channel 复用同一 peer 的设备认证和 `mcp.browser` 命令权限，双向转发该 agent-browser daemon 的原生 WebSocket 消息。Pod 仅做分片传输，不解析浏览器工具、不建立 CDP 连接。UI 绘制帧后才把 ACK 转回上游；关闭此通道不影响命令连接。（2026-10-16 起该通道走通用流注册：rtc.Config.Streams 按 DataChannel 标签现查 vtools 登记表，任何实现 vtools.Streamer 的服务都能获得同形态通道；见 host-vtools.md §4。）
+内建 Browser UI 默认的 `aic-browser` RTC data channel 复用同一 peer 的设备认证和 `mcp.browser` 命令权限，双向转发该 agent-browser daemon 的原生 WebSocket 消息。Pod 仅做分片传输，不解析浏览器工具、不建立 CDP 连接。UI 绘制帧后才把 ACK 转回上游；关闭此通道不影响命令连接。
+
+该通道走通用流注册：host 读取 browser 包 `cli/manifest.json` 的 `stream.channel`，将 pod 的 `streamBrowser` 适配为 `vtools.Streamer` 并原子登记，`rtc.Config.Streams` 再按 DataChannel 标签现查 handler。`aic-browser` 是当前清单值及前端默认值，不再是 host 登记处另写的硬编码。其它内置服务声明流时必须由 Provider 真正实现 `vtools.Streamer`，否则显式拒绝登记；所有者覆盖不继承内置流。通道冲突、非法标签及增删/换型语义见 host-vtools.md §4。
 
 ## 执行边界（vsh 与 MCP）
 
@@ -68,13 +70,13 @@ Browser UI 调用上游工具并通过下述 `aic-browser` 通道查看与控制
 
 - 外层 `exec.1host` 唯一选择执行端；mcp 命令不再选择目标。
 - cloud/设备执行完整 vsh 脚本。内建、CLI、脚本、管道、重定向和 bg 使用现有执行器，原生程序经 vbox 启动。
-- 设备 `mcp tools/describe/call/read` 只接配置的独立服务，不按技能注册命令、不生成 flags；参数使用 JSON，stdin 可传 `--input -`。
+- 设备 `mcp tools/describe/call/read` 只接配置的独立服务，不按技能注册命令；`call` 与服务根命令共用 vtools 参数面（标量可写同名 flag，复杂对象/数组走 `--input`，stdin 可传 `--input -`）。
 - page 接受一个字面 command，按 session 和现有窗口 ID 调用 handler；通过 commands 和 --help 发现用法。复用 vsh 语法解析器，不建立另一套 shell，也不实现 MCP。页面文件继续直接调用 PageFS。
 - exec/fs、技能搜索/读取、云端 HTTP API 都没有 MCP 副本。Cloud 当前没有 MCP 服务配置或 mcp 命令。
 - 服务门为 `mcp.<alias>`；共享服务的 cwd/env/沙箱来自设备配置，不随某次 shell 改变。配置更新或 Pod 退出时回收服务，单次取消不关闭整个服务。
 - UI 与 AI 都按原生 request_id 取消执行，Pod 内 SDK 将上下文取消传给 MCP 服务。取消不回滚副作用；响应丢失不自动重放。
-- `skill search/load` 读取云端静态内容，fork 创建副本（均 cloud 端接线）。安装脚本、CLI 或 MCP 程序按说明执行。
+- `skills` 工具的 search/load 读取云端静态内容，fork 创建副本（均 cloud 端接线）。安装脚本、CLI 或 MCP 程序按说明执行。
 - **设备凭证 = vbase 静态秘钥**（device-key-migration 2026-10-12）：config `key` 存复合凭证 `<host_id>.<vbase 四段 credential>`；NATS CONNECT token 与 HTTP Bearer 均为四段 credential；第 4 段 secret 是本地 HKDF 根（K_tool/RTC 票据不变）。e1. 自签连接 proof、nonce 防重放、enc1. 存储、credVer 与 NATS fetch 分块通道全删。
 - **pull/push**（设备端平台命令）：设备 ↔ 平台云盘走 /fs/cloud HTTP 面——`pull <云端路径> [本地路径]`（目录递归：一次 ?depth=5 列表 + 逐文件 GET）、`push <本地路径> <云端路径>`（目录 v1 拒绝）；Bearer 由 pod 进程注入不进沙箱 env；非 loopback 的 http:// 拒绝发凭证；exec 规则 `pull`/`push` 门（默认开，锁 deny 的设备用 `grant cmd pull` 收放）。
 
-旧技能 provider、设备安装表、包根命令、通用媒体流、host 端 skill 命令与 fetch 通道已删除，没有兼容入口。
+旧技能 provider、设备安装表、包根命令、旧通用媒体流、host 端 skill 命令与 fetch 通道已删除，没有兼容入口。

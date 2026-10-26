@@ -17,7 +17,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/aic-pod/protocol"
@@ -67,6 +70,24 @@ type StreamRelay func(ctx context.Context, caller protocol.Caller, input <-chan 
 type Streamer interface {
 	StreamChannel() string
 	Stream(ctx context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error
+}
+
+// ValidateStreamChannel 校验 RTC 流路由标签。aic-tools 是请求-响应通道，
+// 不能被服务流抢占；其余限制与 DataChannel 标签的 UTF-8/长度契约一致。
+func ValidateStreamChannel(label string) error {
+	if label == "" {
+		return fmt.Errorf("stream channel label is empty")
+	}
+	if label == protocol.RtcChannel {
+		return fmt.Errorf("stream channel %q is reserved for tool requests", label)
+	}
+	if !utf8.ValidString(label) || len(label) > 65535 {
+		return fmt.Errorf("stream channel label must be valid UTF-8 and at most 65535 bytes")
+	}
+	if strings.TrimSpace(label) != label || strings.IndexFunc(label, unicode.IsControl) >= 0 {
+		return fmt.Errorf("stream channel label has surrounding whitespace or control characters")
+	}
+	return nil
 }
 
 // StreamerFunc 把独立的流接线（不与 Provider 同体）适配成 Streamer。
@@ -122,7 +143,14 @@ func NewRegistry(cmds *commands.Registry, opts Options) *Registry {
 // 重复登记同一 alias 即拒——更新配置先 Unregister 再 Register。stream channel
 // 标签同样撞名即拒（与命令名同一原则）。
 func (r *Registry) Register(alias string, p Provider) error {
-	return r.register(alias, p, nil)
+	return r.register(alias, p, nil, nil, false)
+}
+
+// RegisterWithStream 原子登记服务与显式流接线。streamer 的通道标签由调用方
+// （如 pack manifest）决定；nil 表示该服务不暴露流，即使 Provider 自身实现了
+// Streamer。显式接线不会短暂暴露 Provider 自带的另一通道名。
+func (r *Registry) RegisterWithStream(alias string, p Provider, streamer Streamer) error {
+	return r.register(alias, p, nil, streamer, true)
 }
 
 // RegisterCustom 同 Register，但命令面由调用方提供（如 blender 的生命周期
@@ -135,29 +163,42 @@ func (r *Registry) RegisterCustom(alias string, p Provider, cmd commands.Command
 	if cmd.Name() != alias {
 		return fmt.Errorf("vtools %s: custom command name %q does not match alias", alias, cmd.Name())
 	}
-	return r.register(alias, p, cmd)
+	return r.register(alias, p, cmd, nil, false)
 }
 
-func (r *Registry) register(alias string, p Provider, custom commands.Command) error {
+// RegisterCustomWithStream 是 RegisterWithStream 的自定义命令形态。
+func (r *Registry) RegisterCustomWithStream(alias string, p Provider, cmd commands.Command, streamer Streamer) error {
+	if cmd == nil {
+		return fmt.Errorf("vtools %s: custom command is nil", alias)
+	}
+	if cmd.Name() != alias {
+		return fmt.Errorf("vtools %s: custom command name %q does not match alias", alias, cmd.Name())
+	}
+	return r.register(alias, p, cmd, streamer, true)
+}
+
+func (r *Registry) register(alias string, p Provider, custom commands.Command, streamer Streamer, explicitStream bool) error {
 	if err := mcpx.ValidateAlias(alias); err != nil {
 		return err
 	}
 	if p == nil {
 		return fmt.Errorf("vtools %s: provider is nil", alias)
 	}
-	var streamer Streamer
-	if s, ok := p.(Streamer); ok {
-		streamer = s
+	if !explicitStream {
+		if s, ok := p.(Streamer); ok {
+			streamer = s
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.entries[alias]; exists {
 		return fmt.Errorf("vtools %s: service already registered", alias)
 	}
+	var label string
 	if streamer != nil {
-		label := streamer.StreamChannel()
-		if label == "" {
-			return fmt.Errorf("vtools %s: streamer requires a channel label", alias)
+		label = streamer.StreamChannel()
+		if err := ValidateStreamChannel(label); err != nil {
+			return fmt.Errorf("vtools %s: %w", alias, err)
 		}
 		if occupant, taken := r.channels[label]; taken {
 			return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, label, occupant)
@@ -172,7 +213,7 @@ func (r *Registry) register(alias string, p Provider, custom commands.Command) e
 	}
 	r.entries[alias] = &entry{provider: p, streamer: streamer}
 	if streamer != nil {
-		r.channels[streamer.StreamChannel()] = alias
+		r.channels[label] = alias
 	}
 	return nil
 }
@@ -186,8 +227,11 @@ func (r *Registry) RegisterStream(alias string, s Streamer) error {
 	if !ok {
 		return fmt.Errorf("vtools %s: service is not registered", alias)
 	}
-	if s == nil || s.StreamChannel() == "" {
-		return fmt.Errorf("vtools %s: streamer requires a channel label", alias)
+	if s == nil {
+		return fmt.Errorf("vtools %s: streamer is nil", alias)
+	}
+	if err := ValidateStreamChannel(s.StreamChannel()); err != nil {
+		return fmt.Errorf("vtools %s: %w", alias, err)
 	}
 	if occupant, taken := r.channels[s.StreamChannel()]; taken && occupant != alias {
 		return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, s.StreamChannel(), occupant)
@@ -267,6 +311,18 @@ func (r *Registry) Aliases() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ServiceStreamChannel 返回服务当前暴露的流标签；无流时 ok=false。
+// 配置同步用它区分「同形态服务可复用」与「流声明已变化，必须重登记」。
+func (r *Registry) ServiceStreamChannel(alias string) (label string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e := r.entries[alias]
+	if e == nil || e.streamer == nil {
+		return "", false
+	}
+	return e.streamer.StreamChannel(), true
 }
 
 // StreamHandler 按 RTC DataChannel 标签解析流转发执行体（通道开启时现查，

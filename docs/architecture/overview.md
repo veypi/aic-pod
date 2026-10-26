@@ -1,6 +1,6 @@
 # AIC Pod 架构
 
-状态：2026-10-26 现行架构，统一命令与策略核心迁移已完成；缓存、darwin 代理和实机收尾见 [../development/todo.md](../development/todo.md)。
+状态：2026-10-27 现行架构，统一命令与策略核心迁移已完成；跨平台实机收尾见 [../development/todo.md](../development/todo.md)。
 
 调用契约见 [设备执行与工具服务](../reference/hosts-tools.md)；权限与沙箱见 [host 沙箱](../reference/host-sandbox.md)；browser/CUA 设备侧接入见 [browser](../guides/browser.md)。
 

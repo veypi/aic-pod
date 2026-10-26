@@ -1,6 +1,6 @@
 # Host 执行权限与原生沙箱
 
-状态：2026-10-26 现行权限契约；统一命令、策略核心、Manager 缓存与 darwin 代理已实现，实机与发布收尾见 [../development/todo.md](../development/todo.md)。总架构见 [../architecture/overview.md](../architecture/overview.md)，调用契约见 [hosts-tools.md](hosts-tools.md)。
+状态：2026-10-27 现行权限契约；统一命令、策略核心、Manager 缓存与 darwin 代理已实现，跨平台实机收尾见 [../development/todo.md](../development/todo.md)。总架构见 [../architecture/overview.md](../architecture/overview.md)，调用契约见 [hosts-tools.md](hosts-tools.md)。
 
 ## 1. 边界
 
@@ -106,4 +106,4 @@ exec 外层将 stdout/stderr 分别写文件，始终返回已创建文件的路
 - `ssh` 与 `/bin/ssh` 可以使用不同实现和内部策略，但 exec 决策结构相同；绝对路径不触发 SSH 名称门或 gitx 拦截。
 - `net_policy` 分别由 curl 和 vbox 支撑命令完整消费，不存在 `tool:` 过滤；vbox 不支持只影响对应命令，fallback 不绕过拒绝。
 - stdout JSON 与 stderr 诊断分离，截断不丢日志；取消、超时转后台和文件关闭不存在重复执行或句柄丢失。
-- macOS/Linux/Windows 分别在真实目标平台验证沙箱；仅编译通过不代表隔离成立（本项仍待真实平台实测）。
+- macOS/Linux/Windows 分别在真实目标平台验证沙箱；仅编译通过不代表隔离成立。darwin 已于 2026-10-27 在 mbp 完成真实 Seatbelt、强制代理、工作区读写与 hard protection 验收；Linux/Windows 仍待实测。

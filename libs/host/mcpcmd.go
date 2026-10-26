@@ -355,6 +355,9 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 	if err := config.Validate(alias); err != nil {
 		return commands.Exitf(inv, 2, "mcp add: %s", err)
 	}
+	// manager、owner 与 registry 必须作为一次完整变更与 configure/remove 串行化。
+	c.svc.registrationMu.Lock()
+	defer c.svc.registrationMu.Unlock()
 	if c.svc.registry != nil && c.svc.registry.Has(alias) {
 		return commands.Exitf(inv, 1, "mcp add: %s 已存在（先 mcp remove）", alias)
 	}
@@ -369,7 +372,7 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 			return commands.Exitf(inv, 1, "mcp add: %s", err)
 		}
 	}
-	if err := c.registerService(alias, config); err != nil {
+	if err := c.registerServiceLocked(alias, config); err != nil {
 		if manager != nil {
 			_ = manager.Remove(ctx, alias) // 回滚：不留「管理器有、命令面没有」的半登记状态
 		}
@@ -410,6 +413,9 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 		return commands.Exitf(inv, 2, "usage: mcp remove <alias> [--persist]")
 	}
 	alias := positional[0]
+	// 与 add/configure 同锁，避免 manager 已删而 registry 被旧快照重新登记。
+	c.svc.registrationMu.Lock()
+	defer c.svc.registrationMu.Unlock()
 	if c.isBuiltinPack(alias) && !c.ownerConfigured(alias) {
 		return commands.Exitf(inv, 2, "mcp remove: 内置服务 %s 不可移除（要禁用请在配置文件设 disabled: true）", alias)
 	}
@@ -427,7 +433,7 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 			return commands.Exitf(inv, 1, "mcp remove: unknown service %q", alias)
 		}
 	} else {
-		c.svc.registry.Unregister(alias)
+		c.unregisterServiceLocked(alias)
 	}
 	if persist {
 		if err := c.persistMCPServer(alias, nil); err != nil {

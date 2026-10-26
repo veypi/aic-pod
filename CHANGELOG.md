@@ -5,6 +5,22 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **pack manifest 流声明接入真实 RTC 路由**：`stream.channel` 经
+  `RegisterWithStream` / `RegisterCustomWithStream` 与服务命令原子登记，不再由 host
+  另行硬编码 browser 标签；Provider 自带的另一通道不会在显式 manifest 接线时泄露。
+  除 browser 的 Pod 内置适配器外，声明流的服务必须真实实现 `vtools.Streamer`；非法/
+  冲突标签显式拒绝，所有者覆盖不继承内置流，禁用、删除、换型、换址与换通道同步摘除
+  旧路由。新增 `aic-tools` 保留校验、UTF-8/长度/空白与控制字符校验及确定性冲突测试。
+- **服务变更完整串行化**：`configureMCP` 从目标配置读取到 manager/owner/registry
+  切换完成，与运行期 `mcp add/remove` 共用 `registrationMu`，消除 add 被旧快照误删、
+  remove 被旧快照复活的逻辑竞态；新增三组完整事务边界回归。
+- **验证**：`GOWORK=off go build ./...`、`GOWORK=off go test ./...`、
+  `go test -race ./libs/vtools ./libs/host`、`go test ./libs/rtc ./protocol`、Desktop
+  21 项 JS 测试、前端 BrowserStream/Viewer 14 项测试全绿。mbp v0.9.6-dirty 运行实例
+  的 browser manifest 通道、真实画面与人工操作验收通过。
+
 ## v0.9.6 — 2026-10-27
 
 - **桌面打包白名单补齐新模块（CI check-asar 修复）**：`main.js` 拆出的
