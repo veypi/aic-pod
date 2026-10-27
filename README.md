@@ -185,16 +185,18 @@ browser 与 cua 默认直接启动官方 agent-browser 0.38.2 和 cua-driver 0.3
 两套官方原生程序；独立 CLI 按技能说明安装运行依赖。
 
 ```sh
-mcp tools browser
-mcp call browser new_page --input '{"url":"https://example.com"}'
-mcp call browser take_snapshot --input '{"pageId":1}'
-mcp tools cua
+browser                            # 工具目录
+browser agent_browser_open --url https://example.com --json
+browser agent_browser_snapshot --json
+cua                                # 工具目录
+# mcp tools/describe/call 仅作调试直通；正式调用走 <alias> <tool>
 ```
 
 ## 构建
 
-普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 MCP manager。上游工具作为
-独立进程运行，Desktop 打包时附带固定版本依赖。云端技能内容位于 aic-skills。
+普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 vtools 服务注册（MCP/TCP）。
+内置服务清单与程序源码来自 aic-skills embed，上游工具作为独立进程运行，Desktop 打包时附带固定版本依赖。
+云端技能内容也来自同一 aic-skills 模块。
 
 产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
 

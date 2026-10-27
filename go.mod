@@ -90,5 +90,5 @@ require (
 	modernc.org/sqlite v1.23.1 // indirect
 )
 
-// require 版本随 aic-skills 发版推进（当前 v0.2.1）。本地开发由 go.work 指向兄弟目录，
+// require 版本随 aic-skills 发版推进，必须与上方实际 require 同步。本地开发由 go.work 指向兄弟目录，
 // 此处不得再用 replace ../aic-skills——CI/发行构建没有兄弟目录，replace 会让构建直接失败。

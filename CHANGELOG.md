@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.9.7 — 2026-10-28
 
 - **pack manifest 流声明接入真实 RTC 路由**：`stream.channel` 经
   `RegisterWithStream` / `RegisterCustomWithStream` 与服务命令原子登记，不再由 host
@@ -20,6 +20,17 @@
   `go test -race ./libs/vtools ./libs/host`、`go test ./libs/rtc ./protocol`、Desktop
   21 项 JS 测试、前端 BrowserStream/Viewer 14 项测试全绿。mbp v0.9.6-dirty 运行实例
   的 browser manifest 通道、真实画面与人工操作验收通过。
+- **发行文档收口**：`docs/guides/release.md` 重写——技能内容由 **aic-skills** 单一维护
+  （aic 负责云端发布与内建定版，aic-pod 经同一份 Go embed 消费设备侧 `cli/` 清单与程序源码）；
+  Pod 不只是原生 exec/fs 与 MCP manager，还包含 vtools 服务注册（MCP/TCP）、内置服务清单
+  与 RTC 流装配。新增「内置服务与运行依赖」「技能内容的两个版本面与两条生效链」两节——
+  **模块版本**（aic-skills `VERSION` / tag，供 Go `require` 消费）与**技能版本**（各包
+  `SKILL.md` frontmatter，进入 `skills.builtin` 指纹）不是一回事，版本不要在本文复制、
+  统一查 aic-skills README 的版本表；内容面与设备程序面各有自己的生效链（后者必须先发布
+  aic-skills 模块、再升 aic-pod 的 `require` 并重建重启）。验证命令改为以 `GOWORK=off`
+  为主——本地根 `go.work` 会用兄弟目录掩盖依赖差，不能代替发行验证。README / README.en
+  的服务命令示例改用正式调用形态（`<alias> <tool>`，`mcp tools/describe/call` 仅作调试直通）。
+  **文档变更，无运行时行为变化。**
 
 ## v0.9.6 — 2026-10-27
 

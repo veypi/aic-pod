@@ -200,17 +200,19 @@ parameters and results follow upstream. The desktop build ships Chrome and both 
 programs; the standalone CLI installs what it needs at runtime as described by each skill.
 
 ```sh
-mcp tools browser
-mcp call browser new_page --input '{"url":"https://example.com"}'
-mcp call browser take_snapshot --input '{"pageId":1}'
-mcp tools cua
+browser                            # tool directory
+browser agent_browser_open --url https://example.com --json
+browser agent_browser_snapshot --json
+cua                                # tool directory
+# mcp tools/describe/call are debug passthroughs; use <alias> <tool> normally
 ```
 
 ## Build
 
-A plain `go build ./cli` / `go run ./cli` includes native execution, the file service and the
-MCP manager. Upstream tools run as separate processes; the desktop packaging ships pinned
-versions. Cloud skill content lives in aic-skills.
+A plain `go build ./cli` / `go run ./cli` includes native execution, the file service and vtools
+service registration (MCP/TCP). Built-in service manifests and program source come from the aic-skills
+embed; upstream tools run as separate processes and the desktop packaging ships pinned versions.
+Cloud skill content comes from the same aic-skills module.
 
 Artifacts: desktop is the main product (`aic-*`), the CLI is `aic-cli-*`.
 
