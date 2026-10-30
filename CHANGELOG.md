@@ -5,6 +5,12 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.9.8 — 2026-10-30
+
+- **命令字节流中继写超时即断流**：流的维护归 pod——设备侧不读（进程卡死或不再
+  消费）时写超时（30s）就关掉这条流，设备侧摘掉订阅者，页面重新活跃时自己新建
+  流。不再出现「页面已经关了、流还在挂、设备还在推帧」的僵尸订阅者。
+
 ## v0.9.7 — 2026-10-28
 
 - **pack manifest 流声明接入真实 RTC 路由**：`stream.channel` 经

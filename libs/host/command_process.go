@@ -15,6 +15,12 @@ import (
 	"github.com/veypi/vsh/commands"
 )
 
+// streamWriteTimeout 是命令字节流中继写设备侧的写超时。
+//
+// 流的维护归 pod：写不动（设备进程卡死或不再消费）就断开这条流，
+// 设备侧摘掉订阅者，页面重新活跃时自己新建流。
+const streamWriteTimeout = 30 * time.Second
+
 func (c *Client) runHostCommand(ctx context.Context, def *hostCommand, inv *commands.Invocation) error {
 	wd := def.cwd()
 	if wd == "" {
@@ -248,6 +254,10 @@ func (c *Client) streamHostCommand(parent context.Context, caller protocol.Calle
 					return
 				}
 				for len(raw) > 0 {
+					// 写超时即断流：流的维护归 pod——设备侧不读了（进程卡死、
+					// 对端不再消费）就不能一直挂着。超时就关掉连接，设备侧会
+					// 摘掉这个订阅者，页面重新活跃时自己新建流。
+					_ = conn.SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 					var n int
 					n, err = conn.Write(raw)
 					if err != nil {
