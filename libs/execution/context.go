@@ -48,6 +48,17 @@ func GrantApprovedFromContext(ctx context.Context) bool {
 	return v
 }
 
+// WithGrantApproved 注入审批事实（服务端已确认过的审批）——引擎与调用方
+// 共用同一入口，不各造 key。
+func WithGrantApproved(ctx context.Context, approved bool) context.Context {
+	return context.WithValue(ctx, grantApprovedKey{}, approved)
+}
+
+// WithOwner 注入任务归属（用户身份）；空串 = 非平台来源（本机 owner）。
+func WithOwner(ctx context.Context, owner string) context.Context {
+	return context.WithValue(ctx, ownerKey{}, owner)
+}
+
 // NoSandboxFromContext 取本次执行的免沙箱选项（默认 false）。
 func NoSandboxFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(noSandboxKey{}).(bool)

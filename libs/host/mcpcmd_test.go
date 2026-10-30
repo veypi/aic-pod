@@ -100,7 +100,7 @@ func TestVtoolsServiceLifecycle(t *testing.T) {
 		t.Fatalf("removed alias still resolves: exit=%s", got)
 	}
 	// 内置服务不可移除
-	removed, _ := run("mcp remove browser")
+	removed, _ := run("mcp remove cua")
 	if removed.Attrs["exit_code"] != "2" || !strings.Contains(removed.Attrs["stderr"], "内置服务") {
 		t.Fatalf("builtin removal: %+v", removed)
 	}
@@ -122,14 +122,14 @@ func TestVtoolsGates(t *testing.T) {
 	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp" denied`) {
 		t.Fatalf("add gate: %+v", out)
 	}
-	// 内置 browser 的工具命令同样过 exec 规则门（mcp.browser）
-	out = run("browser")
-	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp.browser" denied`) {
+	// 内置 cua 的工具命令同样过 exec 规则门（mcp.cua）
+	out = run("cua")
+	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp.cua" denied`) {
 		t.Fatalf("alias gate: %+v", out)
 	}
 	// 放行后不再被门拦（连接失败是后话：不是 126）
-	c.perms.grantCmd("s1", "mcp.browser")
-	if out = run("browser"); out.Attrs["exit_code"] == "126" {
+	c.perms.grantCmd("s1", "mcp.cua")
+	if out = run("cua"); out.Attrs["exit_code"] == "126" {
 		t.Fatalf("granted alias still gated: %+v", out)
 	}
 	c.perms.grantCmd("s1", "mcp")
@@ -274,7 +274,8 @@ func TestVtoolsDiscoverable(t *testing.T) {
 		return decoded[protocol.Output](t, r.Result)
 	}
 	text := out("commands").Content
-	if !strings.Contains(text, "browser") || !strings.Contains(text, "cua") {
+	// 内建服务只剩 cua / blender：browser 已改为技能包（统一 commands 机制）。
+	if !strings.Contains(text, "cua") || !strings.Contains(text, "blender") {
 		t.Fatalf("builtin services not discoverable: %q", text)
 	}
 	if strings.Contains(text, "sed") || strings.Contains(text, "grep") {

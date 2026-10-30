@@ -36,18 +36,20 @@ import (
 
 // Options 客户端配置。
 type Options struct {
-	MCP         mcpx.Settings
-	Transfers   hostfs.TransferConfig
-	Host        string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
-	Key         string        // 设备凭证复合串 "<host_id>.<vbase 四段 credential>"（必填，平台设备页签发）
-	WorkDir     string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
-	DeviceName  string        // 展示名称，默认 hostname
-	DeviceType  string        // 客户端类型（cli/desktop/...），默认 cli
-	Version     string        // 客户端版本号（va.b.c，§6.3 版本门禁）
-	ExecTimeout time.Duration // 程序后台自有超时，默认 30m（§5.9）
-	NoSandbox   bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
-	RTC         bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
-	OnLog       func(format string, args ...any)
+	MCP           mcpx.Settings
+	Commands      map[string]cfg.CommandConfig
+	CommandConfig map[string]cfg.CommandDefConfig
+	Transfers     hostfs.TransferConfig
+	Host          string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
+	Key           string        // 设备凭证复合串 "<host_id>.<vbase 四段 credential>"（必填，平台设备页签发）
+	WorkDir       string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
+	DeviceName    string        // 展示名称，默认 hostname
+	DeviceType    string        // 客户端类型（cli/desktop/...），默认 cli
+	Version       string        // 客户端版本号（va.b.c，§6.3 版本门禁）
+	ExecTimeout   time.Duration // 程序后台自有超时，默认 30m（§5.9）
+	NoSandbox     bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
+	RTC           bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
+	OnLog         func(format string, args ...any)
 }
 
 // serviceState 是设备服务集合的唯一运行态：MCP 连接管理器、vsh 命令登记表、
@@ -59,8 +61,12 @@ type serviceState struct {
 	manager        *mcpx.Manager // MCP 连接（nil = 未初始化）
 	// registry 仅 initTools 写一次（先于任何并发读），此后不再变——不持锁
 	// 直接读；运行期 add/remove 走 Registry 自身方法，不换实例。
-	registry      *vtools.Registry       // 所有服务（MCP/TCP/内置）的 vsh 根命令
-	owner         map[string]mcpx.Config // 所有者显式配置（不含内置默认项）
+	registry *vtools.Registry       // 所有服务（MCP/TCP/内置）的 vsh 根命令
+	owner    map[string]mcpx.Config // 所有者显式配置（不含内置默认项）
+	// fileServices 是文件来源（config.yaml 的 mcp.servers 段 + 内置默认项）的
+	// 服务集合快照：配置热加载按它算差异，进程级注册不在其中。
+	fileServices  map[string]mcpx.Config
+	watchCancel   context.CancelFunc // 配置热加载轮询的停止句柄
 	rejected      map[string]serviceRejection
 	browser       *mcpx.Config // 内置 browser 的有效配置（nil = 非内置/已禁用）
 	browserCtx    context.Context
@@ -71,8 +77,11 @@ type sshProcessRunner = sshx.ProcessRunner
 
 // Client 是 host agent 客户端。
 type Client struct {
-	sessionRoot string
-	svc         serviceState
+	sessionRoot     string
+	svc             serviceState
+	cmds            *commandHub
+	commandPackages string // 测试可覆盖；生产默认 StateDir/packages
+	packageMu       sync.RWMutex
 
 	optsMu          sync.RWMutex
 	opts            Options
@@ -289,8 +298,11 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.closeConnection()
 	c.svc.mu.Lock()
-	browserCancel, manager, browser := c.svc.browserCancel, c.svc.manager, c.svc.browser
+	browserCancel, manager, browser, watchCancel := c.svc.browserCancel, c.svc.manager, c.svc.browser, c.svc.watchCancel
 	c.svc.mu.Unlock()
+	if watchCancel != nil {
+		watchCancel()
+	}
 	if browserCancel != nil {
 		browserCancel()
 	}
@@ -308,6 +320,9 @@ func (c *Client) Close() error {
 	}
 	if c.bytes != nil {
 		_ = c.bytes.Close()
+	}
+	if c.cmds != nil {
+		c.cmds.close()
 	}
 	c.stopRTC()
 	return nil

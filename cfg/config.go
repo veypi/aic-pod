@@ -45,12 +45,40 @@ var DeviceType = "cli"
 // cli 与 desktop 读写同一份——任一端的修改（编辑文件 / 页面绑定）另一端启动即生效。
 //
 // 解析优先级：显式 flag > 环境变量 > 配置文件（flags.LoadCfg）> default tag
+// CommandConfig 是 host 普通进程或 MCP 命令的自包含执行定义。
+// 技能 manifest 与设备 commands 配置共用这一数据形状；技能侧禁止 cwd/env/no_sandbox，
+// 设备所有者手工定义则可以使用它们。
+type CommandConfig struct {
+	Run         []string          `json:"run,omitempty" yaml:"run"`
+	URL         string            `json:"url,omitempty" yaml:"url"`
+	Protocol    string            `json:"protocol,omitempty" yaml:"protocol"`
+	IdleTimeout string            `json:"idle_timeout,omitempty" yaml:"idle_timeout"`
+	Cwd         string            `json:"cwd,omitempty" yaml:"cwd"`
+	Env         map[string]string `json:"env,omitempty" yaml:"env"`
+	NoSandbox   bool              `json:"no_sandbox,omitempty" yaml:"no_sandbox"`
+}
+
+// CommandDefConfig 是命令定义级配置：应用配置（env）+ 沙箱策略（no_sandbox）。
+//
+// 一张表管两件事——它们都是「这条命令定义的运行配置」，不是一个管应用参数、
+// 一个管提权策略。map key = 定义身份（skill:<skill_id>:<command_name> 或
+// config:<alias>），不是可被同名替换的 alias：同名替换不继承配置。
+//
+// 写入面只有一个：commands config（设备侧命令）。配置文件里的同名段是
+// 所有者直接改的等价物，热加载生效。
+type CommandDefConfig struct {
+	Env       map[string]string `json:"env,omitempty" yaml:"env"`
+	NoSandbox bool              `json:"no_sandbox,omitempty" yaml:"no_sandbox"`
+}
+
 type Options struct {
-	MCP         mcpx.Settings `json:"mcp" yaml:"mcp" desc:"configured MCP services"`
-	Host        string        `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
-	Key         string        `json:"key" yaml:"key" desc:"device credential <host_id>.<vbase credential> (from platform device page)"`
-	WorkDir     string        `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
-	ExecTimeout string        `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
+	MCP           mcpx.Settings            `json:"mcp" yaml:"mcp" desc:"configured MCP services"`
+	Commands      map[string]CommandConfig `json:"commands,omitempty" yaml:"commands" desc:"registered process and MCP commands"`
+	CommandConfig map[string]CommandDefConfig `json:"command_config,omitempty" yaml:"command_config" desc:"per-definition command configuration (env + sandbox policy), keyed by definition identity"`
+	Host          string                   `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
+	Key           string                   `json:"key" yaml:"key" desc:"device credential <host_id>.<vbase credential> (from platform device page)"`
+	WorkDir       string                   `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
+	ExecTimeout   string                   `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`

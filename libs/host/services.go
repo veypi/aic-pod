@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -287,6 +288,60 @@ func (c *Client) serviceRejections() map[string]serviceRejection {
 }
 
 // persistMCPServer 持久化服务条目（config=nil 表示删除）：只写 config.yaml，
+// addServiceRuntime 运行期登记一个服务（MCP 或 TCP）并把它注册为 vsh 根命令。
+// 登记失败不留半状态（管理器里撤掉刚加的）。mcp add 与配置热加载共用。
+func (c *Client) addServiceRuntime(alias string, config mcpx.Config) error {
+	var manager *mcpx.Manager
+	if !config.IsTCP() {
+		manager = c.mcpManager()
+		if manager == nil {
+			return fmt.Errorf("MCP unavailable")
+		}
+		if err := manager.Add(alias, config); err != nil {
+			return err
+		}
+	}
+	if err := c.registerServiceLocked(alias, config); err != nil {
+		if manager != nil {
+			_ = manager.Remove(context.Background(), alias)
+		}
+		return err
+	}
+	return nil
+}
+
+// removeServiceRuntime 运行期摘除一个服务（MCP 或 TCP）。
+func (c *Client) removeServiceRuntime(ctx context.Context, alias string) error {
+	// 内置 browser 的上游 daemon 与 MCP 前端分离：摘除服务时显式关掉它。
+	c.svc.mu.RLock()
+	browser := c.svc.browser
+	c.svc.mu.RUnlock()
+	if alias == "browser" && browser != nil {
+		c.closeBrowser(browser)
+	}
+	manager := c.mcpManager()
+	if manager != nil {
+		if err := manager.Remove(ctx, alias); err != nil && !errors.Is(err, mcpx.ErrUnknownService) {
+			return err
+		}
+	}
+	if c.svc.registry != nil && c.svc.registry.Has(alias) {
+		c.unregisterServiceLocked(alias)
+	}
+	return nil
+}
+
+// fileServices 返回文件来源的服务集合快照（配置热加载的差异基线）。
+func (c *Client) fileServices() map[string]mcpx.Config {
+	c.svc.mu.RLock()
+	defer c.svc.mu.RUnlock()
+	out := make(map[string]mcpx.Config, len(c.svc.fileServices))
+	for name, config := range c.svc.fileServices {
+		out[name] = config
+	}
+	return out
+}
+
 // 运行态已由调用方先行生效。
 func (c *Client) persistMCPServer(alias string, config *mcpx.Config) error {
 	unlock := cfg.LockUpdate()
@@ -338,6 +393,11 @@ func (c *Client) isBuiltinPack(alias string) bool {
 // streamResolver 是 rtc.Config.Streams 的装配：按 DataChannel 标签现查
 // vtools 登记表（通道开启时解析，运行期 add 的流式服务无需重启 RTC）。
 func (c *Client) streamResolver(label string) (rtc.StreamRelay, bool) {
+	if c.cmds != nil {
+		if relay, ok := c.cmds.streamResolver(label); ok {
+			return relay, true
+		}
+	}
 	if c.svc.registry == nil {
 		return nil, false
 	}

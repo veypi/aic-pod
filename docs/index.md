@@ -41,6 +41,7 @@
 | 文档 | 内容 | 何时读 |
 | --- | --- | --- |
 | [development/todo.md](development/todo.md) | 未完成工作（实机验收、发布收尾） | 评估计划时；已完成事实写 CHANGELOG |
+| [development/unified-commands.md](development/unified-commands.md) | 目标设计：统一 commands、技能设备扩展、MCP 与双向流 | 评审或实施统一插件机制前；非现行契约 |
 | [development/baselines/](development/baselines/) | browser 稳定性/性能基线数据（JSON） | 对比回归数据时 |
 
 ## 约定

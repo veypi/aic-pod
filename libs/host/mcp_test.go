@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,27 +21,18 @@ import (
 
 func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("AIC_AGENT_BROWSER_PATH", "")
-	t.Setenv("AIC_AGENT_BROWSER_BUNDLE_DIR", filepath.Join(root, "agent-browser"))
 	t.Setenv("AIC_CUA_DRIVER_PATH", filepath.Join(root, "cua-driver"))
 	servers, err := mcpServers(nil, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary := "agent-browser"
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
-	if servers["browser"].Command != filepath.Join(root, "agent-browser", binary) || !reflect.DeepEqual(servers["browser"].Args, []string{"mcp", "--tools", "core,tabs,mobile,state"}) {
-		t.Fatalf("browser must launch upstream directly: %+v", servers["browser"])
-	}
+	// 内建 MCP 服务只剩 cua / blender：browser 已改为技能包（统一 commands 机制）。
 	if servers["cua"].Command != filepath.Join(root, "cua-driver") || !reflect.DeepEqual(servers["cua"].Args, []string{"mcp"}) {
 		t.Fatalf("CUA must launch upstream directly: %+v", servers["cua"])
 	}
 	configured := map[string]mcpx.Config{
-		"browser": {Disabled: true},
-		"cua":     {Command: "custom-cua"},
-		"custom":  {URL: "https://example.test/mcp"},
+		"cua":    {Disabled: true},
+		"custom": {URL: "https://example.test/mcp"},
 	}
 	servers, err = mcpServers(configured, root)
 	if err != nil || !reflect.DeepEqual(servers, configured) {
@@ -56,7 +46,7 @@ func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
 	if err := c.configureMCP(mcpx.Settings{Servers: configured}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.mcpManager().Session(context.Background(), "browser"); err == nil || !strings.Contains(err.Error(), "disabled") {
+	if _, err := c.mcpManager().Session(context.Background(), "cua"); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("disabled builtin started: %v", err)
 	}
 }

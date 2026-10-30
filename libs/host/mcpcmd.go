@@ -362,20 +362,8 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 		return commands.Exitf(inv, 1, "mcp add: %s 已存在（先 mcp remove）", alias)
 	}
 	// 运行态生效：MCP 条目进连接管理器，TCP 条目直接登记；两者都注册 vsh 命令。
-	var manager *mcpx.Manager
-	if !config.IsTCP() {
-		manager = c.mcpManager()
-		if manager == nil {
-			return commands.Exitf(inv, 1, "mcp add: MCP unavailable")
-		}
-		if err := manager.Add(alias, config); err != nil {
-			return commands.Exitf(inv, 1, "mcp add: %s", err)
-		}
-	}
-	if err := c.registerServiceLocked(alias, config); err != nil {
-		if manager != nil {
-			_ = manager.Remove(ctx, alias) // 回滚：不留「管理器有、命令面没有」的半登记状态
-		}
+	// 登记失败不留半状态（管理器里撤掉刚加的）。
+	if err := c.addServiceRuntime(alias, config); err != nil {
 		return commands.Exitf(inv, 1, "mcp add: %s，已回滚", err)
 	}
 	if persist {

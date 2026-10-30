@@ -29,16 +29,18 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 		timeout = d
 	}
 	return Options{
-		MCP:         o.MCP,
-		Transfers:   hostfs.TransferConfig{MaxUploadBytes: o.HostsUploadBytes, ProxyUploadBytes: o.HostsProxyUploadBytes, MaxSources: o.HostsSources},
-		Host:        o.Host,
-		Key:         o.Key,
-		WorkDir:     o.WorkDir,
-		DeviceType:  deviceType,
-		Version:     version,
-		ExecTimeout: timeout,
-		NoSandbox:   o.NoSandbox,
-		RTC:         o.RTC,
-		OnLog:       onLog,
+		MCP:           o.MCP,
+		Commands:      o.Commands,
+		CommandConfig: o.CommandConfig,
+		Transfers:     hostfs.TransferConfig{MaxUploadBytes: o.HostsUploadBytes, ProxyUploadBytes: o.HostsProxyUploadBytes, MaxSources: o.HostsSources},
+		Host:          o.Host,
+		Key:           o.Key,
+		WorkDir:       o.WorkDir,
+		DeviceType:    deviceType,
+		Version:       version,
+		ExecTimeout:   timeout,
+		NoSandbox:     o.NoSandbox,
+		RTC:           o.RTC,
+		OnLog:         onLog,
 	}, nil
 }

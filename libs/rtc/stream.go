@@ -51,7 +51,7 @@ func (p *peer) streamChannel(dc *webrtc.DataChannel, relay StreamRelay) {
 	}
 	dc.OnClose(closeStream)
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if !msg.IsString || len(msg.Data) > 64<<10 {
+		if len(msg.Data) > 64<<10 {
 			closeStream()
 			return
 		}

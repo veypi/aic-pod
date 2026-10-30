@@ -109,50 +109,40 @@ func TestManifestStreamCollisionAndRemoval(t *testing.T) {
 	}
 }
 
-func TestBrowserManifestChannelAndOwnerOverride(t *testing.T) {
-	packs, err := builtinPacks()
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := packs["browser"]
-	if original == nil || original.Stream == nil {
-		t.Fatal("browser pack must declare its stream channel")
-	}
-	manifest := *original
-	manifest.Stream = &packStream{Channel: "aic-browser-test-manifest"}
+// 内建集不再有 browser 包：官方 browser 改走统一 commands 机制（技能包 +
+// 根 manifest.json + 设备侧字节流）。本测试用合成清单验证「清单声明流通道」
+// 这层机制本身：路由按清单走、所有者覆盖不继承、禁用即摘除。
+func TestManifestStreamChannelFollowsManifestAndDropsOnOverride(t *testing.T) {
 	c, _ := testClient(t)
-	if _, ok := c.streamResolver(original.Stream.Channel); !ok {
-		t.Fatal("default service sync did not consume the embedded browser manifest")
-	}
-	c.svc.mu.RLock()
-	config := *c.svc.browser
-	c.svc.mu.RUnlock()
-	c.unregisterService("browser")
-	if err := c.registerServiceWithManifest("browser", config, &manifest); err != nil {
+	provider := &manifestStreamProvider{channel: "aic-provider-default"}
+	manifest := &packManifest{Alias: "fixture", Stream: &packStream{Channel: "aic-fixture-manifest"}}
+	if err := c.registerServiceProvider("fixture", provider, nil, manifest); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := c.streamResolver(manifest.Stream.Channel); !ok {
-		t.Fatal("browser did not use the channel from its manifest")
+		t.Fatal("manifest channel was not routed")
 	}
-	if _, ok := c.streamResolver(original.Stream.Channel); ok {
-		t.Fatal("browser retained a hard-coded/default channel alongside manifest")
+	if _, ok := c.streamResolver(provider.channel); ok {
+		t.Fatal("provider default channel was advertised instead of the manifest one")
 	}
-	// Owner override is still MCP-shaped, but must not inherit the built-in stream.
-	if err := c.registerService("browser", mcpx.Config{Command: "custom-browser"}); err != nil {
+	// 所有者覆盖是纯命令定义（不带清单），不继承清单声明的流。
+	c.unregisterService("fixture")
+	if err := c.registerService("fixture", mcpx.Config{Command: "custom-fixture"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := c.streamResolver(manifest.Stream.Channel); ok {
-		t.Fatal("owner-overridden browser inherited built-in stream support")
+		t.Fatal("owner-overridden service inherited the manifest stream")
 	}
-	// Restoring the built-in definition reattaches the same real stream adapter.
-	if err := c.registerServiceWithManifest("browser", config, &manifest); err != nil {
+	// 恢复带清单的定义 → 路由回来。
+	c.unregisterService("fixture")
+	if err := c.registerServiceProvider("fixture", provider, nil, manifest); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := c.streamResolver(manifest.Stream.Channel); !ok {
-		t.Fatal("restored built-in browser did not restore its manifest route")
+		t.Fatal("restored manifest definition did not restore its route")
 	}
-	c.syncServiceRegistrations(map[string]mcpx.Config{"browser": {Disabled: true}})
+	c.syncServiceRegistrations(map[string]mcpx.Config{"fixture": {Disabled: true}})
 	if _, ok := c.streamResolver(manifest.Stream.Channel); ok {
-		t.Fatal("disabled browser retained its stream route")
+		t.Fatal("disabled service retained its stream route")
 	}
 }

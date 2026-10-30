@@ -81,6 +81,12 @@ func (c *Client) mcpExpired(name string) {
 }
 
 func (c *Client) mcpSession(ctx context.Context, server string) (*mcp.ClientSession, error) {
+	if c.cmds != nil && c.cmds.has(server) {
+		if !c.execAllowed(execution.SessionFromContext(ctx), server) {
+			return nil, fmt.Errorf("%s: denied by exec rules; request grant cmd %s", server, server)
+		}
+		return c.cmds.session(ctx, server)
+	}
 	if !c.execAllowed(execution.SessionFromContext(ctx), "mcp."+server) {
 		return nil, fmt.Errorf("mcp.%s: denied by exec rules; request grant cmd mcp.%s", server, server)
 	}

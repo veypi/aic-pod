@@ -1,0 +1,300 @@
+package host
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/libs/rtc"
+	"github.com/veypi/aic-pod/libs/vtools"
+	"github.com/veypi/aic-pod/protocol"
+	"github.com/veypi/vbox"
+	"github.com/veypi/vsh/commands"
+)
+
+type commandStreamBinding struct {
+	def     *hostCommand
+	stream  hostStream
+	manager *mcpx.Manager
+	process *streamProcess
+}
+
+type commandHub struct {
+	client *Client
+	reg    *commands.Registry
+
+	rebuildMu sync.Mutex
+	mu        sync.RWMutex
+	active    map[string]*hostCommand
+	rejected  map[string]string
+	streams   map[string]commandStreamBinding
+	manager   *mcpx.Manager
+	processes map[string]*streamProcess
+	runtime   map[string]*hostCommand
+}
+
+func newCommandHub(client *Client, reg *commands.Registry) *commandHub {
+	return &commandHub{
+		client: client, reg: reg,
+		active: map[string]*hostCommand{}, rejected: map[string]string{},
+		streams: map[string]commandStreamBinding{}, processes: map[string]*streamProcess{},
+		runtime: map[string]*hostCommand{},
+	}
+}
+
+func (h *commandHub) has(alias string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.active[alias]
+	return ok
+}
+
+func (h *commandHub) definition(alias string) (*hostCommand, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	def, ok := h.active[alias]
+	return def, ok
+}
+
+func (h *commandHub) upsertRuntime(def *hostCommand) error {
+	h.rebuildMu.Lock()
+	defer h.rebuildMu.Unlock()
+	h.runtime[def.ID] = def
+	return h.reloadLocked()
+}
+
+func (h *commandHub) removeRuntime(id string) error {
+	h.rebuildMu.Lock()
+	defer h.rebuildMu.Unlock()
+	delete(h.runtime, id)
+	return h.reloadLocked()
+}
+
+func (h *commandHub) reload() error {
+	h.rebuildMu.Lock()
+	defer h.rebuildMu.Unlock()
+	return h.reloadLocked()
+}
+
+func (h *commandHub) reloadLocked() error {
+	defs, err := h.client.collectHostCommands(h.runtime)
+	if err != nil {
+		return err
+	}
+	return h.rebuildLocked(defs)
+}
+
+func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
+	winners := map[string]*hostCommand{}
+	skillAliases := map[string]bool{}
+	ids := make([]string, 0, len(defs))
+	for id := range defs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		def := defs[id]
+		if def.Source == commandSourceSkill {
+			skillAliases[def.Alias] = true
+		}
+		current := winners[def.Alias]
+		if current == nil || def.Order > current.Order {
+			winners[def.Alias] = def
+		}
+	}
+	for alias, def := range winners {
+		if def.Source == commandSourceConfig && skillAliases[alias] {
+			delete(winners, alias)
+		}
+	}
+
+	h.mu.RLock()
+	oldActive := h.active
+	oldManager := h.manager
+	oldProcesses := h.processes
+	h.mu.RUnlock()
+
+	aliases := make([]string, 0, len(winners))
+	for alias := range winners {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	active := map[string]*hostCommand{}
+	rejected := map[string]string{}
+	streamBindings := map[string]commandStreamBinding{}
+	processes := map[string]*streamProcess{}
+	mcpConfigs := map[string]mcpx.Config{}
+	prepared := map[string]*hostCommand{}
+
+	for _, alias := range aliases {
+		def := winners[alias].clone()
+		if err := allocateCommandStreams(def); err != nil {
+			rejected[alias] = err.Error()
+			continue
+		}
+		if err := validateHostCommand(def); err != nil {
+			rejected[alias] = err.Error()
+			continue
+		}
+		if oldActive[alias] == nil {
+			if _, taken := h.reg.Lookup(alias); taken {
+				rejected[alias] = "command name is taken by a platform or legacy service"
+				continue
+			}
+		}
+		prepared[alias] = def
+		if def.Config.Protocol == "mcp" {
+			mcpConfigs[alias] = def.mcpConfig()
+		}
+	}
+
+	manager, err := mcpx.NewManager(mcpConfigs, mcpx.Options{
+		Authorize: func(ctx context.Context, alias, _ string, _ mcp.Params) error {
+			if !h.client.execAllowed(execution.SessionFromContext(ctx), alias) {
+				return protocol.Fail("permission_denied", "Command denied; request grant cmd "+alias)
+			}
+			return nil
+		},
+		HTTPClient: h.client.mcpHTTP(), Processes: h.client.procs, Logf: h.client.logf,
+		Policy: func(config mcpx.Config) vbox.Policy {
+			return h.client.nativePolicy(context.Background(), config.Cwd, config.Command)
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	for alias := range oldActive {
+		h.reg.Unregister(alias)
+	}
+	for _, alias := range aliases {
+		def := prepared[alias]
+		if def == nil {
+			continue
+		}
+		var cmd commands.Command
+		switch def.kind() {
+		case "mcp":
+			provider := vtools.MCP(func(ctx context.Context) (*mcp.ClientSession, error) {
+				return manager.Session(ctx, alias)
+			})
+			cmd = commands.DefineCommand(alias, func(ctx context.Context, inv *commands.Invocation) error {
+				return vtools.RunProvider(ctx, inv, alias, provider)
+			})
+		case "stream":
+			cmd = commands.DefineCommand(alias, func(_ context.Context, inv *commands.Invocation) error {
+				return commands.Exitf(inv, 2, "%s: command only provides streams", alias)
+			})
+		default:
+			cmd = commands.DefineCommand(alias, func(ctx context.Context, inv *commands.Invocation) error {
+				return h.client.runHostCommand(ctx, def, inv)
+			})
+		}
+		if err := h.reg.RegisterGuarded(cmd); err != nil {
+			rejected[alias] = err.Error()
+			continue
+		}
+		active[alias] = def
+		if len(def.Streams) > 0 {
+			if def.Config.Protocol == "" {
+				processes[alias] = newStreamProcess(h.client, def)
+			}
+			for _, stream := range def.Streams {
+				// 流与命令同属一个命名空间：地址 = 命令别名 + 流名。
+				// skill_id 是平台内部键，不进寻址（同名命令按注册表的生效定义解析）。
+				label := def.Alias + ":" + stream.Name
+				streamBindings[label] = commandStreamBinding{def: def, stream: stream, manager: manager, process: processes[alias]}
+			}
+		}
+	}
+
+	h.mu.Lock()
+	h.active, h.rejected, h.streams = active, rejected, streamBindings
+	h.manager, h.processes = manager, processes
+	h.mu.Unlock()
+
+	if oldManager != nil {
+		_ = oldManager.Close()
+	}
+	for _, process := range oldProcesses {
+		process.stop()
+	}
+	return nil
+}
+
+func (h *commandHub) session(ctx context.Context, alias string) (*mcp.ClientSession, error) {
+	h.mu.RLock()
+	def, manager := h.active[alias], h.manager
+	h.mu.RUnlock()
+	if def == nil || def.Config.Protocol != "mcp" || manager == nil {
+		return nil, fmt.Errorf("%s is not an MCP command", alias)
+	}
+	return manager.Session(ctx, alias)
+}
+
+func (h *commandHub) startStop(ctx context.Context, inv *commands.Invocation, op, alias string) error {
+	h.mu.RLock()
+	def, manager, process := h.active[alias], h.manager, h.processes[alias]
+	h.mu.RUnlock()
+	if def == nil {
+		return commands.Exitf(inv, 1, "commands %s: unknown command %q", op, alias)
+	}
+	if !def.resident() {
+		return commands.Exitf(inv, 2, "commands %s: one-shot process does not support lifecycle", op)
+	}
+	if def.Config.Protocol == "mcp" {
+		if op != "start" {
+			if err := manager.Restart(ctx, alias); err != nil {
+				return commands.Exitf(inv, 1, "commands %s: %s", op, err)
+			}
+		}
+		if op != "stop" {
+			if _, err := manager.Session(ctx, alias); err != nil {
+				return commands.Exitf(inv, 1, "commands %s: %s", op, err)
+			}
+		}
+	} else {
+		if op == "stop" {
+			process.stop()
+		} else {
+			if op == "restart" {
+				process.stop()
+			}
+			if err := process.start(); err != nil {
+				return commands.Exitf(inv, 1, "commands %s: %s", op, err)
+			}
+		}
+	}
+	fmt.Fprintf(inv.Stdout, "%s %s\n", op, alias)
+	return nil
+}
+
+func (h *commandHub) streamResolver(label string) (rtc.StreamRelay, bool) {
+	h.mu.RLock()
+	binding, ok := h.streams[label]
+	h.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return func(ctx context.Context, caller protocol.Caller, input <-chan []byte, send func([]byte) error) error {
+		return h.client.streamHostCommand(ctx, caller, binding, input, send)
+	}, true
+}
+
+func (h *commandHub) close() {
+	h.rebuildMu.Lock()
+	defer h.rebuildMu.Unlock()
+	h.mu.RLock()
+	manager, processes := h.manager, h.processes
+	h.mu.RUnlock()
+	if manager != nil {
+		_ = manager.Close()
+	}
+	for _, process := range processes {
+		process.stop()
+	}
+}

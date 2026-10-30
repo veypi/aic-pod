@@ -112,13 +112,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令、已登记的服务
 			// 命令（vtools），外加名字不自明的 contrib 命令（html-to-markdown；
 			// jq/awk 属通用命令不列）。
-			Discoverable: func(name string) bool {
-				switch name {
-				case "commands", "bg", "grant", "mcp", "ssh", "scp", "sftp", "pull", "push", "html-to-markdown":
-					return true
-				}
-				return c.serviceRegistered(name)
-			},
+			Discoverable: c.hostDiscoverable,
 		},
 		FileCommands: commands.FileCommandResolverFunc(c.resolveFileCommand),
 		ExecPolicy:   c,
@@ -129,9 +123,20 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 	return engine, nil
 }
 
-// AllowExec 把已注册服务 alias 映射到 mcp.<alias>，其他命令身份原样
-// 交给权限快照。绝对路径不经过服务别名映射。
+func (c *Client) hostDiscoverable(name string) bool {
+	switch name {
+	case "commands", "bg", "grant", "mcp", "ssh", "scp", "sftp", "pull", "push", "html-to-markdown":
+		return true
+	}
+	return c.serviceRegistered(name) || c.cmds != nil && c.cmds.has(name)
+}
+
+// AllowExec 保留旧内建服务的 mcp.<alias> 权限名；新统一命令直接使用 alias。
+// 绝对路径不经过服务别名映射。
 func (c *Client) AllowExec(ctx context.Context, req vshpolicy.ExecRequest) error {
+	if c.cmds != nil && c.cmds.has(req.Name) {
+		return c.perms.AllowExec(ctx, req)
+	}
 	if c.serviceRegistered(req.Name) {
 		req.Name = "mcp." + req.Name
 	}
