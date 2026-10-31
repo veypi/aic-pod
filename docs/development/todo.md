@@ -9,15 +9,13 @@
 
 pod 不再内置任何包（browser/cua/blender 降为普通设备包）之后，以下几处接线尚待收口：
 
-- **Desktop 打包的 Chrome 怎么被 browser 包找到**：desktop 注入的是目录型环境变量
-  （`AIC_BROWSER_BUNDLE_DIR` / `AIC_AGENT_BROWSER_BUNDLE_DIR`，见 `desktop/main.js`），
-  而包内 browser 服务只认文件路径 `AIC_BROWSER_PATH` / `AGENT_BROWSER_EXECUTABLE_PATH`
-  或 owner 的 `~/.aic/browser/config.env`。需拍板由谁负责连接（desktop 写 config.env、
-  包内读 bundle 目录、或命令配置 `commands config browser --env AIC_BROWSER_PATH=…`）。
 - **browser / cua 包的设备侧构建流程**：包内只入库源码，设备要按 SKILL.md「安装与构建」
   自行编译 `bin/<name>`；需实机验证该流程（含 `go mod tidy` 需要外网的条件）。
 - **平台侧画面入口**：历史内置 Browser UI 的 `aic-browser` 标签生产零登记，前端默认
   值是否切换到 `<alias>:<stream>`（browser:view）需与前端确认。
+
+（Desktop 打包的 Chrome 与包内 `AIC_BROWSER_PATH` 的接线已于 2026-10-31 收口：
+desktop 注入可执行文件路径，见 `desktop/runtime-paths.cjs`。）
 
 ### 统一命令与策略架构 —— 核心迁移已完成（2026-10-26）
 

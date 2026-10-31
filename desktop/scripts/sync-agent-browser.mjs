@@ -5,9 +5,11 @@ import crypto from 'node:crypto'
 import {pipeline} from 'node:stream/promises'
 import {Readable} from 'node:stream'
 import {fileURLToPath, pathToFileURL} from 'node:url'
+import runtimePaths from '../runtime-paths.cjs'
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 export const manifest = JSON.parse(fs.readFileSync(path.join(desktop, 'agent-browser.json')))
-const binary = platform => platform === 'win32' ? 'agent-browser.exe' : 'agent-browser'
+// 二进制文件名表在 runtime-paths.cjs（与运行时注入 main.js 同一事实源）。
+const binary = runtimePaths.agentBrowserBinaryName
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 export function assertAgentBrowserBundle(dir, platform, arch) {
   const asset = manifest.assets[`${platform}-${arch}`]

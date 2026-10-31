@@ -29,6 +29,10 @@ Desktop 构建同步资源（供技能包使用，pod 自身不启动这些程�
 - `desktop/agent-browser.json` 固定官方原生二进制及各平台 SHA-256；无 Browser 专用 Node 运行时。
 - `desktop/browser.json` 固定 Chrome for Testing；`desktop/cua.json` 固定上游 CuaDriver 与 SHA-256。
 - `make runtime-sync` 同步当前平台开发资源。安装包包含 `resources/agent-browser`、`resources/browser`、`resources/cua`；运行时无需下载软件。
+- 运行时注入（`desktop/main.js`）：`AIC_BROWSER_PATH` = 随包 Chrome 的**可执行文件路径**（browser
+  技能包只认文件型 env，目录型提示无效），`AIC_AGENT_BROWSER_PATH` = agent-browser 可执行文件，
+  `AIC_CUA_BUNDLE_DIR` = cua-driver 目录。可执行文件名的平台差异在 `desktop/runtime-paths.cjs`
+  （与打包前同步/校验同一事实源）。
 - 独立 CLI/Docker 的 Go 构建不包含这些运行依赖，用户按包内手册安装上游程序，或用 `AIC_BROWSER_PATH`、`AIC_AGENT_BROWSER_EXECUTABLE_PATH`、`AIC_CUA_DRIVER_PATH` 指定。
 
 macOS 按上游要求将随包 CuaDriver.app 安装到 `/Applications/CuaDriver.app`，官方 MCP 再按应用名启动它；不增加平台安装器或启动代理。CuaDriver 保留上游 app 身份，桌面权限由系统授予该 app。驱动 daemon 生命周期由上游负责；升级正在运行的驱动后，用官方 `cua-driver stop` 停止旧 daemon，再启动新 app。Pod 关闭时回收自己的 MCP 连接与子进程。

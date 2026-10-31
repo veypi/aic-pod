@@ -11,10 +11,10 @@ Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
  │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
  │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
- ├─ browser/cua：Go MCP manager 直接启动官方 agent-browser mcp / cua-driver mcp
- │    MCP 工具与 schema 原样暴露，状态归上游服务
- ├─ resources/agent-browser：官方原生二进制（AIC_AGENT_BROWSER_BUNDLE_DIR）
- ├─ resources/browser：Chrome for Testing（AIC_BROWSER_BUNDLE_DIR）
+ ├─ browser/cua/blender：普通技能包（`commands install <id>` 装包，pod 按包内 manifest 拉起）
+ │    包自带服务或启动器；MCP 工具与 schema 原样暴露
+ ├─ resources/agent-browser：官方原生二进制（AIC_AGENT_BROWSER_PATH = 可执行文件）
+ ├─ resources/browser：Chrome for Testing（AIC_BROWSER_PATH = 可执行文件）
  ├─ resources/cua：官方 CuaDriver（AIC_CUA_BUNDLE_DIR）
  ├─ BaseWindow 主窗口：平台页 WebContentsView
  │    Browser UI 经 RTC command 调用上游工具，同一 RTC 连接转发上游画面和人工输入
@@ -37,8 +37,9 @@ Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢�
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
 键到平台页，动作由页面 keymap 决定（默认 launcher）；失焦即注销。
 
-浏览器工具、tabId、元素引用 和参数均遵循上游。查看实际 schema 使用
-`mcp tools browser` / `mcp describe browser <tool>`。实时 UI 复用 agent-browser 的原生流，由 Pod 转发；没有另一条 CDP 连接或自研 Browser MCP。
+浏览器工具、tabId、元素引用 和参数均以 browser 技能包为准（包内自带 CDP 服务）。查看实际 schema
+使用 `browser <tool> --help`。实时 UI 走包声明的 `browser:view` 流通道，由 Pod 转发；没有另一条
+CDP 连接或自研 Browser MCP。
 
 ## 开发
 

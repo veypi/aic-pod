@@ -11,18 +11,15 @@ import { execFileSync } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import runtimePaths from '../runtime-paths.cjs'
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 // Chrome for Testing 固定版本清单（version + 各平台 sha256；last-known-good 钉版）。
 export const manifest = JSON.parse(fs.readFileSync(path.join(desktopDir, 'browser.json'), 'utf8'))
 
-export function browserExecutable(root, platform, arch) {
-  const name = platform === 'darwin'
-    ? 'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
-    : platform === 'win32' ? 'chrome.exe' : 'chrome'
-  return path.join(root, `${platform}-${arch}`, name)
-}
+// 可执行文件名表在 runtime-paths.cjs（与运行时注入 main.js 同一事实源）。
+export const { browserExecutable } = runtimePaths
 
 export function assertBrowserBundle(root, platform, arch, config = manifest) {
   const key = `${platform}-${arch}`, asset = config.assets[key]

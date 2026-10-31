@@ -21,6 +21,12 @@
   示例标签改为宿主自登记口径）、`docs/development/unified-commands.md`（设计稿标记为已落地）、
   `docs/development/todo.md`（新增「技能包设备维度落地后的收尾」：Desktop 打包的 Chrome
   与包内 `AIC_BROWSER_PATH` 的接线、设备侧构建流程、前端默认通道标签）。
+- **Desktop 注入的 Chrome 路径改为可执行文件（`AIC_BROWSER_PATH`）**：此前注入的是目录型
+  `AIC_BROWSER_BUNDLE_DIR` / `AIC_AGENT_BROWSER_BUNDLE_DIR`，而包内 browser 服务只认文件型
+  `AIC_BROWSER_PATH`（兼容 `AGENT_BROWSER_EXECUTABLE_PATH`）——桌面版随包 Chrome 因此找不到。
+  现在 `desktop/main.js` 直接注入可执行文件路径（`AIC_BROWSER_PATH` / `AIC_AGENT_BROWSER_PATH`），
+  平台文件名差异收敛到 `desktop/runtime-paths.cjs`（与打包前同步/校验 `scripts/sync-browser.mjs`
+  同一事实源）；desktop 测试补 `runtime-paths.test.cjs`。
 
 ## v0.9.8 — 2026-10-30
 

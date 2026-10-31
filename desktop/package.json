@@ -15,7 +15,6 @@
     "dist:linux": "electron-builder --linux",
     "test": "node --test *.test.cjs scripts/*.test.mjs",
     "runtime-sync": "npm run browser-sync && npm run cua-sync && npm run agent-browser-sync",
-    "test:mcp:live": "cd .. && AIC_MCP_TEST=1 go test ./libs/host -run TestUpstreamMCPThroughExec -count=1",
     "agent-browser-sync": "node scripts/sync-agent-browser.mjs"
   },
   "devDependencies": {

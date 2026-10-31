@@ -6,6 +6,7 @@ directories:
   buildResources: assets
 files:
   - main.js
+  - runtime-paths.cjs
   - backend-startup.cjs
   - backend.cjs
   - host-state.cjs

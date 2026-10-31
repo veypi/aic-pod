@@ -22,6 +22,7 @@ const { waitForStartup } = require('./backend-startup.cjs')
 const { createBackend } = require('./backend.cjs')
 const { capturePlatform } = require('./screenshot.cjs')
 const { composeLocalStatus } = require('./host-state.cjs')
+const { browserExecutable, agentBrowserBinaryName } = require('./runtime-paths.cjs')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
@@ -82,7 +83,7 @@ let platformRetryMs = platformRetryMin // 当前复查间隔（10s 起步，×2 
 const backendCtl = createBackend({
   spawn,
   binary: backendBin,
-  env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserBundleEnv(), ...cuaBundleEnv(), ...agentBrowserBundleEnv() },
+  env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv(), ...cuaBundleEnv(), ...agentBrowserEnv() },
   waitForStartup,
   onFatal: (error) => failStartup(error),
 })
@@ -225,20 +226,25 @@ function cuaBundleEnv() {
   return fs.existsSync(dir) ? { AIC_CUA_BUNDLE_DIR: dir } : {}
 }
 
-// ---- 内置 Chrome 目录提示（vendor/browser → resources/browser） ----
-// Pod 把随包 Chrome 的路径作为官方 MCP 的 executable-path 参数。
-function browserBundleEnv() {
-  const dir = app.isPackaged
+// ---- 内置 Chrome 可执行文件路径（vendor/browser → resources/browser） ----
+// browser 技能包只认文件型 AIC_BROWSER_PATH（兼容 AGENT_BROWSER_EXECUTABLE_PATH）；
+// 目录型提示对它无效，故这里直接给可执行文件路径。可执行文件名表见 runtime-paths.cjs
+// （与打包前同步/校验 scripts/sync-browser.mjs 同一事实源）。
+function browserEnv() {
+  const root = app.isPackaged
     ? path.join(process.resourcesPath, 'browser')
     : path.join(__dirname, 'vendor', 'browser')
-  return fs.existsSync(dir) ? { AIC_BROWSER_BUNDLE_DIR: dir } : {}
+  const executable = browserExecutable(root, process.platform, process.arch)
+  return fs.existsSync(executable) ? { AIC_BROWSER_PATH: executable } : {}
 }
 
-function agentBrowserBundleEnv() {
+// 官方 agent-browser 原生二进制（随包分发；当前仓内无消费者，留给 owner 自配 MCP 服务）。
+function agentBrowserEnv() {
   const dir = app.isPackaged
     ? path.join(process.resourcesPath, 'agent-browser')
     : path.join(__dirname, 'vendor', 'agent-browser', `${process.platform}-${process.arch}`)
-  return { AIC_AGENT_BROWSER_BUNDLE_DIR: dir }
+  const executable = path.join(dir, agentBrowserBinaryName(process.platform))
+  return fs.existsSync(executable) ? { AIC_AGENT_BROWSER_PATH: executable } : {}
 }
 
 // ---- 后端子进程：启动 / 停止 / 重启（实现见 backend.cjs） ----

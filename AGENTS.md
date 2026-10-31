@@ -116,8 +116,11 @@ make docker-build ; make docker-push ; make release ; make clean ; make help
   drives Chrome over CDP; cua launches the official `cua-driver mcp`; blender bridges the Blender
   addon over vtools/tcp). The Pod only registers, starts and streams them: package commands are
   vsh root commands, package streams are `<alias>:<stream>` RTC labels. The desktop build still
-  ships the runtime binaries (`desktop/*.json`); the browser package locates Chrome via
-  `AIC_BROWSER_PATH` / `AGENT_BROWSER_EXECUTABLE_PATH`.
+  ships the runtime binaries (`desktop/*.json`) and injects their **executable paths**
+  (`AIC_BROWSER_PATH` for the bundled Chrome — the package only accepts a file path, never a
+  directory; `desktop/runtime-paths.cjs` is the single source of the per-platform file names).
+  The browser package otherwise falls back to `AGENT_BROWSER_EXECUTABLE_PATH` and the owner's
+  `~/.aic/browser/config.env`.
 - **MCP services are lazily started and shared**, and a service with `idle_timeout` is released
   after that much idleness (in-flight requests count as activity; a call renews it) — release is a
   control action and must not log as a failure. Skill packages declare their own `idle_timeout`
