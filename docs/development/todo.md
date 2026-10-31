@@ -5,6 +5,20 @@
 
 ## 待做
 
+### 技能包设备维度落地后的收尾（2026-10-31）
+
+pod 不再内置任何包（browser/cua/blender 降为普通设备包）之后，以下几处接线尚待收口：
+
+- **Desktop 打包的 Chrome 怎么被 browser 包找到**：desktop 注入的是目录型环境变量
+  （`AIC_BROWSER_BUNDLE_DIR` / `AIC_AGENT_BROWSER_BUNDLE_DIR`，见 `desktop/main.js`），
+  而包内 browser 服务只认文件路径 `AIC_BROWSER_PATH` / `AGENT_BROWSER_EXECUTABLE_PATH`
+  或 owner 的 `~/.aic/browser/config.env`。需拍板由谁负责连接（desktop 写 config.env、
+  包内读 bundle 目录、或命令配置 `commands config browser --env AIC_BROWSER_PATH=…`）。
+- **browser / cua 包的设备侧构建流程**：包内只入库源码，设备要按 SKILL.md「安装与构建」
+  自行编译 `bin/<name>`；需实机验证该流程（含 `go mod tidy` 需要外网的条件）。
+- **平台侧画面入口**：历史内置 Browser UI 的 `aic-browser` 标签生产零登记，前端默认
+  值是否切换到 `<alias>:<stream>`（browser:view）需与前端确认。
+
 ### 统一命令与策略架构 —— 核心迁移已完成（2026-10-26）
 
 现行契约见 [../architecture/overview.md](../architecture/overview.md) 与 [../reference/host-sandbox.md](../reference/host-sandbox.md)。统一 exec、按域配置快照、level/hard protection、普通名称与绝对路径、vbox 支撑命令、SSH/curl/git 内部策略及核心验收已经落地。
@@ -19,7 +33,7 @@
 
 ### 真实环境验收
 
-- browser / CUA Windows 真机联调：画面通道、坐标缩放、权限诊断、退出清理。mbp 的 browser manifest 通道、真实画面与人工操作已在 v0.9.6-dirty 运行实例验收。
+- browser / CUA Windows 真机联调：画面通道、坐标缩放、权限诊断、退出清理。mbp 的 browser 画面与人工操作曾在 v0.9.6-dirty 的**内置 browser 形态**下验收过；包形态（`commands install browser` + `browser:view` 通道）需重新验收，旧结论不算数。
 - quota_provider 额度查询在真实账号上的余额 / 套餐语义核对。
 
 ### 待拍板 / 待确认（继承自 v0.18 大版本审查）

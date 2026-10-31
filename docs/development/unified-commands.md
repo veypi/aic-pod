@@ -1,7 +1,9 @@
 # 统一 Commands 与技能设备扩展设计
 
-> 状态：目标设计，尚未实施（2026-10-29）。本文不是现行契约；实施完成后应同步重写
-> `reference/host-vtools.md`、相关执行文档与技能作者手册，并将本文标记为已落地或归档。
+> 状态：**已落地**（2026-10-31 设计稿，2026-10-31 随统一 commands 机制实施）。本文是设计
+> 记录，不是现行契约；现行契约见 `reference/host-vtools.md`（§5 技能包的设备维度）、
+> `reference/hosts-tools.md` 与 `guides/browser.md`，技能作者手册见
+> `aic-skills/create/references/device-cli.md`。
 
 ## 1. 目标与边界
 

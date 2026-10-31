@@ -1,6 +1,6 @@
 # 设备执行、文件与工具服务
 
-MCP 只是服务协议之一（host-vtools：通用工具服务注册）。服务（MCP/TCP/…）经 libs/vtools 适配后注册为 vsh 根命令，工具调用直达（`<alias> <tool> [flags]`）；`mcp` 命令退化为管理面（list/add/remove/start/stop + tools/describe/call/read 调试直通）。平台 exec/fs 直接调用执行器和文件服务，UI/page/cloud 不实现 MCP。命令连接默认配置的官方 browser/CUA 和 `mcp.servers` 配置的第三方服务，没有平台 MCP server 或 exec、fs.* 的 MCP 注册。共享连接使用官方 Go SDK v1.7.0。
+MCP 只是服务协议之一（host-vtools：通用工具服务注册）。服务（MCP/TCP/…）经 libs/vtools 适配后注册为 vsh 根命令，工具调用直达（`<alias> <tool> [flags]`）；`mcp` 命令退化为管理面（list/add/remove/start/stop + tools/describe/call/read 调试直通）。平台 exec/fs 直接调用执行器和文件服务，UI/page/cloud 不实现 MCP。命令连接技能包安装的服务（官方 browser/CUA/blender 也是普通技能包）和 `mcp.servers` 配置的独立服务，没有平台 MCP server 或 exec、fs.* 的 MCP 注册。共享连接使用官方 Go SDK v1.7.0。
 
 本文含两部分：设备执行与工具服务的**现行契约**（入口与路由、配置与运行、结果与边界），以及「执行边界」速查（vsh 与 MCP 的分工）。
 
@@ -25,7 +25,7 @@ RTC `hosts_rtc/3` 使用可靠有序的 `aic-tools` DataChannel。每帧只允�
 mcp:
   servers:
     browser:
-      disabled: true  # 可选：禁用默认内置服务
+      disabled: true  # 可选：禁用该服务条目
     local:
       command: /absolute/path/custom-server
       cwd: /absolute/workdir
@@ -34,15 +34,15 @@ mcp:
       url: https://service.example/mcp
 ```
 
-browser/CUA/blender 是内置服务，默认项由 aic-skills 对应包的 `cli/manifest.json` 声明（pod 经 embed 读取，不再硬编码）：分别启动官方 `agent-browser mcp --tools core,tabs,mobile,state` 与 `cua-driver mcp`，blender 是 `tcp://127.0.0.1:9866` 的 addon 通道（含 doctor/launch/install 生命周期动词与分级报错，详见 blender 技能手册）。browser/CUA 默认 30m `idle_timeout`；所有者显式配置同名项会整体替换内置项（含默认有效期与权限），`disabled: true` 关闭。Desktop 分发运行依赖；独立 CLI 按技能说明安装上游软件。`disabled: true` 无需填写 command。其他启用的服务 command 与 url 二选一；cwd 必须绝对路径。可设 disabled:true 或进程 no_sandbox:true。url 另接受 `tcp://host:port`（vtools/tcp v1 行分隔 JSON 协议——非 MCP 服务，由注册层直接接管，不进连接管理器）。配置只由设备所有者维护，不从技能或工具参数加载；亦可用 `mcp add/remove [--persist]` 在会话里增删（需 exec 规则放行 `mcp`；不带 --persist 进程级生效）。当前远程 HTTP 使用设备网络规则、不继承 shell env、不跟随重定向；没有 OAuth/token 管理器。
+pod 不内置任何服务：browser/CUA/blender 都是 aic-skills 的普通设备包，包根 `manifest.json` 声明 `commands`/`streams`（如 `run: [bin/browser]`、`protocol: mcp`、`idle_timeout: 30m`），经统一 commands 机制安装与登记；设备侧按各包 SKILL.md 的「安装与构建」编译出 `bin/<name>`。Desktop 分发运行依赖；独立 CLI 按技能说明安装上游软件。`disabled: true` 无需填写 command。其他启用的服务 command 与 url 二选一；cwd 必须绝对路径。可设 disabled:true 或进程 no_sandbox:true。url 另接受 `tcp://host:port`（vtools/tcp v1 行分隔 JSON 协议——非 MCP 服务，由注册层直接接管，不进连接管理器）。配置只由设备所有者维护，不从技能或工具参数加载；亦可用 `mcp add/remove [--persist]` 在会话里增删（需 exec 规则放行 `mcp`；不带 --persist 进程级生效）。当前远程 HTTP 使用设备网络规则、不继承 shell env、不跟随重定向；没有 OAuth/token 管理器。
 
 stdio 服务懒启动并复用一个 SDK session。进程由 vbox 负责；manager 只拥有配置与连接。一次取消不关闭服务；退出后的下一次显式调用可重新建连，失败写操作不自动重放。服务或启动权限配置更新时关闭旧连接，撤销相关临时服务授权。
 
-`idle_timeout` 是每个服务条目的空闲有效期：服务启动或最后一次使用（取连接或在途请求结束）后经过该时长无任何调用即被回收，下次调用重新懒启动；在途请求算活跃，调用即续期，缺省空值表示随 Pod 常驻。回收是控制行为，不写故障日志（记一条生命周期日志）。内置 browser 的 MCP 连接与上游 daemon 分离——到期时显式用上游 CLI 关闭它自己的 daemon（连同受管浏览器），彻底释放资源；所有者覆盖的 browser 项自管 daemon，Pod 不代管。UI 实时画面挂载期间按分钟刷新 browser 的空闲截止时间（画面通道不经过 MCP session），避免观看中被回收。
+`idle_timeout` 是每个服务条目的空闲有效期：服务启动或最后一次使用（取连接或在途请求结束）后经过该时长无任何调用即被回收，下次调用重新懒启动；在途请求算活跃，调用即续期，缺省空值表示随 Pod 常驻。回收是控制行为，不写故障日志（记一条生命周期日志）。回收只关闭该条目的连接与受管进程；技能包服务（browser/CUA/blender）的生命周期由 command hub 与各包自管，Pod 不代管上游 daemon。
 
-调用门为 exec 规则 `mcp.<alias>`（服务根命令边界统一检查；`grant cmd mcp.<alias>` 放行该服务全部工具与流）。内置 browser/CUA 以 Pod 设备权限运行，以访问 Chrome 私有状态和系统桌面；第三方服务默认受沙箱约束。进程 cwd/env/沙箱固定；按调用 session 获得的临时文件权限不扩展常驻进程沙箱。服务授权是设备能力授权，原生 fs 规则不会隔离浏览器或桌面操作。browser 默认用上游 `--filesystem-root` 限制显式文件参数为 Pod 工作目录；其余业务权限由上游服务负责。原生 exec 的 nosandbox 需可信审批；第三方 MCP 的 no_sandbox 只能由设备所有者在配置中设置。
+独立服务的调用门为 exec 规则 `mcp.<alias>`（服务根命令边界统一检查；`grant cmd mcp.<alias>` 放行该服务全部工具与流）；技能包命令的调用门是别名本身（`grant cmd browser`）。技能包服务默认受沙箱约束，免沙箱只能由设备 owner 用 `commands config <alias> --no-sandbox` 授予（包内 manifest 不许声明沙箱姿态）；官方 browser/CUA 通常需要免沙箱，以访问 Chrome 私有状态和系统桌面。进程 cwd/env/沙箱固定；按调用 session 获得的临时文件权限不扩展常驻进程沙箱。服务授权是设备能力授权，原生 fs 规则不会隔离浏览器或桌面操作。browser 默认用上游 `--filesystem-root` 限制显式文件参数为 Pod 工作目录；其余业务权限由上游服务负责。原生 exec 的 nosandbox 需可信审批；第三方 MCP 的 no_sandbox 只能由设备所有者在配置中设置。
 
-exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`mcp`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`pull`/`push`）+ 已登记的服务根命令（内置 `browser`/`cua`/`blender` 与 `mcp add` 添加的服务；`<alias>` 无参列工具目录，`<alias> <tool> --help` 看参数表）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令与已登记服务，常见命令不重复列出。（2026-10-12：`skill` 命令在设备端退役——包/文件拉取改用 `pull`，走 /fs/cloud HTTP 面。）
+exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`mcp`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`pull`/`push`）+ 已登记的服务根命令（技能包安装的服务与 `mcp add` 添加的服务；`<alias>` 无参列工具目录，`<alias> <tool> --help` 看参数表）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令与已登记服务，常见命令不重复列出。（2026-10-12：`skill` 命令在设备端退役——包/文件拉取改用 `pull`，走 /fs/cloud HTTP 面。）
 
 ## 结果与边界
 
@@ -56,13 +56,11 @@ exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`
 
 `mcp` 管理面提供 list/add/remove/start/stop/restart 与调试直通 tools/describe/call/read；不引入 prompts、sampling、任务引擎或技能依赖求解器。服务的业务权限仍由对应服务负责，MCP 传输本身不是沙箱。
 
-Browser UI 调用上游工具并通过下述 `aic-browser` 通道查看与控制画面；CUA UI 使用截图预览和上游输入工具，并保留 `check_permissions({prompt:false})` 只读诊断。
+浏览器画面入口是 browser 技能自带 UI（与 AI 共享同一浏览器实例，实时画面与键鼠交互）；CUA UI 使用截图预览和上游输入工具，并保留 `check_permissions({prompt:false})` 只读诊断。
 
 依赖与用法见 [browser](../../../aic-skills/browser/SKILL.md)、[CUA](../../../aic-skills/cua/SKILL.md) 与 [构建发行](../guides/release.md)。
 
-内建 Browser UI 默认的 `aic-browser` RTC data channel 复用同一 peer 的设备认证和 `mcp.browser` 命令权限，双向转发该 agent-browser daemon 的原生 WebSocket 消息。Pod 仅做分片传输，不解析浏览器工具、不建立 CDP 连接。UI 绘制帧后才把 ACK 转回上游；关闭此通道不影响命令连接。
-
-该通道走通用流注册：host 读取 browser 包 `cli/manifest.json` 的 `stream.channel`，将 pod 的 `streamBrowser` 适配为 `vtools.Streamer` 并原子登记，`rtc.Config.Streams` 再按 DataChannel 标签现查 handler。`aic-browser` 是当前清单值及前端默认值，不再是 host 登记处另写的硬编码。其它内置服务声明流时必须由 Provider 真正实现 `vtools.Streamer`，否则显式拒绝登记；所有者覆盖不继承内置流。通道冲突、非法标签及增删/换型语义见 host-vtools.md §4。
+技能包的流通道由包根 `manifest.json` 的 `streams` 声明，command hub 落地为 `<alias>:<stream>` 标签的 RTC DataChannel（见 `libs/host/command_registry.go`）；Pod 仅做分片传输，不解析流内容。宿主自登记服务仍可用 `vtools.Streamer` 隐式接线，`rtc.Config.Streams` 按 DataChannel 标签现查 handler；通道冲突、非法标签及增删/换型语义见 host-vtools.md §4。历史内置 browser 的 `aic-browser` 标签（`protocol.RtcBrowserChannel`）现仅作前端宿主 UI 的默认值保留，生产零登记。
 
 ## 执行边界（vsh 与 MCP）
 
@@ -73,7 +71,7 @@ Browser UI 调用上游工具并通过下述 `aic-browser` 通道查看与控制
 - 设备 `mcp tools/describe/call/read` 只接配置的独立服务，不按技能注册命令；`call` 与服务根命令共用 vtools 参数面（标量可写同名 flag，复杂对象/数组走 `--input`，stdin 可传 `--input -`）。
 - page 接受一个字面 command，按 session 和现有窗口 ID 调用 handler；通过 commands 和 --help 发现用法。复用 vsh 语法解析器，不建立另一套 shell，也不实现 MCP。页面文件继续直接调用 PageFS。
 - exec/fs、技能搜索/读取、云端 HTTP API 都没有 MCP 副本。Cloud 当前没有 MCP 服务配置或 mcp 命令。
-- 服务门为 `mcp.<alias>`；共享服务的 cwd/env/沙箱来自设备配置，不随某次 shell 改变。配置更新或 Pod 退出时回收服务，单次取消不关闭整个服务。
+- 独立服务门为 `mcp.<alias>`，技能包命令门为别名本身；共享服务的 cwd/env/沙箱来自设备配置，不随某次 shell 改变。配置更新或 Pod 退出时回收服务，单次取消不关闭整个服务。
 - UI 与 AI 都按原生 request_id 取消执行，Pod 内 SDK 将上下文取消传给 MCP 服务。取消不回滚副作用；响应丢失不自动重放。
 - `skills` 工具的 search/load 读取云端静态内容，fork 创建副本（均 cloud 端接线）。安装脚本、CLI 或 MCP 程序按说明执行。
 - **设备凭证 = vbase 静态秘钥**（device-key-migration 2026-10-12）：config `key` 存复合凭证 `<host_id>.<vbase 四段 credential>`；NATS CONNECT token 与 HTTP Bearer 均为四段 credential；第 4 段 secret 是本地 HKDF 根（K_tool/RTC 票据不变）。e1. 自签连接 proof、nonce 防重放、enc1. 存储、credVer 与 NATS fetch 分块通道全删。

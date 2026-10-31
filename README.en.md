@@ -31,14 +31,15 @@ keeping that power on a leash:
 
 Device `fs`/`exec` calls go straight to the executor and file service; standalone services are
 reached over [MCP connections](docs/reference/hosts-tools.md). Skills are static cloud content;
-browser/CUA are built into the Pod — registered by default and started on demand.
+device-side browser/cua/blender behave like any other package — installed with
+`commands install <id>` and started on demand.
 
 This document describes the current unified command and policy model dated 2026-10-26.
 The core migration is complete; caching, the darwin proxy and real-platform validation are
 tracked in [docs/development/todo.md](docs/development/todo.md).
 
-The browser runs a real Chrome in the background with a consistent UA, Client Hints,
-automation markers and window size, and reuses a dedicated profile; details in
+The browser is driven by the skill package's own service: a real Chrome with a consistent UA,
+Client Hints, automation markers and window size, reusing a dedicated profile; details in
 [Browser runtime](docs/guides/browser.md).
 
 ## Quick start
@@ -194,15 +195,23 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-browser and cua start the official `agent-browser` 0.38.2 and `cua-driver` 0.33.2 in MCP mode
-directly; they start lazily on first call and share the connection afterwards. All tool names,
-parameters and results follow upstream. The desktop build ships Chrome and both official native
-programs; the standalone CLI installs what it needs at runtime as described by each skill.
+browser and cua are ordinary skill packages (same shape as third-party ones), no longer built
+into the Pod: `commands install <id>` fetches them, registers them as vsh root commands, and the
+first call starts them lazily while later calls share the connection.
+
+- `browser` — a Go service inside the package; it ships its own Chrome and drives it over CDP.
+  Tool surface: `targets` / `attach` / `navigate` / `snapshot` / `click` / `fill` / `screenshot` …;
+  the live view rides the package's `browser:view` stream channel.
+- `cua` — a launcher inside the package that starts the official `cua-driver mcp`; tool names and
+  parameters follow upstream.
+
+The desktop build ships Chrome and the official native programs; the standalone CLI builds and
+installs what the packages need as described in each package manual.
 
 ```sh
 browser                            # tool directory
-browser agent_browser_open --url https://example.com --json
-browser agent_browser_snapshot --json
+browser targets --json
+browser navigate --url https://example.com --json
 cua                                # tool directory
 # mcp tools/describe/call are debug passthroughs; use <alias> <tool> normally
 ```
@@ -210,9 +219,9 @@ cua                                # tool directory
 ## Build
 
 A plain `go build ./cli` / `go run ./cli` includes native execution, the file service and vtools
-service registration (MCP/TCP). Built-in service manifests and program source come from the aic-skills
-embed; upstream tools run as separate processes and the desktop packaging ships pinned versions.
-Cloud skill content comes from the same aic-skills module.
+service registration (MCP/TCP). The Pod embeds no skill package (manifests and program source
+live in the aic-skills repo and run after a device-side install); desktop packaging ships the
+browser runtime and the official native programs for the matching packages.
 
 Artifacts: desktop is the main product (`aic-*`), the CLI is `aic-cli-*`.
 
@@ -229,9 +238,10 @@ make release                    # full local build + gh release create (needs ev
 make clean                      # clean up
 ```
 
-Before packaging, the desktop build syncs the bundled cua-driver (`desktop/cua.json` pins the
-version and sha256 → `vendor/cua → resources/cua`, three platforms). On an offline or
-restricted network use `npm run cua-sync -- --asset <downloaded asset>`.
+Before packaging, the desktop build syncs the cua-driver runtime (`desktop/cua.json` pins the
+version and sha256 → `vendor/cua → resources/cua`, three platforms), which the cua package uses
+to start the official driver. On an offline or restricted network use
+`npm run cua-sync -- --asset <downloaded asset>`.
 
 **Release flow**: pushing a `v*` tag triggers CI (`.github/workflows/build.yml`), which builds
 the desktop and CLI for every platform and creates a GitHub Release. The version number lives

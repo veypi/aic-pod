@@ -31,7 +31,7 @@ type Options struct {                        // 登记表装配：Gate / Session
 }
 
 type Streamer interface {                    // 可选：实时流（见 §4）
-    StreamChannel() string                   // RTC DataChannel 标签，如 "aic-browser"
+    StreamChannel() string                   // RTC DataChannel 标签，如 "myhost-view"（宿主自登记服务用；技能包走 <alias>:<stream>）
     Stream(ctx, caller, input <-chan []byte, send func([]byte) error) error
 }
 ```
@@ -60,7 +60,7 @@ type Streamer interface {                    // 可选：实时流（见 §4）
  → `{"id":N,"result":…}`（工具级失败加 `"isError":true`，结果保留）或
  `{"id":N,"error":"…"}`（协议级失败）。
 - **断连语义**：连接断开使全部在途请求失败；客户端下次调用自动重拨（含重握手）。
-- 参考实现：客户端 `libs/vtools/tcp.go`；服务端 `aic-skills/blender/cli/aic_blender_bridge.py`。
+- 参考实现：客户端 `libs/vtools/tcp.go`、设备侧客户端 `aic-skills/blender/src/addon.go`；服务端 `aic-skills/blender/cli/aic_blender_bridge.py`。
 - **会话键（会话级临时授权的查找键）由 `Options.SessionOf` 注入**：命令路径取
  host 的 `execution.SessionFromContext(ctx)`，流通道开门取 `caller.Origin`
 （peer ctx 不携带会话）。本层不假设会话键挂在 ctx 上的形式，也不反向依赖执行层。
@@ -76,7 +76,7 @@ type Streamer interface {                    // 可选：实时流（见 §4）
 服务**（记日志 + `mcp list` 显示 `rejected`），不会把平台命令注册顶掉、更不
  会让引擎初始化失败。反过来的顺序会让整机 `initErr` 离线，勿回退。
 - 换型/换址判定按 `AddrProvider` 接口（不是具体类型断言）：已登记服务与配置
- 同为 TCP 端点且地址一致才不重登记；`blenderProvider` 这类包装也算 TCP。
+ 同为 TCP 端点且地址一致才不重登记；宿主在 TCPProvider 之上的包装也算 TCP。
 - 命令路径的会话键由 `Options.SessionOf` 注入（host = `execution.SessionFromContext`）；
  流通道开门用 `caller.Origin`。两者同源，vtools 不反向依赖执行层。
 - 命令形态：`<alias> <tool> [--flag value]... [--input JSON|-] [--json]
@@ -86,8 +86,9 @@ type Streamer interface {                    // 可选：实时流（见 §4）
  为同名 flag（布尔可裸写）；复杂对象/数组走 `--input`（JSON 对象，flag 覆盖
  同名键）；未知 flag 报错并列出可映射项；未知工具名列出可用面。
 - **注册即时、连接懒惰**：登记不 connect，首次执行才连接。
-- 调用门在命令边界：exec 规则 `mcp.<alias>`（与历史 `mcp call` 的门同一条
- 规则，`grant cmd mcp.<alias>` 放行该服务全部工具与流）。
+- 调用门在命令边界：独立服务为 exec 规则 `mcp.<alias>`（与历史 `mcp call`
+ 的门同一条规则，`grant cmd mcp.<alias>` 放行该服务全部工具与流）；技能包
+ 命令的门是别名本身（`grant cmd <alias>`）。
 - `commands` 的 Discoverable 动态纳入已登记 alias。
 
 ## 3. mcp 命令 = 管理面
@@ -108,8 +109,7 @@ mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样�
  引导，与 skill 命令同形）；`start/stop/restart` 要求 `mcp.<alias>` 已授权。
  `list` 不增加额外管理子门，但 `mcp` 根命令仍须通过统一 `exec_policy`；锁死设备上也需先 `grant cmd mcp`。
 - `--persist` 写 config.yaml `mcp.servers`（cfg.LoadFile→改→cfg.Save，原子写
- 0600）；不带 = 进程级，重启失效。内置 browser/cua/blender 不可 remove（禁用
- 走配置 `disabled: true`）。`no_sandbox` 只能所有者手改配置。
+ 0600）；不带 = 进程级，重启失效。`no_sandbox` 只能所有者手改配置。
  反向注意：手改 config.yaml 需重启 pod 生效（无运行期重载）。
 - 配置文件里 `url = tcp://host:port` 的条目由 vtools 接管（不进 mcpx.Manager）；
  `mcpx.Config.Validate` 接受 tcp scheme。
@@ -122,55 +122,50 @@ mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样�
  `streamChannel`（原 browserChannel 泛化）：帧格式 uint32 大端长度 + 有序
  16 KiB 分块；单消息 ≤16 MiB；入方向必须 string ≤64 KiB，拥塞即断；
  同一 peer 每个标签至多一条。
-- 内置 pack 的 `stream.channel` 是实际路由配置源，不是展示元数据。host 用
- `RegisterWithStream` / `RegisterCustomWithStream` 将服务命令和显式 Streamer
- 原子登记，再经上述 resolver 接入 RTC；Provider 自带的另一 `StreamChannel`
- 不会抢先生效。Browser 使用同一链路，转发实现仍是 pod 的 `streamBrowser`，
- 不再在 Go 登记处硬编码 `aic-browser`。
-- **通道声明不等于流能力**：除 Browser 这个明确的独立适配器外，声明流的
- Provider 必须实现 `vtools.Streamer`，否则登记显式失败（配置态服务以
- `rejected` 曝光），不能只留下一条看似可用的通道。所有者覆盖内置同名服务
- 时不继承内置流声明；禁用、删除、换型、换址或换通道会同步摘除旧路由。
+- 技能包声明的流通道不经 vtools 登记表：包根 `manifest.json` 的 `streams`
+ 由 command hub 落地为 `<alias>:<stream>` 标签（见
+ `libs/host/command_registry.go`），是技能包流通道的唯一生产路径。
+- vtools 登记表只保留 Provider 隐式接线：`Register` 时 Provider 实现
+ `vtools.Streamer` 即登记其 `StreamChannel()`，供宿主自登记服务使用；禁用、
+ 删除、换型、换址或换通道会同步摘除旧路由。
 - 通道标签必须非空、为合法 UTF-8、无首尾空白/控制字符且 ≤65535 字节；
  `aic-tools` 保留给请求-响应，服务流显式拒绝。不同 alias 抢同一标签即拒，
  原路由不动；全量同步按 alias 排序，冲突结果不受 map 迭代顺序影响。
-- 权限：通道开启时过一道 `mcp.<alias>` 门；逐消息复查由 Streamer 实现方
- 负责（browser 的 streamBrowser 保持逐消息复查）。挂流期间的 idle 保活
-（Touch）同理由实现方负责。
+- 权限：vtools 接线通道开启时过一道 `mcp.<alias>` 门；逐消息复查由 Streamer
+ 实现方负责。挂流期间的 idle 保活（Touch）同理由实现方负责。
 - 前端 `BrowserStream`（ui/hosts/browser_stream.js）标签参数化
 （`options.channel`，默认 `aic-browser`），重组/背压/15s ready 语义不变。
- 这个默认值与内置 browser 清单当前的 `stream.channel` 一致；它是前端默认
- 配置，不是 host 的流登记实现。若定制清单通道，前端也必须显式传同一标签。
+ 这个默认值是历史内置 browser 清单的 `stream.channel` 遗留；它是前端默认
+ 配置，不是 host 的流登记实现（生产侧已无该标签的登记方）。技能包画面请
+ 使用技能自带 UI 的 `<alias>:<stream>` 通道。
 
-## 5. 内置服务 = 技能包的 cli/ 维度（2026-10-16 起）
+## 5. 技能包的设备维度（2026-10-31 起）
 
-技能包即插件单元（aic docs/reference/skill.md）：`cli/manifest.json` 声明设备服务
-（协议 kind / 别名 / 程序解析 programs / stream 通道；blender 另有私有扩展
-verbs 声明生命周期动词，非通用维度），程序源码随包入库。pod 启动时经 aicskills embed 读内嵌集的清单注册服务
-（`libs/host/packs.go`）：mcp-stdio 进连接管理器，tcp 由注册层直接接管；
-所有者 `mcp.servers.<alias>` 同名配置整体替换内置项。
+技能包即插件单元（aic docs/reference/skill.md）：包根 `manifest.json` 声明
+`schema` / `commands` / `streams`（如 `run: [bin/blender]`、`protocol: mcp`、
+`idle_timeout`），程序源码随包入库（`src/` + `src/go.mod.example`，设备侧
+自行构建 `bin/<name>`）。pod 不内嵌任何包：`commands install <id>` 拉取、
+登记为 vsh 根命令，沙箱姿态只能由设备 owner 用
+`commands config <alias> --no-sandbox` 授予（包内 manifest 声明即拒）。
 
-- browser/cua 的默认项是 `aic-skills/{browser,cua}/cli/manifest.json` 的数据
- （不再是 Go 硬编码）；程序解析按 path_env → bundle → 默认名（darwin 可回退
-  /Applications 布局）。browser 的 `stream.channel` 同样由清单提供；当前默认
- 为 `aic-browser`，实际 RTC resolver 按该值找到 pod 的 Streamer。
-- blender（`kind: tcp`）带生命周期动词：`blender doctor/launch/install`
- （自定义命令分发后透传 `Registry.RunTool`），分级报错
-  blender_not_installed → blender_not_running → addon_not_connected 是产品
-  功能。addon 源码 = `aic-skills/blender/cli/aic_blender_bridge.py`。
+- browser/cua/blender 与普通第三方包同等待遇：browser 是自带 Go 服务
+ （CDP 驱动 Chrome）；cua 包装官方 `cua-driver mcp`；blender 是自带 Go 服务
+  经 vtools/tcp 连 addon，带 `blender doctor/launch/install` 生命周期动词，
+  分级报错 blender_not_installed → blender_not_running → addon_not_connected
+  是产品功能。addon 源码 = `aic-skills/blender/cli/aic_blender_bridge.py`。
   **addon 强制 vtools/tcp 认证握手**（§1.1）：token 取 env `AIC_BLENDER_TOKEN`
  （launch 拉起时透传）→ `$HOME/.aic/blender/bridge_token`（0600，O_EXCL
   先建者赢，pod 与 addon 共读）。威胁模型：防浏览器页面/跨用户本机进程
   直连回环驱动 `execute_code`（进程内任意 Python）；同 uid 恶意本机进程
   能读 token 文件，不在此模型内。
-- 用户第三方包的设备安装链路（拉取 + 审批 + 注册）是 v2——manifest 格式与
-  注册机制已按容纳它设计。
+- 历史内置包机制（aicskills embed、`cli/manifest.json`、`libs/host/packs.go`、
+  `streamBrowser`/`blenderProvider`）已删除，没有兼容入口。
 
 ## 6. 明确不做（v1 边界）
 
 - 流式端点的通用配置声明（端口文件/env/固定 URL）等第二个流式服务再抽象。
- 当前通用化的是 `stream.channel` → `Streamer` → RTC 的链路；browser 的上游
- WebSocket 发现与转发仍是 pod 内置实现，普通 Provider 则必须自行实现 Streamer。
+ 技能包流通道走 command hub 的 `<alias>:<stream>`；`Streamer` → RTC 的隐式
+ 接线仅保留给宿主自登记服务。
 - `aic-tools` 不加增量响应（请求-响应 + 日志补全已够用）。
 - Pod 永不解析流内容（消息边界保持的纯转发）。
 - `aic`（cloud）侧不变：机制仅落在物理 host（libs/host）。

@@ -6,16 +6,19 @@ is [README.md](README.md) (Chinese) / [README.en.md](README.en.md) (English).
 ## What this repo is, and what it is not
 
 The **device-side client** of the AIC platform: it connects out over NATS WebSocket / WebRTC and
-exposes the host's capabilities (exec, fs, browser, cua, ssh/scp) as tools an LLM can call.
+exposes the host's capabilities (exec, fs, ssh/scp) plus skill-package services (browser, cua,
+blender) as tools an LLM can call.
 
 This repo owns: configuration and grant lifetimes, execution scheduling, command registration
 and command implementations, the exec/fs tool layer, transport contracts, desktop packaging and
 the CLI. It is the integration point for vsh (virtual shell and uniform `exec_policy` admission)
 and vbox (native-process FS/NET sandboxing); those libraries do not own each other's concerns.
 It does **not** own: the platform side (accounts, approvals, prompts), or skills — skills are static
-cloud content and the in-repo skill runner/registry mechanism (`libs/skillrun`, `libs/uiscript`,
-`protocol/hosts_tools`) was removed on purpose; do not reintroduce it. The `aic-skills` Go module stays on purpose: `libs/host/packs.go` reads its embedded
-manifest for the built-in packs (browser/cua/blender).
+cloud content, and device-side skills arrive as ordinary packages (root `manifest.json` + `src/`),
+installed with `commands install <id>` and registered as vsh root commands. The in-repo skill
+runner/registry mechanism (`libs/skillrun`, `libs/uiscript`, `protocol/hosts_tools`) was removed on
+purpose; do not reintroduce it. The `aic-skills` Go module dependency went away with the built-in
+packs (`libs/host/packs.go`): pod embeds no skill content and ships no package-specific code.
 
 ## Layout
 
@@ -27,7 +30,7 @@ manifest for the built-in packs (browser/cua/blender).
 - `cfg/` — config schema/defaults and `Version` (the only place the version number lives).
 - `libs/` — `execution` (vsh assembly, logs and run records), `fsx` (fs tool layer), `host`
   (host engine: connect, configuration/grant snapshots, command registration, vbox-backed
-  commands, browser stream), `hostfs` (os.Root-backed backend and path canonicalization),
+  commands, skill-package command/stream registration), `hostfs` (os.Root-backed backend and path canonicalization),
   `mcpx` (official MCP Go SDK wrapper), `vtools` (protocol-agnostic service registration as
   vsh commands), `sshx` (Pod ssh/scp/sftp commands using `ssh_policy`), `gitx` (optional Pod
   `git` command implementation; never an interceptor for vbox-backed `/usr/bin/git`), `rtc`,
@@ -39,7 +42,8 @@ manifest for the built-in packs (browser/cua/blender).
   `reference/` (`host-sandbox.md` = security/authorization contract, `hosts-tools.md` =
   tool and MCP surface + execution boundary, `host-vtools.md` = service registration),
   `guides/` (`browser.md`, `managed-ssh.md`, `managed-git.md`, `release.md`),
-  `development/` (`todo.md`, `baselines/`). Root holds only READMEs, `CHANGELOG.md` and
+  `development/` (`todo.md`, `baselines/`, `unified-commands.md` — the unified commands design
+  note, now landed). Root holds only READMEs, `CHANGELOG.md` and
   this file; completed changes go to the changelog, future plans only to
   `docs/development/todo.md`. Move a document ⇒ update every `docs/...` pointer in code
   comments in the same turn.
@@ -107,13 +111,18 @@ make docker-build ; make docker-push ; make release ; make clean ; make help
   stored copy — electron-builder takes the product version from it — synced only by `make
   desktop-version` (the desktop make targets run it; packaging that bypasses make ships a stale
   version). Pushing a `v*` tag triggers the release workflow.
-- **browser/cua are upstream programs** (`agent-browser`, `cua-driver`, pinned in `desktop/*.json`):
-  tool names, parameters and results pass through unchanged, and the Pod only starts/streams them.
-  Do not hand-roll Chrome/CDP again.
+- **Skills are ordinary packages**: pod embeds no skill code and ships no package-specific
+  branches. browser/cua/blender live in `aic-skills` as packages with their own services (browser
+  drives Chrome over CDP; cua launches the official `cua-driver mcp`; blender bridges the Blender
+  addon over vtools/tcp). The Pod only registers, starts and streams them: package commands are
+  vsh root commands, package streams are `<alias>:<stream>` RTC labels. The desktop build still
+  ships the runtime binaries (`desktop/*.json`); the browser package locates Chrome via
+  `AIC_BROWSER_PATH` / `AGENT_BROWSER_EXECUTABLE_PATH`.
 - **MCP services are lazily started and shared**, and a service with `idle_timeout` is released
   after that much idleness (in-flight requests count as activity; a call renews it) — release is a
-  control action and must not log as a failure. The built-in browser entry defaults to 30m; its
-  upstream daemon is closed explicitly when the entry was idle-released.
+  control action and must not log as a failure. Skill packages declare their own `idle_timeout`
+  in the root manifest (browser/cua/blender: 30m); host-registered MCP entries keep their
+  configured value.
 - `libs/hostfs` echoes caller-facing paths and stable error kinds (`not_found`,
   `permission_denied`, `filesystem_error`) — keep errors actionable rather than collapsing
   everything into `internal`.

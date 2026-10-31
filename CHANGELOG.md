@@ -5,6 +5,23 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **pod 不再内置任何包的专属代码与配置（cua/blender 沦为普通第三方包，官方预装）**：
+  删除 `libs/host/packs.go`（内嵌 `cli/manifest.json` 装载）、`libs/host/blender.go`
+  （生命周期动词与 TCP 包装）、`libs/host/browser_stream.go`（旧 agent-browser 流
+  适配）及其派生文件；`mcp.servers` 只剩所有者配置，不再合并内置默认项；vtools
+  注册层去掉 manifest 流/内置包维度。cua 改由包内启动器定位官方驱动，blender 的
+  `doctor/launch/install` 改为包内 MCP 工具（均在 aic-skills 仓，与 browser 同形态）。
+  pod 对 aic-skills 的代码依赖随之移除。
+- **文档同步到「技能包即普通包」形态**：`AGENTS.md`（不再 embed 技能、不再有内置包特例）、
+  `README.md` / `README.en.md`（browser/cua 改为 `commands install` 装包；构建节不再提
+  aic-skills embed）、`docs/guides/release.md`（产物表与运行依赖章节重写，删除已删的
+  `TestUpstreamMCPThroughExec` 验证命令）、`docs/reference/host-vtools.md`（`Streamer`
+  示例标签改为宿主自登记口径）、`docs/development/unified-commands.md`（设计稿标记为已落地）、
+  `docs/development/todo.md`（新增「技能包设备维度落地后的收尾」：Desktop 打包的 Chrome
+  与包内 `AIC_BROWSER_PATH` 的接线、设备侧构建流程、前端默认通道标签）。
+
 ## v0.9.8 — 2026-10-30
 
 - **命令字节流中继写超时即断流**：流的维护归 pod——设备侧不读（进程卡死或不再

@@ -28,12 +28,12 @@ aic-pod 是 AIC 平台的设备端客户端：它通过 NATS WebSocket 主动连
 | **cli** | 单二进制 `aic` | exec（统一准入 + 命令策略 + 原生沙箱，含 browser/cua/ssh/scp）、fs |
 
 设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/reference/hosts-tools.md)。
-技能是云端静态内容；browser/CUA 随 Pod 内置，默认注册并按需启动。
+技能是云端静态内容；设备侧的 browser/cua/blender 与第三方包同形态——`commands install <id>` 装好后按需启动。
 
 本文描述 2026-10-26 的现行统一命令与策略模型，核心迁移已完成；缓存、darwin 代理和
 实机收尾见 [docs/development/todo.md](docs/development/todo.md)。
 
-Browser 在后台运行真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，
+Browser 由技能包内的服务驱动真实 Chrome，统一实际版本的 UA、Client Hints、自动化标记和窗口尺寸，
 并持续复用独立 profile；具体行为见 [Browser 运行环境](docs/guides/browser.md)。
 
 ## 快速开始
@@ -180,14 +180,20 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-browser 与 cua 默认直接启动官方 agent-browser 0.38.2 和 cua-driver 0.33.2 的 MCP 模式，
-首次调用懒启动，后续共享连接。所有工具名称、参数和结果遵循上游。Desktop 附带 Chrome 与
-两套官方原生程序；独立 CLI 按技能说明安装运行依赖。
+browser 与 cua 是普通技能包（与第三方包同形态），不再由 Pod 内置：`commands install <id>`
+拉取、登记为 vsh 根命令，首次调用懒启动、后续共享连接。
+
+- `browser`——包内 Go 服务，自带 Chrome 并用 CDP 驱动；工具面为
+  `targets` / `attach` / `navigate` / `snapshot` / `click` / `fill` / `screenshot` 等，
+  实时画面走包声明的 `browser:view` 流通道。
+- `cua`——包内启动器，拉起官方 `cua-driver mcp`；工具名与参数遵循官方上游。
+
+Desktop 附带 Chrome 与官方原生程序；独立 CLI 按包内手册构建与安装。
 
 ```sh
 browser                            # 工具目录
-browser agent_browser_open --url https://example.com --json
-browser agent_browser_snapshot --json
+browser targets --json
+browser navigate --url https://example.com --json
 cua                                # 工具目录
 # mcp tools/describe/call 仅作调试直通；正式调用走 <alias> <tool>
 ```
@@ -195,8 +201,8 @@ cua                                # 工具目录
 ## 构建
 
 普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 vtools 服务注册（MCP/TCP）。
-内置服务清单与程序源码来自 aic-skills embed，上游工具作为独立进程运行，Desktop 打包时附带固定版本依赖。
-云端技能内容也来自同一 aic-skills 模块。
+Pod 不嵌入任何技能包（清单与程序源码都在 aic-skills 仓，设备侧安装后运行）；Desktop 打包时
+附带浏览器运行时与官方原生程序，供对应技能包使用。
 
 产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
 
@@ -213,8 +219,8 @@ make release                    # 本地全量构建 + gh release create（需�
 make clean                      # 清理
 ```
 
-desktop 打包前自动同步内置 cua-driver（`desktop/cua.json` 固定版本 + sha256 →
-`vendor/cua → resources/cua`，三平台）；离线/受限网络用
+desktop 打包前自动同步 cua-driver 运行时（`desktop/cua.json` 固定版本 + sha256 →
+`vendor/cua → resources/cua`，三平台），供 cua 技能包拉起官方驱动；离线/受限网络用
 `npm run cua-sync -- --asset <已下载资产>`。
 
 **发版流程**：推送 tag `v*` 触发 CI（`.github/workflows/build.yml`）构建 desktop 全平台 +
