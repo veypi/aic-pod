@@ -30,7 +30,7 @@ var cmdSockPath = func() (string, error) {
 // 仅 desktop 形态支持——socket 由 Electron 主进程创建；纯 cli（无桌面）拨号必失败。
 func Wake() error {
 	if runtime.GOOS == "windows" {
-		return fmt.Errorf("wake 暂不支持 windows（桌面指令通道为 unix socket）")
+		return fmt.Errorf("wake is not supported on windows (the desktop command channel is a unix socket)")
 	}
 	sock, err := cmdSockPath()
 	if err != nil {
@@ -38,26 +38,26 @@ func Wake() error {
 	}
 	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
 	if err != nil {
-		return fmt.Errorf("连接桌面端失败（desktop 未运行？）: %w", err)
+		return fmt.Errorf("failed to connect to the desktop app (is it running?): %w", err)
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 	if _, err := conn.Write([]byte(`{"action":"wake"}` + "\n")); err != nil {
-		return fmt.Errorf("发送唤醒指令失败: %w", err)
+		return fmt.Errorf("failed to send the wake command: %w", err)
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("读取应答失败: %w", err)
+		return fmt.Errorf("failed to read the response: %w", err)
 	}
 	var resp struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		return fmt.Errorf("解析应答失败: %w", err)
+		return fmt.Errorf("failed to parse the response: %w", err)
 	}
 	if !resp.OK {
-		return fmt.Errorf("唤醒失败: %s", resp.Error)
+		return fmt.Errorf("wake failed: %s", resp.Error)
 	}
 	return nil
 }

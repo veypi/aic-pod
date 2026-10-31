@@ -82,7 +82,7 @@ type Options struct {
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`
-	// 内置 browser 的 Chrome 路径/视口/状态目录通过 AIC_BROWSER_* env 配置。
+	// browser 技能包的 Chrome 路径/视口/状态目录通过 AIC_BROWSER_* env 配置。
 	// NoSandbox 全局禁用 exec 进程沙箱（§5.10）：缺省 false = 沙箱开启；
 	// 置 true 后所有 exec 调用跳过沙箱包装（与请求级 nosandbox 同效，无需审批）。
 	// 慎用：等同放弃进程级隔离（仅建议本机可信环境）。

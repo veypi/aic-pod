@@ -74,14 +74,14 @@ func TestTaskTableCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adopt("o1"); err == nil || !strings.Contains(err.Error(), "单归属") {
+	if _, err := adopt("o1"); err == nil || !strings.Contains(err.Error(), "per-owner") {
 		t.Fatalf("per-owner 超额应拒: %v", err)
 	}
 	// o2 第 1 个过（此时 running=3 达全局），o2 第 2 个撞全局拒。
 	if _, err := adopt("o2"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adopt("o2"); err == nil || !strings.Contains(err.Error(), "全局") {
+	if _, err := adopt("o2"); err == nil || !strings.Contains(err.Error(), "global") {
 		t.Fatalf("全局超额应拒: %v", err)
 	}
 	// kill 后执行实际结束（release）→ 容量恢复。

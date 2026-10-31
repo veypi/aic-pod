@@ -89,22 +89,22 @@ func TestParseGitTransportRejections(t *testing.T) {
 	}{
 		{"clone 内联配置", []string{"clone", "-c", "core.sshCommand=x", "git@h:r"}, "core.sshCommand"},
 		{"clone upload-pack", []string{"clone", "--upload-pack", "/tmp/x", "git@h:r"}, "upload-pack"},
-		{"clone 模板", []string{"clone", "--template", "/tmp/t", "git@h:r"}, "模板"},
-		{"clone 子模块", []string{"clone", "--recurse-submodules", "git@h:r"}, "子模块"},
-		{"clone 未知选项", []string{"clone", "--ipv99", "git@h:r"}, "白名单"},
-		{"clone 缺 remote", []string{"clone", "--depth", "1"}, "缺少 remote"},
-		{"clone 选项缺值", []string{"clone", "--depth"}, "缺少参数值"},
-		{"clone 参数过多", []string{"clone", "a", "b", "c"}, "过多"},
-		{"fetch --all", []string{"fetch", "--all"}, "多 remote"},
-		{"pull 编辑器", []string{"pull", "--edit"}, "编辑器"},
-		{"push --force", []string{"push", "--force", "origin", "main"}, "破坏性"},
-		{"push -f", []string{"push", "-f"}, "破坏性"},
-		{"push mirror", []string{"push", "--mirror"}, "破坏性"},
+		{"clone 模板", []string{"clone", "--template", "/tmp/t", "git@h:r"}, "template directories"},
+		{"clone 子模块", []string{"clone", "--recurse-submodules", "git@h:r"}, "submodule transport"},
+		{"clone 未知选项", []string{"clone", "--ipv99", "git@h:r"}, "whitelist"},
+		{"clone 缺 remote", []string{"clone", "--depth", "1"}, "missing remote"},
+		{"clone 选项缺值", []string{"clone", "--depth"}, "requires a value"},
+		{"clone 参数过多", []string{"clone", "a", "b", "c"}, "too many positional"},
+		{"fetch --all", []string{"fetch", "--all"}, "multi-remote"},
+		{"pull 编辑器", []string{"pull", "--edit"}, "interactive editor"},
+		{"push --force", []string{"push", "--force", "origin", "main"}, "destructive operations"},
+		{"push -f", []string{"push", "-f"}, "destructive operations"},
+		{"push mirror", []string{"push", "--mirror"}, "destructive operations"},
 		{"push +refspec", []string{"push", "origin", "+main:main"}, "--force"},
-		{"push 星号 refspec", []string{"push", "origin", "*"}, "形态不允许"},
+		{"push 星号 refspec", []string{"push", "origin", "*"}, "form not allowed"},
 		{"push receive-pack", []string{"push", "--receive-pack", "/tmp/x"}, "receive-pack"},
-		{"refspec 双点", []string{"fetch", "origin", "a..b"}, "形态不允许"},
-		{"布尔选项赋值", []string{"fetch", "--prune=yes"}, "不接受赋值"},
+		{"refspec 双点", []string{"fetch", "origin", "a..b"}, "form not allowed"},
+		{"布尔选项赋值", []string{"fetch", "--prune=yes"}, "does not take a value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,7 +234,7 @@ func TestGitRemoteForCall(t *testing.T) {
 	}
 	// 非仓库
 	if _, err = gitRemoteForCall(t.TempDir(), &gitTransportCall{sub: "fetch"}); err == nil ||
-		!strings.Contains(err.Error(), "不是 git 仓库") {
+		!strings.Contains(err.Error(), "is not a git repository") {
 		t.Fatalf("non-repo err=%v", err)
 	}
 	// 分支无 remote 配置 → 回退 origin

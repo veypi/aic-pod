@@ -20,10 +20,9 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 	// 否则并发 add/remove 会被旧 servers 快照误删或复活。
 	c.svc.registrationMu.Lock()
 	defer c.svc.registrationMu.Unlock()
-	servers, err := mcpServers(settings.Servers, c.options().WorkDir)
-	if err != nil {
-		return err
-	}
+	// 服务集就是所有者配置：pod 不再内置任何包的默认项（cua/blender/browser
+	// 都是普通技能包，经统一 commands 机制注册）。
+	servers := mcpServers(settings.Servers)
 	// TCP 条目（url = tcp://…）不是 MCP 传输：不进连接管理器，由 vtools
 	// 注册层直接接管（syncServiceRegistrations）。
 	mcpSet := make(map[string]mcpx.Config, len(servers))
@@ -33,51 +32,34 @@ func (c *Client) configureMCP(settings mcpx.Settings) error {
 		}
 		mcpSet[name] = cfg
 	}
-	manager, err := mcpx.NewManager(mcpSet, mcpx.Options{Authorize: c.authorizeMCP, HTTPClient: c.mcpHTTP(), Processes: c.procs, Logf: c.logf, Expired: c.mcpExpired, Policy: func(cfg mcpx.Config) vbox.Policy {
+	manager, err := mcpx.NewManager(mcpSet, mcpx.Options{Authorize: c.authorizeMCP, HTTPClient: c.mcpHTTP(), Processes: c.procs, Logf: c.logf, Policy: func(cfg mcpx.Config) vbox.Policy {
 		return c.nativePolicy(context.Background(), cfg.Cwd, cfg.Command)
 	}})
 	if err != nil {
 		return err
 	}
 	c.svc.mu.Lock()
-	if c.svc.browserCancel != nil {
-		c.svc.browserCancel()
-	}
 	if c.svc.manager != nil {
-		old := c.svc.manager
-		old.Close()
-		if old.Started("browser") {
-			c.closeBrowser(c.svc.browser)
-		}
-	}
-	c.svc.browser = nil
-	if _, overridden := settings.Servers["browser"]; !overridden {
-		browser := servers["browser"]
-		c.svc.browser = &browser
+		c.svc.manager.Close()
 	}
 	c.svc.owner = make(map[string]mcpx.Config, len(settings.Servers))
 	for name, cfg := range settings.Servers {
 		c.svc.owner[name] = cfg
 	}
-	c.svc.browserCtx, c.svc.browserCancel = context.WithCancel(context.Background())
 	c.svc.manager = manager
 	c.svc.mu.Unlock()
-	// 服务登记为 vsh 根命令（vtools；含 TCP 条目与 browser 流通道）。
+	// 服务登记为 vsh 根命令（vtools；含 TCP 条目）。
 	c.syncServiceRegistrationsLocked(servers)
 	return nil
 }
 
-// mcpExpired 在服务因空闲有效期被回收后释放其进程之外的资源：内置 browser
-// 的 MCP 前端退出不会结束上游 daemon，需显式关掉受管浏览器；所有者覆盖的
-// browser 项自管 daemon，不在此列。
-func (c *Client) mcpExpired(name string) {
-	if name != "browser" {
-		return
+// mcpServers 返回所有者配置的服务集：pod 不再合并任何内置包的默认项。
+func mcpServers(configured map[string]mcpx.Config) map[string]mcpx.Config {
+	servers := make(map[string]mcpx.Config, len(configured))
+	for name, cfg := range configured {
+		servers[name] = cfg
 	}
-	c.svc.mu.RLock()
-	config := c.svc.browser
-	c.svc.mu.RUnlock()
-	c.closeBrowser(config)
+	return servers
 }
 
 func (c *Client) mcpSession(ctx context.Context, server string) (*mcp.ClientSession, error) {

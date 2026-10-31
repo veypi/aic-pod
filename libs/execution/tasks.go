@@ -224,10 +224,10 @@ func (t *TaskTable) adoptBackground(r *Run) (Task, error) {
 		return Task{}, errRunFinished
 	}
 	if t.bgRunning >= t.maxGlobal {
-		return Task{}, fmt.Errorf("task table full（全局运行上限 %d，当前 %d）——先 bg list 查看、bg kill 释放或稍后重试", t.maxGlobal, t.bgRunning)
+		return Task{}, fmt.Errorf("task table full (global running limit %d, current %d) — check \"bg list\", free slots with \"bg kill\", or retry later", t.maxGlobal, t.bgRunning)
 	}
 	if t.bgByOwner[r.owner] >= t.maxPerOwner {
-		return Task{}, fmt.Errorf("task table full（单归属运行上限 %d，当前 %d）——先 bg list 查看、bg kill 释放或稍后重试", t.maxPerOwner, t.bgByOwner[r.owner])
+		return Task{}, fmt.Errorf("task table full (per-owner running limit %d, current %d) — check \"bg list\", free slots with \"bg kill\", or retry later", t.maxPerOwner, t.bgByOwner[r.owner])
 	}
 	t.bgSeq++
 	r.background = true

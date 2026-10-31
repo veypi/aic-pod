@@ -250,7 +250,7 @@ func (c *NetClient) checkTarget(ctx context.Context, rawURL string) error {
 	// 规则表（首命中生效；default open——grant net 动态行插表头）。
 	if c.cfg.Rules != nil {
 		if !c.cfg.Rules(ctx).Match(net.JoinHostPort(host, port)) {
-			return &vshnet.AccessDeniedError{URL: rawURL, Reason: "denied by net rule table（如需访问请 grant net " + net.JoinHostPort(host, port) + "）"}
+			return &vshnet.AccessDeniedError{URL: rawURL, Reason: "denied by net rule table (to access it, run \"grant net " + net.JoinHostPort(host, port) + "\")"}
 		}
 	}
 	// 私网阻断（显式清单：RFC1918 + loopback + link-local 169.254.0.0/16——

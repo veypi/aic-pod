@@ -3,14 +3,12 @@ module github.com/veypi/aic-pod
 go 1.27.0
 
 require (
-	github.com/coder/websocket v1.8.14
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pion/ice/v4 v4.4.2
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/aic-skills v0.3.1
 	github.com/veypi/vbox v0.3.4
 	github.com/veypi/vigo v0.8.2
 	github.com/veypi/vsh v0.3.3
@@ -89,6 +87,3 @@ require (
 	modernc.org/memory v1.5.0 // indirect
 	modernc.org/sqlite v1.23.1 // indirect
 )
-
-// require 版本随 aic-skills 发版推进，必须与上方实际 require 同步。本地开发由 go.work 指向兄弟目录，
-// 此处不得再用 replace ../aic-skills——CI/发行构建没有兄弟目录，replace 会让构建直接失败。

@@ -33,7 +33,7 @@ func (c *Client) fsDecision(sid, abs string, write, noFollow bool) vbox.Decision
 func (c *Client) fsGate(sid string) func(op, abs string, write bool) error {
 	return func(op, abs string, write bool) error {
 		if d := c.fsDecision(sid, abs, write, false); !d.Allow {
-			return fmt.Errorf("%s: %s 被规则表拒绝（越界硬拒绝；如需写入请用 exec 执行 `grant fs %s`）", op, abs, abs)
+			return fmt.Errorf("%s: %s is denied by the rule table (hard boundary; to write here, run \"grant fs %s\" via exec)", op, abs, abs)
 		}
 		return nil
 	}
@@ -75,7 +75,7 @@ func (c *Client) initFilesystem() error {
 		// fs rm 删 venv 被 .venv/bin/python -> /opt/homebrew/... 挡下）。
 		noFollow := call.Method == "remove" || call.Method == "move"
 		if d := c.fsDecision(call.Caller.Origin, p, write, noFollow); !d.Allow {
-			return protocol.Fail("permission_denied", fmt.Sprintf("fs: %s 被规则表拒绝（如需写入请 grant fs %s）", p, p))
+			return protocol.Fail("permission_denied", fmt.Sprintf("fs: %s is denied by the rule table (to write here, run \"grant fs %s\")", p, p))
 		}
 		return nil
 	}})

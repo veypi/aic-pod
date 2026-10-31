@@ -34,7 +34,6 @@ const mcpManageHelp = `usage:
 （<alias> 无参列工具目录，<alias> <tool> --help 看参数表）。
 add/remove 引入新能力/改配置，需要 exec 规则放行：grant cmd mcp。
 --persist 写 config.yaml（重启后仍在）；不带则进程级，重启失效。
-内置 browser/cua/blender 不可经 remove 移除（要禁用请在配置文件设 disabled: true）。
 手改 config.yaml 需重启 pod 生效；运行期增删请用 mcp add/remove（--persist 才落盘）。`
 
 func (c *Client) cmdMCP(ctx context.Context, inv *commands.Invocation) error {
@@ -323,32 +322,32 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 	switch {
 	case rawTCP != "":
 		if rawURL != "" || len(positional) != 1 {
-			return commands.Exitf(inv, 2, "mcp add: --tcp 与 --url/command 互斥")
+			return commands.Exitf(inv, 2, "mcp add: --tcp is mutually exclusive with --url/command")
 		}
 		if idle != "" {
-			return commands.Exitf(inv, 2, "mcp add: --idle 对 TCP 服务无效（连接懒惰，无空闲回收）")
+			return commands.Exitf(inv, 2, "mcp add: --idle has no effect for TCP services (connections are lazy, no idle reaping)")
 		}
 		if cwd != "" || len(env) > 0 {
-			return commands.Exitf(inv, 2, "mcp add: --cwd/--env 仅对 command 形态有效")
+			return commands.Exitf(inv, 2, "mcp add: --cwd/--env are only valid for the command form")
 		}
 		config = mcpx.Config{URL: "tcp://" + rawTCP, Token: token}
 	case rawURL != "":
 		if len(positional) != 1 {
-			return commands.Exitf(inv, 2, "mcp add: --url 与 command 互斥")
+			return commands.Exitf(inv, 2, "mcp add: --url and command are mutually exclusive")
 		}
 		if cwd != "" || len(env) > 0 {
-			return commands.Exitf(inv, 2, "mcp add: --cwd/--env 仅对 command 形态有效")
+			return commands.Exitf(inv, 2, "mcp add: --cwd/--env are only valid for the command form")
 		}
 		if token != "" {
-			return commands.Exitf(inv, 2, "mcp add: --token 仅对 --tcp 形态有效")
+			return commands.Exitf(inv, 2, "mcp add: --token is only valid with --tcp")
 		}
 		config = mcpx.Config{URL: rawURL, IdleTimeout: idle}
 	default:
 		if len(positional) < 2 {
-			return commands.Exitf(inv, 2, "mcp add: 需要 <command>（或 --url/--tcp）")
+			return commands.Exitf(inv, 2, "mcp add: <command> is required (or --url/--tcp)")
 		}
 		if token != "" {
-			return commands.Exitf(inv, 2, "mcp add: --token 仅对 --tcp 形态有效")
+			return commands.Exitf(inv, 2, "mcp add: --token is only valid with --tcp")
 		}
 		config = mcpx.Config{Command: positional[1], Args: positional[2:], Cwd: cwd, Env: env, IdleTimeout: idle}
 	}
@@ -359,16 +358,16 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 	c.svc.registrationMu.Lock()
 	defer c.svc.registrationMu.Unlock()
 	if c.svc.registry != nil && c.svc.registry.Has(alias) {
-		return commands.Exitf(inv, 1, "mcp add: %s 已存在（先 mcp remove）", alias)
+		return commands.Exitf(inv, 1, "mcp add: %s already exists (run mcp remove first)", alias)
 	}
 	// 运行态生效：MCP 条目进连接管理器，TCP 条目直接登记；两者都注册 vsh 命令。
 	// 登记失败不留半状态（管理器里撤掉刚加的）。
 	if err := c.addServiceRuntime(alias, config); err != nil {
-		return commands.Exitf(inv, 1, "mcp add: %s，已回滚", err)
+		return commands.Exitf(inv, 1, "mcp add: %s, rolled back", err)
 	}
 	if persist {
 		if err := c.persistMCPServer(alias, &config); err != nil {
-			return commands.Exitf(inv, 1, "mcp add: 已生效但落盘失败: %s", err)
+			return commands.Exitf(inv, 1, "mcp add: applied but failed to persist: %s", err)
 		}
 	}
 	// owner 同步：ownerConfigured 据此判定「所有者显式配置」（不加会同进程
@@ -379,7 +378,7 @@ func (c *Client) mcpAdd(ctx context.Context, inv *commands.Invocation, args []st
 	}
 	c.svc.owner[alias] = config
 	c.svc.mu.Unlock()
-	fmt.Fprintf(inv.Stdout, "added %s（%s）\n", alias, map[bool]string{true: "persisted", false: "进程级，重启失效"}[persist])
+	fmt.Fprintf(inv.Stdout, "added %s (%s)\n", alias, map[bool]string{true: "persisted", false: "process-level, lost on restart"}[persist])
 	return nil
 }
 
@@ -404,9 +403,6 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 	// 与 add/configure 同锁，避免 manager 已删而 registry 被旧快照重新登记。
 	c.svc.registrationMu.Lock()
 	defer c.svc.registrationMu.Unlock()
-	if c.isBuiltinPack(alias) && !c.ownerConfigured(alias) {
-		return commands.Exitf(inv, 2, "mcp remove: 内置服务 %s 不可移除（要禁用请在配置文件设 disabled: true）", alias)
-	}
 	manager := c.mcpManager()
 	if manager != nil {
 		if err := manager.Remove(ctx, alias); err != nil && !errors.Is(err, mcpx.ErrUnknownService) {
@@ -425,7 +421,7 @@ func (c *Client) mcpRemove(ctx context.Context, inv *commands.Invocation, args [
 	}
 	if persist {
 		if err := c.persistMCPServer(alias, nil); err != nil {
-			return commands.Exitf(inv, 1, "mcp remove: 已生效但落盘失败: %s", err)
+			return commands.Exitf(inv, 1, "mcp remove: applied but failed to persist: %s", err)
 		}
 	}
 	// 同 add：owner 同步摘除（ownerConfigured 判定源）。

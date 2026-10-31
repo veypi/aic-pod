@@ -99,11 +99,6 @@ func TestVtoolsServiceLifecycle(t *testing.T) {
 	if got := exitCode("fixture next"); got != "127" {
 		t.Fatalf("removed alias still resolves: exit=%s", got)
 	}
-	// 内置服务不可移除
-	removed, _ := run("mcp remove cua")
-	if removed.Attrs["exit_code"] != "2" || !strings.Contains(removed.Attrs["stderr"], "内置服务") {
-		t.Fatalf("builtin removal: %+v", removed)
-	}
 }
 
 // 管理动词与工具命令的门：deny 策略下 mcp add / alias 直调都是 126 + grant 引导。
@@ -122,7 +117,10 @@ func TestVtoolsGates(t *testing.T) {
 	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp" denied`) {
 		t.Fatalf("add gate: %+v", out)
 	}
-	// 内置 cua 的工具命令同样过 exec 规则门（mcp.cua）
+	// 服务 alias 的工具命令同样过 exec 规则门（mcp.<alias>）
+	if err := c.registerService("cua", mcpx.Config{URL: "tcp://127.0.0.1:9866"}); err != nil {
+		t.Fatal(err)
+	}
 	out = run("cua")
 	if out.Attrs["exit_code"] != "126" || !strings.Contains(out.Attrs["stderr"], `command "mcp.cua" denied`) {
 		t.Fatalf("alias gate: %+v", out)
@@ -235,9 +233,9 @@ func TestRegisterServiceTypeSwitch(t *testing.T) {
 		t.Fatal("MCP→TCP switch must re-register as TCPProvider")
 	}
 
-	// TCP 后端的包装 provider（blenderProvider）：地址按接口判定，不断言具体
-	// 类型——否则它会被当成「非 TCP」，换成 MCP 配置时留在原地继续服务旧端点。
-	wrapped := &blenderProvider{addr: "127.0.0.1:9866"}
+	// TCP 后端的包装 provider：地址按接口判定，不断言具体类型——否则它会被
+	// 当成「非 TCP」，换成 MCP 配置时留在原地继续服务旧端点。
+	wrapped := &addrWrapProvider{addr: "127.0.0.1:9866"}
 	if err := c.serviceRegistry().Register("bl", wrapped); err != nil {
 		t.Fatal(err)
 	}
@@ -274,23 +272,27 @@ func TestVtoolsDiscoverable(t *testing.T) {
 		return decoded[protocol.Output](t, r.Result)
 	}
 	text := out("commands").Content
-	// 内建服务只剩 cua / blender：browser 已改为技能包（统一 commands 机制）。
-	if !strings.Contains(text, "cua") || !strings.Contains(text, "blender") {
-		t.Fatalf("builtin services not discoverable: %q", text)
+	// 没有内置服务：登记一个服务后它才出现在展示面。
+	if strings.Contains(text, "cua") || strings.Contains(text, "blender") {
+		t.Fatalf("pod must not ship built-in services: %q", text)
+	}
+	if err := c.registerService("fixture", mcpx.Config{URL: "tcp://127.0.0.1:9866"}); err != nil {
+		t.Fatal(err)
+	}
+	if text = out("commands").Content; !strings.Contains(text, "fixture") {
+		t.Fatalf("registered service not discoverable: %q", text)
 	}
 	if strings.Contains(text, "sed") || strings.Contains(text, "grep") {
 		t.Fatalf("builtins must stay out of the discovery view: %q", text)
 	}
 }
 
-// mcp add/remove 同步刷新内存配置（ownerConfigured 判定源）：add 内置同名
-// 覆盖项后，同进程 remove 不再被「内置服务不可移除」误判（原只落盘不刷新，
-// ownerConfigured 恒为启动快照）。
-func TestMCPAddRemoveBuiltinOverrideSameProcess(t *testing.T) {
+// mcp add/remove 同步刷新内存配置：add 之后同进程 remove 能立刻摘除。
+func TestMCPAddRemoveSameProcess(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	c := New(Options{Key: "host_1.1.secret.owner", WorkDir: t.TempDir(), NoSandbox: true,
 		MCP: mcpx.Settings{Servers: map[string]mcpx.Config{
-			"blender": {URL: "tcp://127.0.0.1:1", Disabled: true}, // 所有者禁用内置
+			"blender": {URL: "tcp://127.0.0.1:1", Disabled: true},
 		}}})
 	c.hostID = "host_1"
 	c.uid = "owner"
@@ -300,7 +302,7 @@ func TestMCPAddRemoveBuiltinOverrideSameProcess(t *testing.T) {
 		t.Fatal(c.initErr)
 	}
 	if c.serviceRegistry().Has("blender") {
-		t.Fatal("disabled 内置不应登记")
+		t.Fatal("disabled 服务不应登记")
 	}
 	var out strings.Builder
 	inv := func() *commands.Invocation { return &commands.Invocation{Stdout: &out} }
@@ -311,7 +313,7 @@ func TestMCPAddRemoveBuiltinOverrideSameProcess(t *testing.T) {
 		t.Fatal("add 后未登记")
 	}
 	if err := c.mcpRemove(context.Background(), inv(), []string{"blender"}); err != nil {
-		t.Fatalf("同进程 remove 所有者覆盖项被误判: %v", err)
+		t.Fatalf("同进程 remove 失败: %v", err)
 	}
 	if c.serviceRegistry().Has("blender") {
 		t.Fatal("remove 后仍在")
@@ -340,4 +342,16 @@ func TestMCPListShowsDisabledTCP(t *testing.T) {
 	if !strings.Contains(out.String(), "off-tcp\ttcp\tdisabled") {
 		t.Fatalf("disabled tcp 未曝光:\n%s", out.String())
 	}
+}
+
+// addrWrapProvider 是带地址的包装 provider：验证登记层按接口判定 TCP 形态，
+// 而不是断言具体的 TCPProvider 类型。
+type addrWrapProvider struct{ addr string }
+
+func (p *addrWrapProvider) Addr() string { return p.addr }
+
+func (p *addrWrapProvider) Tools(context.Context) ([]vtools.Tool, error) { return nil, nil }
+
+func (p *addrWrapProvider) Call(context.Context, string, map[string]any) (any, error) {
+	return nil, nil
 }

@@ -29,15 +29,16 @@ import (
 )
 
 const commandConfigHelp = `usage: commands config <alias> [K=V ...] [--unset K] [--no-sandbox|--sandbox] [--clear] [--json]
-  查看或修改一条命令定义的运行配置（按定义身份存储，与 alias 同名替换无关）。
+  Show or edit one command definition's runtime config (keyed by definition
+  identity, not by alias).
 
-  commands config <alias>                     显示当前配置
-  commands config <alias> K=V ...             设置应用配置（环境变量）
-  commands config <alias> --unset K           删除一个环境变量
-  commands config <alias> --no-sandbox        免沙箱运行（提权：需平台审批）
-  commands config <alias> --sandbox           取消免沙箱
-  commands config <alias> --clear             清空该定义的全部配置
-  commands config <alias> --json              以 JSON 输出`
+  commands config <alias>              show current config
+  commands config <alias> K=V ...      set environment variables
+  commands config <alias> --unset K    remove an environment variable
+  commands config <alias> --no-sandbox run without the sandbox (needs approved exec)
+  commands config <alias> --sandbox    re-enable the sandbox
+  commands config <alias> --clear      remove all config for this definition
+  commands config <alias> --json       print config as JSON`
 
 // hostCommandConfig 是 `commands config` 的执行体。
 func (c *Client) hostCommandConfig(ctx context.Context, inv *commands.Invocation, args []string) error {
@@ -94,7 +95,7 @@ func (c *Client) hostCommandConfig(ctx context.Context, inv *commands.Invocation
 	// 设备 owner 本机直接执行（无平台归属）不需要审批。
 	if noSandbox != nil && *noSandbox &&
 		execution.OwnerFromContext(ctx) != "" && !execution.GrantApprovedFromContext(ctx) {
-		return commands.Exitf(inv, 1, "commands config: no_sandbox 需要 owner 批准（平台审批后重试）")
+		return commands.Exitf(inv, 1, "commands config: no_sandbox requires owner approval; ask the device owner to approve this script, then resend the same command")
 	}
 
 	id := def.ID

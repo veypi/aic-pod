@@ -89,7 +89,7 @@ func helpRequested(args []string) bool {
 // page（Discoverable=nil）展示全部已注册指令。
 func (d PlatformDeps) cmdCommands(ctx context.Context, inv *commands.Invocation) error {
 	if helpRequested(inv.Args) {
-		fmt.Fprintln(inv.Stdout, "usage: commands — 列出当前环境可用的命令（用 <cmd> --help 查用法）")
+		fmt.Fprintln(inv.Stdout, "usage: commands — list commands available in this environment (run <cmd> --help for usage)")
 		return nil
 	}
 	if inv.GetRegisteredCommands == nil {
@@ -187,7 +187,7 @@ func (d PlatformDeps) cmdBG(ctx context.Context, inv *commands.Invocation) error
 		return nil
 	case "wait":
 		if len(args) < 2 {
-			return commands.Exitf(inv, 2, "usage: bg wait <id> [秒] [--json]")
+			return commands.Exitf(inv, 2, "usage: bg wait <id> [seconds] [--json]")
 		}
 		// 禁止等待自身（后台执行里的 wait 只查询——等待链不派生）。
 		if id := CurrentRunID(ctx); id != "" && id == args[1] {
@@ -265,7 +265,7 @@ func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) er
 	// status 只读查询（不要求 grant_approved）。
 	if inv.Args[0] == "status" {
 		if d.GrantStatus == nil {
-			return commands.Exitf(inv, 1, "grant: 此端未接状态查询")
+			return commands.Exitf(inv, 1, "grant: status query is not available on this end")
 		}
 		text, err := d.GrantStatus(ctx, SessionFromContext(ctx))
 		if err != nil {
@@ -279,7 +279,7 @@ func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) er
 	//（都执行到这里）。无批准事实直接 permission_denied，规则不变，
 	// 不暂停、不转 waiting、不重放脚本。
 	if !GrantApprovedFromContext(ctx) {
-		return commands.Exitf(inv, 126, "permission_denied: grant 修改授权需要审批——由服务端批准本次脚本（grant_approved）后重发；AI 请向用户申请批准该脚本")
+		return commands.Exitf(inv, 126, "permission_denied: modifying grants requires approval — ask the user to approve this script, then retry once it has been approved (grant_approved)")
 	}
 	// --permanent 任意位置生效（grant fs /x --permanent / grant --permanent fs /x）。
 	permanent := false
@@ -298,17 +298,17 @@ func (d PlatformDeps) cmdGrant(ctx context.Context, inv *commands.Invocation) er
 	switch domain {
 	case "fs", "net", "ssh", "cmd":
 	default:
-		return commands.Exitf(inv, 2, "grant: unknown domain %q（支持 fs/net/ssh/cmd）", domain)
+		return commands.Exitf(inv, 2, "grant: unknown domain %q (supported: fs/net/ssh/cmd)", domain)
 	}
 	if d.Grant == nil {
-		return commands.Exitf(inv, 1, "grant: 此端未接授权通道")
+		return commands.Exitf(inv, 1, "grant: the grant channel is not available on this end")
 	}
 	msg, err := d.Grant(ctx, SessionFromContext(ctx), domain, target, permanent)
 	if err != nil {
 		return commands.Exitf(inv, 1, "grant %s %s: %s", domain, target, err)
 	}
 	if msg == "" {
-		msg = fmt.Sprintf("grant %s %s: 已授权", domain, target)
+		msg = fmt.Sprintf("grant %s %s: granted", domain, target)
 	}
 	fmt.Fprintln(inv.Stdout, msg)
 	return nil

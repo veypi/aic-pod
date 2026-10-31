@@ -254,10 +254,10 @@ func TestManagedGitSSHIntegration(t *testing.T) {
 		t.Fatalf("local passthrough hit unified exec: %+v", r)
 	}
 	// 选项白名单：破坏性/危险选项 fail-closed，不接触网络。
-	if r := runGitScript(t, c, "git push --force"); r.ExitCode != 2 || !strings.Contains(r.Stderr, "破坏性") {
+	if r := runGitScript(t, c, "git push --force"); r.ExitCode != 2 || !strings.Contains(r.Stderr, "destructive operations") {
 		t.Fatalf("force reject %+v", r)
 	}
-	if r := runGitScript(t, c, "git fetch --all"); r.ExitCode != 2 || !strings.Contains(r.Stderr, "多 remote") {
+	if r := runGitScript(t, c, "git fetch --all"); r.ExitCode != 2 || !strings.Contains(r.Stderr, "multi-remote") {
 		t.Fatalf("fetch --all reject %+v", r)
 	}
 

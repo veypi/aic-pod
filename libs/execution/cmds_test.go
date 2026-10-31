@@ -114,7 +114,7 @@ func TestCmdGrantRequiresApprovalFact(t *testing.T) {
 		Tasks: NewTaskTable(),
 		Grant: func(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
 			called = true
-			return "已授权", nil
+			return "granted", nil
 		},
 		GrantStatus: func(ctx context.Context, sessionKey string) (string, error) {
 			return "fs_policy: deny", nil
@@ -144,7 +144,7 @@ func TestCmdGrantRequiresApprovalFact(t *testing.T) {
 	}
 	// 批准事实：执行
 	out, _, err = runCmdCtx(identityCtx("u1", "s1", true), t, reg, "grant", "fs", "/x")
-	if err != nil || !strings.Contains(out, "已授权") || !called {
+	if err != nil || !strings.Contains(out, "granted") || !called {
 		t.Fatalf("approved grant: %q %v called=%v", out, err, called)
 	}
 }
@@ -158,7 +158,7 @@ func TestCmdGrantFlow(t *testing.T) {
 		Tasks: NewTaskTable(),
 		Grant: func(ctx context.Context, sessionKey, domain, target string, permanent bool) (string, error) {
 			gotDomain, gotTarget, gotPermanent = domain, target, permanent
-			return "已授权", nil
+			return "granted", nil
 		},
 	}
 	_ = RegisterPlatformCommands(reg, deps)
@@ -167,7 +167,7 @@ func TestCmdGrantFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotDomain != "fs" || gotTarget != "/u/u1/docs" || gotPermanent || !strings.Contains(out, "已授权") {
+	if gotDomain != "fs" || gotTarget != "/u/u1/docs" || gotPermanent || !strings.Contains(out, "granted") {
 		t.Fatalf("grant: %q %q %v %q", gotDomain, gotTarget, gotPermanent, out)
 	}
 	// ssh 域 + --permanent（任意位置）透传。

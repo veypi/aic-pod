@@ -9,7 +9,9 @@
 //   - 注册即时、连接懒惰：命令进 Registry 不 connect，首次执行才连接。
 //   - 命令准入由 vsh 统一处理；独立 RTC 流通道保留 StreamGate。
 //   - Streamer 是可选能力：实现它的服务获得一条 RTC 专用 DataChannel
-//     （消息边界保持的纯转发，权限复查与保活由实现方负责）。
+//     （消息边界保持的纯转发，权限复查与保活由实现方负责）。技能包
+//     声明的流通道不经本登记表，由 command hub 以 `<alias>:<stream>`
+//     承载（见 libs/host/command_registry.go）。
 package vtools
 
 import (
@@ -53,10 +55,10 @@ type ImagePreviewer interface {
 	PreviewImages(result any, size string) (any, error)
 }
 
-// AddrProvider 是有明确 TCP 端点地址的 Provider（TCPProvider，以及宿主在它
-// 之上包装的 Provider 如 blender）。登记层据此判定「已登记的服务是不是同一个
-// TCP 端点」——换型或换址即摘除重登记；按接口而非具体类型判定，包装形态
-// （blenderProvider）不会被误认成非 TCP 服务。
+// AddrProvider 是有明确 TCP 端点地址的 Provider（TCPProvider 或宿主在它
+// 之上的包装）。登记层据此判定「已登记的服务是不是同一个 TCP 端点」——换型
+// 或换址即摘除重登记；按接口而非具体类型判定，包装形态不会被误认成非 TCP
+// 服务。
 type AddrProvider interface {
 	Addr() string
 }
@@ -140,54 +142,18 @@ func NewRegistry(cmds *commands.Registry, opts Options) *Registry {
 }
 
 // Register 把服务登记为 vsh 根命令（撞名即拒，绝不静默覆盖内建或平台命令）。
-// 重复登记同一 alias 即拒——更新配置先 Unregister 再 Register。stream channel
-// 标签同样撞名即拒（与命令名同一原则）。
+// 重复登记同一 alias 即拒——更新配置先 Unregister 再 Register。Provider 实现
+// Streamer 时一并登记其流通道，标签同样撞名即拒（与命令名同一原则）。
 func (r *Registry) Register(alias string, p Provider) error {
-	return r.register(alias, p, nil, nil, false)
-}
-
-// RegisterWithStream 原子登记服务与显式流接线。streamer 的通道标签由调用方
-// （如 pack manifest）决定；nil 表示该服务不暴露流，即使 Provider 自身实现了
-// Streamer。显式接线不会短暂暴露 Provider 自带的另一通道名。
-func (r *Registry) RegisterWithStream(alias string, p Provider, streamer Streamer) error {
-	return r.register(alias, p, nil, streamer, true)
-}
-
-// RegisterCustom 同 Register，但命令面由调用方提供（如 blender 的生命周期
-// 动词：分发后把剩余参数透传给 Registry.RunTool）。cmd.Name() 必须等于
-// alias——vsh registry 以 Name 为键、Unregister 按 alias 摘，不一致会驻留。
-func (r *Registry) RegisterCustom(alias string, p Provider, cmd commands.Command) error {
-	if cmd == nil {
-		return fmt.Errorf("vtools %s: custom command is nil", alias)
-	}
-	if cmd.Name() != alias {
-		return fmt.Errorf("vtools %s: custom command name %q does not match alias", alias, cmd.Name())
-	}
-	return r.register(alias, p, cmd, nil, false)
-}
-
-// RegisterCustomWithStream 是 RegisterWithStream 的自定义命令形态。
-func (r *Registry) RegisterCustomWithStream(alias string, p Provider, cmd commands.Command, streamer Streamer) error {
-	if cmd == nil {
-		return fmt.Errorf("vtools %s: custom command is nil", alias)
-	}
-	if cmd.Name() != alias {
-		return fmt.Errorf("vtools %s: custom command name %q does not match alias", alias, cmd.Name())
-	}
-	return r.register(alias, p, cmd, streamer, true)
-}
-
-func (r *Registry) register(alias string, p Provider, custom commands.Command, streamer Streamer, explicitStream bool) error {
 	if err := mcpx.ValidateAlias(alias); err != nil {
 		return err
 	}
 	if p == nil {
 		return fmt.Errorf("vtools %s: provider is nil", alias)
 	}
-	if !explicitStream {
-		if s, ok := p.(Streamer); ok {
-			streamer = s
-		}
+	var streamer Streamer
+	if s, ok := p.(Streamer); ok {
+		streamer = s
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -204,11 +170,7 @@ func (r *Registry) register(alias string, p Provider, custom commands.Command, s
 			return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, label, occupant)
 		}
 	}
-	cmd := custom
-	if cmd == nil {
-		cmd = commands.DefineCommand(alias, r.commandFunc(alias))
-	}
-	if err := r.cmds.RegisterGuarded(cmd); err != nil {
+	if err := r.cmds.RegisterGuarded(commands.DefineCommand(alias, r.commandFunc(alias))); err != nil {
 		return fmt.Errorf("vtools %s: command name is taken: %w", alias, err)
 	}
 	r.entries[alias] = &entry{provider: p, streamer: streamer}
@@ -216,49 +178,6 @@ func (r *Registry) register(alias string, p Provider, custom commands.Command, s
 		r.channels[label] = alias
 	}
 	return nil
-}
-
-// RegisterStream 给已登记的服务附加独立的流接线（如 browser：Provider 是
-// MCP 适配器，流是 daemon 的原生 WebSocket 转发，两者不同体）。
-func (r *Registry) RegisterStream(alias string, s Streamer) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, ok := r.entries[alias]
-	if !ok {
-		return fmt.Errorf("vtools %s: service is not registered", alias)
-	}
-	if s == nil {
-		return fmt.Errorf("vtools %s: streamer is nil", alias)
-	}
-	if err := ValidateStreamChannel(s.StreamChannel()); err != nil {
-		return fmt.Errorf("vtools %s: %w", alias, err)
-	}
-	if occupant, taken := r.channels[s.StreamChannel()]; taken && occupant != alias {
-		return fmt.Errorf("vtools %s: stream channel %q is taken by %s", alias, s.StreamChannel(), occupant)
-	}
-	// 换标签：先摘本条目的旧映射——只写不删会让旧标签残留（不可复用，
-	// 且开启时静默挂到新 streamer）。
-	if e.streamer != nil && r.channels[e.streamer.StreamChannel()] == alias {
-		delete(r.channels, e.streamer.StreamChannel())
-	}
-	e.streamer = s
-	r.channels[s.StreamChannel()] = alias
-	return nil
-}
-
-// UnregisterStream 摘除服务的流接线（保留工具命令）。
-func (r *Registry) UnregisterStream(alias string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, ok := r.entries[alias]
-	if !ok || e.streamer == nil {
-		return
-	}
-	// 只摘自己的映射（撞名已在登记侧拒绝，这里是防御）
-	if r.channels[e.streamer.StreamChannel()] == alias {
-		delete(r.channels, e.streamer.StreamChannel())
-	}
-	e.streamer = nil
 }
 
 // Unregister 摘除服务：vsh 命令与流登记一并移除（在途调用/流持有各自的
@@ -311,18 +230,6 @@ func (r *Registry) Aliases() []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// ServiceStreamChannel 返回服务当前暴露的流标签；无流时 ok=false。
-// 配置同步用它区分「同形态服务可复用」与「流声明已变化，必须重登记」。
-func (r *Registry) ServiceStreamChannel(alias string) (label string, ok bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	e := r.entries[alias]
-	if e == nil || e.streamer == nil {
-		return "", false
-	}
-	return e.streamer.StreamChannel(), true
 }
 
 // StreamHandler 按 RTC DataChannel 标签解析流转发执行体（通道开启时现查，

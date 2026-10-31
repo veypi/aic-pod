@@ -264,7 +264,7 @@ func (c *Client) cmdPush(ctx context.Context, inv *commands.Invocation) error {
 		return nil
 	}
 	if len(inv.Args) < 2 {
-		return commands.Exitf(inv, 2, "push: <本地路径> <云端路径> both required")
+		return commands.Exitf(inv, 2, "push: <local path> <cloud path> both required")
 	}
 	remote, err := cloudPathArg(inv.Args[1])
 	if err != nil {

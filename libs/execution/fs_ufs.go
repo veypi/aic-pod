@@ -218,7 +218,7 @@ func fileOpName(op vbox.FileOp) string {
 // noFollow = unlink/rename 语义（作用于链接本身，不跟随末段）。
 func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
 	if !a.inJail(abs) {
-		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
+		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s (cloud file access is limited to %s)", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
 	}
 	if a.rules == nil {
 		return nil
@@ -242,7 +242,7 @@ func ruleDeniedText(abs, reason string) string {
 	if reason != "" {
 		return reason
 	}
-	return fmt.Sprintf("%s（越界硬拒绝；如需访问请 grant fs %s）", abs, abs)
+	return fmt.Sprintf("%s (hard boundary; to access it, run \"grant fs %s\")", abs, abs)
 }
 
 // gateMeta 元数据读的 jail 放宽（2026-09-24 实测修复；2026-10-05 补 jail 根本身）：
@@ -271,7 +271,7 @@ func (a *ufsAdapter) gateMeta(abs string) error {
 		if abs == "/" {
 			return nil
 		}
-		return &stdfs.PathError{Op: "read", Path: abs, Err: fmt.Errorf("%w: %s（cloud 文件访问限定在 %s 之下）", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
+		return &stdfs.PathError{Op: "read", Path: abs, Err: fmt.Errorf("%w: %s (cloud file access is limited to %s)", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
 	}
 	// jail 根本身：元数据放行（列目录/读内容仍走 gate）。
 	for _, j := range a.jails {

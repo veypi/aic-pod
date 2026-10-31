@@ -91,7 +91,7 @@ func TestGrantNetNativeNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(msg, "未逐条落地") {
+	if strings.Contains(msg, "not applied individually") {
 		t.Fatalf("darwin non-loopback grant now lands in the egress proxy, got %q", msg)
 	}
 	if !c.perms.netSnapshot("s1").Match("example.com:443") {
@@ -101,7 +101,7 @@ func TestGrantNetNativeNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(msg, "未逐条落地") {
+	if strings.Contains(msg, "not applied individually") {
 		t.Fatalf("loopback grant lands on darwin, want no note, got %q", msg)
 	}
 	msg, err = c.grantTarget("s1", "ssh", "10.0.0.2:22", false)

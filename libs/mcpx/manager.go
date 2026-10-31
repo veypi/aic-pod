@@ -89,7 +89,7 @@ func (c Config) Validate(alias string) error {
 		return fmt.Errorf("mcp %s: configure exactly one of command or url", alias)
 	}
 	if c.Token != "" && !c.IsTCP() {
-		return fmt.Errorf("mcp %s: token 仅对 tcp 形态有效（vtools/tcp 认证握手）", alias)
+		return fmt.Errorf("mcp %s: token is only valid for tcp services (vtools/tcp authenticated handshake)", alias)
 	}
 	if c.Cwd != "" && !filepath.IsAbs(c.Cwd) {
 		return fmt.Errorf("mcp %s: cwd must be absolute", alias)
@@ -124,7 +124,7 @@ type Options struct {
 	HTTPClient *http.Client
 	Logf       func(string, ...any)
 	// Expired 在服务因空闲有效期被回收后调用（进程已结束）。调用方据此释放
-	// 服务进程之外的资源（如内置 browser 的常驻 daemon）。
+	// 服务进程之外的资源。
 	Expired func(name string)
 }
 
@@ -232,9 +232,9 @@ func (m *Manager) Remove(ctx context.Context, name string) error {
 type ServiceStatus struct {
 	Name        string
 	Disabled    bool
-	Launched    bool      // 曾经启动过
-	Starting    bool      // 实例存在但未就绪
-	Running     bool      // 连接就绪且未结束
+	Launched    bool   // 曾经启动过
+	Starting    bool   // 实例存在但未就绪
+	Running     bool   // 连接就绪且未结束
 	IdleTimeout string // 配置原文（空 = 常驻）
 	Inflight    int
 	Err         string // 连接失败原因（就绪前）

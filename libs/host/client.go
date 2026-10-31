@@ -4,8 +4,8 @@
 // 物理 host 命令空间（vsh 引擎化）：exec 唯一执行动作（script 契约）——
 // vsh 默认 registry + contrib 命令（jq/awk/html-to-markdown）+ 平台命令
 // （commands/bg/grant/mcp/ssh/scp/sftp）由引擎 Registry 收口；服务
-// （MCP/TCP 等）经 vtools 登记为 vsh 根命令（mcp 退化为管理面，browser 与
-// cua 是内置服务）；原生命令按 exec_rules 首命中判定；
+// （MCP/TCP 等）经 vtools 登记为 vsh 根命令（mcp 退化为管理面；服务随技能包
+// 安装，无内置服务）；原生命令按 exec_rules 首命中判定；
 // 白名单外一律 127，不存在「未知命令透传」。审批只留 grant/nosandbox 两处
 // 且全在发送前；pod 不重新分类审批，只在执行点看 rules。
 package host
@@ -61,16 +61,13 @@ type serviceState struct {
 	manager        *mcpx.Manager // MCP 连接（nil = 未初始化）
 	// registry 仅 initTools 写一次（先于任何并发读），此后不再变——不持锁
 	// 直接读；运行期 add/remove 走 Registry 自身方法，不换实例。
-	registry *vtools.Registry       // 所有服务（MCP/TCP/内置）的 vsh 根命令
-	owner    map[string]mcpx.Config // 所有者显式配置（不含内置默认项）
-	// fileServices 是文件来源（config.yaml 的 mcp.servers 段 + 内置默认项）的
-	// 服务集合快照：配置热加载按它算差异，进程级注册不在其中。
-	fileServices  map[string]mcpx.Config
-	watchCancel   context.CancelFunc // 配置热加载轮询的停止句柄
-	rejected      map[string]serviceRejection
-	browser       *mcpx.Config // 内置 browser 的有效配置（nil = 非内置/已禁用）
-	browserCtx    context.Context
-	browserCancel context.CancelFunc
+	registry *vtools.Registry       // 所有服务（MCP/TCP）的 vsh 根命令
+	owner    map[string]mcpx.Config // 所有者显式配置
+	// fileServices 是文件来源（config.yaml 的 mcp.servers 段）的服务集合
+	// 快照：配置热加载按它算差异，进程级注册不在其中。
+	fileServices map[string]mcpx.Config
+	watchCancel  context.CancelFunc // 配置热加载轮询的停止句柄
+	rejected     map[string]serviceRejection
 }
 
 type sshProcessRunner = sshx.ProcessRunner
@@ -298,19 +295,13 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.closeConnection()
 	c.svc.mu.Lock()
-	browserCancel, manager, browser, watchCancel := c.svc.browserCancel, c.svc.manager, c.svc.browser, c.svc.watchCancel
+	manager, watchCancel := c.svc.manager, c.svc.watchCancel
 	c.svc.mu.Unlock()
 	if watchCancel != nil {
 		watchCancel()
 	}
-	if browserCancel != nil {
-		browserCancel()
-	}
 	if manager != nil {
 		manager.Close()
-		if manager.Started("browser") {
-			c.closeBrowser(browser)
-		}
 	}
 	shutdown, cancelRuns := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = c.procs.Close(shutdown)

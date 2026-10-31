@@ -80,6 +80,7 @@ func (p *peer) channel(dc *webrtc.DataChannel) {
 	}
 	_ = dc.Close()
 }
+
 // streamLock 返回该标签的发送锁（懒建）。原全局 streamSend 单锁下，一个
 // 拥塞通道可把锁持有到 30s 超时、期间其它流通道全阻塞；per-label 后互不影响。
 func (p *peer) streamLock(label string) *sync.Mutex {

@@ -83,7 +83,7 @@ func (r *Runner) Managed(ctx context.Context, inv *commands.Invocation) (bool, e
 	}
 	gitBin, err := TrustedBinary()
 	if err != nil {
-		return true, commands.Exitf(inv, 126, "git: managed 传输不可用：%v", err)
+		return true, commands.Exitf(inv, 126, "git: managed transport unavailable: %v", err)
 	}
 	dir, err := os.MkdirTemp("", "aic-git-ssh-")
 	if err != nil {
@@ -231,13 +231,13 @@ var gitTransportSpecs = map[string]gitSubSpec{
 			"--no-checkout": gitFlagBool, "-n": gitFlagBool, "--no-tags": gitFlagBool,
 		}),
 		reject: map[string]string{
-			"-u":                   "自定义 upload-pack 属于任意命令执行",
-			"--upload-pack":        "自定义 upload-pack 属于任意命令执行",
-			"-c":                   "内联配置可改写 core.sshCommand 等危险键",
-			"--config":             "内联配置可改写 core.sshCommand 等危险键",
-			"--template":           "模板目录可携带 hooks",
-			"--separate-git-dir":   "MVP 未接入",
-			"--recurse-submodules": "子模块传输未接入受管钉扎（host pin 只覆盖主仓库）",
+			"-u":                   "custom upload-pack is arbitrary command execution",
+			"--upload-pack":        "custom upload-pack is arbitrary command execution",
+			"-c":                   "inline config can rewrite dangerous keys such as core.sshCommand",
+			"--config":             "inline config can rewrite dangerous keys such as core.sshCommand",
+			"--template":           "template directories can carry hooks",
+			"--separate-git-dir":   "not supported yet",
+			"--recurse-submodules": "submodule transport is not covered by managed pinning (host pin covers only the main repository)",
 		},
 		minPos: 1, maxPos: 2,
 	},
@@ -250,14 +250,14 @@ var gitTransportSpecs = map[string]gitSubSpec{
 			"--dry-run": gitFlagBool, "--prune-tags": gitFlagBool, "--unshallow": gitFlagBool,
 		}),
 		reject: map[string]string{
-			"--all":                "多 remote 传输未接入受管钉扎",
-			"--multiple":           "多 remote 传输未接入受管钉扎",
-			"--recurse-submodules": "子模块传输未接入受管钉扎",
-			"--upload-pack":        "自定义 upload-pack 属于任意命令执行",
-			"-o":                   "server-option 直送远端 hooks，MVP 未接入",
-			"--server-option":      "server-option 直送远端 hooks，MVP 未接入",
-			"-c":                   "内联配置可改写 core.sshCommand 等危险键",
-			"--config":             "内联配置可改写 core.sshCommand 等危险键",
+			"--all":                "multi-remote transport is not covered by managed pinning",
+			"--multiple":           "multi-remote transport is not covered by managed pinning",
+			"--recurse-submodules": "submodule transport is not covered by managed pinning",
+			"--upload-pack":        "custom upload-pack is arbitrary command execution",
+			"-o":                   "server-option goes straight to remote hooks; not supported yet",
+			"--server-option":      "server-option goes straight to remote hooks; not supported yet",
+			"-c":                   "inline config can rewrite dangerous keys such as core.sshCommand",
+			"--config":             "inline config can rewrite dangerous keys such as core.sshCommand",
 		},
 		minPos: 0, maxPos: -1, refspecPlus: true,
 	},
@@ -276,13 +276,13 @@ var gitTransportSpecs = map[string]gitSubSpec{
 			"--force": gitFlagBool, "-f": gitFlagBool,
 		}),
 		reject: map[string]string{
-			"--upload-pack":        "自定义 upload-pack 属于任意命令执行",
-			"--recurse-submodules": "子模块传输未接入受管钉扎",
-			"--edit":               "受管传输无交互编辑器",
-			"-e":                   "受管传输无交互编辑器",
-			"--all":                "多 remote 传输未接入受管钉扎",
-			"-c":                   "内联配置可改写 core.sshCommand 等危险键",
-			"--config":             "内联配置可改写 core.sshCommand 等危险键",
+			"--upload-pack":        "custom upload-pack is arbitrary command execution",
+			"--recurse-submodules": "submodule transport is not covered by managed pinning",
+			"--edit":               "managed transport has no interactive editor",
+			"-e":                   "managed transport has no interactive editor",
+			"--all":                "multi-remote transport is not covered by managed pinning",
+			"-c":                   "inline config can rewrite dangerous keys such as core.sshCommand",
+			"--config":             "inline config can rewrite dangerous keys such as core.sshCommand",
 		},
 		minPos: 0, maxPos: -1, refspecPlus: true,
 	},
@@ -295,17 +295,17 @@ var gitTransportSpecs = map[string]gitSubSpec{
 			"--no-verify":        gitFlagBool, "--verify": gitFlagBool,
 		}),
 		reject: map[string]string{
-			"--force":              "破坏性操作不走受管通道（确需强推请用户显式 nosandbox）",
-			"-f":                   "破坏性操作不走受管通道（确需强推请用户显式 nosandbox）",
-			"--mirror":             "破坏性操作不走受管通道",
-			"--all":                "多分支批量推送未接入受管通道",
-			"--exec":               "自定义 receive-pack 属于任意命令执行",
-			"--receive-pack":       "自定义 receive-pack 属于任意命令执行",
-			"-o":                   "push-option 直送远端 hooks，MVP 未接入",
-			"--push-option":        "push-option 直送远端 hooks，MVP 未接入",
-			"--recurse-submodules": "子模块传输未接入受管钉扎",
-			"-c":                   "内联配置可改写 core.sshCommand 等危险键",
-			"--config":             "内联配置可改写 core.sshCommand 等危险键",
+			"--force":              "destructive operations do not use the managed channel (if a force push is really needed, ask the user to run it explicitly with nosandbox)",
+			"-f":                   "destructive operations do not use the managed channel (if a force push is really needed, ask the user to run it explicitly with nosandbox)",
+			"--mirror":             "destructive operations do not use the managed channel",
+			"--all":                "batch pushing all branches is not supported by the managed channel",
+			"--exec":               "custom receive-pack is arbitrary command execution",
+			"--receive-pack":       "custom receive-pack is arbitrary command execution",
+			"-o":                   "push-option goes straight to remote hooks; not supported yet",
+			"--push-option":        "push-option goes straight to remote hooks; not supported yet",
+			"--recurse-submodules": "submodule transport is not covered by managed pinning",
+			"-c":                   "inline config can rewrite dangerous keys such as core.sshCommand",
+			"--config":             "inline config can rewrite dangerous keys such as core.sshCommand",
 		},
 		minPos: 0, maxPos: -1, refspecPlus: false,
 	},
@@ -318,9 +318,9 @@ var gitTransportSpecs = map[string]gitSubSpec{
 			"--sort": gitFlagValue,
 		}),
 		reject: map[string]string{
-			"--upload-pack": "自定义 upload-pack 属于任意命令执行",
-			"-c":            "内联配置可改写 core.sshCommand 等危险键",
-			"--config":      "内联配置可改写 core.sshCommand 等危险键",
+			"--upload-pack": "custom upload-pack is arbitrary command execution",
+			"-c":            "inline config can rewrite dangerous keys such as core.sshCommand",
+			"--config":      "inline config can rewrite dangerous keys such as core.sshCommand",
 		},
 		minPos: 0, maxPos: -1,
 	},
@@ -360,16 +360,16 @@ func parseGitTransport(args []string) (call *gitTransportCall, ok bool, err erro
 				name, hasVal = a[:j], true
 			}
 			if reason, bad := spec.reject[name]; bad {
-				return nil, true, fmt.Errorf("managed git %s: 选项 %s 不受支持（%s）", call.sub, name, reason)
+				return nil, true, fmt.Errorf("managed git %s: option %s is not supported (%s)", call.sub, name, reason)
 			}
 			kind, known := spec.flags[name]
 			if !known {
-				return nil, true, fmt.Errorf("managed git %s: 选项 %s 不在白名单（复杂操作请拆步，或由用户显式 nosandbox 走原生）", call.sub, name)
+				return nil, true, fmt.Errorf("managed git %s: option %s is not in the whitelist (split complex operations into steps, or ask the user to run it natively with nosandbox)", call.sub, name)
 			}
 			switch kind {
 			case gitFlagBool:
 				if hasVal {
-					return nil, true, fmt.Errorf("managed git %s: 选项 %s 不接受赋值", call.sub, name)
+					return nil, true, fmt.Errorf("managed git %s: option %s does not take a value", call.sub, name)
 				}
 				call.opts = append(call.opts, a)
 			case gitFlagOptValue:
@@ -379,7 +379,7 @@ func parseGitTransport(args []string) (call *gitTransportCall, ok bool, err erro
 					call.opts = append(call.opts, a)
 				} else {
 					if i+1 >= len(rest) {
-						return nil, true, fmt.Errorf("managed git %s: 选项 %s 缺少参数值", call.sub, name)
+						return nil, true, fmt.Errorf("managed git %s: option %s requires a value", call.sub, name)
 					}
 					call.opts = append(call.opts, a, rest[i+1])
 					i++
@@ -387,40 +387,40 @@ func parseGitTransport(args []string) (call *gitTransportCall, ok bool, err erro
 			}
 		case strings.HasPrefix(a, "-") && a != "-":
 			if reason, bad := spec.reject[a]; bad {
-				return nil, true, fmt.Errorf("managed git %s: 选项 %s 不受支持（%s）", call.sub, a, reason)
+				return nil, true, fmt.Errorf("managed git %s: option %s is not supported (%s)", call.sub, a, reason)
 			}
 			kind, known := spec.flags[a]
 			if !known {
-				return nil, true, fmt.Errorf("managed git %s: 选项 %s 不在白名单（复杂操作请拆步，或由用户显式 nosandbox 走原生）", call.sub, a)
+				return nil, true, fmt.Errorf("managed git %s: option %s is not in the whitelist (split complex operations into steps, or ask the user to run it natively with nosandbox)", call.sub, a)
 			}
 			if kind == gitFlagBool {
 				call.opts = append(call.opts, a)
 			} else if kind == gitFlagValue {
 				if i+1 >= len(rest) {
-					return nil, true, fmt.Errorf("managed git %s: 选项 %s 缺少参数值", call.sub, a)
+					return nil, true, fmt.Errorf("managed git %s: option %s requires a value", call.sub, a)
 				}
 				call.opts = append(call.opts, a, rest[i+1])
 				i++
 			} else {
-				return nil, true, fmt.Errorf("managed git %s: 选项 %s 需要 -- 长形赋值", call.sub, a)
+				return nil, true, fmt.Errorf("managed git %s: option %s requires the --long=value form", call.sub, a)
 			}
 		default:
 			positional = append(positional, a)
 		}
 	}
 	if len(positional) < spec.minPos {
-		return nil, true, fmt.Errorf("managed git %s: 缺少 remote 参数", call.sub)
+		return nil, true, fmt.Errorf("managed git %s: missing remote argument", call.sub)
 	}
 	if spec.maxPos >= 0 && len(positional) > spec.maxPos {
-		return nil, true, fmt.Errorf("managed git %s: 位置参数过多（%d 个，上限 %d）", call.sub, len(positional), spec.maxPos)
+		return nil, true, fmt.Errorf("managed git %s: too many positional arguments (%d, max %d)", call.sub, len(positional), spec.maxPos)
 	}
 	for i, p := range positional {
 		if p == "" || strings.ContainsAny(p, " \t\r\n\x00") {
-			return nil, true, fmt.Errorf("managed git %s: 位置参数 %q 非法", call.sub, p)
+			return nil, true, fmt.Errorf("managed git %s: invalid positional argument %q", call.sub, p)
 		}
 		if i > 0 && call.sub != "clone" {
 			if err := gitRefspecCheck(p, spec.refspecPlus); err != nil {
-				return nil, true, fmt.Errorf("managed git %s: 引用参数 %q 非法（%v）", call.sub, p, err)
+				return nil, true, fmt.Errorf("managed git %s: invalid ref argument %q (%v)", call.sub, p, err)
 			}
 		}
 	}
@@ -434,12 +434,12 @@ func parseGitTransport(args []string) (call *gitTransportCall, ok bool, err erro
 func gitRefspecCheck(s string, plus bool) error {
 	if strings.HasPrefix(s, "+") {
 		if !plus {
-			return fmt.Errorf("'+' 前缀等价于 --force")
+			return fmt.Errorf("'+' prefix is equivalent to --force")
 		}
 		s = s[1:]
 	}
 	if s == "" || strings.HasPrefix(s, "*") || strings.Contains(s, "..") {
-		return fmt.Errorf("形态不允许")
+		return fmt.Errorf("form not allowed")
 	}
 	return nil
 }
@@ -533,7 +533,7 @@ func gitRemoteForCall(repoDir string, call *gitTransportCall) (gitRemoteTarget, 
 	}
 	u, ok := gitConfigValue(data, "remote", name, "url")
 	if !ok || u == "" {
-		return gitRemoteTarget{}, fmt.Errorf("remote %q 没有配置 url", name)
+		return gitRemoteTarget{}, fmt.Errorf("remote %q has no url configured", name)
 	}
 	return gitRemoteTarget{url: u, passArg: name}, nil
 }
@@ -541,7 +541,7 @@ func gitRemoteForCall(repoDir string, call *gitTransportCall) (gitRemoteTarget, 
 func readGitRepoConfig(repoDir string) ([]byte, error) {
 	dotgit := filepath.Join(repoDir, ".git")
 	if st, err := os.Stat(dotgit); err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("%s 不是 git 仓库（受管传输需在仓库目录执行；worktree/submodule 的 .git 文件布局 MVP 未接入）", repoDir)
+		return nil, fmt.Errorf("%s is not a git repository (managed transport must run in a repository directory; worktree/submodule .git file layout is not supported yet)", repoDir)
 	}
 	return os.ReadFile(filepath.Join(dotgit, "config"))
 }

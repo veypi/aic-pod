@@ -169,12 +169,12 @@ func (c *Client) vshGrant(ctx context.Context, sessionKey, domain, target string
 			if err := c.persistGrant("exec", name); err != nil {
 				return "", fmt.Errorf("grant cmd: persist: %w", err)
 			}
-			return fmt.Sprintf("granted cmd: %s（scope=permanent，已置于 exec_rules 表头 落盘；注意：授予解释器 = 授予该进程一切能力）", name), nil
+			return fmt.Sprintf("granted cmd: %s (scope=permanent, written to the exec_rules table header and persisted; note: granting an interpreter grants everything that process can do)", name), nil
 		}
 		c.perms.grantCmd(sid, name)
-		return fmt.Sprintf("granted cmd: %s（scope=session，重启失效；注意：授予解释器 = 授予该进程一切能力）", name), nil
+		return fmt.Sprintf("granted cmd: %s (scope=session, lost on restart; note: granting an interpreter grants everything that process can do)", name), nil
 	default:
-		return "", fmt.Errorf("grant: host 支持 fs/net/ssh/cmd 域")
+		return "", fmt.Errorf("grant: host supports the fs/net/ssh/cmd domains")
 	}
 }
 
@@ -274,7 +274,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		// 与 DisconnectTools 仍可终止）；日志在实际结束时关闭。
 		spillLogs()
 		return &protocol.Output{
-			Content: fmt.Sprintf("execution still running; output: %s（cancel(request_id) 可终止）", logOut),
+			Content: fmt.Sprintf("execution still running; output: %s (cancel(request_id) can terminate it)", logOut),
 			Attrs:   attrs,
 		}, protocol.Fail("deadline_exceeded", "exec: wait elapsed; execution continues (cancel to stop)")
 	case execution.OutcomeBackground:

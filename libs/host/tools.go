@@ -43,19 +43,15 @@ func (c *Client) initTools() {
 	}
 	// 配置热加载：文件来源的服务集合是差异基线；owner 改 config.yaml 的
 	// mcp.servers 段后运行期生效（姿态 no_sandbox、内置项禁用等）。
-	if services, err := mcpServers(c.options().MCP.Servers, c.options().WorkDir); err == nil {
-		c.svc.mu.Lock()
-		c.svc.fileServices = services
-		c.svc.mu.Unlock()
-	}
+	services := mcpServers(c.options().MCP.Servers)
+	c.svc.mu.Lock()
+	c.svc.fileServices = services
+	c.svc.mu.Unlock()
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	c.svc.mu.Lock()
 	c.svc.watchCancel = watchCancel
 	c.svc.mu.Unlock()
 	go c.watchServiceConfig(watchCtx)
-	// 内嵌技能包的非 MCP 服务（blender：TCP 通道 + 生命周期动词）。单包失败
-	// 只记日志跳过，不占 initErr（撞名/坏包不能打挂整机）。
-	c.registerBuiltinPacks()
 	// 新统一命令面只接管 host commands 管理入口；旧内建服务仍沿原路径，
 	// 私有包与设备 commands 配置在独立定义表中解析，不依赖旧 mcp.servers。
 	c.cmds = newCommandHub(c, reg)

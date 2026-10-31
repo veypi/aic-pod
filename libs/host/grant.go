@@ -54,17 +54,17 @@ func grantFSResult(abs, scope string, sandboxErr error) string {
 		return msg
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n  warn: 该目录在沙箱内授不上写权限（spawn 的子进程写会被拒；vsh fs 工具不受影响）：%v", msg, sandboxErr)
-	b.WriteString("\n  原因：通常是没有 WRITE_DAC——目录属主是 Administrators/SYSTEM，当前用户只有 Modify（Modify 不含改安全描述符的权限）")
-	b.WriteString("\n  处置（需管理员，任选其一）：")
+	fmt.Fprintf(&b, "%s\n  warn: write access cannot be granted inside the sandbox for this directory (spawned child processes will be denied writes; vsh fs tools are unaffected): %v", msg, sandboxErr)
+	b.WriteString("\n  reason: usually missing WRITE_DAC — the directory is owned by Administrators/SYSTEM and the current user only has Modify (Modify does not include changing security descriptors)")
+	b.WriteString("\n  remedies (requires administrator, pick one):")
 	if who := currentUserName(); who != "" {
 		// 注意不能对路径用 %q：Go 会转义反斜杠（C:\\models\\llama），用户复制即错。
-		fmt.Fprintf(&b, "\n    1) icacls \"%s\" /setowner \"%s\"            （把属主改成当前用户）", abs, who)
-		fmt.Fprintf(&b, "\n    2) icacls \"%s\" /grant \"%s:(OI)(CI)F\"    （只给当前用户完全控制）", abs, who)
+		fmt.Fprintf(&b, "\n    1) icacls \"%s\" /setowner \"%s\"            (make the current user the owner)", abs, who)
+		fmt.Fprintf(&b, "\n    2) icacls \"%s\" /grant \"%s:(OI)(CI)F\"    (grant the current user full control only)", abs, who)
 	} else {
-		b.WriteString("\n    把该目录的属主或完全控制交给当前用户")
+		b.WriteString("\n    give the current user ownership or full control of the directory")
 	}
-	b.WriteString("\n  不要用 Authenticated Users（*S-1-5-11）：那等于把完全控制（含改 ACL）给所有已认证主体")
+	b.WriteString("\n  do not use Authenticated Users (*S-1-5-11): that grants full control (including ACL changes) to every authenticated principal")
 	return b.String()
 }
 
@@ -106,12 +106,12 @@ func (c *Client) nativeNetNote(sid, domain string, e vbox.Entry) string {
 	snap := c.perms.netSnapshot(sid)
 	landings, err := vbox.CheckNetPolicy(nativeNetPlatform, snap)
 	if err != nil {
-		return fmt.Sprintf("\n  warn: 本平台（%s）原生沙箱无法落实当前 net 规则表: %v；本次授权仅工具层生效", nativeNetPlatform, err)
+		return fmt.Sprintf("\n  warn: on this platform (%s) the native sandbox cannot enforce the current net rule table: %v; this grant only takes effect at the tool layer", nativeNetPlatform, err)
 	}
 	for _, l := range landings {
 		if l.Rule.Allow && l.Rule.HostPort == e.String() {
 			if l.Absorbed {
-				return fmt.Sprintf("\n  note: 原生沙箱未逐条落地（%s）；Pod curl/MCP 仍按 net_policy 判定", l.Reason)
+				return fmt.Sprintf("\n  note: native sandbox rules not applied individually (%s); Pod curl/MCP still follow net_policy", l.Reason)
 			}
 			return ""
 		}

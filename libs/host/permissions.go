@@ -467,7 +467,7 @@ func (c *writeRootProbeCache) note(row vbox.Rule) string {
 	}
 	note := ""
 	if err := sandboxWritableProbe(vbox.HostPathToOS(p)); err != nil {
-		note = " [沙箱内不可写: " + err.Error() + "]"
+		note = " [not writable inside the sandbox: " + err.Error() + "]"
 	}
 	c.notes[p] = note
 	return note
@@ -478,7 +478,7 @@ func (c *writeRootProbeCache) skippedNote() string {
 	if len(c.skipped) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("\n  (另有 %d 条 rw 行未做沙箱可写性探测：单次上限 %d)", len(c.skipped), writeRootProbeLimit)
+	return fmt.Sprintf("\n  (%d more rw lines were not probed for sandbox writability: per-call limit %d)", len(c.skipped), writeRootProbeLimit)
 }
 
 // grantStatus 是 grant status 的执行体：四域姿态 + 规则表 + 会话级
@@ -535,7 +535,7 @@ func (p *permissionState) grantStatus(sessionKey string) string {
 	// exec 域（policy/deny/allow 三键 + 会话级 cmd 授权）
 	fmt.Fprintf(&b, "exec_policy: %s", base.execMode)
 	fmt.Fprintf(&b, "\nexec_rules (%d): %s", len(base.execRules), strings.Join(base.execRules, " "))
-	fmt.Fprintf(&b, "\nsession cmd grants (%d, 重启失效): %s", len(session), strings.Join(session, " "))
+	fmt.Fprintf(&b, "\nsession cmd grants (%d, lost on restart): %s", len(session), strings.Join(session, " "))
 	for _, domain := range []string{"exec", "fs", "net", "ssh"} {
 		if err := base.errs[domain]; err != nil {
 			fmt.Fprintf(&b, "\n%s_config_error: %v", domain, err)
@@ -551,7 +551,7 @@ func (p *permissionState) grantStatus(sessionKey string) string {
 	for _, domain := range domains {
 		fmt.Fprintf(&b, "\n\n%s_policy: %s\n%s_rules (level + original order):", domain.name, policyName(domain.open), domain.name)
 		if domain.name == "net" && landErr != nil {
-			fmt.Fprintf(&b, "\n  [原生沙箱无法落实当前规则表: %v]", landErr)
+			fmt.Fprintf(&b, "\n  [the native sandbox cannot enforce the current rule table: %v]", landErr)
 		}
 		for i, row := range domain.rows.Rules {
 			note := ""

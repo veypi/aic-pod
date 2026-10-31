@@ -290,7 +290,7 @@ func TestPermsGrantStatus(t *testing.T) {
 	p := newTestPerms(t, t.TempDir())
 	p.grantCmd("s1", "git")
 	out := p.grantStatus("s1")
-	for _, want := range []string{"exec_policy: deny", "fs_policy:", "net_policy:", "ssh_policy:", "session cmd grants (1, 重启失效): git", "allow:localhost:*"} {
+	for _, want := range []string{"exec_policy: deny", "fs_policy:", "net_policy:", "ssh_policy:", "session cmd grants (1, lost on restart): git", "allow:localhost:*"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("grant status missing %q:\n%s", want, out)
 		}
@@ -316,7 +316,7 @@ func TestPermsGrantStatusMarksUngrantableWriteRoot(t *testing.T) {
 		return nil
 	}
 	out := p.grantStatus("s1")
-	if !strings.Contains(out, "rw:/opt/bad [cfg level=0] [沙箱内不可写: Access is denied.]") {
+	if !strings.Contains(out, "rw:/opt/bad [cfg level=0] [not writable inside the sandbox: Access is denied.]") {
 		t.Fatalf("grant status missing sandbox marker:\n%s", out)
 	}
 	if probed["/opt/bad"] != 1 {
@@ -326,7 +326,7 @@ func TestPermsGrantStatusMarksUngrantableWriteRoot(t *testing.T) {
 	if probed["/data/*/keep"] != 0 {
 		t.Fatalf("glob row must not be probed: %v", probed)
 	}
-	if strings.Contains(out, "rw:/data/*/keep [cfg level=0] [沙箱内不可写") {
+	if strings.Contains(out, "rw:/data/*/keep [cfg level=0] [not writable inside the sandbox") {
 		t.Fatalf("glob row must not be annotated:\n%s", out)
 	}
 }
@@ -356,7 +356,7 @@ func TestWriteRootProbeCacheLimit(t *testing.T) {
 		t.Fatalf("probe limit not honored: %v", probed)
 	}
 	note := c.skippedNote()
-	if !strings.Contains(note, "另有 2 条") || !strings.Contains(note, "单次上限 2") {
+	if !strings.Contains(note, "2 more rw lines") || !strings.Contains(note, "per-call limit 2") {
 		t.Fatalf("skipped note missing or mismatched: %q", note)
 	}
 	if empty := newWriteRootProbeCache().skippedNote(); empty != "" {

@@ -72,11 +72,7 @@ func (c *Client) reloadServiceConfig(path string) error {
 	if err != nil {
 		return err
 	}
-	desired, err := mcpServers(fileCfg.MCP.Servers, c.options().WorkDir)
-	if err != nil {
-		return err
-	}
-	if err := c.applyServiceSet(desired); err != nil {
+	if err := c.applyServiceSet(mcpServers(fileCfg.MCP.Servers)); err != nil {
 		return err
 	}
 	if c.cmds != nil {

@@ -55,4 +55,3 @@ func Stop() {
 		writeState(State{Connected: false, HostID: id, Version: version, LastError: "host session stopped"})
 	}
 }
-

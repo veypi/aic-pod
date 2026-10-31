@@ -166,7 +166,7 @@ func TestCommandFlagErrors(t *testing.T) {
 	if _, _, err := run(t, r, "echo", "echo", "--times", "soon"); exitCode(err) != 2 || !strings.Contains(err.Error(), "invalid integer") {
 		t.Fatalf("integer: %v", err)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--meta", "{}"); exitCode(err) != 2 || !strings.Contains(err.Error(), "不能映射为 flag") {
+	if _, _, err := run(t, r, "echo", "echo", "--meta", "{}"); exitCode(err) != 2 || !strings.Contains(err.Error(), "cannot be mapped to a flag") {
 		t.Fatalf("non-scalar must point at --input: %v", err)
 	}
 	if _, _, err := run(t, r, "echo", "echo", "--text"); exitCode(err) != 2 || !strings.Contains(err.Error(), "requires a value") {
@@ -180,7 +180,7 @@ func TestCommandFlagErrors(t *testing.T) {
 func TestCommandUnknownToolListsAvailable(t *testing.T) {
 	r, _ := newFixture(t, nil)
 	// 无 flag 时直达（不校验工具名，由服务方报错）；有 flag 时先校验并给可用面
-	if _, _, err := run(t, r, "echo", "ehco", "--text", "x"); exitCode(err) != 1 || !strings.Contains(err.Error(), "可用: echo, ping") {
+	if _, _, err := run(t, r, "echo", "ehco", "--text", "x"); exitCode(err) != 1 || !strings.Contains(err.Error(), "available: echo, ping") {
 		t.Fatalf("unknown tool: %v", err)
 	}
 }
@@ -191,7 +191,7 @@ func TestCommandToolHelp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"--text (string) 必填", "--times (integer) 默认 1", "echo 文本"} {
+	for _, want := range []string{"--text (string) required", "--times (integer) default 1", "echo 文本"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("tool help missing %q:\n%s", want, out)
 		}
@@ -211,7 +211,7 @@ func TestCommandCallErrorRendersResult(t *testing.T) {
 // --image-preview 支持性检查必须先于调用（不支持的 Provider 不应真跑工具）。
 func TestCommandPreviewPrecheckBeforeCall(t *testing.T) {
 	r, p := newFixture(t, nil)
-	if _, _, err := run(t, r, "echo", "ping", "--image-preview", "1280x720"); exitCode(err) != 2 || !strings.Contains(err.Error(), "不支持 --image-preview") {
+	if _, _, err := run(t, r, "echo", "ping", "--image-preview", "1280x720"); exitCode(err) != 2 || !strings.Contains(err.Error(), "does not support --image-preview") {
 		t.Fatalf("preview gate: %v", err)
 	}
 	if len(p.calls) != 0 {
@@ -231,7 +231,7 @@ func TestCommandReservedFlagShadowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _, err := run(t, r, "cfg", "cfg", "--help")
-	if err != nil || !strings.Contains(out, "保留 flag 名") {
+	if err != nil || !strings.Contains(out, "reserved flag name") {
 		t.Fatalf("tool help must mark reserved names: %q %v", out, err)
 	}
 	_, _, err = run(t, r, "cfg", "cfg", "--nope", "1")
@@ -292,59 +292,29 @@ func (s *streamProvider) Stream(context.Context, protocol.Caller, <-chan []byte,
 	return nil
 }
 
-type fakeStreamer struct {
-	channel string
-}
-
-func (s *fakeStreamer) StreamChannel() string { return s.channel }
-
-func (s *fakeStreamer) Stream(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error {
-	return nil
-}
-
-// RegisterCustom 的 cmd.Name() 必须等于 alias（vsh 以 Name 为键、Unregister
-// 按 alias 摘，不一致会永久驻留）。
-func TestRegistryCustomNameMismatch(t *testing.T) {
-	r, _ := newFixture(t, nil)
-	cmd := commands.DefineCommand("other-name", func(context.Context, *commands.Invocation) error { return nil })
-	if err := r.RegisterCustom("svc", &fakeProvider{}, cmd); err == nil {
-		t.Fatal("name mismatch accepted")
-	}
-	if r.Has("svc") {
-		t.Fatal("rejected RegisterCustom left an entry")
-	}
-}
-
 // stream channel 标签撞名即拒（登记侧防护；Unregister 只摘自己的映射）。
 func TestRegistryStreamChannelCollision(t *testing.T) {
 	r, _ := newFixture(t, nil)
-	if err := r.RegisterStream("echo", &fakeStreamer{channel: "aic-echo"}); err != nil {
+	if err := r.Register("streamer", &streamProvider{channel: "aic-echo"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Register("other", &fakeProvider{}); err != nil {
-		t.Fatal(err)
-	}
-	// RegisterStream 抢占他人标签即拒
-	if err := r.RegisterStream("other", &fakeStreamer{channel: "aic-echo"}); err == nil {
-		t.Fatal("channel takeover accepted")
-	}
-	// Provider 自带 Streamer 撞标签也拒
+	// Provider 自带 Streamer 撞标签即拒
 	if err := r.Register("third", &streamProvider{channel: "aic-echo"}); err == nil {
 		t.Fatal("register with taken channel accepted")
 	}
 	if r.Has("third") {
 		t.Fatal("rejected registration left an entry")
 	}
-	// 标签仍属 echo
+	// 标签仍属 streamer
 	if _, ok := r.StreamHandler("aic-echo"); !ok {
 		t.Fatal("original channel mapping lost")
 	}
-	r.Unregister("echo")
+	r.Unregister("streamer")
 	if _, ok := r.StreamHandler("aic-echo"); ok {
 		t.Fatal("channel survived owner Unregister")
 	}
 	// 摘除后标签可重用
-	if err := r.RegisterStream("other", &fakeStreamer{channel: "aic-echo"}); err != nil {
+	if err := r.Register("other", &streamProvider{channel: "aic-echo"}); err != nil {
 		t.Fatalf("channel reuse after unregister: %v", err)
 	}
 }
@@ -353,8 +323,7 @@ func TestRegistryStreamHandler(t *testing.T) {
 	gated := false
 	var gateSession string
 	r, _ := newFixture(t, func(_ context.Context, session, _ string) error { gated = true; gateSession = session; return nil })
-	s := &fakeStreamer{channel: "aic-echo"}
-	if err := r.RegisterStream("echo", s); err != nil {
+	if err := r.Register("streamer", &streamProvider{channel: "aic-echo"}); err != nil {
 		t.Fatal(err)
 	}
 	relay, ok := r.StreamHandler("aic-echo")
@@ -375,7 +344,7 @@ func TestRegistryStreamHandler(t *testing.T) {
 	if _, ok := r.StreamHandler("aic-other"); ok {
 		t.Fatal("unknown channel resolved")
 	}
-	r.Unregister("echo")
+	r.Unregister("streamer")
 	if _, ok := r.StreamHandler("aic-echo"); ok {
 		t.Fatal("stream channel survived Unregister")
 	}

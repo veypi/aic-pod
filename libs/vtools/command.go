@@ -133,11 +133,11 @@ func convertFlag(name, raw string, explicit bool, prop schemaProp) (any, error) 
 		return v, nil
 	case "string":
 		if raw == "" && !explicit {
-			return nil, fmt.Errorf("flag --%s requires a value（空串写 --%s=）", name, name)
+			return nil, fmt.Errorf("flag --%s requires a value (for an empty string, write --%s=)", name, name)
 		}
 		return raw, nil
 	default:
-		return nil, fmt.Errorf("flag --%s: schema type %s 不能映射为 flag，请走 --input", name, schemaTypeText(prop.Type))
+		return nil, fmt.Errorf("flag --%s: schema type %s cannot be mapped to a flag; pass it via --input", name, schemaTypeText(prop.Type))
 	}
 }
 
@@ -170,7 +170,7 @@ func renderToolHelp(inv *commands.Invocation, alias string, tool Tool) {
 	fmt.Fprintln(out)
 	doc := parseSchema(tool.InputSchema)
 	if doc == nil || len(doc.Properties) == 0 {
-		fmt.Fprintln(out, "（无参数或 schema 未声明；复杂参数走 --input JSON）")
+		fmt.Fprintln(out, "(no parameters or no schema declared; pass complex arguments via --input JSON)")
 		return
 	}
 	names := make([]string, 0, len(doc.Properties))
@@ -183,15 +183,15 @@ func renderToolHelp(inv *commands.Invocation, alias string, tool Tool) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "  --%s (%s)", name, schemaTypeText(prop.Type))
 		if doc.required(name) {
-			b.WriteString(" 必填")
+			b.WriteString(" required")
 		}
 		if reservedFlags[name] {
-			b.WriteString("（保留 flag 名，此参数请走 --input）")
+			b.WriteString(" (reserved flag name; pass this parameter via --input)")
 		}
 		if prop.Default != nil {
 			raw, err := json.Marshal(prop.Default)
 			if err == nil {
-				fmt.Fprintf(&b, " 默认 %s", raw)
+				fmt.Fprintf(&b, " default %s", raw)
 			}
 		}
 		if prop.Description != "" {
@@ -200,7 +200,7 @@ func renderToolHelp(inv *commands.Invocation, alias string, tool Tool) {
 		if len(prop.Enum) > 0 {
 			raw, err := json.Marshal(prop.Enum)
 			if err == nil {
-				fmt.Fprintf(&b, "\n      取值: %s", raw)
+				fmt.Fprintf(&b, "\n      values: %s", raw)
 			}
 		}
 		fmt.Fprintln(out, b.String())
@@ -362,7 +362,7 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 		}
 		toolDef = FindTool(tools, tool)
 		if toolDef == nil {
-			return commands.Exitf(inv, 1, "%s: unknown tool %q（可用: %s）", alias, tool, toolNames(tools))
+			return commands.Exitf(inv, 1, "%s: unknown tool %q (available: %s)", alias, tool, toolNames(tools))
 		}
 		schema = parseSchema(toolDef.InputSchema)
 	}
@@ -398,7 +398,7 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 	}
 	if len(flagNames) > 0 {
 		if schema == nil {
-			return commands.Exitf(inv, 2, "%s: tool %q 未声明 inputSchema，参数请走 --input", alias, tool)
+			return commands.Exitf(inv, 2, "%s: tool %q does not declare an inputSchema; pass arguments via --input", alias, tool)
 		}
 		for _, name := range flagNames {
 			prop, ok := schema.Properties[name]
@@ -413,7 +413,7 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 					}
 				}
 				sort.Strings(mappable)
-				return commands.Exitf(inv, 2, "%s: unknown flag --%s（可映射: %s；其余走 --input）", alias, name, strings.Join(mappable, " "))
+				return commands.Exitf(inv, 2, "%s: unknown flag --%s (mappable: %s; everything else goes via --input)", alias, name, strings.Join(mappable, " "))
 			}
 			value, err := convertFlag(name, flagValues[name], flagExplicit[name], prop)
 			if err != nil {
@@ -429,7 +429,7 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 	if preview != "" {
 		pv, ok := p.(ImagePreviewer)
 		if !ok {
-			return commands.Exitf(inv, 2, "%s: 该服务不支持 --image-preview", alias)
+			return commands.Exitf(inv, 2, "%s: this service does not support --image-preview", alias)
 		}
 		previewer = pv
 	}

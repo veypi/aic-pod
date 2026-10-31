@@ -3,11 +3,9 @@ package host
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/veypi/aic-pod/protocol"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -19,26 +17,21 @@ import (
 	"github.com/veypi/aic-pod/libs/mcpx"
 )
 
-func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("AIC_CUA_DRIVER_PATH", filepath.Join(root, "cua-driver"))
-	servers, err := mcpServers(nil, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 内建 MCP 服务只剩 cua / blender：browser 已改为技能包（统一 commands 机制）。
-	if servers["cua"].Command != filepath.Join(root, "cua-driver") || !reflect.DeepEqual(servers["cua"].Args, []string{"mcp"}) {
-		t.Fatalf("CUA must launch upstream directly: %+v", servers["cua"])
+func TestMCPServersAreOwnerConfiguredOnly(t *testing.T) {
+	// pod 不再内置任何服务默认项（cua/blender/browser 都是普通技能包）。
+	servers := mcpServers(nil)
+	if len(servers) != 0 {
+		t.Fatalf("pod must not ship built-in services: %+v", servers)
 	}
 	configured := map[string]mcpx.Config{
 		"cua":    {Disabled: true},
 		"custom": {URL: "https://example.test/mcp"},
 	}
-	servers, err = mcpServers(configured, root)
-	if err != nil || !reflect.DeepEqual(servers, configured) {
-		t.Fatalf("owner overrides changed: %+v, %v", servers, err)
+	servers = mcpServers(configured)
+	if !reflect.DeepEqual(servers, configured) {
+		t.Fatalf("owner overrides changed: %+v", servers)
 	}
-	// Disabled builtins require no command path and never start a process.
+	// Disabled services require no command path and never start a process.
 	if _, err := optionsOf(cfg.Options{MCP: mcpx.Settings{Servers: configured}}, "cli", "test", t.Logf); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +40,7 @@ func TestBuiltinMCPDefaultsAndOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := c.mcpManager().Session(context.Background(), "cua"); err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("disabled builtin started: %v", err)
+		t.Fatalf("disabled service started: %v", err)
 	}
 }
 
@@ -155,36 +148,5 @@ func TestMCPConfiguredServiceFromFileCommandAndUI(t *testing.T) {
 	out := decoded[protocol.Output](t, response.Result)
 	if response.Error != nil || out.Attrs["exit_code"] != "0" || calls.Load() != 4 {
 		t.Fatalf("service unusable after cancellation: %+v %+v", response, out)
-	}
-}
-
-func TestBrowserStreamUsesExistingCommandAuthorization(t *testing.T) {
-	saved := cfg.Global
-	cfg.Global = cfg.NewOptions()
-	t.Cleanup(func() { cfg.Global = saved })
-	c, _ := testClient(t)
-	caller := testCaller()
-	call := func(caller protocol.Caller) {
-		t.Helper()
-		err := c.streamBrowser(context.Background(), caller, nil, func([]byte) error { t.Fatal("unauthorized frame"); return nil })
-		if err == nil || protocol.AsFault(err).Code != "permission_denied" {
-			t.Fatalf("browser bypassed command gate: %v", err)
-		}
-	}
-	call(caller)
-	caller.Direct = true
-	caller.Scope = "fs"
-	call(caller)
-	caller.Scope = ""
-	// exec 域基表更新 = 编译 + 原子发布（运行中改 cfg.Global 不生效，§4）
-	cfg.Global.ExecRules = []string{"deny:mcp.browser"}
-	publishGlobal(t, c.perms)
-	call(caller)
-	// 会话 temp 授权即时生效
-	c.perms.grantCmd("s1", "mcp.browser")
-	err := c.streamBrowser(context.Background(), caller, nil, func([]byte) error { t.Fatal("unauthorized frame"); return nil })
-	var fault *protocol.Fault
-	if err == nil || errors.As(err, &fault) {
-		t.Fatalf("granted browser must pass the gate (fails later on missing stream): %v", err)
 	}
 }
