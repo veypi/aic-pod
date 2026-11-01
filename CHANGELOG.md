@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.9.8 — 2026-11-01
 
 - **pod 不再内置任何包的专属代码与配置（cua/blender 沦为普通第三方包，官方预装）**：
   删除 `libs/host/packs.go`（内嵌 `cli/manifest.json` 装载）、`libs/host/blender.go`
@@ -27,8 +27,6 @@
   现在 `desktop/main.js` 直接注入可执行文件路径（`AIC_BROWSER_PATH` / `AIC_AGENT_BROWSER_PATH`），
   平台文件名差异收敛到 `desktop/runtime-paths.cjs`（与打包前同步/校验 `scripts/sync-browser.mjs`
   同一事实源）；desktop 测试补 `runtime-paths.test.cjs`。
-
-## v0.9.8 — 2026-10-30
 
 - **命令字节流中继写超时即断流**：流的维护归 pod——设备侧不读（进程卡死或不再
   消费）时写超时（30s）就关掉这条流，设备侧摘掉订阅者，页面重新活跃时自己新建
