@@ -20,8 +20,9 @@ const (
 )
 
 type commandPackageRecord struct {
-	SkillID string `json:"skill_id"`
-	Order   uint64 `json:"order"`
+	SkillID  string `json:"skill_id"`
+	Order    uint64 `json:"order"`
+	Revision uint64 `json:"revision"`
 }
 
 type commandPackageState struct {
@@ -131,8 +132,12 @@ func (c *Client) installCommandPackage(ctx context.Context, skillID string) erro
 	if err := fetchCommandPackage(ctx, cloud, skillID, tmp); err != nil {
 		return err
 	}
-	if _, err := parseCommandManifestFile(tmp); err != nil {
+	manifest, err := parseCommandManifestFile(tmp)
+	if err != nil {
 		return err
+	}
+	if _, err := skillCommands(skillID, tmp, 0, manifest); err != nil {
+		return fmt.Errorf("manifest.json: %w", err)
 	}
 	// 更新不冲掉设备侧构建产物：bin/ 是设备编译出来的（平台包里只有源码），
 	// 整目录换血会让命令在更新后直接失联（run 指向 bin/xxx 却没了）。
@@ -144,8 +149,10 @@ func (c *Client) installCommandPackage(ctx context.Context, skillID string) erro
 	}
 	record, exists := state.Packages[skillID]
 	if !exists {
-		record = commandPackageRecord{SkillID: skillID, Order: state.NextOrder}
+		record = commandPackageRecord{SkillID: skillID, Order: state.NextOrder, Revision: 1}
 		state.NextOrder++
+	} else {
+		record.Revision++
 	}
 	final := filepath.Join(root, skillID)
 	backup := ""
@@ -278,6 +285,7 @@ func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[strin
 			return nil, fmt.Errorf("skill %s: %w", record.SkillID, err)
 		}
 		for id, def := range packageDefs {
+			def.Revision = record.Revision
 			def.Local = c.options().CommandConfig[id]
 			defs[id] = def
 		}
@@ -290,7 +298,9 @@ func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[strin
 		}
 	}
 	for id, def := range runtime {
-		defs[id] = def
+		next := def.clone()
+		next.Local = c.options().CommandConfig[id]
+		defs[id] = next
 	}
 	return defs, nil
 }

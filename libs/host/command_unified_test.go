@@ -29,7 +29,7 @@ func TestCommandHelperProcess(t *testing.T) {
 		return
 	case "process":
 		data, _ := io.ReadAll(os.Stdin)
-		fmt.Fprintf(os.Stdout, "args=%s stdin=%s", strings.Join(os.Args[1:], ","), data)
+		fmt.Fprintf(os.Stdout, "args=%s stdin=%s local_env=%s", strings.Join(os.Args[1:], ","), data, os.Getenv("AIC_COMMAND_LOCAL_ENV"))
 		code := 0
 		_, _ = fmt.Sscanf(os.Getenv("AIC_COMMAND_HELPER_EXIT"), "%d", &code)
 		os.Exit(code)
@@ -80,6 +80,9 @@ func TestUnifiedProcessCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := runHostCommandManagement(t, c, "config", "hello", "AIC_COMMAND_LOCAL_ENV=visible"); err != nil {
+		t.Fatal(err)
+	}
 	req := execRequest("hello alpha beta", 30000)
 	req.Exec.Stdin = "input-bytes"
 	response := callTool(t, c, context.Background(), testCaller(), req)
@@ -92,6 +95,9 @@ func TestUnifiedProcessCommand(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "stdin=input-bytes") || !strings.Contains(result.Content, "alpha") {
 		t.Fatalf("process output = %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "local_env=visible") {
+		t.Fatalf("definition config env missing from process output = %q", result.Content)
 	}
 }
 
@@ -349,6 +355,16 @@ func TestUnifiedPackageInstallUpdateUninstall(t *testing.T) {
 	if body, err := os.ReadFile(filepath.Join(c.commandPackages, "private-package", "bin", "hello")); err != nil || string(body) != "source" {
 		t.Fatalf("package file = %q, err = %v", body, err)
 	}
+	// 语义非法的更新必须在替换现有包之前拒绝，不能污染后续 reload。
+	payload = map[string]string{
+		"manifest.json": `{"schema":1,"commands":{"broken":{}}}`,
+	}
+	if err := c.installCommandPackage(context.Background(), "private-package"); err == nil {
+		t.Fatal("semantically invalid package update was accepted")
+	}
+	if err := c.cmds.reload(); err != nil {
+		t.Fatalf("invalid update poisoned the installed package state: %v", err)
+	}
 	payload = map[string]string{
 		"manifest.json": `{"schema":1,"commands":{"hello2":{"run":["bin/hello2"]}}}`,
 		"bin/hello2":    "new-source",
@@ -471,13 +487,19 @@ func TestUnifiedAliasPermissionGate(t *testing.T) {
 	if out := run("commands add gate-test --protocol mcp --url " + endpoint.URL); out.Attrs["exit_code"] != "0" {
 		t.Fatalf("management grant did not allow add: %+v", out.Attrs)
 	}
-	for _, script := range []string{"gate-test ping", "commands start gate-test", "commands mcp gate-test tools"} {
+	for _, script := range []string{"gate-test ping", "commands start gate-test", "commands mcp gate-test tools", "commands info gate-test --schema"} {
 		if out := run(script); out.Attrs["exit_code"] != "126" {
 			t.Fatalf("%s bypassed alias gate: %+v", script, out.Attrs)
 		}
 	}
+	c.cmds.mu.RLock()
+	manager := c.cmds.managers["gate-test"]
+	c.cmds.mu.RUnlock()
+	if manager.Started("gate-test") {
+		t.Fatal("unauthorized schema inspection started the MCP process")
+	}
 	c.perms.grantCmd("s1", "gate-test")
-	for _, script := range []string{"gate-test ping", "commands mcp gate-test tools"} {
+	for _, script := range []string{"gate-test ping", "commands mcp gate-test tools", "commands info gate-test --schema"} {
 		if out := run(script); out.Attrs["exit_code"] != "0" {
 			t.Fatalf("authorized %s failed: %+v", script, out.Attrs)
 		}
@@ -509,5 +531,117 @@ func TestPreserveCommandPackageArtifacts(t *testing.T) {
 	data, err = os.ReadFile(filepath.Join(shipped, "bin", "browser"))
 	if err != nil || string(data) != "shipped" {
 		t.Fatalf("shipped artifact was overwritten: %v %q", err, data)
+	}
+}
+
+func TestUnifiedManifestRejectsDuplicateStreamAddressEnv(t *testing.T) {
+	manifest, err := parseCommandManifest([]byte(`{"schema":1,"commands":{"raw":{"run":["raw"]}},"streams":{"one":{"command":"raw","address_env":"RAW_ADDR"},"two":{"command":"raw","address_env":"RAW_ADDR"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := skillCommands("private", t.TempDir(), 1, manifest); err == nil {
+		t.Fatal("streams sharing one address_env were accepted")
+	}
+}
+
+func TestUnifiedReloadPreservesUnchangedMCPCommands(t *testing.T) {
+	c, _ := testClient(t)
+	newMCPDef := func(alias string) *hostCommand {
+		return &hostCommand{
+			ID: "config:" + alias, Alias: alias, Source: commandSourceConfig,
+			Config: cfg.CommandConfig{
+				Run: []string{os.Args[0], "-test.run=^TestCommandHelperProcess$"},
+				Env: map[string]string{"AIC_COMMAND_HELPER": "mcp"}, Protocol: "mcp",
+			},
+		}
+	}
+	defA, defB := newMCPDef("mcp-a"), newMCPDef("mcp-b")
+	if err := c.cmds.upsertRuntime(defA); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.cmds.upsertRuntime(defB); err != nil {
+		t.Fatal(err)
+	}
+	c.cmds.mu.RLock()
+	managerA, managerB := c.cmds.managers["mcp-a"], c.cmds.managers["mcp-b"]
+	c.cmds.mu.RUnlock()
+	sessionA, err := c.cmds.session(context.Background(), "mcp-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unrelated := &hostCommand{ID: "config:unrelated", Alias: "unrelated", Source: commandSourceConfig, Config: cfg.CommandConfig{Run: []string{os.Args[0]}}}
+	if err := c.cmds.upsertRuntime(unrelated); err != nil {
+		t.Fatal(err)
+	}
+	c.cmds.mu.RLock()
+	currentA, currentB := c.cmds.managers["mcp-a"], c.cmds.managers["mcp-b"]
+	c.cmds.mu.RUnlock()
+	if currentA != managerA || currentB != managerB {
+		t.Fatal("unrelated reload replaced an unchanged MCP manager")
+	}
+	gotSession, err := c.cmds.session(context.Background(), "mcp-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSession != sessionA {
+		t.Fatal("unrelated reload replaced an active MCP session")
+	}
+
+	defA.Config.Env["AIC_COMMAND_LOCAL_ENV"] = "changed"
+	if err := c.cmds.upsertRuntime(defA); err != nil {
+		t.Fatal(err)
+	}
+	c.cmds.mu.RLock()
+	currentA, currentB = c.cmds.managers["mcp-a"], c.cmds.managers["mcp-b"]
+	c.cmds.mu.RUnlock()
+	if currentA == managerA {
+		t.Fatal("changed MCP command retained its old manager")
+	}
+	if currentB != managerB {
+		t.Fatal("changing one MCP command restarted an unrelated command")
+	}
+}
+
+func TestUnifiedReloadPreservesUnchangedStreamProcess(t *testing.T) {
+	c, _ := testClient(t)
+	newStreamDef := func(alias, addressEnv string) *hostCommand {
+		return &hostCommand{
+			ID: "config:" + alias, Alias: alias, Source: commandSourceConfig,
+			Config: cfg.CommandConfig{
+				Run: []string{os.Args[0], "-test.run=^TestCommandHelperProcess$"},
+				Env: map[string]string{"AIC_COMMAND_HELPER": "stream"}, NoSandbox: true,
+			},
+			Streams: map[string]hostStream{"view": {Name: "view", AddressEnv: addressEnv}},
+		}
+	}
+	if err := c.cmds.upsertRuntime(newStreamDef("stream-a", "STREAM_A_ADDR")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.cmds.upsertRuntime(newStreamDef("stream-b", "STREAM_B_ADDR")); err != nil {
+		t.Fatal(err)
+	}
+	c.cmds.mu.RLock()
+	processA := c.cmds.processes["stream-a"]
+	c.cmds.mu.RUnlock()
+	if err := processA.start(); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := c.cmds.definition("stream-a")
+	address := before.Streams["view"].Address
+
+	unrelated := &hostCommand{ID: "config:unrelated", Alias: "unrelated", Source: commandSourceConfig, Config: cfg.CommandConfig{Run: []string{os.Args[0]}}}
+	if err := c.cmds.upsertRuntime(unrelated); err != nil {
+		t.Fatal(err)
+	}
+	c.cmds.mu.RLock()
+	current := c.cmds.processes["stream-a"]
+	c.cmds.mu.RUnlock()
+	if current != processA || !processA.isRunning() {
+		t.Fatal("unrelated reload stopped or replaced an unchanged stream process")
+	}
+	after, _ := c.cmds.definition("stream-a")
+	if after.Streams["view"].Address != address {
+		t.Fatal("unchanged stream address was reallocated")
 	}
 }

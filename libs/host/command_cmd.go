@@ -120,8 +120,8 @@ func (c *Client) hostCommandRows() []hostCommandRow {
 	rows := make([]hostCommandRow, 0, len(c.cmds.active)+len(c.cmds.rejected))
 	for alias, def := range c.cmds.active {
 		row := hostCommandRow{Name: alias, ID: def.ID, Kind: def.kind(), Source: def.Source, State: "ready"}
-		if def.Config.Protocol == "mcp" && c.cmds.manager != nil {
-			for _, status := range c.cmds.manager.Status() {
+		if manager := c.cmds.managers[alias]; def.Config.Protocol == "mcp" && manager != nil {
+			for _, status := range manager.Status() {
 				if status.Name == alias {
 					row.State = "configured"
 					if status.Running {
@@ -194,6 +194,9 @@ func (c *Client) hostCommandInfo(ctx context.Context, inv *commands.Invocation, 
 	}
 	alias := positional[0]
 	if schema {
+		if !c.execAllowed(execution.SessionFromContext(ctx), alias) {
+			return commands.Exitf(inv, 126, "commands info: denied; request grant cmd %s", alias)
+		}
 		session, err := c.cmds.session(ctx, alias)
 		if err != nil {
 			return commands.Exitf(inv, 1, "commands info: %s", err)

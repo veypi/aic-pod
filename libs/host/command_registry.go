@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -32,7 +33,7 @@ type commandHub struct {
 	active    map[string]*hostCommand
 	rejected  map[string]string
 	streams   map[string]commandStreamBinding
-	manager   *mcpx.Manager
+	managers  map[string]*mcpx.Manager
 	processes map[string]*streamProcess
 	runtime   map[string]*hostCommand
 }
@@ -41,8 +42,8 @@ func newCommandHub(client *Client, reg *commands.Registry) *commandHub {
 	return &commandHub{
 		client: client, reg: reg,
 		active: map[string]*hostCommand{}, rejected: map[string]string{},
-		streams: map[string]commandStreamBinding{}, processes: map[string]*streamProcess{},
-		runtime: map[string]*hostCommand{},
+		streams: map[string]commandStreamBinding{}, managers: map[string]*mcpx.Manager{},
+		processes: map[string]*streamProcess{}, runtime: map[string]*hostCommand{},
 	}
 }
 
@@ -88,6 +89,25 @@ func (h *commandHub) reloadLocked() error {
 	return h.rebuildLocked(defs)
 }
 
+// inheritCommandStreams 保留同一命令定义的流地址。地址属于常驻进程的运行态，
+// 不是每次注册表重建都要变化的声明；只有增删流或修改 address_env 才重新分配。
+func inheritCommandStreams(old, next *hostCommand) bool {
+	if old == nil || old.ID != next.ID || len(old.Streams) != len(next.Streams) {
+		return false
+	}
+	for name, stream := range next.Streams {
+		previous, ok := old.Streams[name]
+		if !ok || previous.Name != stream.Name || previous.AddressEnv != stream.AddressEnv || previous.Address == "" {
+			return false
+		}
+	}
+	for name, stream := range next.Streams {
+		stream.Address = old.Streams[name].Address
+		next.Streams[name] = stream
+	}
+	return true
+}
+
 func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 	winners := map[string]*hostCommand{}
 	skillAliases := map[string]bool{}
@@ -114,7 +134,7 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 
 	h.mu.RLock()
 	oldActive := h.active
-	oldManager := h.manager
+	oldManagers := h.managers
 	oldProcesses := h.processes
 	h.mu.RUnlock()
 
@@ -127,14 +147,16 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 	rejected := map[string]string{}
 	streamBindings := map[string]commandStreamBinding{}
 	processes := map[string]*streamProcess{}
-	mcpConfigs := map[string]mcpx.Config{}
+	managers := map[string]*mcpx.Manager{}
 	prepared := map[string]*hostCommand{}
 
 	for _, alias := range aliases {
 		def := winners[alias].clone()
-		if err := allocateCommandStreams(def); err != nil {
-			rejected[alias] = err.Error()
-			continue
+		if !inheritCommandStreams(oldActive[alias], def) {
+			if err := allocateCommandStreams(def); err != nil {
+				rejected[alias] = err.Error()
+				continue
+			}
 		}
 		if err := validateHostCommand(def); err != nil {
 			rejected[alias] = err.Error()
@@ -147,12 +169,9 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 			}
 		}
 		prepared[alias] = def
-		if def.Config.Protocol == "mcp" {
-			mcpConfigs[alias] = def.mcpConfig()
-		}
 	}
 
-	manager, err := mcpx.NewManager(mcpConfigs, mcpx.Options{
+	managerOptions := mcpx.Options{
 		Authorize: func(ctx context.Context, alias, _ string, _ mcp.Params) error {
 			if !h.client.execAllowed(execution.SessionFromContext(ctx), alias) {
 				return protocol.Fail("permission_denied", "Command denied; request grant cmd "+alias)
@@ -163,9 +182,26 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 		Policy: func(config mcpx.Config) vbox.Policy {
 			return h.client.nativePolicy(context.Background(), config.Cwd, config.Command)
 		},
-	})
-	if err != nil {
-		return err
+	}
+	createdManagers := map[*mcpx.Manager]bool{}
+	for _, alias := range aliases {
+		def := prepared[alias]
+		if def == nil || def.Config.Protocol != "mcp" {
+			continue
+		}
+		if oldManagers[alias] != nil && reflect.DeepEqual(oldActive[alias], def) {
+			managers[alias] = oldManagers[alias]
+			continue
+		}
+		manager, err := mcpx.NewManager(map[string]mcpx.Config{alias: def.mcpConfig()}, managerOptions)
+		if err != nil {
+			for created := range createdManagers {
+				_ = created.Close()
+			}
+			return err
+		}
+		createdManagers[manager] = true
+		managers[alias] = manager
 	}
 
 	for alias := range oldActive {
@@ -179,6 +215,7 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 		var cmd commands.Command
 		switch def.kind() {
 		case "mcp":
+			manager := managers[alias]
 			provider := vtools.MCP(func(ctx context.Context) (*mcp.ClientSession, error) {
 				return manager.Session(ctx, alias)
 			})
@@ -201,34 +238,52 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 		active[alias] = def
 		if len(def.Streams) > 0 {
 			if def.Config.Protocol == "" {
-				processes[alias] = newStreamProcess(h.client, def)
+				if oldProcesses[alias] != nil && reflect.DeepEqual(oldActive[alias], def) {
+					processes[alias] = oldProcesses[alias]
+				} else {
+					processes[alias] = newStreamProcess(h.client, def)
+				}
 			}
 			for _, stream := range def.Streams {
 				// 流与命令同属一个命名空间：地址 = 命令别名 + 流名。
 				// skill_id 是平台内部键，不进寻址（同名命令按注册表的生效定义解析）。
 				label := def.Alias + ":" + stream.Name
-				streamBindings[label] = commandStreamBinding{def: def, stream: stream, manager: manager, process: processes[alias]}
+				streamBindings[label] = commandStreamBinding{def: def, stream: stream, manager: managers[alias], process: processes[alias]}
 			}
 		}
 	}
 
+	for alias, manager := range managers {
+		if active[alias] != nil {
+			continue
+		}
+		if createdManagers[manager] {
+			_ = manager.Close()
+		}
+		delete(managers, alias)
+	}
+
 	h.mu.Lock()
 	h.active, h.rejected, h.streams = active, rejected, streamBindings
-	h.manager, h.processes = manager, processes
+	h.managers, h.processes = managers, processes
 	h.mu.Unlock()
 
-	if oldManager != nil {
-		_ = oldManager.Close()
+	for alias, old := range oldManagers {
+		if managers[alias] != old {
+			_ = old.Close()
+		}
 	}
-	for _, process := range oldProcesses {
-		process.stop()
+	for alias, old := range oldProcesses {
+		if processes[alias] != old {
+			old.stop()
+		}
 	}
 	return nil
 }
 
 func (h *commandHub) session(ctx context.Context, alias string) (*mcp.ClientSession, error) {
 	h.mu.RLock()
-	def, manager := h.active[alias], h.manager
+	def, manager := h.active[alias], h.managers[alias]
 	h.mu.RUnlock()
 	if def == nil || def.Config.Protocol != "mcp" || manager == nil {
 		return nil, fmt.Errorf("%s is not an MCP command", alias)
@@ -238,7 +293,7 @@ func (h *commandHub) session(ctx context.Context, alias string) (*mcp.ClientSess
 
 func (h *commandHub) startStop(ctx context.Context, inv *commands.Invocation, op, alias string) error {
 	h.mu.RLock()
-	def, manager, process := h.active[alias], h.manager, h.processes[alias]
+	def, manager, process := h.active[alias], h.managers[alias], h.processes[alias]
 	h.mu.RUnlock()
 	if def == nil {
 		return commands.Exitf(inv, 1, "commands %s: unknown command %q", op, alias)
@@ -289,9 +344,9 @@ func (h *commandHub) close() {
 	h.rebuildMu.Lock()
 	defer h.rebuildMu.Unlock()
 	h.mu.RLock()
-	manager, processes := h.manager, h.processes
+	managers, processes := h.managers, h.processes
 	h.mu.RUnlock()
-	if manager != nil {
+	for _, manager := range managers {
 		_ = manager.Close()
 	}
 	for _, process := range processes {

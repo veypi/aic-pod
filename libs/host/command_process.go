@@ -27,13 +27,14 @@ func (c *Client) runHostCommand(ctx context.Context, def *hostCommand, inv *comm
 		wd = c.options().WorkDir
 	}
 	env := HostEnvToOS(inv.Env)
-	keys := make([]string, 0, len(def.Config.Env))
-	for key := range def.Config.Env {
+	overrides := def.environment()
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		env = append(env, key+"="+def.Config.Env[key])
+		env = append(env, key+"="+overrides[key])
 	}
 	argv := append(append([]string(nil), def.Config.Run...), inv.Args...)
 	code, err := c.procs.RunProcess(ctx, vbox.StartOptions{

@@ -37,13 +37,14 @@ type hostStream struct {
 }
 
 type hostCommand struct {
-	ID      string
-	Alias   string
-	Source  string
-	SkillID string
-	Order   uint64
-	Root    string
-	Config  cfg.CommandConfig
+	ID       string
+	Alias    string
+	Source   string
+	SkillID  string
+	Order    uint64
+	Revision uint64
+	Root     string
+	Config   cfg.CommandConfig
 	// Local 是设备侧命令定义级配置（command_config 表，按定义身份）：
 	// 应用配置 env + 沙箱策略。声明来源（manifest / 设备 commands 段）不携带。
 	Local   cfg.CommandDefConfig
@@ -190,6 +191,13 @@ func skillCommands(skillID, root string, order uint64, m *commandManifest) (map[
 		def.Streams[name] = hostStream{Name: name, AddressEnv: stream.AddressEnv}
 	}
 	for _, def := range defs {
+		addressOwners := map[string]string{}
+		for name, stream := range def.Streams {
+			if previous, exists := addressOwners[stream.AddressEnv]; exists {
+				return nil, fmt.Errorf("command %s: streams %s and %s share address_env %q", def.Alias, previous, name, stream.AddressEnv)
+			}
+			addressOwners[stream.AddressEnv] = name
+		}
 		if err := validateHostCommand(def); err != nil {
 			return nil, err
 		}
