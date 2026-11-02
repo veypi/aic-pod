@@ -24,8 +24,7 @@ const hostCommandsHelp = `usage:
   commands add <alias> [--protocol mcp] [--cwd DIR] [--env K=V]... [--idle DUR] [--persist] -- <program> [args...]
   commands add <alias> --protocol mcp --url URL [--persist]
   commands remove <alias> [--persist]
-  commands start|stop|restart <alias>
-  commands mcp <alias> tools|describe|call|read ...`
+  commands start|stop|restart <alias>`
 
 type hostCommandRow struct {
 	Name    string       `json:"name"`
@@ -35,6 +34,8 @@ type hostCommandRow struct {
 	State   string       `json:"state"`
 	Error   string       `json:"error,omitempty"`
 	Streams []hostStream `json:"streams,omitempty"`
+	// Preinstalled = 官方预装包（启动定版，不可卸载）。
+	Preinstalled bool `json:"preinstalled,omitempty"`
 }
 
 func (c *Client) cmdHostCommands(ctx context.Context, inv *commands.Invocation) error {
@@ -99,16 +100,6 @@ func (c *Client) cmdHostCommands(ctx context.Context, inv *commands.Invocation) 
 			return commands.Exitf(inv, 126, "commands %s: denied; request grant cmd %s", op, rest[0])
 		}
 		return c.cmds.startStop(ctx, inv, op, rest[0])
-	case "mcp":
-		if len(rest) < 2 {
-			return commands.Exitf(inv, 2, "usage: commands mcp <alias> <tools|describe|call|read> ...")
-		}
-		if !c.execAllowed(execution.SessionFromContext(ctx), rest[0]) {
-			return commands.Exitf(inv, 126, "commands mcp: denied; request grant cmd %s", rest[0])
-		}
-		debugInv := *inv
-		debugInv.Args = append([]string{rest[1], rest[0]}, rest[2:]...)
-		return c.mcpDebug(ctx, &debugInv)
 	default:
 		return commands.Exitf(inv, 2, "commands: unknown operation %q\n%s", op, hostCommandsHelp)
 	}
@@ -119,7 +110,8 @@ func (c *Client) hostCommandRows() []hostCommandRow {
 	defer c.cmds.mu.RUnlock()
 	rows := make([]hostCommandRow, 0, len(c.cmds.active)+len(c.cmds.rejected))
 	for alias, def := range c.cmds.active {
-		row := hostCommandRow{Name: alias, ID: def.ID, Kind: def.kind(), Source: def.Source, State: "ready"}
+		row := hostCommandRow{Name: alias, ID: def.ID, Kind: def.kind(), Source: def.Source, State: "ready",
+			Preinstalled: def.Source == commandSourceSkill && preinstalledCommandPackage(def.SkillID)}
 		if manager := c.cmds.managers[alias]; def.Config.Protocol == "mcp" && manager != nil {
 			for _, status := range manager.Status() {
 				if status.Name == alias {
@@ -303,6 +295,16 @@ func (c *Client) hostCommandAdd(inv *commands.Invocation, args []string) error {
 	} else if err := c.cmds.upsertRuntime(def); err != nil {
 		return commands.Exitf(inv, 1, "commands add: %s", err)
 	}
+	// 回执必须反映命令面真相：装配是批量赢者语义，撞平台命令名进 rejected、
+	// 被同名技能命令覆盖时连 rejected 都不进——两种都不能打 "added"。
+	current, active := c.cmds.definition(alias)
+	if !active || current.ID != def.ID {
+		reason := c.cmds.rejection(alias)
+		if reason == "" {
+			reason = "shadowed by a skill command with the same alias"
+		}
+		return commands.Exitf(inv, 1, "commands add: %s is not active: %s", alias, reason)
+	}
 	fmt.Fprintf(inv.Stdout, "added %s\n", alias)
 	return nil
 }
@@ -322,7 +324,7 @@ func (c *Client) hostCommandRemove(inv *commands.Invocation, args []string) erro
 	}
 	alias := positional[0]
 	id := "config:" + alias
-	_, runtime := c.cmds.runtime[id]
+	runtime := c.cmds.hasRuntime(id)
 	_, file := c.options().Commands[alias]
 	if persist {
 		c.cmds.rebuildMu.Lock()

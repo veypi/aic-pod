@@ -39,6 +39,9 @@ extraResources:
     to: browser/${platform}-${arch}
   - from: vendor/agent-browser/${platform}-${arch}
     to: agent-browser
+  # 官方预装包设备程序（make skill-bin-desktop，预编译 browser/cua）→ resources/skill-bin/
+  - from: vendor/skill-bin
+    to: skill-bin
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg

@@ -5,6 +5,20 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## Unreleased
+
+- **官方设备包预装：browser/cua 开箱即用（含预编译设备程序）**：pod 重新 require `aic-skills`（上次移除的是技能代码耦合，不是内容分发），启动时对两包做整目录原子定版到 `~/.aic/packages/<id>`（`libs/host/command_preinstall.go`），并从发行附带的资源目录把预编译 `bin/browser`、`bin/cua` 铺进包内——`run` 相对包根的现有解析不变，用户不再需要 `commands install` 与 Go 工具链。预装包不可 `commands install/update/uninstall`，随 pod 版本更新；`commands list` 行新增 `preinstalled` 标记。发行链：`make skill-bin-<os>-<arch>` 交叉编译设备程序并产 `aic-skill-bin-*.tar.gz`（CLI 解到可执行文件同目录），Desktop 经 `skill-bin-desktop` → extraResources `resources/skill-bin` + `main.js` 注入 `AIC_SKILL_BIN_DIR`；资源缺失时保留源码与旧构建产物，调用报明确错误，不静默。
+- **manifest 解析收敛为单一权威实现**：`parseCommandManifest` 改为调用 `aic-skills/manifest`（与 aic 云端、aic-skills 契约测试同一 parser）。行为变化：pod 此前对 `ui` 段接受任意 JSON，现在与云端同契约校验（非法 UI 同样整包拒绝）；pod 仍只消费 `host`。
+- **修掉 `commands add` 的假回执**：装配是批量赢者语义——撞平台命令名只进 `rejected`、被同名技能命令覆盖时连 `rejected` 都不进，但旧回执一律 `added <alias>` + exit 0（AI/owner 以为装好了，命令面里却没有）。现在结束后回查激活定义：不在 active 或激活的是别人的定义则非零退出并报原因（新增 `commandHub.rejection` 访问器）。回归：`libs/host/command_add_test.go`（含撞名、技能覆盖、正常 add）。
+- **远程 URL 型命令显式拒绝 `cwd`/`env`**：远程端点没有进程，旧实现静默丢弃这两个设置；现在 `validateHostCommand` 直接报「cwd/env require a run-based command」。远程 MCP 的 header/token 注入口留待下一阶段（见 `docs/development/todo.md`）。
+- **配置热加载的 options/注册表一致性**：`reloadCommandConfig` 先换 options 再重建，重建失败会留下「options 新、注册表旧」且每 2s 重试持续不一致（`commands remove --persist` 判定与 `commands config` 都作用在错对象上）。改为失败即回滚旧 options。
+- **vtools 删掉无调用方的 Registry 层**：`NewRegistry/Register/Unregister/Lookup/Has/Aliases/commandFunc/RunTool` 只有本包测试在用，生产注册由 command hub 负责；保留 `MCP()`/`RunProvider()` 调用内核，包注释改为现行边界。
+- **统一命令面：服务注册、设备命令与 owner 手工服务收成一条 `commands` 通道（破坏性）**：删除 `mcp` 根命令与调试直通（`libs/host/mcpcmd.go`）、`mcp.servers` 配置段、`tcp://` 端点形态与 `libs/vtools/tcp.go`，以及 `mcpx.Settings` / `Config.IsTCP` / `Config.Token` / `Config.Disabled`；服务、技能包命令与本地定义统一经 command hub（`libs/host/command_registry.go`）注册，能力面收敛为 `commands list|info|install|update|uninstall|config|add|remove|start|stop|restart`。**调用门身份变更**：服务命令的门是别名本身，不再是 `mcp.<alias>`——既有 `exec_rules` 里的 `mcp.<alias>` 行不再命中（`deny:mcp.x` 在 `exec_policy: open` 下会由「拒」变「放」，`allow:mcp.x` 在 deny 模式下会一律 126），需按别名改写。包声明面改为包根 `manifest.json` 的 `host` 段（pod 只解释 `host`，显式忽略 `ui`）；包内不得声明 `cwd` / `env` / `no_sandbox`（设备 owner 专属，经 `commands config` 授予）。
+- **修掉运行期定义表的无锁读（并发致命错误）**：`commands remove` 读 `runtime` map 时未持 `rebuildMu`，与 `commands add` 的写并发时触发 Go 运行时 `concurrent map read and map write`——不可 recover，整个 pod 进程直接死。读改走加锁访问器 `commandHub.hasRuntime`，并补并发回归用例 `libs/host/command_hub_concurrency_test.go`（须带 `-race` 跑：去掉锁后 race detector 稳定报出读写竞争）。
+- **修掉两处既有缺陷**：① `commands uninstall` 旧实现先删状态再清理，任一步失败即留下「状态已删、命令与常驻进程仍在」且重试无效（`not installed`）——改为无论如何重建注册表并聚合三个错误；② 技能包里 `url` 型远程 MCP 命令此前因 `mcpConfig()` 无条件带 `cwd`（技能命令恒为包目录）而被判「process settings require command」，永远注册不上——`cwd` 改到只对 `run` 型生效。
+- 测试同步：被删的 `services_concurrency_test.go` / `mcp_alias_gate_test.go` 由 `command_unified_test.go` 的 `TestUnifiedAliasPermissionGate`（别名门覆盖调用/生命周期/参数表）与新增的 hub 并发用例接管。
+- 文档：`README.md` / `README.en.md` 的构建段同步预装包现状——pod 内嵌 browser/cua 的包内容用于启动定版，不再是「不嵌入任何技能包」；发行包附带预编译设备程序。
+
 ## v0.9.8 — 2026-11-01
 
 - **pod 不再内置任何包的专属代码与配置（cua/blender 沦为普通第三方包，官方预装）**：

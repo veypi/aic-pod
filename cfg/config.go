@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/veypi/aic-pod/libs/mcpx"
 	"github.com/veypi/vigo/flags"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -72,13 +71,12 @@ type CommandDefConfig struct {
 }
 
 type Options struct {
-	MCP           mcpx.Settings            `json:"mcp" yaml:"mcp" desc:"configured MCP services"`
-	Commands      map[string]CommandConfig `json:"commands,omitempty" yaml:"commands" desc:"registered process and MCP commands"`
+	Commands      map[string]CommandConfig    `json:"commands,omitempty" yaml:"commands" desc:"registered process and MCP commands"`
 	CommandConfig map[string]CommandDefConfig `json:"command_config,omitempty" yaml:"command_config" desc:"per-definition command configuration (env + sandbox policy), keyed by definition identity"`
-	Host          string                   `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
-	Key           string                   `json:"key" yaml:"key" desc:"device credential <host_id>.<vbase credential> (from platform device page)"`
-	WorkDir       string                   `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
-	ExecTimeout   string                   `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
+	Host          string                      `json:"host" yaml:"host" default:"https://ivec-ai.com" desc:"platform address (NATS endpoint inferred)"`
+	Key           string                      `json:"key" yaml:"key" desc:"device credential <host_id>.<vbase credential> (from platform device page)"`
+	WorkDir       string                      `json:"work_dir" yaml:"work_dir" desc:"working directory for exec (default: ~/aic)"`
+	ExecTimeout   string                      `json:"exec_timeout" yaml:"exec_timeout" default:"30m" desc:"exec background timeout"`
 	// HomePath 默认打开地址（desktop 启动/托盘打开时加载 host+HomePath）：
 	// 必须为 / 开头的路径（如 /、/a、/agents），默认 /。
 	HomePath string `json:"home_path" yaml:"home_path" default:"/" desc:"default page path to open on platform (must start with /)"`

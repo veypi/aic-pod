@@ -263,7 +263,7 @@ func waitIdleRelease(t *testing.T, manager *Manager, name string) {
 }
 
 func TestManagerRejectsInvalidConfiguration(t *testing.T) {
-	for _, cfg := range []Config{{}, {Command: "tool", URL: "https://example.test/mcp"}, {Command: "tool", Cwd: "relative"}, {URL: "file:///tmp/mcp"}, {URL: "https://example.test/mcp", Env: map[string]string{"TOKEN": "secret"}}, {Command: "tool", IdleTimeout: "soon"}, {Command: "tool", IdleTimeout: "-1m"}} {
+	for _, cfg := range []Config{{}, {Command: "tool", URL: "https://example.test/mcp"}, {Command: "tool", Cwd: "relative"}, {URL: "file:///tmp/mcp"}, {URL: "tcp://127.0.0.1:9000/mcp"}, {URL: "https://example.test/mcp", Env: map[string]string{"TOKEN": "secret"}}, {Command: "tool", IdleTimeout: "soon"}, {Command: "tool", IdleTimeout: "-1m"}} {
 		if _, err := NewManager(map[string]Config{"fixture": cfg}, Options{Processes: vbox.NewManager()}); err == nil {
 			t.Fatalf("accepted %+v", cfg)
 		}

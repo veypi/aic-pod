@@ -116,6 +116,25 @@ func TestUnifiedMCPCommand(t *testing.T) {
 	if !strings.Contains(result.Content, "pong") {
 		t.Fatalf("MCP output = %q", result.Content)
 	}
+	c.cmds.mu.RLock()
+	manager := c.cmds.managers["mcp-test"]
+	c.cmds.mu.RUnlock()
+	if _, err := runHostCommandManagement(t, c, "stop", "mcp-test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range manager.Status() {
+		if status.Name == "mcp-test" && status.Running {
+			t.Fatal("commands stop left the MCP session running")
+		}
+	}
+	if _, err := runHostCommandManagement(t, c, "start", "mcp-test"); err != nil {
+		t.Fatal(err)
+	}
+	response = callTool(t, c, context.Background(), testCaller(), execRequest("mcp-test ping", 30000))
+	result = decoded[protocol.Output](t, response.Result)
+	if !strings.Contains(result.Content, "pong") {
+		t.Fatalf("MCP restart output = %q", result.Content)
+	}
 }
 
 func writeTestPackage(t *testing.T, root, skillID, program, addressEnv string) {
@@ -124,10 +143,108 @@ func writeTestPackage(t *testing.T, root, skillID, program, addressEnv string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := fmt.Sprintf(`{"schema":1,"commands":{"shared":{"run":[%q]}},"streams":{"view":{"command":"shared","address_env":%q}}}`, program, addressEnv)
+	manifest := fmt.Sprintf(`{"schema":1,"host":{"shared":{"run":[%q],"streams":{"view":{"address_env":%q}}}}}`, program, addressEnv)
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestUnifiedManifestUIAndHost(t *testing.T) {
+	t.Run("ui validated by shared parser but ignored by pod", func(t *testing.T) {
+		manifest, err := parseCommandManifest([]byte(`{"schema":1,"ui":{"pages":{"index":{"desc":"主页"}}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defs, err := skillCommands("private", t.TempDir(), 1, manifest)
+		if err != nil || len(defs) != 0 {
+			t.Fatalf("ui produced host commands: defs=%+v err=%v", defs, err)
+		}
+		// UI 契约只有一份（aic-skills/manifest）：非法 UI 在 pod 侧同样整包拒绝。
+		if _, err := parseCommandManifest([]byte(`{"schema":1,"ui":{"pages":[{"path":"/view"}]}}`)); err == nil {
+			t.Fatal("invalid ui declaration was accepted")
+		}
+	})
+
+	t.Run("empty host", func(t *testing.T) {
+		manifest, err := parseCommandManifest([]byte(`{"schema":1,"host":{}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defs, err := skillCommands("private", t.TempDir(), 1, manifest)
+		if err != nil || len(defs) != 0 {
+			t.Fatalf("empty host: defs=%+v err=%v", defs, err)
+		}
+	})
+
+	t.Run("host only", func(t *testing.T) {
+		root := t.TempDir()
+		manifest, err := parseCommandManifest([]byte(`{"schema":1,"host":{"hello":{"run":["bin/hello"]},"remote":{"url":"http://127.0.0.1:9000/mcp","protocol":"mcp","idle_timeout":"30m"}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defs, err := skillCommands("private", root, 7, manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hello := defs["skill:private:hello"]
+		if hello == nil || hello.Alias != "hello" || hello.Order != 7 || hello.Config.Run[0] != filepath.Join(root, "bin", "hello") {
+			t.Fatalf("hello definition = %+v", hello)
+		}
+		remote := defs["skill:private:remote"]
+		if remote == nil || remote.Config.URL != "http://127.0.0.1:9000/mcp" || remote.Config.Protocol != "mcp" || remote.Config.IdleTimeout != "30m" {
+			t.Fatalf("remote definition = %+v", remote)
+		}
+	})
+
+	t.Run("ui and host", func(t *testing.T) {
+		manifest, err := parseCommandManifest([]byte(`{"schema":1,"ui":{"pages":{"index":{}}},"host":{"hello":{"run":["hello"]}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defs, err := skillCommands("private", t.TempDir(), 1, manifest)
+		if err != nil || len(defs) != 1 || defs["skill:private:hello"] == nil {
+			t.Fatalf("ui affected host commands: defs=%+v err=%v", defs, err)
+		}
+	})
+
+	t.Run("nested streams", func(t *testing.T) {
+		manifest, err := parseCommandManifest([]byte(`{"schema":1,"host":{"raw":{"run":["raw"],"idle_timeout":"30m","streams":{"view":{"address_env":"RAW_VIEW_ADDR"},"control":{"address_env":"RAW_CONTROL_ADDR"}}}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defs, err := skillCommands("private", t.TempDir(), 1, manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		def := defs["skill:private:raw"]
+		if def == nil || len(def.Streams) != 2 || def.Streams["view"].AddressEnv != "RAW_VIEW_ADDR" || def.Streams["control"].AddressEnv != "RAW_CONTROL_ADDR" {
+			t.Fatalf("nested streams = %+v", def)
+		}
+	})
+
+	t.Run("remote endpoint rejects userinfo and fragment", func(t *testing.T) {
+		for _, data := range []string{
+			`{"schema":1,"host":{"remote":{"url":"http://user:pass@127.0.0.1:9000/mcp","protocol":"mcp"}}}`,
+			`{"schema":1,"host":{"remote":{"url":"http://127.0.0.1:9000/mcp#frag","protocol":"mcp"}}}`,
+			`{"schema":1,"host":{"remote":{"url":"http:///mcp","protocol":"mcp"}}}`,
+		} {
+			if _, err := parseCommandManifest([]byte(data)); err == nil {
+				t.Fatalf("unsafe endpoint was accepted: %s", data)
+			}
+		}
+	})
+
+	t.Run("old cross structures rejected", func(t *testing.T) {
+		for _, data := range []string{
+			`{"schema":1,"commands":{"hello":{"run":["hello"]}}}`,
+			`{"schema":1,"streams":{"view":{"command":"raw","address_env":"RAW_ADDR"}}}`,
+			`{"schema":1,"host":{"raw":{"run":["raw"],"streams":{"view":{"command":"raw","address_env":"RAW_ADDR"}}}}}`,
+		} {
+			if _, err := parseCommandManifest([]byte(data)); err == nil {
+				t.Fatalf("old or cross-referencing manifest was accepted: %s", data)
+			}
+		}
+	})
 }
 
 func TestUnifiedCommandConfigSurface(t *testing.T) {
@@ -317,7 +434,7 @@ func TestUnifiedPackageInstallUpdateUninstall(t *testing.T) {
 	c, _ := testClient(t)
 	c.commandPackages = t.TempDir()
 	payload := map[string]string{
-		"manifest.json": `{"schema":1,"commands":{"hello":{"run":["bin/hello"]}}}`,
+		"manifest.json": `{"schema":1,"host":{"hello":{"run":["bin/hello"]}}}`,
 		"bin/hello":     "source",
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +474,7 @@ func TestUnifiedPackageInstallUpdateUninstall(t *testing.T) {
 	}
 	// 语义非法的更新必须在替换现有包之前拒绝，不能污染后续 reload。
 	payload = map[string]string{
-		"manifest.json": `{"schema":1,"commands":{"broken":{}}}`,
+		"manifest.json": `{"schema":1,"host":{"broken":{}}}`,
 	}
 	if err := c.installCommandPackage(context.Background(), "private-package"); err == nil {
 		t.Fatal("semantically invalid package update was accepted")
@@ -366,7 +483,7 @@ func TestUnifiedPackageInstallUpdateUninstall(t *testing.T) {
 		t.Fatalf("invalid update poisoned the installed package state: %v", err)
 	}
 	payload = map[string]string{
-		"manifest.json": `{"schema":1,"commands":{"hello2":{"run":["bin/hello2"]}}}`,
+		"manifest.json": `{"schema":1,"host":{"hello2":{"run":["bin/hello2"]}}}`,
 		"bin/hello2":    "new-source",
 	}
 	if err := c.installCommandPackage(context.Background(), "private-package"); err != nil {
@@ -383,6 +500,43 @@ func TestUnifiedPackageInstallUpdateUninstall(t *testing.T) {
 	}
 	if _, ok := c.cmds.definition("hello2"); ok {
 		t.Fatal("command survived uninstall")
+	}
+}
+
+func TestUnifiedUninstallReloadsAfterConfigCleanupFailure(t *testing.T) {
+	c, _ := testClient(t)
+	c.commandPackages = t.TempDir()
+	packageRoot := filepath.Join(c.commandPackages, "private-package")
+	if err := os.MkdirAll(packageRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema":1,"host":{"hello":{"run":["bin/hello"]}}}`
+	if err := os.WriteFile(filepath.Join(packageRoot, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := commandPackageState{NextOrder: 2, Packages: map[string]commandPackageRecord{
+		"private-package": {SkillID: "private-package", Order: 1, Revision: 1},
+	}}
+	if err := c.saveCommandPackageState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.cmds.reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.cmds.definition("hello"); !ok {
+		t.Fatal("test package was not registered")
+	}
+	// 让 ~/.aic/config.yaml 的父路径成为普通文件，强制配置清理失败。
+	homeFile := filepath.Join(t.TempDir(), "home-file")
+	if err := os.WriteFile(homeFile, []byte("not-a-directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeFile)
+	if err := c.uninstallCommandPackage("private-package"); err == nil {
+		t.Fatal("expected config cleanup failure")
+	}
+	if _, ok := c.cmds.definition("hello"); ok {
+		t.Fatal("uninstalled command remained active after config cleanup failure")
 	}
 }
 
@@ -455,11 +609,7 @@ func TestUnifiedPackageRejectsPathEscape(t *testing.T) {
 }
 
 func TestUnifiedManifestRejectsOwnerPolicy(t *testing.T) {
-	manifest, err := parseCommandManifest([]byte(`{"schema":1,"commands":{"x":{"run":["x"],"no_sandbox":true}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := skillCommands("private", t.TempDir(), 1, manifest); err == nil {
+	if _, err := parseCommandManifest([]byte(`{"schema":1,"host":{"x":{"run":["x"],"no_sandbox":true}}}`)); err == nil {
 		t.Fatal("skill manifest accepted no_sandbox")
 	}
 	empty := &hostCommand{Alias: "empty", Config: cfg.CommandConfig{Run: []string{""}}}
@@ -487,7 +637,7 @@ func TestUnifiedAliasPermissionGate(t *testing.T) {
 	if out := run("commands add gate-test --protocol mcp --url " + endpoint.URL); out.Attrs["exit_code"] != "0" {
 		t.Fatalf("management grant did not allow add: %+v", out.Attrs)
 	}
-	for _, script := range []string{"gate-test ping", "commands start gate-test", "commands mcp gate-test tools", "commands info gate-test --schema"} {
+	for _, script := range []string{"gate-test ping", "commands start gate-test", "commands info gate-test --schema"} {
 		if out := run(script); out.Attrs["exit_code"] != "126" {
 			t.Fatalf("%s bypassed alias gate: %+v", script, out.Attrs)
 		}
@@ -499,7 +649,7 @@ func TestUnifiedAliasPermissionGate(t *testing.T) {
 		t.Fatal("unauthorized schema inspection started the MCP process")
 	}
 	c.perms.grantCmd("s1", "gate-test")
-	for _, script := range []string{"gate-test ping", "commands mcp gate-test tools", "commands info gate-test --schema"} {
+	for _, script := range []string{"gate-test ping", "commands info gate-test --schema"} {
 		if out := run(script); out.Attrs["exit_code"] != "0" {
 			t.Fatalf("authorized %s failed: %+v", script, out.Attrs)
 		}
@@ -535,12 +685,22 @@ func TestPreserveCommandPackageArtifacts(t *testing.T) {
 }
 
 func TestUnifiedManifestRejectsDuplicateStreamAddressEnv(t *testing.T) {
-	manifest, err := parseCommandManifest([]byte(`{"schema":1,"commands":{"raw":{"run":["raw"]}},"streams":{"one":{"command":"raw","address_env":"RAW_ADDR"},"two":{"command":"raw","address_env":"RAW_ADDR"}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := skillCommands("private", t.TempDir(), 1, manifest); err == nil {
+	if _, err := parseCommandManifest([]byte(`{"schema":1,"host":{"raw":{"run":["raw"],"streams":{"one":{"address_env":"RAW_ADDR"},"two":{"address_env":"RAW_ADDR"}}}}}`)); err == nil {
 		t.Fatal("streams sharing one address_env were accepted")
+	}
+}
+
+func TestUnifiedManifestRejectsInvalidHostRuntimeConfig(t *testing.T) {
+	for _, data := range []string{
+		`{"schema":1,"host":{"x":{"run":["x"],"protocol":"mcp","idle_timeout":"0s"}}}`,
+		`{"schema":1,"host":{"x":{"run":["x"],"protocol":"mcp","idle_timeout":"-1s"}}}`,
+		`{"schema":1,"host":{"x":{"url":" ","protocol":"mcp"}}}`,
+		`{"schema":1,"host":{"x":{"url":"not a url","protocol":"mcp"}}}`,
+		`{"schema":1,"host":{"x":{"url":"tcp://127.0.0.1:9000","protocol":"mcp"}}}`,
+	} {
+		if _, err := parseCommandManifest([]byte(data)); err == nil {
+			t.Fatalf("invalid host runtime config was accepted: %s", data)
+		}
 	}
 }
 

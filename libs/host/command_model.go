@@ -1,17 +1,16 @@
 package host
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/mcpx"
+	skillmanifest "github.com/veypi/aic-skills/manifest"
 )
 
 const (
@@ -19,14 +18,18 @@ const (
 	commandSourceConfig = "config"
 )
 
+// commandManifest 是权威解析结果在 pod 侧的投影：UI 由平台其他层消费，
+// pod 只取 Host。解析与校验统一走 aic-skills/manifest（UI 声明同契约校验）。
 type commandManifest struct {
-	Schema   int                          `json:"schema"`
-	Commands map[string]cfg.CommandConfig `json:"commands"`
-	Streams  map[string]manifestStream    `json:"streams,omitempty"`
+	Host map[string]manifestHost
+}
+
+type manifestHost struct {
+	cfg.CommandConfig
+	Streams map[string]manifestStream `json:"streams,omitempty"`
 }
 
 type manifestStream struct {
-	Command    string `json:"command"`
 	AddressEnv string `json:"address_env"`
 }
 
@@ -119,13 +122,13 @@ func (d *hostCommand) mcpConfig() mcpx.Config {
 	cfg := mcpx.Config{
 		URL:         d.Config.URL,
 		IdleTimeout: d.Config.IdleTimeout,
-		Cwd:         d.cwd(),
 		Env:         d.environment(),
 		NoSandbox:   d.noSandbox(),
 	}
 	if len(d.Config.Run) > 0 {
 		cfg.Command = d.Config.Run[0]
 		cfg.Args = append([]string(nil), d.Config.Run[1:]...)
+		cfg.Cwd = d.cwd()
 	}
 	return cfg
 }
@@ -133,27 +136,30 @@ func (d *hostCommand) mcpConfig() mcpx.Config {
 var addressEnvPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func parseCommandManifest(data []byte) (*commandManifest, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var m commandManifest
-	if err := dec.Decode(&m); err != nil {
+	parsed, err := skillmanifest.Parse(data)
+	if err != nil {
 		return nil, err
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("manifest contains trailing JSON")
+	out := &commandManifest{Host: make(map[string]manifestHost, len(parsed.Host))}
+	for alias, service := range parsed.Host {
+		host := manifestHost{CommandConfig: cfg.CommandConfig{
+			Run: service.Run, URL: service.URL, Protocol: service.Protocol, IdleTimeout: service.IdleTimeout,
+		}}
+		if len(service.Streams) > 0 {
+			host.Streams = make(map[string]manifestStream, len(service.Streams))
+			for name, stream := range service.Streams {
+				host.Streams[name] = manifestStream{AddressEnv: stream.AddressEnv}
+			}
+		}
+		out.Host[alias] = host
 	}
-	if m.Schema != 1 {
-		return nil, fmt.Errorf("unsupported manifest schema %d", m.Schema)
-	}
-	if len(m.Commands) == 0 {
-		return nil, fmt.Errorf("manifest commands is empty")
-	}
-	return &m, nil
+	return out, nil
 }
 
 func skillCommands(skillID, root string, order uint64, m *commandManifest) (map[string]*hostCommand, error) {
-	defs := make(map[string]*hostCommand, len(m.Commands))
-	for alias, config := range m.Commands {
+	defs := make(map[string]*hostCommand, len(m.Host))
+	for alias, host := range m.Host {
+		config := host.CommandConfig
 		if err := mcpx.ValidateAlias(alias); err != nil {
 			return nil, err
 		}
@@ -165,30 +171,26 @@ func skillCommands(skillID, root string, order uint64, m *commandManifest) (map[
 			config.Run[0] = filepath.Join(root, filepath.FromSlash(config.Run[0]))
 		}
 		id := "skill:" + skillID + ":" + alias
-		defs[id] = &hostCommand{
+		def := &hostCommand{
 			ID: id, Alias: alias, Source: commandSourceSkill, SkillID: skillID,
 			Order: order, Root: root, Config: config,
 		}
-	}
-	for name, stream := range m.Streams {
-		if !addressEnvPattern.MatchString(stream.AddressEnv) {
-			return nil, fmt.Errorf("stream %s: invalid address_env %q", name, stream.AddressEnv)
+		for name, stream := range host.Streams {
+			if !addressEnvPattern.MatchString(stream.AddressEnv) {
+				return nil, fmt.Errorf("stream %s: invalid address_env %q", name, stream.AddressEnv)
+			}
+			if !addressEnvPattern.MatchString(name) {
+				return nil, fmt.Errorf("stream name %q is invalid", name)
+			}
+			if len(config.Run) == 0 {
+				return nil, fmt.Errorf("stream %s: command %q must use run", name, alias)
+			}
+			if def.Streams == nil {
+				def.Streams = map[string]hostStream{}
+			}
+			def.Streams[name] = hostStream{Name: name, AddressEnv: stream.AddressEnv}
 		}
-		if !addressEnvPattern.MatchString(name) {
-			return nil, fmt.Errorf("stream name %q is invalid", name)
-		}
-		id := "skill:" + skillID + ":" + stream.Command
-		def := defs[id]
-		if def == nil {
-			return nil, fmt.Errorf("stream %s: command %q is not declared in the same manifest", name, stream.Command)
-		}
-		if len(def.Config.Run) == 0 {
-			return nil, fmt.Errorf("stream %s: command %q must use run", name, stream.Command)
-		}
-		if def.Streams == nil {
-			def.Streams = map[string]hostStream{}
-		}
-		def.Streams[name] = hostStream{Name: name, AddressEnv: stream.AddressEnv}
+		defs[id] = def
 	}
 	for _, def := range defs {
 		addressOwners := map[string]string{}
@@ -231,6 +233,18 @@ func validateHostCommand(d *hostCommand) error {
 	if d.Config.Protocol == "mcp" {
 		if err := d.mcpConfig().Validate(d.Alias); err != nil {
 			return err
+		}
+	}
+	if d.Config.URL != "" {
+		// 远程端点没有进程：cwd/env 只对 run 型命令有意义，不接受静默丢弃。
+		// （远程 MCP 的 header/token 注入是下一阶段的能力。）
+		if d.Config.Cwd != "" || len(d.Config.Env) > 0 {
+			return fmt.Errorf("command %s: cwd/env require a run-based command", d.Alias)
+		}
+		u, err := url.Parse(d.Config.URL)
+		if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" ||
+			(u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("command %s: MCP endpoint must be a plain http(s) URL without userinfo or fragment", d.Alias)
 		}
 	}
 	if d.cwd() != "" && !filepath.IsAbs(d.cwd()) {

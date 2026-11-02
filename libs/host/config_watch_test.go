@@ -3,57 +3,72 @@ package host
 import (
 	"testing"
 
-	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/cfg"
 )
 
-// 配置热加载的差异应用：文件来源的服务集合变化必须落到运行态，
-// 进程级注册的服务不受影响。
-func TestApplyServiceSetRegistersReplacesAndRemoves(t *testing.T) {
+// 配置热加载统一走 commands/command_config；运行期未落盘命令不受文件重载影响。
+func TestReloadCommandConfigRegistersReplacesAndRemoves(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c, _ := testClient(t)
-	c.svc.mu.Lock()
-	c.svc.fileServices = map[string]mcpx.Config{}
-	c.svc.mu.Unlock()
-
-	first := mcpx.Config{Command: "/bin/echo", Args: []string{"hi"}}
-	if err := c.applyServiceSet(map[string]mcpx.Config{"fixture": first}); err != nil {
-		t.Fatalf("apply add: %v", err)
+	first := cfg.CommandConfig{Run: []string{"/bin/echo"}, Protocol: "mcp"}
+	if err := cfg.Save(&cfg.Options{Commands: map[string]cfg.CommandConfig{"fixture": first}}); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := c.svc.registry.Lookup("fixture"); !ok {
-		t.Fatal("service was not registered as a vsh command")
+	if err := c.reloadCommandConfig(); err != nil {
+		t.Fatalf("reload add: %v", err)
 	}
+	if !c.cmds.has("fixture") {
+		t.Fatal("configured MCP service was not registered as a vsh command")
+	}
+	c.cmds.mu.RLock()
+	oldManager := c.cmds.managers["fixture"]
+	c.cmds.mu.RUnlock()
 
-	// 姿态变化 = 配置变化：服务重装（no_sandbox 是第三方浏览器类服务的前提）。
+	// 姿态变化 = 定义变化：只替换该命令的 manager。
 	second := first
 	second.NoSandbox = true
-	if err := c.applyServiceSet(map[string]mcpx.Config{"fixture": second}); err != nil {
-		t.Fatalf("apply replace: %v", err)
+	if err := cfg.Save(&cfg.Options{Commands: map[string]cfg.CommandConfig{"fixture": second}}); err != nil {
+		t.Fatal(err)
 	}
-	current := c.fileServices()
-	if !current["fixture"].NoSandbox {
-		t.Fatal("posture change did not land")
+	if err := c.reloadCommandConfig(); err != nil {
+		t.Fatalf("reload replace: %v", err)
+	}
+	c.cmds.mu.RLock()
+	newManager := c.cmds.managers["fixture"]
+	def := c.cmds.active["fixture"]
+	c.cmds.mu.RUnlock()
+	if newManager == oldManager || !def.noSandbox() {
+		t.Fatal("command posture change did not land")
 	}
 
-	// 配置删除 → 服务摘除。
-	if err := c.applyServiceSet(map[string]mcpx.Config{}); err != nil {
-		t.Fatalf("apply remove: %v", err)
+	if err := cfg.Save(&cfg.Options{}); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := c.svc.registry.Lookup("fixture"); ok {
-		t.Fatal("service was not removed")
+	if err := c.reloadCommandConfig(); err != nil {
+		t.Fatalf("reload remove: %v", err)
+	}
+	if c.cmds.has("fixture") {
+		t.Fatal("removed configured command is still registered")
 	}
 }
 
-// 禁用的条目不进入运行态（内置项禁用走同一条路）。
-func TestApplyServiceSetSkipsDisabled(t *testing.T) {
+func TestReloadCommandConfigPreservesRuntimeCommands(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c, _ := testClient(t)
-	c.svc.mu.Lock()
-	c.svc.fileServices = map[string]mcpx.Config{}
-	c.svc.mu.Unlock()
-
-	disabled := mcpx.Config{Command: "/bin/echo", Disabled: true}
-	if err := c.applyServiceSet(map[string]mcpx.Config{"fixture": disabled}); err != nil {
-		t.Fatalf("apply disabled: %v", err)
+	def := &hostCommand{
+		ID: "config:runtime", Alias: "runtime", Source: commandSourceConfig,
+		Config: cfg.CommandConfig{URL: "https://example.test/mcp", Protocol: "mcp"},
 	}
-	if _, ok := c.svc.registry.Lookup("fixture"); ok {
-		t.Fatal("disabled service must not be registered")
+	if err := c.cmds.upsertRuntime(def); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(&cfg.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.reloadCommandConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.cmds.has("runtime") {
+		t.Fatal("file reload removed a process-level runtime command")
 	}
 }

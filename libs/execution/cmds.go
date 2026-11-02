@@ -14,7 +14,6 @@ import (
 // 报错（命令存在、help 自答、执行提示该端不可用）。Tasks 由 NewEngine 自动
 // 接线，调用方无需填。
 type PlatformDeps struct {
-	MCP commands.CommandFunc
 	// Tasks 后台任务登记表（引擎注入）。
 	Tasks *TaskTable
 	// Discoverable 命令发现展示过滤（§2.2 展示过滤，不是执行白名单）：
@@ -46,9 +45,6 @@ type SSHDeps struct {
 func RegisterPlatformCommands(reg *commands.Registry, deps PlatformDeps) error {
 	list := []commands.Command{commands.DefineCommand("commands", deps.cmdCommands)}
 	add := func(name string, fn commands.CommandFunc) { list = append(list, commands.DefineCommand(name, fn)) }
-	if deps.MCP != nil {
-		add("mcp", deps.MCP)
-	}
 	if deps.Tasks != nil {
 		add("bg", deps.cmdBG)
 	}

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/veypi/aic-pod/protocol"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -45,30 +44,22 @@ var echoSchema = json.RawMessage(`{
   "required": ["text"]
 }`)
 
-func newFixture(t *testing.T, gate Gate) (*Registry, *fakeProvider) {
+func newFixture(t *testing.T) *fakeProvider {
 	t.Helper()
-	p := &fakeProvider{
+	return &fakeProvider{
 		tools: []Tool{
 			{Name: "echo", Description: "回显", InputSchema: echoSchema},
 			{Name: "ping", Description: ""},
 		},
 		result: map[string]any{"ok": true},
 	}
-	r := NewRegistry(commands.NewRegistry(), Options{StreamGate: gate})
-	if err := r.Register("echo", p); err != nil {
-		t.Fatal(err)
-	}
-	return r, p
 }
 
-func run(t *testing.T, r *Registry, alias string, args ...string) (string, string, error) {
+// run 直接走调用内核；注册/撞名由 command hub 的测试覆盖。
+func run(t *testing.T, p Provider, alias string, args ...string) (string, string, error) {
 	t.Helper()
-	cmd, ok := r.cmds.Lookup(alias)
-	if !ok {
-		t.Fatalf("command %q not registered", alias)
-	}
 	var out, errBuf strings.Builder
-	err := cmd.Run(context.Background(), &commands.Invocation{Args: args, Stdout: &out, Stderr: &errBuf})
+	err := RunProvider(context.Background(), &commands.Invocation{Args: args, Stdout: &out, Stderr: &errBuf}, alias, p)
 	return out.String(), errBuf.String(), err
 }
 
@@ -78,36 +69,20 @@ func exitCode(err error) int {
 }
 
 func TestCommandCatalog(t *testing.T) {
-	r, _ := newFixture(t, nil)
-	out, _, err := run(t, r, "echo")
+	p := newFixture(t)
+	out, _, err := run(t, p, "echo")
 	if err != nil || !strings.Contains(out, "echo\t回显") || !strings.Contains(out, "ping") {
 		t.Fatalf("catalog: %q %v", out, err)
 	}
-	out, _, err = run(t, r, "echo", "--json")
+	out, _, err = run(t, p, "echo", "--json")
 	if err != nil || !strings.Contains(out, `"inputSchema"`) {
 		t.Fatalf("catalog --json: %q %v", out, err)
 	}
 }
 
-func TestCommandExecutionDoesNotInvokeStreamGate(t *testing.T) {
-	called := false
-	r := NewRegistry(commands.NewRegistry(), Options{
-		StreamGate: func(context.Context, string, string) error { called = true; return nil },
-	})
-	if err := r.Register("echo", &fakeProvider{result: map[string]any{"ok": true}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := run(t, r, "echo", "ping"); err != nil {
-		t.Fatal(err)
-	}
-	if called {
-		t.Fatal("command execution invoked the RTC stream gate")
-	}
-}
-
 func TestCommandFlagMapping(t *testing.T) {
-	r, p := newFixture(t, nil)
-	if _, _, err := run(t, r, "echo", "echo", "--text", "hi", "--times", "3", "--ratio", "0.5", "--loud"); err != nil {
+	p := newFixture(t)
+	if _, _, err := run(t, p, "echo", "echo", "--text", "hi", "--times", "3", "--ratio", "0.5", "--loud"); err != nil {
 		t.Fatal(err)
 	}
 	args := p.calls[0].args
@@ -115,7 +90,7 @@ func TestCommandFlagMapping(t *testing.T) {
 		t.Fatalf("mapped args: %+v", args)
 	}
 	// --flag=value 与可空类型
-	if _, _, err := run(t, r, "echo", "echo", "--maybe=yo"); err != nil {
+	if _, _, err := run(t, p, "echo", "echo", "--maybe=yo"); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.calls[1].args["maybe"]; got != "yo" {
@@ -126,27 +101,27 @@ func TestCommandFlagMapping(t *testing.T) {
 // --flag= 显式空串必须能传给 string 参数（解析层曾把 --flag= 与裸 flag
 // 同映射为 raw==""，空串永远传不进去）；裸 --flag 仍报错。
 func TestCommandEmptyStringFlag(t *testing.T) {
-	r, p := newFixture(t, nil)
-	if _, _, err := run(t, r, "echo", "echo", "--text="); err != nil {
+	p := newFixture(t)
+	if _, _, err := run(t, p, "echo", "echo", "--text="); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := p.calls[0].args["text"]; !ok || got != "" {
 		t.Fatalf("--text= 应传空串: %+v", p.calls[0].args)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--maybe="); err != nil {
+	if _, _, err := run(t, p, "echo", "echo", "--maybe="); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.calls[1].args["maybe"]; got != "" {
 		t.Fatalf("--maybe= 应传空串: %+v", p.calls[1].args)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--text"); exitCode(err) != 2 || !strings.Contains(err.Error(), "requires a value") {
+	if _, _, err := run(t, p, "echo", "echo", "--text"); exitCode(err) != 2 || !strings.Contains(err.Error(), "requires a value") {
 		t.Fatalf("裸 string flag 仍应报错: %v", err)
 	}
 }
 
 func TestCommandInputMergeAndFlagOverride(t *testing.T) {
-	r, p := newFixture(t, nil)
-	if _, _, err := run(t, r, "echo", "echo", "--input", `{"text":"a","meta":{"k":1}}`, "--text", "b"); err != nil {
+	p := newFixture(t)
+	if _, _, err := run(t, p, "echo", "echo", "--input", `{"text":"a","meta":{"k":1}}`, "--text", "b"); err != nil {
 		t.Fatal(err)
 	}
 	args := p.calls[0].args
@@ -159,35 +134,35 @@ func TestCommandInputMergeAndFlagOverride(t *testing.T) {
 }
 
 func TestCommandFlagErrors(t *testing.T) {
-	r, _ := newFixture(t, nil)
-	if _, _, err := run(t, r, "echo", "echo", "--nope", "1"); exitCode(err) != 2 || !strings.Contains(err.Error(), "unknown flag --nope") {
+	p := newFixture(t)
+	if _, _, err := run(t, p, "echo", "echo", "--nope", "1"); exitCode(err) != 2 || !strings.Contains(err.Error(), "unknown flag --nope") {
 		t.Fatalf("unknown flag: %v", err)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--times", "soon"); exitCode(err) != 2 || !strings.Contains(err.Error(), "invalid integer") {
+	if _, _, err := run(t, p, "echo", "echo", "--times", "soon"); exitCode(err) != 2 || !strings.Contains(err.Error(), "invalid integer") {
 		t.Fatalf("integer: %v", err)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--meta", "{}"); exitCode(err) != 2 || !strings.Contains(err.Error(), "cannot be mapped to a flag") {
+	if _, _, err := run(t, p, "echo", "echo", "--meta", "{}"); exitCode(err) != 2 || !strings.Contains(err.Error(), "cannot be mapped to a flag") {
 		t.Fatalf("non-scalar must point at --input: %v", err)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--text"); exitCode(err) != 2 || !strings.Contains(err.Error(), "requires a value") {
+	if _, _, err := run(t, p, "echo", "echo", "--text"); exitCode(err) != 2 || !strings.Contains(err.Error(), "requires a value") {
 		t.Fatalf("bare string flag: %v", err)
 	}
-	if _, _, err := run(t, r, "echo", "echo", "--input", `[1]`); exitCode(err) != 2 {
+	if _, _, err := run(t, p, "echo", "echo", "--input", `[1]`); exitCode(err) != 2 {
 		t.Fatalf("non-object input: %v", err)
 	}
 }
 
 func TestCommandUnknownToolListsAvailable(t *testing.T) {
-	r, _ := newFixture(t, nil)
+	p := newFixture(t)
 	// 无 flag 时直达（不校验工具名，由服务方报错）；有 flag 时先校验并给可用面
-	if _, _, err := run(t, r, "echo", "ehco", "--text", "x"); exitCode(err) != 1 || !strings.Contains(err.Error(), "available: echo, ping") {
+	if _, _, err := run(t, p, "echo", "ehco", "--text", "x"); exitCode(err) != 1 || !strings.Contains(err.Error(), "available: echo, ping") {
 		t.Fatalf("unknown tool: %v", err)
 	}
 }
 
 func TestCommandToolHelp(t *testing.T) {
-	r, _ := newFixture(t, nil)
-	out, _, err := run(t, r, "echo", "echo", "--help")
+	p := newFixture(t)
+	out, _, err := run(t, p, "echo", "echo", "--help")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,10 +174,10 @@ func TestCommandToolHelp(t *testing.T) {
 }
 
 func TestCommandCallErrorRendersResult(t *testing.T) {
-	r, p := newFixture(t, nil)
+	p := newFixture(t)
 	p.result = map[string]any{"isError": true, "content": "boom"}
 	p.callErr = &CallError{Result: p.result}
-	out, _, err := run(t, r, "echo", "ping", "--json")
+	out, _, err := run(t, p, "echo", "ping", "--json")
 	if exitCode(err) != 1 || !strings.Contains(out, `"boom"`) {
 		t.Fatalf("CallError must render result with exit 1: %q %v", out, err)
 	}
@@ -210,8 +185,8 @@ func TestCommandCallErrorRendersResult(t *testing.T) {
 
 // --image-preview 支持性检查必须先于调用（不支持的 Provider 不应真跑工具）。
 func TestCommandPreviewPrecheckBeforeCall(t *testing.T) {
-	r, p := newFixture(t, nil)
-	if _, _, err := run(t, r, "echo", "ping", "--image-preview", "1280x720"); exitCode(err) != 2 || !strings.Contains(err.Error(), "does not support --image-preview") {
+	p := newFixture(t)
+	if _, _, err := run(t, p, "echo", "ping", "--image-preview", "1280x720"); exitCode(err) != 2 || !strings.Contains(err.Error(), "does not support --image-preview") {
 		t.Fatalf("preview gate: %v", err)
 	}
 	if len(p.calls) != 0 {
@@ -222,131 +197,24 @@ func TestCommandPreviewPrecheckBeforeCall(t *testing.T) {
 // 命令面保留 flag（--json/--input/--image-preview/--help）遮蔽同名工具参数：
 // 参数表给出提示，unknown-flag 的可映射清单不列保留名。
 func TestCommandReservedFlagShadowed(t *testing.T) {
-	r, _ := newFixture(t, nil)
 	p2 := &fakeProvider{tools: []Tool{{Name: "cfg", InputSchema: json.RawMessage(`{
 	  "type": "object",
 	  "properties": {"json": {"type": "string"}, "text": {"type": "string"}}
 	}`)}}}
-	if err := r.Register("cfg", p2); err != nil {
-		t.Fatal(err)
-	}
-	out, _, err := run(t, r, "cfg", "cfg", "--help")
+	out, _, err := run(t, p2, "cfg", "cfg", "--help")
 	if err != nil || !strings.Contains(out, "reserved flag name") {
 		t.Fatalf("tool help must mark reserved names: %q %v", out, err)
 	}
-	_, _, err = run(t, r, "cfg", "cfg", "--nope", "1")
+	_, _, err = run(t, p2, "cfg", "cfg", "--nope", "1")
 	if exitCode(err) != 2 || !strings.Contains(err.Error(), "--text") || strings.Contains(err.Error(), "--json ") {
 		t.Fatalf("mappable list must exclude reserved names: %v", err)
 	}
 	// 保留名参数走 --input 照常到达
-	if _, _, err := run(t, r, "cfg", "cfg", "--input", `{"json":"v"}`); err != nil {
+	if _, _, err := run(t, p2, "cfg", "cfg", "--input", `{"json":"v"}`); err != nil {
 		t.Fatal(err)
 	}
 	if got := p2.calls[0].args["json"]; got != "v" {
 		t.Fatalf("reserved-named arg via --input: %+v", p2.calls[0].args)
-	}
-}
-
-// ---- Registry 生命周期 ----
-
-func TestRegistryLifecycle(t *testing.T) {
-	r, _ := newFixture(t, nil)
-	if !r.Has("echo") {
-		t.Fatal("registered service missing")
-	}
-	if err := r.Register("echo", &fakeProvider{}); err == nil {
-		t.Fatal("duplicate Register accepted")
-	}
-	if err := r.Register("bad name!", &fakeProvider{}); err == nil {
-		t.Fatal("invalid alias accepted")
-	}
-	// 撞内建名即拒
-	if err := r.cmds.RegisterGuarded(commands.DefineCommand("taken", nil)); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Register("taken", &fakeProvider{}); err == nil {
-		t.Fatal("name collision with built-in accepted")
-	}
-	r.Unregister("echo")
-	if r.Has("echo") {
-		t.Fatal("unregistered service still present")
-	}
-	if _, ok := r.cmds.Lookup("echo"); ok {
-		t.Fatal("vsh command still resolves after Unregister")
-	}
-	r.Unregister("echo") // 幂等
-	aliases := r.Aliases()
-	if len(aliases) != 0 {
-		t.Fatalf("aliases: %v", aliases)
-	}
-}
-
-type streamProvider struct {
-	fakeProvider
-	channel string
-}
-
-func (s *streamProvider) StreamChannel() string { return s.channel }
-
-func (s *streamProvider) Stream(context.Context, protocol.Caller, <-chan []byte, func([]byte) error) error {
-	return nil
-}
-
-// stream channel 标签撞名即拒（登记侧防护；Unregister 只摘自己的映射）。
-func TestRegistryStreamChannelCollision(t *testing.T) {
-	r, _ := newFixture(t, nil)
-	if err := r.Register("streamer", &streamProvider{channel: "aic-echo"}); err != nil {
-		t.Fatal(err)
-	}
-	// Provider 自带 Streamer 撞标签即拒
-	if err := r.Register("third", &streamProvider{channel: "aic-echo"}); err == nil {
-		t.Fatal("register with taken channel accepted")
-	}
-	if r.Has("third") {
-		t.Fatal("rejected registration left an entry")
-	}
-	// 标签仍属 streamer
-	if _, ok := r.StreamHandler("aic-echo"); !ok {
-		t.Fatal("original channel mapping lost")
-	}
-	r.Unregister("streamer")
-	if _, ok := r.StreamHandler("aic-echo"); ok {
-		t.Fatal("channel survived owner Unregister")
-	}
-	// 摘除后标签可重用
-	if err := r.Register("other", &streamProvider{channel: "aic-echo"}); err != nil {
-		t.Fatalf("channel reuse after unregister: %v", err)
-	}
-}
-
-func TestRegistryStreamHandler(t *testing.T) {
-	gated := false
-	var gateSession string
-	r, _ := newFixture(t, func(_ context.Context, session, _ string) error { gated = true; gateSession = session; return nil })
-	if err := r.Register("streamer", &streamProvider{channel: "aic-echo"}); err != nil {
-		t.Fatal(err)
-	}
-	relay, ok := r.StreamHandler("aic-echo")
-	if !ok {
-		t.Fatal("stream channel not registered")
-	}
-	if err := relay(context.Background(), protocol.Caller{Origin: "s1"}, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if !gated {
-		t.Fatal("stream open bypassed the gate")
-	}
-	// 流通道开门的会话键 = caller.Origin（peer ctx 不携带会话；用错键会让
-	// 会话级 grant cmd 在锁死设备上静默失效）
-	if gateSession != "s1" {
-		t.Fatalf("stream gate session = %q, want caller.Origin", gateSession)
-	}
-	if _, ok := r.StreamHandler("aic-other"); ok {
-		t.Fatal("unknown channel resolved")
-	}
-	r.Unregister("streamer")
-	if _, ok := r.StreamHandler("aic-echo"); ok {
-		t.Fatal("stream channel survived Unregister")
 	}
 }
 

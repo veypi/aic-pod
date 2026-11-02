@@ -14,7 +14,6 @@ import (
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostfs"
-	"github.com/veypi/aic-pod/libs/vtools"
 	"github.com/veypi/vsh/commands"
 )
 
@@ -27,9 +26,6 @@ func (c *Client) initTools() {
 		c.initErr = err
 		return
 	}
-	// vtools 登记表先于 configureMCP 创建：服务（MCP/TCP）登记为 vsh 根命令。
-	// 命令准入由 vsh 统一处理；独立 RTC 流通道保留自己的开启门。
-	c.svc.registry = vtools.NewRegistry(reg, vtools.Options{StreamGate: c.serviceStreamGate, Logf: c.logf})
 	// 平台命令先占位（RegisterGuarded 撞名即拒）：之后服务登记撞名只会被
 	// 拒并记日志跳过；反过来（服务先登记）会让撞名的平台命令注册失败、
 	// initErr 直接打挂整机（Connect 返回 initErr）。
@@ -37,28 +33,21 @@ func (c *Client) initTools() {
 	if c.initErr != nil {
 		return
 	}
-	c.initErr = c.configureMCP(c.options().MCP)
-	if c.initErr != nil {
-		return
-	}
-	// 配置热加载：文件来源的服务集合是差异基线；owner 改 config.yaml 的
-	// mcp.servers 段后运行期生效（姿态 no_sandbox、内置项禁用等）。
-	services := mcpServers(c.options().MCP.Servers)
-	c.svc.mu.Lock()
-	c.svc.fileServices = services
-	c.svc.mu.Unlock()
-	watchCtx, watchCancel := context.WithCancel(context.Background())
-	c.svc.mu.Lock()
-	c.svc.watchCancel = watchCancel
-	c.svc.mu.Unlock()
-	go c.watchServiceConfig(watchCtx)
-	// 新统一命令面只接管 host commands 管理入口；旧内建服务仍沿原路径，
-	// 私有包与设备 commands 配置在独立定义表中解析，不依赖旧 mcp.servers。
+	// 技能包与 owner 手工服务统一由 command hub 装配；MCP 只是其中一种协议。
 	c.cmds = newCommandHub(c, reg)
 	reg.Register(commands.DefineCommand("commands", c.cmdHostCommands))
+	// 官方设备包启动定版（browser/cua），必须在首次 reload 之前。
+	if err := c.preinstallCommandPackages(); err != nil {
+		c.logf("commands: preinstall failed: %v", err)
+	}
 	if err := c.cmds.reload(); err != nil {
 		c.logf("commands: initial registration failed: %v", err)
 	}
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	c.configWatch.mu.Lock()
+	c.configWatch.watchCancel = watchCancel
+	c.configWatch.mu.Unlock()
+	go c.watchCommandConfig(watchCtx)
 }
 
 // DisconnectTools 断连清理：取消该连接发起的前台执行（后台任务继续，

@@ -20,6 +20,7 @@ CLI_NAME    := aic-cli
 BIN_DIR     := dist
 MAIN_DIR    := ./cli
 DESKTOP_DIR := ./desktop
+SKILLS_DIR  := ../aic-skills
 DOCKER_IMAGE ?= veypi/aic-pod
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
@@ -59,6 +60,34 @@ cli-%:
 	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
 	GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o "$(BIN_DIR)/$(CLI_NAME)-$$os-$$arch$$ext" $(MAIN_DIR)
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$*"
+
+# 官方预装包（browser/cua）的设备程序：在 aic-skills 根模块内构建（设备上独立
+# 构建才需要 src/go.mod.example）。产物 = dist/skill-bin/<os>-<arch>/<pkg>/<pkg>[.exe]
+# + aic-skill-bin-<os>-<arch>.tar.gz（CLI 发行附带，解到 aic-cli 同目录即可）。
+# Pod 启动定版时把 <资源目录>/<pkg>/ 铺进包内 bin/（见 libs/host/command_preinstall.go）。
+skill-bin-%:
+	@os=$$(echo $* | cut -d- -f1); arch=$$(echo $* | cut -d- -f2-); \
+	out="$(abspath $(BIN_DIR))/skill-bin/$$os-$$arch"; \
+	rm -rf "$$out"; \
+	for pkg in browser cua; do \
+		ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+		mkdir -p "$$out/$$pkg"; \
+		(cd $(SKILLS_DIR) && GOOS=$$os GOARCH=$$arch go build -ldflags "-s -w" -o "$$out/$$pkg/$$pkg$$ext" ./$$pkg/src) || exit 1; \
+	done; \
+	stage="$(abspath $(BIN_DIR))/.skill-bin-pack-$$os-$$arch"; \
+	rm -rf "$$stage"; mkdir -p "$$stage"; cp -R "$$out" "$$stage/skill-bin"; \
+	tar -czf "$(abspath $(BIN_DIR))/aic-skill-bin-$$os-$$arch.tar.gz" -C "$$stage" skill-bin; \
+	rm -rf "$$stage"
+	@echo "→ $(BIN_DIR)/skill-bin/$* + aic-skill-bin-$*.tar.gz"
+
+skill-bin-all: skill-bin-linux-amd64 skill-bin-linux-arm64 skill-bin-darwin-amd64 skill-bin-darwin-arm64 skill-bin-windows-amd64
+
+# Desktop 随包资源（vendor/skill-bin 已 gitignore；extraResources → resources/skill-bin）
+skill-bin-desktop: skill-bin-$(GOHOSTOS)-$(GOHOSTARCH)
+	@rm -rf $(DESKTOP_DIR)/vendor/skill-bin
+	@mkdir -p $(DESKTOP_DIR)/vendor
+	@cp -R $(BIN_DIR)/skill-bin/$(GOHOSTOS)-$(GOHOSTARCH) $(DESKTOP_DIR)/vendor/skill-bin
+	@echo "→ $(DESKTOP_DIR)/vendor/skill-bin"
 
 # windows 资源（icon + version info，go-winres）
 cli-windows-amd64:
@@ -101,13 +130,13 @@ runtime-sync:
 desktop-version:
 	@node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('$(DESKTOP_DIR)/package.json','utf8'));p.version='$(VERSION)'.replace(/^v/,'');fs.writeFileSync('$(DESKTOP_DIR)/package.json',JSON.stringify(p,null,2)+'\n')"
 
-.PHONY: backend-bin desktop-deps desktop-version cua-sync runtime-sync
+.PHONY: backend-bin desktop-deps desktop-version cua-sync runtime-sync skill-bin-all skill-bin-desktop
 
 desktop-all: desktop-darwin-amd64 desktop-darwin-arm64 desktop-windows-amd64
 
 # macOS：dmg（electron-builder，arm64 runner 构建 arm64 / x64 runner 构建 x64）
 desktop-darwin-%:
-	$(MAKE) desktop-version backend-bin
+	$(MAKE) desktop-version backend-bin skill-bin-desktop
 	@arch=$$(echo $* | sed 's/amd64/x64/'); \
 	cd $(DESKTOP_DIR) && npx electron-builder --mac --$$arch
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
@@ -115,7 +144,7 @@ desktop-darwin-%:
 
 # Windows：NSIS exe（需 Windows runner / wine）
 desktop-windows-%:
-	$(MAKE) desktop-version backend-bin
+	$(MAKE) desktop-version backend-bin skill-bin-desktop
 	cd $(DESKTOP_DIR) && npx electron-builder --win
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@test -f $(BIN_DIR)/win-unpacked/resources/backend/aic-backend.exe || { echo "✗ 打包缺 resources/backend/aic-backend.exe（backend-bin 命名回归？）"; exit 1; }
@@ -123,7 +152,7 @@ desktop-windows-%:
 
 # Linux：AppImage（需 Linux runner）
 desktop-linux-%:
-	$(MAKE) desktop-version backend-bin
+	$(MAKE) desktop-version backend-bin skill-bin-desktop
 	cd $(DESKTOP_DIR) && npx electron-builder --linux
 	cd $(DESKTOP_DIR) && node scripts/check-asar.mjs
 	@echo "→ $(BIN_DIR)/aic-desktop-linux-$*.AppImage"
@@ -165,11 +194,11 @@ run-docker-test:
 # Release / Clean
 # ==============================================================================
 
-release: cli-all desktop-all
+release: cli-all skill-bin-all desktop-all
 	gh release create $(VERSION) \
 		--title "$(VERSION)" \
 		--generate-notes \
-		$(wildcard $(BIN_DIR)/aic-cli-* $(BIN_DIR)/aic-desktop-*)
+		$(wildcard $(BIN_DIR)/aic-cli-* $(BIN_DIR)/aic-desktop-* $(BIN_DIR)/aic-skill-bin-*)
 	@echo "→ GitHub release $(VERSION) created"
 
 clean:

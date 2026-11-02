@@ -3,10 +3,8 @@ package host
 import (
 	"context"
 	"encoding/json"
-	"github.com/veypi/aic-pod/protocol"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,55 +12,27 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/veypi/aic-pod/cfg"
-	"github.com/veypi/aic-pod/libs/mcpx"
+	"github.com/veypi/aic-pod/protocol"
 )
-
-func TestMCPServersAreOwnerConfiguredOnly(t *testing.T) {
-	// pod 不再内置任何服务默认项（cua/blender/browser 都是普通技能包）。
-	servers := mcpServers(nil)
-	if len(servers) != 0 {
-		t.Fatalf("pod must not ship built-in services: %+v", servers)
-	}
-	configured := map[string]mcpx.Config{
-		"cua":    {Disabled: true},
-		"custom": {URL: "https://example.test/mcp"},
-	}
-	servers = mcpServers(configured)
-	if !reflect.DeepEqual(servers, configured) {
-		t.Fatalf("owner overrides changed: %+v", servers)
-	}
-	// Disabled services require no command path and never start a process.
-	if _, err := optionsOf(cfg.Options{MCP: mcpx.Settings{Servers: configured}}, "cli", "test", t.Logf); err != nil {
-		t.Fatal(err)
-	}
-	c, _ := testClient(t)
-	if err := c.configureMCP(mcpx.Settings{Servers: configured}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.mcpManager().Session(context.Background(), "cua"); err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("disabled service started: %v", err)
-	}
-}
 
 func callTool(t *testing.T, c *Client, ctx context.Context, caller protocol.Caller, r protocol.Request) protocol.Response {
 	t.Helper()
 	r.Protocol = protocol.RtcProtocol
 	return c.HandleTool(ctx, caller, r)
 }
+
 func callNATS(t *testing.T, c *Client, subject string, raw []byte) protocol.Response {
 	t.Helper()
 	return c.HandleNATS(context.Background(), subject, raw)
 }
-func TestMCPHasNoPlatformServer(t *testing.T) {
-	saved := cfg.Global
-	cfg.Global = cfg.NewOptions()
-	cfg.Global.ExecPolicy = cfg.PolicyOpen
-	t.Cleanup(func() { cfg.Global = saved })
+
+func TestMCPCommandIsRemoved(t *testing.T) {
+	withGlobal(t, func(o *cfg.Options) { o.ExecPolicy = cfg.PolicyOpen })
 	c, _ := testClient(t)
 	response := callTool(t, c, context.Background(), testCaller(), execRequest("mcp tools aic", 30000))
 	out := decoded[protocol.Output](t, response.Result)
-	if response.Error != nil || out.Attrs["exit_code"] == "0" || !strings.Contains(out.Attrs["stderr"], "aic") {
-		t.Fatalf("unexpected unconfigured service result: %+v %+v", response, out)
+	if response.Error != nil || out.Attrs["exit_code"] != "127" {
+		t.Fatalf("removed mcp command still resolves: %+v %+v", response, out)
 	}
 	// The normal platform path still works with no configured MCP services.
 	if result := callTool(t, c, context.Background(), testCaller(), fsRequest("roots", map[string]any{})); result.Error != nil {
@@ -70,11 +40,8 @@ func TestMCPHasNoPlatformServer(t *testing.T) {
 	}
 }
 
-func TestMCPConfiguredServiceFromFileCommandAndUI(t *testing.T) {
-	saved := cfg.Global
-	cfg.Global = cfg.NewOptions()
-	cfg.Global.ExecPolicy, cfg.Global.NetPolicy = cfg.PolicyOpen, cfg.PolicyOpen
-	t.Cleanup(func() { cfg.Global = saved })
+func TestUnifiedMCPCommandFromHTTPAndCancellation(t *testing.T) {
+	withGlobal(t, func(o *cfg.Options) { o.ExecPolicy, o.NetPolicy = cfg.PolicyOpen, cfg.PolicyOpen })
 	var calls atomic.Int32
 	service := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
 	mcp.AddTool(service, &mcp.Tool{Name: "next", Description: "Increment service state"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
@@ -94,13 +61,13 @@ func TestMCPConfiguredServiceFromFileCommandAndUI(t *testing.T) {
 	endpoint := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return service }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, PropagateRequestCancellation: true}))
 	defer endpoint.Close()
 	c, _ := testClient(t)
-	if err := c.configureMCP(mcpx.Settings{Servers: map[string]mcpx.Config{"fixture": {URL: endpoint.URL}}}); err != nil {
+	if _, err := runHostCommandManagement(t, c, "add", "fixture", "--protocol", "mcp", "--url", endpoint.URL); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []int{1, 2, 3} {
 		caller := testCaller()
 		caller.Direct = want == 3 // UI uses the same exec path with a direct RTC caller.
-		response := callTool(t, c, context.Background(), caller, execRequest("mcp call fixture next --json", 30000))
+		response := callTool(t, c, context.Background(), caller, execRequest("fixture next --json", 30000))
 		output := decoded[protocol.Output](t, response.Result)
 		var result mcp.CallToolResult
 		if response.Error != nil || output.Attrs["exit_code"] != "0" || json.Unmarshal([]byte(output.Content), &result) != nil {
@@ -122,7 +89,7 @@ func TestMCPConfiguredServiceFromFileCommandAndUI(t *testing.T) {
 	defer stop()
 	caller := testCaller()
 	caller.Direct = true
-	request := execRequest("mcp call fixture wait --json", 30000)
+	request := execRequest("fixture wait --json", 30000)
 	finished := make(chan protocol.Response, 1)
 	go func() { finished <- callTool(t, c, ctx, caller, request) }()
 	select {
@@ -144,9 +111,20 @@ func TestMCPConfiguredServiceFromFileCommandAndUI(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("native cancellation did not reach MCP service")
 	}
-	response = callTool(t, c, ctx, caller, execRequest("mcp call fixture next --json", 30000))
+	response = callTool(t, c, ctx, caller, execRequest("fixture next --json", 30000))
 	out := decoded[protocol.Output](t, response.Result)
 	if response.Error != nil || out.Attrs["exit_code"] != "0" || calls.Load() != 4 {
 		t.Fatalf("service unusable after cancellation: %+v %+v", response, out)
+	}
+}
+
+func TestMCPCommandIsNotDiscoverable(t *testing.T) {
+	c, _ := testClient(t)
+	response := callTool(t, c, context.Background(), testCaller(), execRequest("commands", 30000))
+	out := decoded[protocol.Output](t, response.Result)
+	for _, line := range strings.Split(out.Content, "\n") {
+		if strings.TrimSpace(line) == "mcp" {
+			t.Fatal("removed mcp command is still discoverable")
+		}
 	}
 }

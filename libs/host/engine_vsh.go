@@ -101,16 +101,13 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			GrantStatus: c.vshGrantStatus,
 			SSH:         execution.SSHDeps{SSH: c.ssh.SSH, SCP: c.ssh.SCP, SFTP: c.ssh.SFTP},
 			// cloud 专属命令（sessions/list_hosts/send_user）由 AIC 自己注册。
-			// mcp 是服务管理面（list/add/remove/start/stop/restart + 调试直通）；
-			// 工具调用走服务自身的 vsh 根命令（vtools 登记，见 services.go）。
-			MCP: c.cmdMCP,
 			// pull/push：设备↔平台云盘传输（/fs/cloud HTTP 面；skill 命令已随
 			// NATS fetch 通道一并退役——包装载改用 pull，aic docs/reference/skill.md §9.2）。
 			Pull: c.cmdPull,
 			Push: c.cmdPush,
 
-			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令、已登记的服务
-			// 命令（vtools），外加名字不自明的 contrib 命令（html-to-markdown；
+			// 命令发现展示过滤（§2.2）：host 只展示核心自定义指令、统一登记的
+			// 服务命令，外加名字不自明的 contrib 命令（html-to-markdown；
 			// jq/awk 属通用命令不列）。
 			Discoverable: c.hostDiscoverable,
 		},
@@ -125,21 +122,14 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 
 func (c *Client) hostDiscoverable(name string) bool {
 	switch name {
-	case "commands", "bg", "grant", "mcp", "ssh", "scp", "sftp", "pull", "push", "html-to-markdown":
+	case "commands", "bg", "grant", "ssh", "scp", "sftp", "pull", "push", "html-to-markdown":
 		return true
 	}
-	return c.serviceRegistered(name) || c.cmds != nil && c.cmds.has(name)
+	return c.cmds != nil && c.cmds.has(name)
 }
 
-// AllowExec 保留旧内建服务的 mcp.<alias> 权限名；新统一命令直接使用 alias。
-// 绝对路径不经过服务别名映射。
+// AllowExec 对统一命令与普通原生命令使用同一 exec 规则面。
 func (c *Client) AllowExec(ctx context.Context, req vshpolicy.ExecRequest) error {
-	if c.cmds != nil && c.cmds.has(req.Name) {
-		return c.perms.AllowExec(ctx, req)
-	}
-	if c.serviceRegistered(req.Name) {
-		req.Name = "mcp." + req.Name
-	}
 	return c.perms.AllowExec(ctx, req)
 }
 

@@ -31,10 +31,7 @@ type Config struct {
 	Cwd       string            `json:"cwd,omitempty" yaml:"cwd,omitempty"`
 	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	URL       string            `json:"url,omitempty" yaml:"url,omitempty"`
-	Disabled  bool              `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 	NoSandbox bool              `json:"no_sandbox,omitempty" yaml:"no_sandbox,omitempty"`
-	// Token vtools/tcp 认证握手令牌（仅 tcp 形态）：拨号后首行发 {"auth":token}。
-	Token string `json:"token,omitempty" yaml:"token,omitempty"`
 	// IdleTimeout 空闲有效期（如 "30m"）：服务启动或最后一次使用后经过该时长
 	// 无任何调用即被回收，下次调用重新懒启动。空 = 永不过期（服务随 Pod 存活）。
 	IdleTimeout string `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
@@ -55,10 +52,6 @@ func (c Config) IdleDuration() (time.Duration, error) {
 	return d, nil
 }
 
-type Settings struct {
-	Servers map[string]Config `json:"servers,omitempty" yaml:"servers,omitempty"`
-}
-
 var aliasPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 // ErrUnknownService 是操作不存在服务条目的哨兵错误（调用方 errors.Is 判定）。
@@ -72,24 +65,12 @@ func ValidateAlias(alias string) error {
 	return nil
 }
 
-// IsTCP 报告该条目是 TCP 工具服务（url = tcp://host:port，行分隔 JSON 协议，
-// 见 libs/vtools）：不是 MCP 传输，不进 mcpx.Manager，由工具注册层接管。
-func (c Config) IsTCP() bool {
-	return strings.HasPrefix(c.URL, "tcp://")
-}
-
 func (c Config) Validate(alias string) error {
 	if err := ValidateAlias(alias); err != nil {
 		return err
 	}
-	if c.Disabled {
-		return nil
-	}
 	if (c.Command == "") == (c.URL == "") {
 		return fmt.Errorf("mcp %s: configure exactly one of command or url", alias)
-	}
-	if c.Token != "" && !c.IsTCP() {
-		return fmt.Errorf("mcp %s: token is only valid for tcp services (vtools/tcp authenticated handshake)", alias)
 	}
 	if c.Cwd != "" && !filepath.IsAbs(c.Cwd) {
 		return fmt.Errorf("mcp %s: cwd must be absolute", alias)
@@ -99,8 +80,8 @@ func (c Config) Validate(alias string) error {
 		if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" {
 			return fmt.Errorf("mcp %s: invalid endpoint", alias)
 		}
-		if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "tcp" {
-			return fmt.Errorf("mcp %s: invalid endpoint scheme (http | https | tcp)", alias)
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("mcp %s: invalid endpoint scheme (http | https)", alias)
 		}
 		if len(c.Args) != 0 || len(c.Env) != 0 || c.Cwd != "" || c.NoSandbox {
 			return fmt.Errorf("mcp %s: process settings require command", alias)
@@ -231,7 +212,6 @@ func (m *Manager) Remove(ctx context.Context, name string) error {
 // ServiceStatus 是一个服务的配置态 + 运行态快照（不含凭据与启动环境）。
 type ServiceStatus struct {
 	Name        string
-	Disabled    bool
 	Launched    bool   // 曾经启动过
 	Starting    bool   // 实例存在但未就绪
 	Running     bool   // 连接就绪且未结束
@@ -246,7 +226,7 @@ func (m *Manager) Status() []ServiceStatus {
 	defer m.mu.Unlock()
 	out := make([]ServiceStatus, 0, len(m.configs))
 	for name, cfg := range m.configs {
-		s := ServiceStatus{Name: name, Disabled: cfg.Disabled, Launched: m.launched[name], IdleTimeout: cfg.IdleTimeout}
+		s := ServiceStatus{Name: name, Launched: m.launched[name], IdleTimeout: cfg.IdleTimeout}
 		if i := m.instances[name]; i != nil {
 			s.Inflight = i.inflight
 			select {
@@ -317,9 +297,9 @@ func (m *Manager) Session(ctx context.Context, name string) (*mcp.ClientSession,
 		return nil, errors.New("mcp: manager closed")
 	}
 	cfg, ok := m.configs[name]
-	if !ok || cfg.Disabled {
+	if !ok {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("mcp %s: service is not configured or is disabled", name)
+		return nil, fmt.Errorf("mcp %s: service is not configured", name)
 	}
 	i := m.instances[name]
 	if i != nil {

@@ -28,13 +28,15 @@ func (p *peer) streamChannel(dc *webrtc.DataChannel, relay StreamRelay) {
 	}
 	label := dc.Label()
 	p.mu.Lock()
-	if p.streams[label] != nil {
-		p.mu.Unlock()
-		_ = dc.Close()
-		return
-	}
+	previous := p.streams[label]
 	p.streams[label] = dc
 	p.mu.Unlock()
+	// 同标签重连是 replacement，不是第二个订阅者。先登记新通道再关旧的，
+	// 避免客户端 close+open 时旧 OnClose 尚未清理而误拒新流；旧 closeStream
+	// 会因通道身份不等而保留新映射。
+	if previous != nil {
+		_ = previous.Close()
+	}
 	ctx, cancel := context.WithCancel(p.ctx)
 	input := make(chan []byte, 128)
 	var once sync.Once

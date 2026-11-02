@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | [reference/hosts-tools.md](reference/hosts-tools.md) | 设备执行、文件与工具服务的调用契约（协议、日志、MCP） | 改 exec/fs/协议面或接入调用方前必读 |
 | [reference/host-sandbox.md](reference/host-sandbox.md) | host 执行权限与原生沙箱：规则域、grant、fail-closed 边界 | 改权限/沙箱前必读 |
-| [reference/host-vtools.md](reference/host-vtools.md) | host-vtools：通用工具服务注册机制（mcp 管理面、流通道） | 新增设备侧服务或改注册层前 |
+| [reference/host-vtools.md](reference/host-vtools.md) | host-vtools：通用工具服务注册机制（统一 commands、流通道） | 新增设备侧服务或改注册层前 |
 
 ## guides
 
@@ -41,7 +41,6 @@
 | 文档 | 内容 | 何时读 |
 | --- | --- | --- |
 | [development/todo.md](development/todo.md) | 未完成工作（实机验收、发布收尾） | 评估计划时；已完成事实写 CHANGELOG |
-| [development/unified-commands.md](development/unified-commands.md) | 目标设计：统一 commands、技能设备扩展、MCP 与双向流 | 评审或实施统一插件机制前；非现行契约 |
 | [development/baselines/](development/baselines/) | browser 稳定性/性能基线数据（JSON） | 对比回归数据时 |
 
 ## 约定

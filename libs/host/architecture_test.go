@@ -41,7 +41,7 @@ func TestUnifiedExecDenialSkipsCommandSideEffects(t *testing.T) {
 	scripts := []string{
 		"printf builtin",
 		"grant fs /tmp",
-		"mcp add denyprobe --url " + server.URL,
+		"commands add denyprobe --protocol mcp --url " + server.URL,
 		"curl -sS " + server.URL,
 		"ssh fixture",
 		"git ls-remote fixture",
@@ -59,8 +59,8 @@ func TestUnifiedExecDenialSkipsCommandSideEffects(t *testing.T) {
 	if len(c.perms.base.fsRules) != beforeFSRules {
 		t.Fatal("grant changed rules after unified exec denial")
 	}
-	if c.serviceRegistered("denyprobe") {
-		t.Fatal("MCP add registered a service after unified exec denial")
+	if c.cmds.has("denyprobe") {
+		t.Fatal("commands add registered a service after unified exec denial")
 	}
 	if httpCalls.Load() != 0 {
 		t.Fatalf("curl reached the HTTP server %d times", httpCalls.Load())

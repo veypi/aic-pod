@@ -31,7 +31,8 @@ keeping that power on a leash:
 
 Device `fs`/`exec` calls go straight to the executor and file service; standalone services are
 reached over [MCP connections](docs/reference/hosts-tools.md). Skills are static cloud content;
-device-side browser/cua/blender behave like any other package — installed with
+device-side browser/cua/blender behave like any other package — browser/cua are preinstalled
+at pod startup (releases ship prebuilt device binaries), the rest are installed with
 `commands install <id>` and started on demand.
 
 This document describes the current unified command and policy model dated 2026-10-26.
@@ -195,9 +196,10 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-browser and cua are ordinary skill packages (same shape as third-party ones), no longer built
-into the Pod: `commands install <id>` fetches them, registers them as vsh root commands, and the
-first call starts them lazily while later calls share the connection.
+browser and cua are ordinary skill packages (same shape as third-party ones), preinstalled by
+the Pod at startup: releases ship prebuilt `bin/<name>` binaries, so neither `commands install`
+nor a Go toolchain is needed. They register as vsh root commands; the first call starts them
+lazily while later calls share the connection.
 
 - `browser` — a Go service inside the package; it ships its own Chrome and drives it over CDP.
   Tool surface: `targets` / `attach` / `navigate` / `snapshot` / `click` / `fill` / `screenshot` …;
@@ -213,15 +215,17 @@ browser                            # tool directory
 browser targets --json
 browser navigate --url https://example.com --json
 cua                                # tool directory
-# mcp tools/describe/call are debug passthroughs; use <alias> <tool> normally
 ```
 
 ## Build
 
-A plain `go build ./cli` / `go run ./cli` includes native execution, the file service and vtools
-service registration (MCP/TCP). The Pod embeds no skill package (manifests and program source
-live in the aic-skills repo and run after a device-side install); desktop packaging ships the
-browser runtime and the official native programs for the matching packages.
+A plain `go build ./cli` / `go run ./cli` includes native execution, the file service and
+service registration (MCP). The Pod embeds only the content of the official preinstalled
+packages (browser/cua), versioning them onto the device at startup and laying down the
+prebuilt `bin/<name>` programs shipped with the release; other skill packages keep their
+manifests and program source in the aic-skills repo and run after a device-side
+`commands install <id>`. Desktop packaging ships the browser runtime, the official native
+programs and the preinstalled package binaries.
 
 Artifacts: desktop is the main product (`aic-*`), the CLI is `aic-cli-*`.
 

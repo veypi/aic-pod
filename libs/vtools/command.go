@@ -13,7 +13,7 @@ import (
 	"github.com/veypi/vsh/commands"
 )
 
-// maxInputBytes 是 --input 的体积上限（与 mcp call 原约定一致）。
+// maxInputBytes 是 --input 的体积上限。
 const maxInputBytes = 1 << 20
 
 // reservedFlags 是命令面保留 flag：工具 schema 里的同名属性无法经 flag 传递
@@ -247,28 +247,8 @@ func WriteResult(inv *commands.Invocation, value any, compact bool) error {
 	return nil
 }
 
-// commandFunc 生成服务 alias 的 vsh 根命令：工具目录 / 参数表 / 调用。
-func (r *Registry) commandFunc(alias string) commands.CommandFunc {
-	return func(ctx context.Context, inv *commands.Invocation) error {
-		return r.RunTool(ctx, inv, alias)
-	}
-}
-
-// RunTool 是已登记服务的工具调用入口（查找 + RunProvider）。
-// 命令准入由 vsh 在调用本函数之前统一完成。
-func (r *Registry) RunTool(ctx context.Context, inv *commands.Invocation, alias string) error {
-	r.mu.RLock()
-	e := r.entries[alias]
-	r.mu.RUnlock()
-	if e == nil {
-		return commands.Exitf(inv, 1, "%s: service is not registered", alias)
-	}
-	return RunProvider(ctx, inv, alias, e.provider)
-}
-
-// RunProvider 是工具调用内核（目录/参数表/调用），不依赖登记表；调试直通
-// （mcp tools/describe/call）与自定义命令动词分发后直接复用。调用门由调用方
-// 负责（Registry.RunTool 或已认证的调试入口）。
+// RunProvider 是工具调用内核（目录/参数表/调用），不依赖登记表；command hub
+// 与自定义命令动词分发后直接复用。调用门由调用方负责（vsh 准入或已认证入口）。
 func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p Provider) error {
 	var (
 		positional   []string

@@ -1,171 +1,76 @@
-# host-vtools：通用工具服务注册机制（2026-10-16 定稿）
+# Host vtools：MCP 服务注册与调用
 
-> 地位同 hosts-tools.md：本文件是「服务注册进 vsh」的契约源。
-> 动机：MCP 只是一种协议。任何协议（MCP / TCP / …）的工具适配成
-> `vtools.Provider` 后直接注册为 vsh 根命令；`mcp` 命令退化为纯管理面
->（add/remove/start/stop/list + 调试直通），不再是工具调用的中转层。
+> 现行契约。vtools 只是 MCP Provider 的调用内核；命令注册统一归 command hub。
+> 远程 MCP 端点只接受 `http/https` URL。
 
-## 1. 接口体系（libs/vtools）
+## 1. 调用模型
 
-```go
-type Tool struct { Name, Description string; InputSchema json.RawMessage }
+每个 MCP 服务 alias 登记一个 vsh 根命令：
 
-type Provider interface {                    // 一切协议适配器的最小面
-    Tools(ctx context.Context) ([]Tool, error)
-    Call(ctx context.Context, tool string, args map[string]any) (any, error)
-}
-
-type CallError struct{ Result any }          // 工具级失败（MCP isError）：结果照渲染，退出码 1
-
-type ImagePreviewer interface {              // 可选：--image-preview（MCP 适配器实现）
-    PreviewImages(result any, size string) (any, error)
-}
-
-type AddrProvider interface {                // 可选：有明确 TCP 端点（换型/换址判定用）
-    Addr() string                            // TCPProvider、以及宿主在它之上的包装
-}
-
-type Gate func(ctx, session, alias string) error  // 调用门：session = 会话键（见下）
-type Options struct {                        // 登记表装配：Gate / SessionOf / Logf
-    SessionOf func(context.Context) string   // 命令路径取会话键（host 注入；见下）
-}
-
-type Streamer interface {                    // 可选：实时流（见 §4）
-    StreamChannel() string                   // RTC DataChannel 标签，如 "myhost-view"（宿主自登记服务用；技能包走 <alias>:<stream>）
-    Stream(ctx, caller, input <-chan []byte, send func([]byte) error) error
-}
+```text
+<alias>                              工具目录
+<alias> <tool> [--flag value]...     标量参数按 inputSchema 映射
+<alias> <tool> --input JSON|-        复杂 JSON 参数
+<alias> <tool> --json                全量结构化结果
+<alias> <tool> --help                上游参数表
 ```
 
-- `vtools.MCP(resolve)`：MCP 适配器，薄包装 `mcpx.Manager` 的共享 session
- （懒启动/空闲回收/授权中间件都在 mcpx，行为与 mcp call 一致；resolve 每次
- 调用现取连接，管理器重建对已注册命令透明）。`PreviewImages` 复用
- `mcpx.PreviewToolImages`。
-- `vtools.NewTCP(host:port, ...WithToken)`：vtools/tcp v1 行分隔 JSON 协议
- （见 §1.1），证明接口与 MCP 解耦。
+Provider 最小接口仍是 `Tools(ctx)` 与 `Call(ctx, tool, args)`；当前生产适配器只有
+`vtools.MCP`。配置热加载由 command hub 重建注册表；未变化的命令保留原 manager/session。
+MCP `isError` 映射为 `CallError`，结果照常渲染但命令退出非零。
 
-### 1.1 vtools/tcp v1 协议规范（第三方 TCP 扩展按此实现）
+`--image-preview` 由 MCP 适配器实现，只缩放成功结果中的图片，不改变上游 structuredContent。
+普通工具调用直接使用服务根命令；不再有调试直通入口。
 
-通用轻量协议，不是某个服务的私有格式。`mcp add <alias> --tcp host:port` 即可
-接入任何按本节实现的服务。
+## 2. 注册与生命周期
 
-- **帧**：行分隔 JSON（UTF-8，单条 ≤16 MiB），一连接复用，应答按 `id` 对回。
-- **可选认证握手**（服务端可要求）：连接后客户端首行必须是
- `{"auth":"<token>"}`；验证通过回 `{"ok":true}` 进入正常应答，失败回
- `{"ok":false,"error":"…"}` 并立即断连。**要求认证的服务端对首行非合法
- auth 的连接同样拒绝**——这同时挡住浏览器页面发往 localhost 的
- HTTP/WebSocket 报文（它们的首行不是该 JSON）。pod 侧配置：`mcp.servers.<alias>.token`
- 或 `mcp add --tcp ... --token`。
-- **方法**：`{"id":N,"method":"tools"}` → `{"id":N,"tools":[{"name,
- description,inputSchema}]}`；`{"id":N,"method":"call","name":T,"arguments":{…}}`
- → `{"id":N,"result":…}`（工具级失败加 `"isError":true`，结果保留）或
- `{"id":N,"error":"…"}`（协议级失败）。
-- **断连语义**：连接断开使全部在途请求失败；客户端下次调用自动重拨（含重握手）。
-- 参考实现：客户端 `libs/vtools/tcp.go`、设备侧客户端 `aic-skills/blender/src/addon.go`；服务端 `aic-skills/blender/cli/aic_blender_bridge.py`。
-- **会话键（会话级临时授权的查找键）由 `Options.SessionOf` 注入**：命令路径取
- host 的 `execution.SessionFromContext(ctx)`，流通道开门取 `caller.Origin`
-（peer ctx 不携带会话）。本层不假设会话键挂在 ctx 上的形式，也不反向依赖执行层。
+- 平台命令先注册，统一命令后登记；撞名命令进入 rejected，不覆盖平台命令。
+- 登记是即时的，连接是懒惰的；第一次工具调用才建立 stdio/HTTP MCP session。
+- `commands start` 预连接，`commands stop` 断开当前 session，`commands restart` 断开后重建；
+  命令登记不随 stop 消失。
+- manager 拥有进程与共享 session。单次调用取消只取消该调用，不销毁整个服务。
+- 配置或服务重建关闭旧 session；不相关的命令保留原 manager 和流进程。
 
-## 2. 注册进 vsh
-
-- 每个服务 alias 经 `RegisterGuarded` 注册一个根命令；**撞名即拒**（不覆盖
- 内建/平台命令），缺席摘除用新增的 `Registry.Unregister`（在途调用持有
- Command 引用自然跑完；实现 `io.Closer` 的 Provider 顺带关闭）。
-- **平台命令先占位**：装配顺序 = vsh registry（内建 118）→ 平台命令
-（`RegisterPlatformCommands`）→ 服务登记。所以 alias 撞平台命令名（`mcp`
-`ssh` `grant` `bg` `commands` `pull` `push` `skill` …）或内建名只会 **拒给该
-服务**（记日志 + `mcp list` 显示 `rejected`），不会把平台命令注册顶掉、更不
- 会让引擎初始化失败。反过来的顺序会让整机 `initErr` 离线，勿回退。
-- 换型/换址判定按 `AddrProvider` 接口（不是具体类型断言）：已登记服务与配置
- 同为 TCP 端点且地址一致才不重登记；宿主在 TCPProvider 之上的包装也算 TCP。
-- 命令路径的会话键由 `Options.SessionOf` 注入（host = `execution.SessionFromContext`）；
- 流通道开门用 `caller.Origin`。两者同源，vtools 不反向依赖执行层。
-- 命令形态：`<alias> <tool> [--flag value]... [--input JSON|-] [--json]
- [--image-preview WxH]`；无参 = 工具目录；`<alias> <tool> --help` 按
- inputSchema 渲染参数表。
-- 参数映射：inputSchema 的标量属性（string/number/integer/boolean）自动映射
- 为同名 flag（布尔可裸写）；复杂对象/数组走 `--input`（JSON 对象，flag 覆盖
- 同名键）；未知 flag 报错并列出可映射项；未知工具名列出可用面。
-- **注册即时、连接懒惰**：登记不 connect，首次执行才连接。
-- 调用门在命令边界：独立服务为 exec 规则 `mcp.<alias>`（与历史 `mcp call`
- 的门同一条规则，`grant cmd mcp.<alias>` 放行该服务全部工具与流）；技能包
- 命令的门是别名本身（`grant cmd <alias>`）。
-- `commands` 的 Discoverable 动态纳入已登记 alias。
-
-## 3. mcp 命令 = 管理面
-
-```
-mcp list [--json]                       配置态 + 运行态（manager.Status + 登记表；
-                                        被拒登记以 state=rejected + error 曝光，
-                                        mcp remove 可摘除该记录）
-mcp add <alias> [--cwd D][--env K=V]... [--idle DUR] [--persist] <command> [args...]
-mcp add <alias> --url <http(s)-url> [--persist]
-mcp add <alias> --tcp <host:port> [--token STR] [--persist]   （落盘形态 url = tcp://host:port [+ token]）
-mcp remove <alias> [--persist]
-mcp start|stop|restart <alias>          start = 预连接；stop = 断连不摘命令
-mcp tools|describe|call|read ...        调试直通（原 mcpx.Command 原样保留）
+```sh
+commands add <alias> --protocol mcp [--cwd DIR] [--env K=V]... [--idle DUR] [--persist] -- <program> [args...]
+commands add <alias> --protocol mcp --url <http(s)-url> [--persist]
+commands remove <alias> [--persist]
+commands start|stop|restart <alias>
+commands list [--json]
+commands info <alias> [--schema]
 ```
 
-- `add/remove` 引入新能力/改配置：exec 规则门 `mcp`（126 + `grant cmd mcp`
- 引导，与 skill 命令同形）；`start/stop/restart` 要求 `mcp.<alias>` 已授权。
- `list` 不增加额外管理子门，但 `mcp` 根命令仍须通过统一 `exec_policy`；锁死设备上也需先 `grant cmd mcp`。
-- `--persist` 写 config.yaml `mcp.servers`（cfg.LoadFile→改→cfg.Save，原子写
- 0600）；不带 = 进程级，重启失效。`no_sandbox` 只能所有者手改配置。
- 反向注意：手改 config.yaml 需重启 pod 生效（无运行期重载）。
-- 配置文件里 `url = tcp://host:port` 的条目由 vtools 接管（不进 mcpx.Manager）；
- `mcpx.Config.Validate` 接受 tcp scheme。
+owner 手工服务与技能包都落在统一 `commands` 配置/定义面；`--persist` 写
+`$HOME/.aic/config.yaml` 的 `commands` 段，否则只进入运行期定义表。删除定义即停用服务，
+不再有单独的 `mcp.servers` 或 `disabled` 配置。HTTP 只接受 `http/https`，重定向关闭，
+设备 net 规则生效；stdio 进程的 cwd/env/no_sandbox 由 owner 配置。没有 OAuth/token
+管理器，也没有其他 URL scheme。
 
-## 4. 流通道（RTC）
+## 3. 权限边界
 
-- `rtc.Config.Browser BrowserRelay` 已泛化为 `Streams func(label) (StreamRelay,
- bool)`：DataChannel 开启时现查 vtools 登记表（`Registry.StreamHandler`），
- 运行期 add 的流式服务**无需重启 RTC**。`aic-tools` 之外的标签全部走通用
- `streamChannel`（原 browserChannel 泛化）：帧格式 uint32 大端长度 + 有序
- 16 KiB 分块；单消息 ≤16 MiB；入方向必须 string ≤64 KiB，拥塞即断；
- 同一 peer 每个标签至多一条。
-- 技能包声明的流通道不经 vtools 登记表：包根 `manifest.json` 的 `streams`
- 由 command hub 落地为 `<alias>:<stream>` 标签（见
- `libs/host/command_registry.go`），是技能包流通道的唯一生产路径。
-- vtools 登记表只保留 Provider 隐式接线：`Register` 时 Provider 实现
- `vtools.Streamer` 即登记其 `StreamChannel()`，供宿主自登记服务使用；禁用、
- 删除、换型、换址或换通道会同步摘除旧路由。
-- 通道标签必须非空、为合法 UTF-8、无首尾空白/控制字符且 ≤65535 字节；
- `aic-tools` 保留给请求-响应，服务流显式拒绝。不同 alias 抢同一标签即拒，
- 原路由不动；全量同步按 alias 排序，冲突结果不受 map 迭代顺序影响。
-- 权限：vtools 接线通道开启时过一道 `mcp.<alias>` 门；逐消息复查由 Streamer
- 实现方负责。挂流期间的 idle 保活（Touch）同理由实现方负责。
-- 前端 `BrowserStream`（ui/hosts/browser_stream.js）标签参数化
-（`options.channel`，默认 `aic-browser`），重组/背压/15s ready 语义不变。
- 这个默认值是历史内置 browser 清单的 `stream.channel` 遗留；它是前端默认
- 配置，不是 host 的流登记实现（生产侧已无该标签的登记方）。技能包画面请
- 使用技能自带 UI 的 `<alias>:<stream>` 通道。
+- `commands add/remove/config` 的管理门是 `commands`。
+- 所有统一注册服务的调用门都是 alias 本身，不使用 `mcp.<alias>`。
+- `no_sandbox` 只能来自 owner 配置或带人工审批的 `commands config <alias> --no-sandbox`。
+- 工具参数不能覆盖 cwd/env/no_sandbox，也不能把 TCP URL 写成 MCP 服务。
 
-## 5. 技能包的设备维度（2026-10-31 起）
+## 4. 技能包统一 commands
 
-技能包即插件单元（aic docs/reference/skill.md）：包根 `manifest.json` 声明
-`schema` / `commands` / `streams`（如 `run: [bin/blender]`、`protocol: mcp`、
-`idle_timeout`），程序源码随包入库（`src/` + `src/go.mod.example`，设备侧
-自行构建 `bin/<name>`）。pod 不内嵌任何包：`commands install <id>` 拉取、
-登记为 vsh 根命令，沙箱姿态只能由设备 owner 用
-`commands config <alias> --no-sandbox` 授予（包内 manifest 声明即拒）。
+技能包根 `manifest.json` 使用 `schema/ui/host`。pod 显式忽略 `ui`，只装配 `host`：
 
-- browser/cua/blender 与普通第三方包同等待遇：browser 是自带 Go 服务
- （CDP 驱动 Chrome）；cua 包装官方 `cua-driver mcp`；blender 是自带 Go 服务
-  经 vtools/tcp 连 addon，带 `blender doctor/launch/install` 生命周期动词，
-  分级报错 blender_not_installed → blender_not_running → addon_not_connected
-  是产品功能。addon 源码 = `aic-skills/blender/cli/aic_blender_bridge.py`。
-  **addon 强制 vtools/tcp 认证握手**（§1.1）：token 取 env `AIC_BLENDER_TOKEN`
- （launch 拉起时透传）→ `$HOME/.aic/blender/bridge_token`（0600，O_EXCL
-  先建者赢，pod 与 addon 共读）。威胁模型：防浏览器页面/跨用户本机进程
-  直连回环驱动 `execute_code`（进程内任意 Python）；同 uid 恶意本机进程
-  能读 token 文件，不在此模型内。
-- 历史内置包机制（aicskills embed、`cli/manifest.json`、`libs/host/packs.go`、
-  `streamBrowser`/`blenderProvider`）已删除，没有兼容入口。
+- `run + protocol=mcp`：包内或 PATH 程序的 stdio MCP；
+- `url + protocol=mcp`：远程 HTTP MCP；
+- 普通 `run`：一次性进程；
+- `run + streams`：包内常驻进程拥有的 RTC 字节流，标签为 `<alias>:<stream>`。
 
-## 6. 明确不做（v1 边界）
+官方 browser/CUA/Blender 与普通第三方包同形态。browser 是包内 Go CDP 服务；CUA 包装官方
+`cua-driver mcp`；Blender 直接运行现成 `uvx blender-mcp`。pod 不包含这些包的专属 Provider、
+安装目录或生命周期分支。
 
-- 流式端点的通用配置声明（端口文件/env/固定 URL）等第二个流式服务再抽象。
- 技能包流通道走 command hub 的 `<alias>:<stream>`；`Streamer` → RTC 的隐式
- 接线仅保留给宿主自登记服务。
-- `aic-tools` 不加增量响应（请求-响应 + 日志补全已够用）。
-- Pod 永不解析流内容（消息边界保持的纯转发）。
-- `aic`（cloud）侧不变：机制仅落在物理 host（libs/host）。
+browser/cua 由 pod 启动定版预装（发行包附带预编译 `bin/<name>`），其余设备包用
+`commands install <id>` 拉取并注册。需要包内程序时源码位于 `src/`；使用现成 MCP 的包不需要自研桥接或额外协议实现。
+
+## 5. RTC 流
+
+RTC 字节流是独立传输面，不是 MCP，也不是 `vtools/tcp` 的替代名称。流只做不透明双向
+TCP↔RTC 中继，权限按 alias 复查，页面与包共同拥有应用层帧协议。旧独立 `aic-browser`
+通道和包专属流注册已删除，现行标签只取命令注册表中的有效定义。

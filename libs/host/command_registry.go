@@ -61,6 +61,13 @@ func (h *commandHub) definition(alias string) (*hostCommand, bool) {
 	return def, ok
 }
 
+// rejection 返回 alias 最近一次装配被拒绝的原因；不在 rejected 里则为空。
+func (h *commandHub) rejection(alias string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rejected[alias]
+}
+
 func (h *commandHub) upsertRuntime(def *hostCommand) error {
 	h.rebuildMu.Lock()
 	defer h.rebuildMu.Unlock()
@@ -73,6 +80,16 @@ func (h *commandHub) removeRuntime(id string) error {
 	defer h.rebuildMu.Unlock()
 	delete(h.runtime, id)
 	return h.reloadLocked()
+}
+
+// hasRuntime 报告运行期定义是否存在。runtime map 的写方（upsertRuntime /
+// removeRuntime）都在 rebuildMu 下，读方必须同锁——否则并发 add/remove 会触发
+// Go 运行时的 concurrent map read and map write（不可 recover，进程直死）。
+func (h *commandHub) hasRuntime(id string) bool {
+	h.rebuildMu.Lock()
+	defer h.rebuildMu.Unlock()
+	_, ok := h.runtime[id]
+	return ok
 }
 
 func (h *commandHub) reload() error {

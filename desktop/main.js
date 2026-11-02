@@ -83,7 +83,7 @@ let platformRetryMs = platformRetryMin // 当前复查间隔（10s 起步，×2 
 const backendCtl = createBackend({
   spawn,
   binary: backendBin,
-  env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv(), ...cuaBundleEnv(), ...agentBrowserEnv() },
+  env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv(), ...cuaBundleEnv(), ...agentBrowserEnv(), ...skillBinEnv() },
   waitForStartup,
   onFatal: (error) => failStartup(error),
 })
@@ -227,7 +227,7 @@ function cuaBundleEnv() {
 }
 
 // ---- 内置 Chrome 可执行文件路径（vendor/browser → resources/browser） ----
-// browser 技能包只认文件型 AIC_BROWSER_PATH（兼容 AGENT_BROWSER_EXECUTABLE_PATH）；
+// browser 技能包只认文件型 AIC_BROWSER_PATH；
 // 目录型提示对它无效，故这里直接给可执行文件路径。可执行文件名表见 runtime-paths.cjs
 // （与打包前同步/校验 scripts/sync-browser.mjs 同一事实源）。
 function browserEnv() {
@@ -245,6 +245,15 @@ function agentBrowserEnv() {
     : path.join(__dirname, 'vendor', 'agent-browser', `${process.platform}-${process.arch}`)
   const executable = path.join(dir, agentBrowserBinaryName(process.platform))
   return fs.existsSync(executable) ? { AIC_AGENT_BROWSER_PATH: executable } : {}
+}
+
+// 官方预装包（browser/cua）的设备程序：发布时预编译（make skill-bin-desktop）
+// → resources/skill-bin/<pkg>/；Pod 启动定版时复制进包内 bin/，用户无需 Go 工具链。
+function skillBinEnv() {
+  const dir = app.isPackaged
+    ? path.join(process.resourcesPath, 'skill-bin')
+    : path.join(__dirname, 'vendor', 'skill-bin')
+  return fs.existsSync(dir) ? { AIC_SKILL_BIN_DIR: dir } : {}
 }
 
 // ---- 后端子进程：启动 / 停止 / 重启（实现见 backend.cjs） ----

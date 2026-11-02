@@ -1,21 +1,25 @@
 # aic-pod 未来开发计划
 
 - 文档状态：未来规划（只记未完成项）
-- 说明：已完成的事实在 `CHANGELOG.md`，目标设计在 `docs/`。已归档的历史 todo 随 2026-10-23 文档整理删除，git 历史可查。
+- 说明：已完成的事实在 `CHANGELOG.md`；已落地设计稿不留库（git 历史可查，如统一 commands 设计稿于 2026-11-02 删除）。已归档的历史 todo 随 2026-10-23 文档整理删除。
 
 ## 待做
 
-### 技能包设备维度落地后的收尾（2026-10-31）
+### 官方包预装后的收尾（2026-11-02）
 
-pod 不再内置任何包（browser/cua/blender 降为普通设备包）之后，以下几处接线尚待收口：
+browser/cua 已改为 pod 启动定版预装 + 发行包附带预编译 `bin/<name>`（见
+`libs/host/command_preinstall.go`、`make skill-bin-*`），不再要求用户装 Go 工具链。尚待：
 
-- **browser / cua 包的设备侧构建流程**：包内只入库源码，设备要按 SKILL.md「安装与构建」
-  自行编译 `bin/<name>`；需实机验证该流程（含 `go mod tidy` 需要外网的条件）。
+- **实机验收**：Desktop 安装包与 CLI 的 `skill-bin` 解包布局、预装命令注册与画面流；
+  源码运行 pod（无附带二进制）的手动构建回退路径。
 - **平台侧画面入口**：历史内置 Browser UI 的 `aic-browser` 标签生产零登记，前端默认
   值是否切换到 `<alias>:<stream>`（browser:view）需与前端确认。
 
-（Desktop 打包的 Chrome 与包内 `AIC_BROWSER_PATH` 的接线已于 2026-10-31 收口：
-desktop 注入可执行文件路径，见 `desktop/runtime-paths.cjs`。）
+### 远程 MCP 端点凭据（下一阶段）
+
+URL 型命令目前不能携带自定义 header/token：mcpx 没有 HTTP 头注入口，manifest/配置也
+刻意不接收 env/cwd（`validateHostCommand` 直接拒绝，不静默丢弃）。要接需要鉴权的远程
+MCP 服务，需先设计 header/token 的配置面与权限边界。
 
 ### 统一命令与策略架构 —— 核心迁移已完成（2026-10-26）
 

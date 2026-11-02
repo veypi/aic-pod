@@ -5,7 +5,7 @@ import (
 )
 
 func TestOnlyAuthenticationAndNativeFrames(t *testing.T) {
-	native := &Request{Protocol: RtcProtocol, ID: "native", Action: ActionExec, Exec: &ExecPayload{Script: "mcp tools browser"}}
+	native := &Request{Protocol: RtcProtocol, ID: "native", Action: ActionExec, Exec: &ExecPayload{Script: "browser targets"}}
 	for _, r := range []RtcRequest{{Tool: native}, {ID: "auth", Auth: "open", Ticket: "signed"}, {Tool: native, GrantApproved: true}} {
 		if err := r.Validate(); err != nil {
 			t.Fatal(err)

@@ -69,7 +69,7 @@ func (p *MCPProvider) Call(ctx context.Context, tool string, args map[string]any
 }
 
 // PreviewImages 实现 ImagePreviewer：--image-preview 仅作用于成功结果，
-// 语义与 mcp call --image-preview 一致（mcpx.PreviewToolImages）。
+// 语义与服务根命令 --image-preview 一致（mcpx.PreviewToolImages）。
 func (p *MCPProvider) PreviewImages(result any, size string) (any, error) {
 	r, ok := result.(*mcp.CallToolResult)
 	if !ok {

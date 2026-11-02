@@ -28,7 +28,7 @@ aic-pod 是 AIC 平台的设备端客户端：它通过 NATS WebSocket 主动连
 | **cli** | 单二进制 `aic` | exec（统一准入 + 命令策略 + 原生沙箱，含 browser/cua/ssh/scp）、fs |
 
 设备 fs/exec 直接调用执行器和文件服务；独立服务使用 [MCP 连接](docs/reference/hosts-tools.md)。
-技能是云端静态内容；设备侧的 browser/cua/blender 与第三方包同形态——`commands install <id>` 装好后按需启动。
+技能是云端静态内容；设备侧的 browser/cua/blender 与第三方包同形态——browser/cua 随 pod 启动预装（发行包附带预编译设备程序），其余包 `commands install <id>` 装好后按需启动。
 
 本文描述 2026-10-26 的现行统一命令与策略模型，核心迁移已完成；缓存、darwin 代理和
 实机收尾见 [docs/development/todo.md](docs/development/todo.md)。
@@ -180,8 +180,8 @@ docker logs -f aic-pod
 
 ## Browser / CUA
 
-browser 与 cua 是普通技能包（与第三方包同形态），不再由 Pod 内置：`commands install <id>`
-拉取、登记为 vsh 根命令，首次调用懒启动、后续共享连接。
+browser 与 cua 是普通技能包（与第三方包同形态），由 Pod 启动定版预装：发行包附带预编译的
+`bin/<name>`，无需 `commands install` 与 Go 工具链；登记为 vsh 根命令，首次调用懒启动、后续共享连接。
 
 - `browser`——包内 Go 服务，自带 Chrome 并用 CDP 驱动；工具面为
   `targets` / `attach` / `navigate` / `snapshot` / `click` / `fill` / `screenshot` 等，
@@ -195,14 +195,14 @@ browser                            # 工具目录
 browser targets --json
 browser navigate --url https://example.com --json
 cua                                # 工具目录
-# mcp tools/describe/call 仅作调试直通；正式调用走 <alias> <tool>
 ```
 
 ## 构建
 
-普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 vtools 服务注册（MCP/TCP）。
-Pod 不嵌入任何技能包（清单与程序源码都在 aic-skills 仓，设备侧安装后运行）；Desktop 打包时
-附带浏览器运行时与官方原生程序，供对应技能包使用。
+普通 `go build ./cli` / `go run ./cli` 包含原生执行、文件服务与 MCP 服务注册。
+Pod 只内嵌官方预装包（browser/cua）的包内容，启动时定版到设备并铺入随发行预编译的
+`bin/<name>`；其余技能包的清单与程序源码都在 aic-skills 仓，设备侧 `commands install <id>` 后运行。
+Desktop 打包时附带浏览器运行时、官方原生程序与预装包设备程序，供对应技能包使用。
 
 产物：desktop 是主产品（`aic-*`），cli 是 `aic-cli-*`。
 

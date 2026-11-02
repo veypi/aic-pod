@@ -55,22 +55,22 @@ func TestRunGrantTarget(t *testing.T) {
 	}
 }
 
-func TestExecAllowedGatesBrowserAndCUA(t *testing.T) {
+func TestExecAllowedGatesServiceCommands(t *testing.T) {
 	withGlobal(t, func(o *cfg.Options) { o.ExecPolicy = cfg.PolicyDeny })
 	c, _ := testClient(t)
 	// 虚拟指令（browser/cua）按 exec 域规则门控；未授权拒绝。
-	if c.execAllowed("s1", "mcp.browser") {
+	if c.execAllowed("s1", "browser") {
 		t.Fatal("ungranted browser allowed")
 	}
 	// 会话级 grant cmd 授权即时生效（规则数据，不是注册动作）。
-	c.perms.grantCmd("s1", "mcp.browser")
-	if !c.execAllowed("s1", "mcp.browser") {
+	c.perms.grantCmd("s1", "browser")
+	if !c.execAllowed("s1", "browser") {
 		t.Fatal("session grant not effective")
 	}
-	if c.execAllowed("s2", "mcp.browser") {
+	if c.execAllowed("s2", "browser") {
 		t.Fatal("session grant leaked across sessions")
 	}
-	if c.execAllowed("s1", "mcp.cua") {
+	if c.execAllowed("s1", "cua") {
 		t.Fatal("grant leaked across commands")
 	}
 }

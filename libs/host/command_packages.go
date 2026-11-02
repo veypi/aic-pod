@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ type commandPackageRecord struct {
 	SkillID  string `json:"skill_id"`
 	Order    uint64 `json:"order"`
 	Revision uint64 `json:"revision"`
+	// Builtin = 启动定版的官方预装包；不可 install/update/uninstall。
+	Builtin bool `json:"builtin,omitempty"`
 }
 
 type commandPackageState struct {
@@ -111,6 +114,9 @@ func (c *Client) installCommandPackage(ctx context.Context, skillID string) erro
 	defer c.packageMu.Unlock()
 	if !skillIDPattern.MatchString(skillID) {
 		return fmt.Errorf("invalid skill_id %q", skillID)
+	}
+	if preinstalledCommandPackage(skillID) {
+		return fmt.Errorf("skill package %q is preinstalled and managed by the pod release", skillID)
 	}
 	root, err := c.commandPackageRoot()
 	if err != nil {
@@ -215,8 +221,12 @@ func (c *Client) uninstallCommandPackage(skillID string) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := state.Packages[skillID]; !ok {
+	record, ok := state.Packages[skillID]
+	if !ok {
 		return fmt.Errorf("skill package %q is not installed", skillID)
+	}
+	if record.Builtin {
+		return fmt.Errorf("skill package %q is preinstalled and managed by the pod release", skillID)
 	}
 	delete(state.Packages, skillID)
 	if err := c.saveCommandPackageState(state); err != nil {
@@ -226,15 +236,14 @@ func (c *Client) uninstallCommandPackage(skillID string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(root, skillID)); err != nil {
-		return err
-	}
-	if err := c.clearCommandPackageConfig(skillID); err != nil {
-		return err
-	}
+	removeErr := os.RemoveAll(filepath.Join(root, skillID))
+	// 状态删除后的所有收尾都必须重建注册表；否则重试会因记录已消失而
+	// 提前返回，旧命令和常驻进程却继续存活。清理错误仍显式返回。
 	c.packageMu.Unlock()
-	defer c.packageMu.Lock()
-	return c.cmds.reload()
+	reloadErr := c.cmds.reload()
+	configErr := c.clearCommandPackageConfig(skillID)
+	c.packageMu.Lock()
+	return errors.Join(removeErr, reloadErr, configErr)
 }
 
 func parseCommandManifestFile(root string) (*commandManifest, error) {

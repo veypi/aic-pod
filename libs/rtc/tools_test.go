@@ -196,7 +196,7 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 	call := func(script string) map[string]any {
 		return exchange(protocol.RtcRequest{Tool: &protocol.Request{Protocol: protocol.RtcProtocol, ID: protocol.NewID("r_"), Action: protocol.ActionExec, Exec: &protocol.ExecPayload{Script: script}}})
 	}
-	if r := call("mcp call fixture next --json"); r["error"] == nil {
+	if r := call("fixture next --json"); r["error"] == nil {
 		t.Fatal("unauthenticated call admitted")
 	}
 	denied, err := pc.CreateDataChannel(protocol.RtcBrowserChannel, nil)
@@ -265,21 +265,21 @@ func TestRTCToolsWithoutBusinessSession(t *testing.T) {
 		t.Fatal("renderer ACK not forwarded")
 	}
 	duplicate, _ := pc.CreateDataChannel(protocol.RtcBrowserChannel, nil)
-	duplicateClosed := make(chan struct{})
-	duplicate.OnClose(func() { close(duplicateClosed) })
+	duplicateOpen := make(chan struct{})
+	duplicate.OnOpen(func() { close(duplicateOpen) })
 	select {
-	case <-duplicateClosed:
+	case <-duplicateOpen:
 	case <-time.After(3 * time.Second):
-		t.Fatal("duplicate browser stream accepted")
+		t.Fatal("same-label replacement stream was rejected")
 	}
 	// Commands continue on the same authenticated peer while the viewer is open.
 	for _, want := range []float64{1, 2} {
-		r := call("mcp call fixture next --json")
+		r := call("fixture next --json")
 		if r["error"] != nil {
 			t.Fatal(r)
 		}
 		out := r["result"].(map[string]any)
-		if out["calls"] != want || out["approved"] != false || out["script"] != "mcp call fixture next --json" {
+		if out["calls"] != want || out["approved"] != false || out["script"] != "fixture next --json" {
 			t.Fatal(out)
 		}
 	}

@@ -11,7 +11,7 @@ Electron Main (Node, main.js)
  ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
  │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
  │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
- ├─ browser/cua/blender：普通技能包（`commands install <id>` 装包，pod 按包内 manifest 拉起）
+ ├─ browser/cua/blender：普通技能包（browser/cua 预装并随包附带预编译程序，其余 `commands install <id>`；pod 按包内 manifest 拉起）
  │    包自带服务或启动器；MCP 工具与 schema 原样暴露
  ├─ resources/agent-browser：官方原生二进制（AIC_AGENT_BROWSER_PATH = 可执行文件）
  ├─ resources/browser：Chrome for Testing（AIC_BROWSER_PATH = 可执行文件）
@@ -54,7 +54,7 @@ npm start
 平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/settings.html 单文件静态页，
 无框架/无构建、数据全走 IPC 桥）与 main.js/preload.js 改动需重启 electron。
 browser/CUA 使用上游独立程序，没有自研 server 或工具适配层。
-`mcp.servers` 可完整替换默认配置或添加第三方服务。协议见 [设备 MCP](../docs/reference/hosts-tools.md)。
+owner 可用 `commands add <alias> --protocol mcp ... --persist` 添加第三方服务。协议见 [设备 MCP](../docs/reference/hosts-tools.md)。
 开发依赖分别由 `npm run agent-browser-sync`、`npm run browser-sync`、`npm run cua-sync` 同步。
 版本在 `agent-browser.json`、`browser.json`、`cua.json` 固定。
 
