@@ -22,6 +22,8 @@ import (
 
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/gitx"
+	"github.com/veypi/aic-pod/libs/sshx"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -30,7 +32,7 @@ import (
 // 真实的 git-upload-pack / git-receive-pack（命令形态 git-upload-pack '<path>'）。
 func startGitPackSSHFixture(t *testing.T, home string) (string, *atomic.Int32) {
 	t.Helper()
-	if _, err := trustedSSHBinary(); err != nil {
+	if _, err := sshx.TrustedBinary(); err != nil {
 		t.Skip(err)
 	}
 	for _, tool := range []string{"git-upload-pack", "git-receive-pack"} {
@@ -227,7 +229,7 @@ func TestManagedGitSSHIntegration(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed git 未接入 windows")
 	}
-	if _, err := trustedGitBinary(); err != nil {
+	if _, err := gitx.TrustedBinary(); err != nil {
 		t.Skip(err)
 	}
 	c := newManagedSSHTestClient(t)

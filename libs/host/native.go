@@ -8,7 +8,6 @@ import (
 
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/gitx"
-	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/vbox"
 	"github.com/veypi/vsh/commands"
@@ -71,14 +70,3 @@ func (c *Client) runFileCommand(ctx context.Context, resolvedPath string, inv *c
 	}
 	return nil
 }
-
-// trustedSSHBinary 保留 host 侧测试入口（实现已迁 libs/sshx）。
-func trustedSSHBinary() (string, error) { return sshx.TrustedBinary() }
-
-// managedGit 保留 host 测试入口（实现已迁 libs/gitx）。
-func (c *Client) managedGit(ctx context.Context, inv *commands.Invocation) (bool, error) {
-	return c.git.Managed(ctx, inv)
-}
-
-// trustedGitBinary 保留 host 集成测试入口（实现已迁 libs/gitx）。
-func trustedGitBinary() (string, error) { return gitx.TrustedBinary() }

@@ -128,33 +128,46 @@ func (c *Client) hostCommandConfig(ctx context.Context, inv *commands.Invocation
 	return c.printCommandConfig(inv, updated, asJSON)
 }
 
-// updateCommandConfig 落盘一条定义级配置（文件锁内读改写）。
-func (c *Client) updateCommandConfig(id string, mutate func(*cfg.CommandDefConfig)) error {
+// mutateConfigFile 配置文件写面的统一事务：文件锁内读改写——LockUpdate →
+// LoadFile → 改（调用方给）→ Save；落盘成功后热更新内存命令配置。
+// 调用方只提供「改什么」（mutate 返回错误则不落盘）。
+// 锁序不变：调用方原有的 cfg.LockUpdate() 位置即此处取锁的位置。
+func (c *Client) mutateConfigFile(mutate func(*cfg.Options) error) error {
 	unlock := cfg.LockUpdate()
 	defer unlock()
 	fileCfg, err := cfg.LoadFile()
 	if err != nil {
 		return err
 	}
-	if fileCfg.CommandConfig == nil {
-		fileCfg.CommandConfig = map[string]cfg.CommandDefConfig{}
-	}
-	entry := fileCfg.CommandConfig[id]
-	mutate(&entry)
-	if len(entry.Env) == 0 {
-		entry.Env = nil
-	}
-	// 空配置不留痕（表里不出现空条目）。
-	if len(entry.Env) == 0 && !entry.NoSandbox {
-		delete(fileCfg.CommandConfig, id)
-	} else {
-		fileCfg.CommandConfig[id] = entry
+	if err := mutate(fileCfg); err != nil {
+		return err
 	}
 	if err := cfg.Save(fileCfg); err != nil {
 		return err
 	}
 	c.setCommandOptions(fileCfg.Commands, fileCfg.CommandConfig)
 	return nil
+}
+
+// updateCommandConfig 落盘一条定义级配置（文件锁内读改写）。
+func (c *Client) updateCommandConfig(id string, mutate func(*cfg.CommandDefConfig)) error {
+	return c.mutateConfigFile(func(fileCfg *cfg.Options) error {
+		if fileCfg.CommandConfig == nil {
+			fileCfg.CommandConfig = map[string]cfg.CommandDefConfig{}
+		}
+		entry := fileCfg.CommandConfig[id]
+		mutate(&entry)
+		if len(entry.Env) == 0 {
+			entry.Env = nil
+		}
+		// 空配置不留痕（表里不出现空条目）。
+		if len(entry.Env) == 0 && !entry.NoSandbox {
+			delete(fileCfg.CommandConfig, id)
+		} else {
+			fileCfg.CommandConfig[id] = entry
+		}
+		return nil
+	})
 }
 
 // printCommandConfig 输出该定义当前的配置（表内容，不是生效后的 env 全集）。

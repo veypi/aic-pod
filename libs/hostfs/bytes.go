@@ -112,11 +112,6 @@ func (b *Bytes) reserveBytes(n int64) error {
 	return nil
 }
 
-// Upload stages raw bytes with owner as both authorization and lifecycle key.
-func (b *Bytes) Upload(ctx context.Context, owner string, reader io.Reader, size *int64, sha string, mediaType string) (ByteSource, error) {
-	return b.UploadFor(ctx, owner, owner, reader, size, sha, mediaType)
-}
-
 // UploadFor stages raw bytes on disk and exposes a source only after size and
 // hash verification. owner authorizes later access; creator bounds disconnect
 // cleanup. A caller must already be authenticated and bound to owner.
@@ -214,11 +209,6 @@ func (b *Bytes) UploadFor(ctx context.Context, owner, creator string, reader io.
 	success = true
 	b.mu.Unlock()
 	return descriptor, nil
-}
-
-// AddFile transfers ownership of file with owner as both authorization and lifecycle key.
-func (b *Bytes) AddFile(owner string, file *os.File, size int64, version, mediaType string, verify func(context.Context) error) (ByteSource, error) {
-	return b.AddFileFor(owner, owner, file, size, version, mediaType, verify)
 }
 
 // AddFileFor transfers ownership of file, including on failure. verify rechecks

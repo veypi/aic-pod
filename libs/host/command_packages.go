@@ -315,23 +315,15 @@ func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[strin
 }
 
 func (c *Client) clearCommandPackageConfig(skillID string) error {
-	unlock := cfg.LockUpdate()
-	defer unlock()
-	fileCfg, err := cfg.LoadFile()
-	if err != nil {
-		return err
-	}
-	prefix := "skill:" + skillID + ":"
-	for id := range fileCfg.CommandConfig {
-		if strings.HasPrefix(id, prefix) {
-			delete(fileCfg.CommandConfig, id)
+	return c.mutateConfigFile(func(fileCfg *cfg.Options) error {
+		prefix := "skill:" + skillID + ":"
+		for id := range fileCfg.CommandConfig {
+			if strings.HasPrefix(id, prefix) {
+				delete(fileCfg.CommandConfig, id)
+			}
 		}
-	}
-	if err := cfg.Save(fileCfg); err != nil {
-		return err
-	}
-	c.setCommandOptions(fileCfg.Commands, fileCfg.CommandConfig)
-	return nil
+		return nil
+	})
 }
 
 func (c *Client) setCommandOptions(commands map[string]cfg.CommandConfig, configs map[string]cfg.CommandDefConfig) {
@@ -342,23 +334,15 @@ func (c *Client) setCommandOptions(commands map[string]cfg.CommandConfig, config
 }
 
 func (c *Client) persistCommandConfig(alias string, config *cfg.CommandConfig) error {
-	unlock := cfg.LockUpdate()
-	defer unlock()
-	fileCfg, err := cfg.LoadFile()
-	if err != nil {
-		return err
-	}
-	if fileCfg.Commands == nil {
-		fileCfg.Commands = map[string]cfg.CommandConfig{}
-	}
-	if config == nil {
-		delete(fileCfg.Commands, alias)
-	} else {
-		fileCfg.Commands[alias] = *config
-	}
-	if err := cfg.Save(fileCfg); err != nil {
-		return err
-	}
-	c.setCommandOptions(fileCfg.Commands, fileCfg.CommandConfig)
-	return nil
+	return c.mutateConfigFile(func(fileCfg *cfg.Options) error {
+		if fileCfg.Commands == nil {
+			fileCfg.Commands = map[string]cfg.CommandConfig{}
+		}
+		if config == nil {
+			delete(fileCfg.Commands, alias)
+		} else {
+			fileCfg.Commands[alias] = *config
+		}
+		return nil
+	})
 }

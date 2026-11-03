@@ -90,7 +90,7 @@ func value[T any](t *testing.T, op outcome) T {
 func (f *fixture) upload(t *testing.T, data []byte) protocol.FSResourceRef {
 	t.Helper()
 	size := int64(len(data))
-	src, err := f.store.Upload(context.Background(), f.owner, bytes.NewReader(data), &size, "", "")
+	src, err := f.store.UploadFor(context.Background(), f.owner, f.owner, bytes.NewReader(data), &size, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

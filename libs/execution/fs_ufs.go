@@ -217,18 +217,33 @@ func fileOpName(op vbox.FileOp) string {
 // gate 进程内路径权威：jail 硬约束 → vbox 规则表（首命中生效）。
 // noFollow = unlink/rename 语义（作用于链接本身，不跟随末段）。
 func (a *ufsAdapter) gate(abs string, op vbox.FileOp, noFollow bool) error {
+	return a.gatePath(abs, op, noFollow, false)
+}
+
+// gateResolved 判定一条「后端已解析并固定」的路径：不再二次归一化。
+// The host backend has already resolved and pinned this path. Do not resolve
+// it a second time through a concurrently changed pathname before evaluating.
+func (a *ufsAdapter) gateResolved(abs string, op vbox.FileOp) error {
+	return a.gatePath(abs, op, false, true)
+}
+
+// gatePath 是 gate / gateResolved 的共同判定：jail 硬约束 → vbox 规则表
+// （首命中生效）。两处只差一步：
+//   - resolved=false：普通路径，判定前按 noFollow 语义归一化（host 侧的
+//     canonicalize-then-check；cloud 侧逻辑路径不变）。
+//   - resolved=true：路径已由后端解析并固定（见 gateResolved），不再归一化。
+func (a *ufsAdapter) gatePath(abs string, op vbox.FileOp, noFollow, resolved bool) error {
 	if !a.inJail(abs) {
 		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s (cloud file access is limited to %s)", ErrOutsideJail, abs, strings.Join(a.jails, " "))}
 	}
 	if a.rules == nil {
 		return nil
 	}
-	rules := a.rules()
 	target := abs
-	if a.normalizePath != nil {
+	if !resolved && a.normalizePath != nil {
 		target = a.normalizePath(abs, noFollow)
 	}
-	d := rules.MatchPath(target, op)
+	d := a.rules().MatchPath(target, op)
 	if !d.Allow {
 		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s", ErrRuleDenied, ruleDeniedText(abs, d.Reason))}
 	}
@@ -375,7 +390,7 @@ func (a *ufsAdapter) Stat(ctx context.Context, name string) (stdfs.FileInfo, err
 	abs := a.resolve(name)
 	abs = a.resolveMemSymlinks(ctx, abs, true)
 	if data, ok := a.sysFileData(abs); ok {
-		return sysFileInfo{name: abs, size: int64(len(data))}, nil
+		return synthFileInfo{name: abs, size: int64(len(data)), mtime: sysFileModTime}, nil
 	}
 	if a.isMem(abs) {
 		return a.mem.Stat(ctx, abs)
@@ -389,7 +404,7 @@ func (a *ufsAdapter) Stat(ctx context.Context, name string) (stdfs.FileInfo, err
 func (a *ufsAdapter) Lstat(ctx context.Context, name string) (stdfs.FileInfo, error) {
 	abs := a.resolve(name)
 	if data, ok := a.sysFileData(abs); ok {
-		return sysFileInfo{name: abs, size: int64(len(data))}, nil
+		return synthFileInfo{name: abs, size: int64(len(data)), mtime: sysFileModTime}, nil
 	}
 	if a.isMem(abs) {
 		return a.mem.Lstat(ctx, abs)
@@ -608,20 +623,6 @@ type checkedOpener interface {
 	OpenChecked(string, int, stdfs.FileMode, func(string, vbox.FileOp) error) (*os.File, error)
 }
 
-// The host backend has already resolved and pinned this path. Do not resolve
-// it a second time through a concurrently changed pathname before evaluating.
-func (a *ufsAdapter) gateResolved(abs string, op vbox.FileOp) error {
-	if !a.inJail(abs) {
-		return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: ErrOutsideJail}
-	}
-	if a.rules != nil {
-		if d := a.rules().MatchPath(abs, op); !d.Allow {
-			return &stdfs.PathError{Op: fileOpName(op), Path: abs, Err: fmt.Errorf("%w: %s", ErrRuleDenied, ruleDeniedText(abs, d.Reason))}
-		}
-	}
-	return nil
-}
-
 func (a *ufsAdapter) Getwd() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -723,30 +724,33 @@ func (f *sysFile) Close() error {
 }
 
 func (f *sysFile) Stat() (stdfs.FileInfo, error) {
-	return sysFileInfo{name: f.name, size: int64(len(f.data))}, nil
+	return synthFileInfo{name: f.name, size: int64(len(f.data)), mtime: sysFileModTime}, nil
 }
 
-// sysFileModTime 合成文件的固定 mtime（内容随平台发布变化，不用 now——
+// sysFileModTime 合成系统文件的固定 mtime（内容随平台发布变化，不用 now——
 // 每次 exec 同一文件 mtime 稳定，ls -l 不乱跳）。
 var sysFileModTime = time.Unix(1700000000, 0)
 
-// sysFileInfo 合成只读系统文件的最小 FileInfo。
-type sysFileInfo struct {
-	name string
-	size int64
+// synthFileInfo 合成文件的最小 FileInfo（只读系统文件与未落盘的缓冲文件共用
+// 一个实现）：mtime 由调用方给——系统文件用固定值（见 sysFileModTime），未
+// 落盘的缓冲文件用 now（尚无稳定 mtime）。
+type synthFileInfo struct {
+	name  string
+	size  int64
+	mtime time.Time
 }
 
-func (s sysFileInfo) Name() string {
+func (s synthFileInfo) Name() string {
 	if idx := strings.LastIndex(s.name, "/"); idx >= 0 {
 		return s.name[idx+1:]
 	}
 	return s.name
 }
-func (s sysFileInfo) Size() int64          { return s.size }
-func (s sysFileInfo) Mode() stdfs.FileMode { return 0o644 }
-func (s sysFileInfo) ModTime() time.Time   { return sysFileModTime }
-func (s sysFileInfo) IsDir() bool          { return false }
-func (s sysFileInfo) Sys() any             { return nil }
+func (s synthFileInfo) Size() int64          { return s.size }
+func (s synthFileInfo) Mode() stdfs.FileMode { return 0o644 }
+func (s synthFileInfo) ModTime() time.Time   { return s.mtime }
+func (s synthFileInfo) IsDir() bool          { return false }
+func (s synthFileInfo) Sys() any             { return nil }
 
 // 接口断言：合成文件实现引擎 FS 文件契约。
 var _ gbfs.File = (*sysFile)(nil)
@@ -814,26 +818,8 @@ func (f *bufferedWriteFile) Stat() (stdfs.FileInfo, error) {
 		return fi, nil
 	}
 	// 新文件尚未落盘：合成最小 FileInfo。
-	return synthFileInfo{name: f.name, size: int64(len(f.buf))}, nil
+	return synthFileInfo{name: f.name, size: int64(len(f.buf)), mtime: time.Now()}, nil
 }
-
-// synthFileInfo 未落盘文件的最小 FileInfo。
-type synthFileInfo struct {
-	name string
-	size int64
-}
-
-func (s synthFileInfo) Name() string {
-	if idx := strings.LastIndex(s.name, "/"); idx >= 0 {
-		return s.name[idx+1:]
-	}
-	return s.name
-}
-func (s synthFileInfo) Size() int64          { return s.size }
-func (s synthFileInfo) Mode() stdfs.FileMode { return 0o644 }
-func (s synthFileInfo) ModTime() time.Time   { return time.Now() }
-func (s synthFileInfo) IsDir() bool          { return false }
-func (s synthFileInfo) Sys() any             { return nil }
 
 // 接口断言：适配器实现引擎 FS 契约。
 var _ gbfs.FileSystem = (*ufsAdapter)(nil)

@@ -21,6 +21,7 @@ import (
 	"github.com/pkg/sftp"
 	"github.com/veypi/aic-pod/cfg"
 	"github.com/veypi/aic-pod/libs/execution"
+	"github.com/veypi/aic-pod/libs/sshx"
 	"github.com/veypi/vbox"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -30,7 +31,7 @@ import (
 // only implements fixed test commands and an SFTP subsystem, never a shell.
 func startManagedSSHFixture(t *testing.T, home, remoteDir string) (string, *atomic.Int32) {
 	t.Helper()
-	if _, err := trustedSSHBinary(); err != nil {
+	if _, err := sshx.TrustedBinary(); err != nil {
 		t.Skip(err)
 	}
 	_, hostKey, _ := ed25519.GenerateKey(rand.Reader)

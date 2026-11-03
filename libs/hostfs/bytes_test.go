@@ -18,7 +18,7 @@ func TestBytesRoundTripRangeAndOwnership(t *testing.T) {
 	data := append([]byte{0, 255, 0, 128}, bytes.Repeat([]byte("line\r\n"), 20000)...)
 	hash := sha256.Sum256(data)
 	size := int64(len(data))
-	src, err := store.Upload(context.Background(), "session_1", bytes.NewReader(data), &size, hex.EncodeToString(hash[:]), "application/octet-stream")
+	src, err := store.UploadFor(context.Background(), "session_1", "session_1", bytes.NewReader(data), &size, hex.EncodeToString(hash[:]), "application/octet-stream")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,18 +56,18 @@ func TestIncompleteUploadNeverCreatesSource(t *testing.T) {
 	defer store.Close()
 	size := int64(4)
 	for _, data := range [][]byte{[]byte("abc"), []byte("abcde")} {
-		if _, err := store.Upload(context.Background(), "session_1", bytes.NewReader(data), &size, "", ""); err == nil {
+		if _, err := store.UploadFor(context.Background(), "session_1", "session_1", bytes.NewReader(data), &size, "", ""); err == nil {
 			t.Fatal("bad length accepted")
 		}
 	}
-	if _, err := store.Upload(context.Background(), "session_1", bytes.NewReader([]byte("abcdefghx")), nil, "", ""); err == nil {
+	if _, err := store.UploadFor(context.Background(), "session_1", "session_1", bytes.NewReader([]byte("abcdefghx")), nil, "", ""); err == nil {
 		t.Fatal("quota bypass")
 	}
 	if store.used != 0 || len(store.sources) != 0 {
 		t.Fatalf("failed upload leaked reservation: %d", store.used)
 	}
 	zero := int64(0)
-	src, err := store.Upload(context.Background(), "session_1", bytes.NewReader(nil), &zero, "", "")
+	src, err := store.UploadFor(context.Background(), "session_1", "session_1", bytes.NewReader(nil), &zero, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestIncompleteUploadNeverCreatesSource(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err = store.Upload(ctx, "session_1", bytes.NewReader([]byte("x")), nil, "", ""); err == nil {
+	if _, err = store.UploadFor(ctx, "session_1", "session_1", bytes.NewReader([]byte("x")), nil, "", ""); err == nil {
 		t.Fatal("cancelled upload accepted")
 	}
 }
@@ -97,7 +97,7 @@ func TestCreatorCloseDuringUploadDoesNotPublishSource(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := store.Upload(context.Background(), "session_1", readFunc(func(p []byte) (int, error) {
+		_, err := store.UploadFor(context.Background(), "session_1", "session_1", readFunc(func(p []byte) (int, error) {
 			close(started)
 			<-release
 			return copy(p, "pending"), io.EOF

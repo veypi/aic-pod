@@ -74,6 +74,30 @@ var sshBuiltin = []vbox.NetRule{{HostPort: "github.com:22", Allow: true}}
 // grant status 标注共用同一取值。
 var nativeNetPlatform = runtime.GOOS
 
+// authDomain 描述一个授权配置域的编译：域名、policy 取值、规则编译器。
+// 四域同构——policy 非法 → 该域 fail-closed（错误字段 <域>_policy）；规则
+// 编译失败 → 该域 fail-closed（错误字段 <域>_rules）；其余域不受影响。
+// fs 域的编译器另带内建 deny 与 hard protection（compileFSBase 内）；
+// net 域的上游代理校验在规则编译之后单独做。
+type authDomain struct {
+	name    string
+	policy  string
+	compile func() error
+}
+
+// netRulesCompiler 返回 net/ssh 两域共用的规则编译器：编译失败即该域失败，
+// 成功则写回目标表。
+func netRulesCompiler(raw []string, target *[]vbox.NetRule) func() error {
+	return func() error {
+		rules, err := compileNetRules(raw)
+		if err != nil {
+			return err
+		}
+		*target = rules
+		return nil
+	}
+}
+
 // compileAuth 完整编译校验一份授权配置（纯函数，不触碰运行状态）。
 func compileAuth(a cfg.AuthCfg) (*compiledAuth, error) {
 	base := &compiledAuth{
@@ -85,36 +109,34 @@ func compileAuth(a cfg.AuthCfg) (*compiledAuth, error) {
 		execRules:        append([]string(nil), a.ExecRules...),
 		errs:             map[string]error{},
 	}
-	if err := validateAuthPolicy(a.ExecPolicy); err != nil {
-		base.setError("exec", "exec_policy", err)
-	} else if err := cfg.ValidateExecRules(a.ExecRules); err != nil {
-		base.setError("exec", "exec_rules", err)
+	domains := []authDomain{
+		{"exec", a.ExecPolicy, func() error { return cfg.ValidateExecRules(a.ExecRules) }},
+		{"fs", a.FsPolicy, func() error {
+			rules, err := compileFSBase(a.FsRules)
+			if err != nil {
+				return err
+			}
+			base.fsRules = rules
+			return nil
+		}},
+		{"net", a.NetPolicy, netRulesCompiler(a.NetRules, &base.netRules)},
+		{"ssh", a.SshPolicy, netRulesCompiler(a.SshRules, &base.sshRules)},
 	}
-	if err := validateAuthPolicy(a.FsPolicy); err != nil {
-		base.setError("fs", "fs_policy", err)
-	} else if rules, err := compileFSBase(a.FsRules); err != nil {
-		base.setError("fs", "fs_rules", err)
-	} else {
-		base.fsRules = rules
+	for _, d := range domains {
+		if err := validateAuthPolicy(d.policy); err != nil {
+			base.setError(d.name, d.name+"_policy", err)
+			continue
+		}
+		if err := d.compile(); err != nil {
+			base.setError(d.name, d.name+"_rules", err)
+		}
 	}
-	if err := validateAuthPolicy(a.NetPolicy); err != nil {
-		base.setError("net", "net_policy", err)
-	} else if rules, err := compileNetRules(a.NetRules); err != nil {
-		base.setError("net", "net_rules", err)
-	} else {
-		base.netRules = rules
-	}
+	// net 域的后置校验：上游代理只在 net 规则本身无错时校验（一个域只报一个
+	// 错——首个错误由 err() 按 exec,fs,net,ssh 顺序给出）。
 	if base.errs["net"] == nil && a.NetUpstreamProxy != "" {
 		if err := vbox.ValidateUpstreamProxy(a.NetUpstreamProxy); err != nil {
 			base.setError("net", "net_upstream_proxy", err)
 		}
-	}
-	if err := validateAuthPolicy(a.SshPolicy); err != nil {
-		base.setError("ssh", "ssh_policy", err)
-	} else if rules, err := compileNetRules(a.SshRules); err != nil {
-		base.setError("ssh", "ssh_rules", err)
-	} else {
-		base.sshRules = rules
 	}
 	return base, base.err()
 }
@@ -348,18 +370,11 @@ func (p *permissionState) netSnapshot(sid string) vbox.NetRuleSet {
 }
 
 func (p *permissionState) netSnapshotLocked(sid string) vbox.NetRuleSet {
-	if p.base.errs["net"] != nil {
-		return vbox.NetRuleSet{}
-	}
-	var rows []vbox.NetRule
+	var grants []vbox.Entry
 	if g := p.grants[sid]; g != nil {
-		for _, e := range g.net {
-			rows = append(rows, vbox.NetRule{HostPort: e.String(), Allow: true})
-		}
+		grants = g.net
 	}
-	rows = append(rows, p.base.netRules...)
-	rows = append(rows, netBuiltin...)
-	return vbox.NetRuleSet{Rules: rows, Default: p.base.netOpen, UpstreamProxy: p.base.netUpstreamProxy}
+	return p.netLikeSnapshotLocked("net", grants, p.base.netRules, netBuiltin, p.base.netOpen, p.base.netUpstreamProxy)
 }
 
 func (p *permissionState) sshSnapshot(sid string) vbox.NetRuleSet {
@@ -369,18 +384,27 @@ func (p *permissionState) sshSnapshot(sid string) vbox.NetRuleSet {
 }
 
 func (p *permissionState) sshSnapshotLocked(sid string) vbox.NetRuleSet {
-	if p.base.errs["ssh"] != nil {
+	var grants []vbox.Entry
+	if g := p.grants[sid]; g != nil {
+		grants = g.ssh
+	}
+	return p.netLikeSnapshotLocked("ssh", grants, p.base.sshRules, sshBuiltin, p.base.sshOpen, "")
+}
+
+// netLikeSnapshotLocked 合成 net/ssh 两域的规则快照（两域同构：会话级 grant
+// → 基表规则 → 内建行 → 默认姿态）。差别只有域名、内建行、默认姿态，以及
+// 只有 net 域才有的上游代理（ssh 不经代理，传空串即不带该字段）。
+func (p *permissionState) netLikeSnapshotLocked(domain string, grants []vbox.Entry, baseRules, builtin []vbox.NetRule, open bool, upstreamProxy string) vbox.NetRuleSet {
+	if p.base.errs[domain] != nil {
 		return vbox.NetRuleSet{}
 	}
 	var rows []vbox.NetRule
-	if g := p.grants[sid]; g != nil {
-		for _, e := range g.ssh {
-			rows = append(rows, vbox.NetRule{HostPort: e.String(), Allow: true})
-		}
+	for _, e := range grants {
+		rows = append(rows, vbox.NetRule{HostPort: e.String(), Allow: true})
 	}
-	rows = append(rows, p.base.sshRules...)
-	rows = append(rows, sshBuiltin...)
-	return vbox.NetRuleSet{Rules: rows, Default: p.base.sshOpen}
+	rows = append(rows, baseRules...)
+	rows = append(rows, builtin...)
+	return vbox.NetRuleSet{Rules: rows, Default: open, UpstreamProxy: upstreamProxy}
 }
 
 func (p *permissionState) sshAllowed(sid, hostport string) bool {
