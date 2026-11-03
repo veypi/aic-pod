@@ -20,7 +20,9 @@ CLI_NAME    := aic-cli
 BIN_DIR     := dist
 MAIN_DIR    := ./cli
 DESKTOP_DIR := ./desktop
-SKILLS_DIR  := ../aic-skills
+# 预装包设备程序源码目录：取 go 模块解析结果（go.mod 锁定的 aic-skills 版本）——
+# CI 从 module cache 取，go.work 本地则指向同级 ../aic-skills；不依赖同级目录存在。
+SKILLS_DIR  ?= $(shell go list -m -f '{{.Dir}}' github.com/veypi/aic-skills 2>/dev/null || echo ../aic-skills)
 DOCKER_IMAGE ?= veypi/aic-pod
 
 GOHOSTOS   := $(shell go env GOHOSTOS)
@@ -69,10 +71,12 @@ skill-bin-%:
 	@os=$$(echo $* | cut -d- -f1); arch=$$(echo $* | cut -d- -f2-); \
 	out="$(abspath $(BIN_DIR))/skill-bin/$$os-$$arch"; \
 	rm -rf "$$out"; \
+	skills_dir=$$(go list -m -f '{{.Dir}}' github.com/veypi/aic-skills) || exit 1; \
+	test -d "$$skills_dir" || { echo "aic-skills 模块目录不可用：$$skills_dir" >&2; exit 1; }; \
 	for pkg in browser cua; do \
 		ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
 		mkdir -p "$$out/$$pkg"; \
-		(cd $(SKILLS_DIR) && GOOS=$$os GOARCH=$$arch go build -ldflags "-s -w" -o "$$out/$$pkg/$$pkg$$ext" ./$$pkg/src) || exit 1; \
+		(cd "$$skills_dir" && GOOS=$$os GOARCH=$$arch go build -ldflags "-s -w" -o "$$out/$$pkg/$$pkg$$ext" ./$$pkg/src) || exit 1; \
 	done; \
 	stage="$(abspath $(BIN_DIR))/.skill-bin-pack-$$os-$$arch"; \
 	rm -rf "$$stage"; mkdir -p "$$stage"; cp -R "$$out" "$$stage/skill-bin"; \

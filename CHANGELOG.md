@@ -18,6 +18,7 @@
 - **修掉两处既有缺陷**：① `commands uninstall` 旧实现先删状态再清理，任一步失败即留下「状态已删、命令与常驻进程仍在」且重试无效（`not installed`）——改为无论如何重建注册表并聚合三个错误；② 技能包里 `url` 型远程 MCP 命令此前因 `mcpConfig()` 无条件带 `cwd`（技能命令恒为包目录）而被判「process settings require command」，永远注册不上——`cwd` 改到只对 `run` 型生效。
 - 测试同步：被删的 `services_concurrency_test.go` / `mcp_alias_gate_test.go` 由 `command_unified_test.go` 的 `TestUnifiedAliasPermissionGate`（别名门覆盖调用/生命周期/参数表）与新增的 hub 并发用例接管。
 - 文档：`README.md` / `README.en.md` 的构建段同步预装包现状——pod 内嵌 browser/cua 的包内容用于启动定版，不再是「不嵌入任何技能包」；发行包附带预编译设备程序。
+- **发版链修复：`make skill-bin-*` 不再依赖同级 `../aic-skills` 目录**：预装包设备程序（browser/cua）的源码改从 go 模块解析出的目录取（`go list -m -f '{{.Dir}}' github.com/veypi/aic-skills`——CI 从 module cache 取，本地 go.work 仍指向同级目录）；原实现硬编码 `../aic-skills`，CI 只 checkout 本仓时目录不存在 → desktop 的 Build 步直接失败（v0.10.0 首次 CI 即踩中，已修）。
 
 ## v0.9.8 — 2026-11-01
 
