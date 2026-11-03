@@ -4,12 +4,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/veypi/aic-pod/cfg"
 )
 
 func TestPreinstalledCommandPackages(t *testing.T) {
 	resources := t.TempDir()
-	for _, id := range preinstalledCommandPackages {
+	for _, id := range cfg.PreinstalledCommandPackages {
 		dir := filepath.Join(resources, id)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -24,7 +27,7 @@ func TestPreinstalledCommandPackages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range preinstalledCommandPackages {
+	for _, id := range cfg.PreinstalledCommandPackages {
 		data, err := os.ReadFile(filepath.Join(root, id, "bin", id))
 		if err != nil || string(data) != "shipped-"+id {
 			t.Fatalf("%s: preinstalled binary = %q, %v", id, data, err)
@@ -66,7 +69,7 @@ func TestPreinstalledCommandPackages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range preinstalledCommandPackages {
+	for _, id := range cfg.PreinstalledCommandPackages {
 		record := state.Packages[id]
 		if !record.Builtin || record.Revision != 2 {
 			t.Fatalf("%s: record = %+v, want builtin revision 2", id, record)
@@ -91,5 +94,78 @@ func TestPreinstallWithoutShippedBinariesKeepsSource(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "browser", "src")); err != nil {
 		t.Fatalf("package source missing: %v", err)
+	}
+}
+
+// 预装包的默认沙箱姿态：Windows 上 Chrome/CuaDriver 与受限令牌沙箱不兼容，
+// 安装即视为同意其免沙箱运行；owner 显式定过的定义不动。
+func TestPreinstalledSandboxDefaults(t *testing.T) {
+	c, _ := testClient(t)
+	restore := sandboxDefaultPlatforms
+	sandboxDefaultPlatforms = map[string]bool{"windows": true, runtime.GOOS: true}
+	t.Cleanup(func() { sandboxDefaultPlatforms = restore })
+
+	ids := []string{"skill:browser:browser", "skill:cua:cua"}
+	if err := c.applyPreinstalledSandboxDefaults(ids); err != nil {
+		t.Fatal(err)
+	}
+	fileCfg, err := cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if !fileCfg.CommandConfig[id].NoSandbox {
+			t.Fatalf("%s: no_sandbox not defaulted: %+v", id, fileCfg.CommandConfig[id])
+		}
+	}
+
+	// 幂等：再跑一次不改变已有配置。
+	if err := c.applyPreinstalledSandboxDefaults(ids); err != nil {
+		t.Fatal(err)
+	}
+	fileCfg, err = cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if !fileCfg.CommandConfig[id].NoSandbox {
+			t.Fatalf("%s: default not idempotent: %+v", id, fileCfg.CommandConfig[id])
+		}
+	}
+
+	// owner 显式关掉（yaml 里写死 no_sandbox: false）→ 不被改回。
+	fileCfg.CommandConfig["skill:browser:browser"] = cfg.CommandDefConfig{NoSandbox: false}
+	if err := cfg.Save(fileCfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.applyPreinstalledSandboxDefaults(ids); err != nil {
+		t.Fatal(err)
+	}
+	fileCfg, err = cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileCfg.CommandConfig["skill:browser:browser"].NoSandbox {
+		t.Fatal("owner-disabled no_sandbox was overwritten")
+	}
+	if !fileCfg.CommandConfig["skill:cua:cua"].NoSandbox {
+		t.Fatal("cua default lost")
+	}
+
+	// 非目标平台：不写默认姿态。
+	sandboxDefaultPlatforms = map[string]bool{}
+	fileCfg.CommandConfig = nil
+	if err := cfg.Save(fileCfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.applyPreinstalledSandboxDefaults(ids); err != nil {
+		t.Fatal(err)
+	}
+	fileCfg, err = cfg.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fileCfg.CommandConfig) != 0 {
+		t.Fatalf("defaults written on unsupported platform: %+v", fileCfg.CommandConfig)
 	}
 }

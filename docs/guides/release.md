@@ -22,7 +22,9 @@ MCP 服务注册、技能包命令与流的装配。
 `commands install/update/uninstall`，随 pod 版本更新。blender 与第三方包仍走
 `commands install <id>`，设备侧按包内 SKILL.md「安装与构建」准备运行程序。服务首次调用懒启动并共享
 SDK session；包内可声明 `idle_timeout`（browser/cua/blender 均 30m），到期回收。包内不得声明沙箱姿态，
-免沙箱只能由设备 owner 用 `commands config <alias> --no-sandbox` 授予。
+免沙箱只能由设备 owner 用 `commands config <alias> --no-sandbox` 授予——例外是 Windows 上的预装包：
+受限令牌沙箱与 Chrome/CuaDriver 不兼容（Chrome 需 mojo/crashpad 的进程句柄权限），pod 启动定版时
+为它们写入默认 `no_sandbox`（安装即视为同意随包程序在本机运行；owner 显式定过的定义不动）。
 
 owner 手工服务同样写入统一 `commands` 配置段并由 command hub 装配；删除对应定义即停用。
 

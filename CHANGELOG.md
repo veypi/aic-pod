@@ -9,6 +9,11 @@
 
 - **代码精简（结构收口，无行为变更）**：对 `libs/` 做了一轮只读代码评审后，按低风险优先收了一批同构重复与死代码：①**死代码与迁移遗留壳**——`libs/host/native.go` 的 `managedGit`（全仓零调用）、`trustedSSHBinary`/`trustedGitBinary`（实现已迁 `libs/sshx`/`libs/gitx` 后留下的测试转发壳，集成测试改直调 `sshx.TrustedBinary()`/`gitx.TrustedBinary()`）；`libs/hostfs/bytes.go` 的 `AddFile`（零调用）与 `Upload`（仅测试在用，生产一律走 `UploadFor`/`AddFileFor`）——测试改直调 `UploadFor`，两个 owner==creator 退化入口不再占公共 API 面。②**配置文件写面三份同构**（`command_packages.go` 的 `persistCommandConfig`/`clearCommandPackageConfig` 与 `command_config.go` 的 `updateCommandConfig`，都是「加锁→LoadFile→改→Save→刷新内存」）收成一个 `mutateConfigFile`：这四步是「改了文件必须同时刷新运行时」的不变式，抄三遍就多三处漏改的机会。③**权限域装配样板**：`libs/host/permissions.go` 的 `compileAuth` 改表驱动（exec/fs/net/ssh 四域同构），net/ssh 两域的规则快照合成 `netLikeSnapshotLocked`——net 独有的上游代理字段仍只进 net 域，错误域顺序（exec→fs→net→ssh 取首个错误）与 fs 域的内建 deny / hard protection 段均不变。④**`libs/execution/fs_ufs.go` 内部两处重复**：`gate`/`gateResolved` 合成一个判定（只差「路径是否已解析并固定」），`sysFileInfo`/`synthFileInfo` 合成一个带 mtime 参数的合成 FileInfo（系统文件仍用固定 mtime，未落盘的缓冲文件仍用 now）。**一处可见文案变化**：`gateResolved` 的越界拒绝文案由短句 `ErrOutsideJail` 改为与 `gate` 一致的长句（带 jail 范围说明）。验证：`go build ./...` 通过；`libs/execution`、`libs/hostfs` 全绿；`libs/host`、`libs/gitx` 的 ssh/git 集成用例仍因沙箱拒写 `~/.ssh` 而红（既有环境问题，与本次改动无关）。
 
+## v0.10.1 — 2026-11-03
+
+- **预装包默认免沙箱（Windows）**：预装包（browser/cua）随发行携带设备程序（Chrome for Testing / CuaDriver），安装即视为同意其在本机免沙箱运行——Windows 的受限令牌沙箱与它们不兼容：Chrome 需要 mojo 平台通道与 crashpad 的进程句柄权限，受限令牌下直接 FATAL（`OpenProcess: 拒绝访问`），首次调用死在 chrome profile 目录写权限上；CuaDriver 同样需要图形与驱动权限。pod 启动定版预装包时为这些命令写入默认 `no_sandbox`（config.yaml 的 `command_config` 段，键为定义身份 `skill:<包>:<命令>`），**owner 显式定过的定义不动**（yaml 里写死 `no_sandbox: false` 也不会被改回）。
+- 预装包清单收敛到 `cfg.PreinstalledCommandPackages`（pod 启动定版与默认沙箱姿态共用一处事实），原先 `libs/host` 的本地副本删除。
+
 ## v0.10.0 — 2026-11-02
 
 - **官方设备包预装：browser/cua 开箱即用（含预编译设备程序）**：pod 重新 require `aic-skills`（上次移除的是技能代码耦合，不是内容分发），启动时对两包做整目录原子定版到 `~/.aic/packages/<id>`（`libs/host/command_preinstall.go`），并从发行附带的资源目录把预编译 `bin/browser`、`bin/cua` 铺进包内——`run` 相对包根的现有解析不变，用户不再需要 `commands install` 与 Go 工具链。预装包不可 `commands install/update/uninstall`，随 pod 版本更新；`commands list` 行新增 `preinstalled` 标记。发行链：`make skill-bin-<os>-<arch>` 交叉编译设备程序并产 `aic-skill-bin-*.tar.gz`（CLI 解到可执行文件同目录），Desktop 经 `skill-bin-desktop` → extraResources `resources/skill-bin` + `main.js` 注入 `AIC_SKILL_BIN_DIR`；资源缺失时保留源码与旧构建产物，调用报明确错误，不静默。

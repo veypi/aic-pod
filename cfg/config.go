@@ -24,10 +24,18 @@ const DefaultHost = "https://ivec-ai.com"
 
 // Version 客户端版本：Makefile -X github.com/veypi/aic-pod/cfg.Version 注入 git
 // 版本，未注入时以此兑底。发版只改本变量；desktop 版本由构建同步。
-var Version = "v0.10.0"
+var Version = "v0.10.1"
 
 // DeviceType 客户端类型（cli/desktop），启动时固定（desktop main 覆盖为 "desktop"）。
 var DeviceType = "cli"
+
+// PreinstalledCommandPackages 是官方预装包清单：随发行携带设备程序（Desktop 的
+// resources/skill-bin / CLI 的 aic-skill-bin-*.tar.gz），启动定版到
+// ~/.aic/packages/<id>，用户无需 commands install 与 Go 工具链。
+//
+// 一处事实源：pod 启动定版（libs/host/command_preinstall.go）与 Desktop 首次
+// 运行写入的默认沙箱姿态（cli/config.go 的 config sandbox-defaults）共用本清单。
+var PreinstalledCommandPackages = []string{"browser", "cua"}
 
 // Options 是 cli 与 desktop 共享的唯一配置模型（配置参数就是一个结构体，
 // vigo/flags AutoRegister/LoadCfg/DumpCfg 直接使用）：

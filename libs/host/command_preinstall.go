@@ -18,15 +18,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 
+	"github.com/veypi/aic-pod/cfg"
 	aicskills "github.com/veypi/aic-skills"
 )
 
-// preinstalledCommandPackages 是启动定版的官方包清单（只含带设备命令的包）。
-var preinstalledCommandPackages = []string{"browser", "cua"}
-
+// preinstalledCommandPackage 判断 id 是否官方预装包（清单见 cfg：pod 定版与
+// 默认沙箱姿态共用同一份事实）。
 func preinstalledCommandPackage(id string) bool {
-	for _, name := range preinstalledCommandPackages {
+	for _, name := range cfg.PreinstalledCommandPackages {
 		if name == id {
 			return true
 		}
@@ -62,12 +64,53 @@ func (c *Client) preinstallCommandPackages() error {
 	if err != nil {
 		return err
 	}
-	for _, id := range preinstalledCommandPackages {
+	ids := make([]string, 0, len(cfg.PreinstalledCommandPackages))
+	for _, id := range cfg.PreinstalledCommandPackages {
 		if err := c.preinstallCommandPackage(root, &state, id); err != nil {
 			return fmt.Errorf("preinstall %s: %w", id, err)
 		}
+		defIDs, err := preinstalledCommandIDs(root, id)
+		if err != nil {
+			return fmt.Errorf("preinstall %s: %w", id, err)
+		}
+		ids = append(ids, defIDs...)
 	}
-	return c.saveCommandPackageState(state)
+	if err := c.saveCommandPackageState(state); err != nil {
+		return err
+	}
+	return c.applyPreinstalledSandboxDefaults(ids)
+}
+
+// sandboxDefaultPlatforms 是「预装包默认免沙箱」的平台集合。
+//
+// Windows 的受限令牌沙箱与 Chrome/CuaDriver 不兼容：Chrome 需要 mojo 平台通道
+// 与 crashpad 的进程句柄权限，受限令牌下直接 FATAL（OpenProcess: 拒绝访问）；
+// CuaDriver 同样要图形与驱动权限。其余平台的沙箱与随包程序相容，不改姿态。
+var sandboxDefaultPlatforms = map[string]bool{"windows": true}
+
+// applyPreinstalledSandboxDefaults 给预装包写入默认免沙箱姿态（仅上述平台）。
+//
+// 预装包由发行随包分发（Chrome for Testing / CuaDriver 都在安装包里），安装
+// 即视为同意其在本机免沙箱运行——否则「开箱即用」名不副实：browser 首次调用
+// 会死在 chrome profile 目录写权限上，cua 在干净机器上也起不来驱动。
+//
+// 只写「尚无 owner 配置」的定义：owner 显式改过（true 或 false）都不动。
+func (c *Client) applyPreinstalledSandboxDefaults(ids []string) error {
+	if !sandboxDefaultPlatforms[runtime.GOOS] || len(ids) == 0 {
+		return nil
+	}
+	return c.mutateConfigFile(func(fileCfg *cfg.Options) error {
+		if fileCfg.CommandConfig == nil {
+			fileCfg.CommandConfig = map[string]cfg.CommandDefConfig{}
+		}
+		for _, id := range ids {
+			if _, exists := fileCfg.CommandConfig[id]; exists {
+				continue
+			}
+			fileCfg.CommandConfig[id] = cfg.CommandDefConfig{NoSandbox: true}
+		}
+		return nil
+	})
 }
 
 func (c *Client) preinstallCommandPackage(root string, state *commandPackageState, id string) error {
@@ -133,6 +176,26 @@ func (c *Client) preinstallCommandPackage(root string, state *commandPackageStat
 		_ = os.RemoveAll(backup)
 	}
 	return nil
+}
+
+// preinstalledCommandIDs 返回预装包内命令的定义身份（skill:<包>:<命令>），
+// 与 pod 装配命令时用的身份同源（skillCommands）。
+func preinstalledCommandIDs(root, id string) ([]string, error) {
+	packageRoot := filepath.Join(root, id)
+	manifest, err := parseCommandManifestFile(packageRoot)
+	if err != nil {
+		return nil, err
+	}
+	defs, err := skillCommands(id, packageRoot, 0, manifest)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(defs))
+	for defID := range defs {
+		ids = append(ids, defID)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // copyPreinstalledBinaries 把发行附带的 <资源目录>/<包>/ 复制为包内 bin/。
