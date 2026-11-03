@@ -25,6 +25,10 @@ MCP `isError` 映射为 `CallError`，结果照常渲染但命令退出非零。
 ## 2. 注册与生命周期
 
 - 平台命令先注册，统一命令后登记；撞名命令进入 rejected，不覆盖平台命令。
+- `commands` 是设备命令面的唯一入口：无参时列出当前可发现的命令（平台自定义指令 + 已登记服务），带子命令时进入设备管理面（list/info/add/remove/start/stop/restart/config/install/uninstall）——与 cloud/page 同一入口、同一口径。
+- 技能包装配失败（包目录缺失、manifest 缺失或非法）只跳过该包：其余命令照常注册，
+  坏包在 `commands list` 里单列一行（行名 `package:<skill_id>`、`kind=package`、`state=rejected`、
+  `id` 列写 skill_id、`error` 写原因），修好后重装或重装配即恢复。
 - 登记是即时的，连接是懒惰的；第一次工具调用才建立 stdio/HTTP MCP session。
 - `commands start` 预连接，`commands stop` 断开当前 session，`commands restart` 断开后重建；
   命令登记不随 stop 消失。

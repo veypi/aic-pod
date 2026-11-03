@@ -261,7 +261,8 @@ func (v *fileView) commit(name string, r io.Reader, size int64, condition protoc
 		return err
 	}
 	defer v.f.cfg.Bytes.Release(v.call.Owner, source.Ref)
-	return v.f.writeTyped(v.ctx, v.callAs("write"), writeArgs{Path: p, Source: source.Ref, Condition: condition})
+	_, err = v.f.executeParsed(v.ctx, v.callAs("write"), writeArgs{Path: p, Source: source.Ref, Condition: condition})
+	return err
 }
 func (v *fileView) WriteFile(name string, data []byte, perm fs.FileMode) (err error) {
 	defer func() { err = echoPath(name, err) }()
@@ -325,7 +326,8 @@ func (v *fileView) MkdirAll(name string, perm fs.FileMode) (err error) {
 	if len(p.Segments) == 0 {
 		return nil
 	}
-	return v.f.mkdirTyped(v.ctx, v.callAs("mkdir"), mkdirArgs{Path: p, Parents: true, ExistOK: true})
+	_, err = v.f.executeParsed(v.ctx, v.callAs("mkdir"), mkdirArgs{Path: p, Parents: true, ExistOK: true})
+	return err
 }
 func (v *fileView) RemoveAll(name string) (err error) {
 	defer func() { err = echoPath(name, err) }()
@@ -340,7 +342,8 @@ func (v *fileView) RemoveAll(name string) (err error) {
 	if err != nil {
 		return err
 	}
-	return v.f.removeTyped(v.ctx, v.callAs("remove"), removeArgs{Path: p, IfVersion: version(info), Recursive: true, MissingOK: true})
+	_, err = v.f.executeParsed(v.ctx, v.callAs("remove"), removeArgs{Path: p, IfVersion: version(info), Recursive: true, MissingOK: true})
+	return err
 }
 func (v *fileView) Rename(from, to string) (err error) {
 	// 报错回显源路径（move 类失败以 src 侧为主）。
@@ -361,7 +364,8 @@ func (v *fileView) Rename(from, to string) (err error) {
 	if err != nil {
 		return err
 	}
-	return v.f.moveTyped(v.ctx, v.callAs("move"), moveArgs{Src: src, Dst: dst, IfVersion: version(info), Condition: condition})
+	_, err = v.f.executeParsed(v.ctx, v.callAs("move"), moveArgs{Src: src, Dst: dst, IfVersion: version(info), Condition: condition})
+	return err
 }
 func (v *fileView) Search(path, glob, pattern string, limit int, ignore bool) ([]ufs.SearchMatch, error) {
 	return ufs.Search(searchView{v}, path, glob, pattern, limit, ignore)

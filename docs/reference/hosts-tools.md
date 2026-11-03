@@ -6,7 +6,7 @@ MCP 服务经统一 commands 机制与 libs/vtools 适配后注册为 vsh 根命
 
 ## 入口与路由
 
-- AI 设置 `exec.1host=设备ID`，完整脚本经签名 NATS 到设备。脚本中的服务命令只解析本机服务别名，无跨设备目标参数。
+- AI 设置 `exec._host=设备ID`，完整脚本经签名 NATS 到设备。脚本中的服务命令只解析本机服务别名，无跨设备目标参数。
 - UI 用 `$hosts.openTools(hostId)` 建立 RTC 连接，通过 `execCall(script, {stdin})` 调同一套 vsh 命令；JSON 参数经 stdin 传递，结果读取命令 stdout。
 - 文件 HTTP proxy 只转发原生 fs 请求，设备再次限制 scope=fs。
 
@@ -65,7 +65,7 @@ exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`
 
 现行实现：2026-10-12（原文为独立设计稿 hosts-vsh-redesign.md，现并入本文）。
 
-- 外层 `exec.1host` 唯一选择执行端；MCP 服务命令不选择目标。
+- 外层 `exec._host` 唯一选择执行端；MCP 服务命令不选择目标。
 - cloud/设备执行完整 vsh 脚本。内建、CLI、脚本、管道、重定向和 bg 使用现有执行器，原生程序经 vbox 启动。
 - page 接受一个字面 command，按 session 和现有窗口 ID 调用 handler；通过 commands 和 --help 发现用法。复用 vsh 语法解析器，不建立另一套 shell，也不实现 MCP。页面文件继续直接调用 PageFS。
 - exec/fs、技能搜索/读取、云端 HTTP API 都没有 MCP 副本。Cloud 当前没有 MCP 服务配置。

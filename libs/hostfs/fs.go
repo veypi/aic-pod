@@ -152,7 +152,7 @@ type removeArgs struct {
 
 // Handle 是 FS 数据面直调入口（MCP §4.1：fs 载荷 {method, args}
 // 直达现有 FS 服务；不再有方法声明/schema 目录层——方法集为协议固定集，
-// 参数校验在 validate/Authorize 内）。
+// 普通文件方法与 View 共用 executeParsed 的校验、授权和执行链）。
 func (f *FS) Handle(ctx context.Context, caller protocol.Caller, method string, args json.RawMessage) (any, error) {
 	call := Call{Caller: caller, Owner: Owner(caller), Command: "fs", Method: method, Args: args}
 	if v, ok, err := f.handleBytes(ctx, call); ok {
@@ -160,115 +160,76 @@ func (f *FS) Handle(ctx context.Context, caller protocol.Caller, method string, 
 	}
 	return f.Run(ctx, call)
 }
-func (f *FS) validate(method string, raw json.RawMessage) error {
-	var path protocol.FSPath
-	switch method {
-	case "roots", "home", "os_home":
-		var p struct{}
-		return protocol.Decode(raw, &p)
-	case "stat", "read":
-		var p pathArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		path = p.Path
-		if p.Follow {
-			return protocol.FSFail("unsupported", "Following symbolic links is not available")
-		}
-		if p.Consistency != "" && (method != "read" || p.Consistency != "verified") {
-			return protocol.FSFail("unsupported", "Requested read consistency is unavailable")
-		}
-	case "list":
-		var p listArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		path = p.Path
-		if p.Limit < 0 || p.Limit > 1000 || len(p.Cursor) > 2048 {
-			return protocol.FSFail("invalid_argument", "Invalid list bounds")
-		}
-		if p.Sort != "" && p.Sort != "name" {
-			return protocol.FSFail("unsupported", "Unsupported directory sort")
-		}
-	case "write":
-		var p writeArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		return validateWriteArgs(p)
-	case "find":
-		var p findArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		path = p.Path
-		if p.Depth < 0 || p.Depth > 64 || p.Limit < 0 || p.Limit > 1000 || len(p.Glob) > 256 || strings.ContainsAny(p.Glob, `/\[]{}`) {
-			return protocol.FSFail("invalid_argument", "Invalid find bounds or basename glob")
-		}
-	case "move", "copy":
-		var p moveArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		return validateMoveArgs(p)
-	case "mkdir":
-		var p mkdirArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		return p.Path.Validate(runtime.GOOS == "windows")
-	case "remove":
-		var p removeArgs
-		if err := protocol.Decode(raw, &p); err != nil {
-			return err
-		}
-		return validateRemoveArgs(p)
-	default:
-		return protocol.FSFail("unsupported", "Unknown fs method")
+
+func decodeArgs[T any](raw json.RawMessage) (T, error) {
+	var p T
+	if err := protocol.Decode(raw, &p); err != nil {
+		return p, err
 	}
-	return path.Validate(runtime.GOOS == "windows")
+	return p, nil
 }
 
-// Authorize applies current policy both to new invocations and to queries of
-// retained results. Execution and range reads also check at the point of use.
-func (f *FS) Authorize(ctx context.Context, call Call) error {
-	if call.Command != "fs" {
-		return protocol.FSFail("unsupported", "Command is not registered")
+// parseArgs 只在 JSON 边界解码一次；业务校验与授权由 executeParsed 统一处理，
+// 因而 View 构造的类型化参数不会绕过或重复实现同一套规则。
+func parseArgs(method string, raw json.RawMessage) (any, error) {
+	switch method {
+	case "roots", "home", "os_home":
+		return decodeArgs[struct{}](raw)
+	case "stat", "read":
+		return decodeArgs[pathArgs](raw)
+	case "list":
+		return decodeArgs[listArgs](raw)
+	case "write":
+		return decodeArgs[writeArgs](raw)
+	case "find":
+		return decodeArgs[findArgs](raw)
+	case "move", "copy":
+		return decodeArgs[moveArgs](raw)
+	case "mkdir":
+		return decodeArgs[mkdirArgs](raw)
+	case "remove":
+		return decodeArgs[removeArgs](raw)
+	default:
+		return nil, protocol.FSFail("unsupported", "Unknown fs method")
 	}
-	if err := f.validate(call.Method, call.Args); err != nil {
-		return err
-	}
-	if call.Method == "roots" || call.Method == "home" || call.Method == "os_home" {
+}
+
+// authorizeParsed 使用已校验的参数判定授权，不再为取路径另解一份匿名结构。
+func (f *FS) authorizeParsed(ctx context.Context, call Call, params any) error {
+	switch p := params.(type) {
+	case struct{}:
 		return nil // Mount metadata grants no access; home checks its actual path.
-	}
-	var p struct {
-		Path    protocol.FSPath `json:"path"`
-		Src     protocol.FSPath `json:"src"`
-		Dst     protocol.FSPath `json:"dst"`
-		Parents bool            `json:"parents"`
-	}
-	if err := json.Unmarshal(call.Args, &p); err != nil {
-		return protocol.FSFail("invalid_argument", "Invalid file location")
-	}
-	write := call.Method == "write" || call.Method == "mkdir" || call.Method == "remove" || call.Method == "move" || call.Method == "copy"
-	if call.Method == "move" || call.Method == "copy" {
+	case pathArgs:
+		return f.authorizeTarget(ctx, call, p.Path, false)
+	case listArgs:
+		return f.authorizeTarget(ctx, call, p.Path, false)
+	case writeArgs:
+		return f.authorizeTarget(ctx, call, p.Path, true)
+	case findArgs:
+		return f.authorizeTarget(ctx, call, p.Path, false)
+	case moveArgs:
 		if err := f.authorizeTarget(ctx, call, p.Src, call.Method == "move"); err != nil {
 			return err
 		}
-		p.Path = p.Dst
+		return f.authorizeTarget(ctx, call, p.Dst, true)
+	case mkdirArgs:
+		// mkdir -p 的写授权按「实际创建的层级」在执行内逐层判定（mkdirParents
+		// 先检后建、拒绝时零副作用）：整目标在此不做写检查——已存在的祖先不
+		// 需要写授权，否则 write/curl -o 等补父目录的便利逻辑会把授权要求放大
+		// 到容器目录，与 edit/mkdir/remove 只查目标的口径不一致。
+		if p.Parents {
+			return nil
+		}
+		return f.authorizeTarget(ctx, call, p.Path, true)
+	case removeArgs:
+		return f.authorizeTarget(ctx, call, p.Path, true)
+	default:
+		return protocol.FSFail("unsupported", "Unknown fs method")
 	}
-	// mkdir -p 的写授权按「实际创建的层级」在执行内逐层判定（mkdirParents
-	// 先检后建、拒绝时零副作用）：整目标在此不做写检查——已存在的祖先不
-	// 需要写授权，否则 write/curl -o 等补父目录的便利逻辑会把授权要求放大
-	// 到容器目录，与 edit/mkdir/remove 只查目标的口径不一致。
-	if call.Method == "mkdir" && p.Parents {
-		return nil
-	}
-	return f.authorizeTarget(ctx, call, p.Path, write)
 }
 
-// authorizeTarget 校验单路径访问授权（closed 检查与 fault 映射与 Authorize
-// 同口径）；已解析参数的类型化调用与 JSON 分发共用本函数。
+// authorizeTarget 统一处理单路径授权的 closed 检查与 fault 映射；
+// 已解析参数的类型化调用与 JSON 分发共用本函数。
 func (f *FS) authorizeTarget(ctx context.Context, call Call, p protocol.FSPath, write bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -284,7 +245,7 @@ func (f *FS) authorizeTarget(ctx context.Context, call Call, p protocol.FSPath, 
 // ---- 类型化入口（批次 2：View 内部调用与 Run 进入同一具体方法，解除
 // 「编码 JSON → 重新解析」的内部回环）----
 
-// validateWriteArgs 是 write 参数的完整校验（Run 的 validate 与类型化入口共用）。
+// validateWriteArgs 是 write 参数的完整校验（JSON 入口与类型化入口共用）。
 func validateWriteArgs(p writeArgs) error {
 	if err := p.Condition.Validate(); err != nil {
 		return err
@@ -318,60 +279,58 @@ func validateRemoveArgs(p removeArgs) error {
 	return p.Path.Validate(runtime.GOOS == "windows")
 }
 
-func (f *FS) writeTyped(ctx context.Context, call Call, p writeArgs) error {
-	if err := validateWriteArgs(p); err != nil {
-		return err
-	}
-	if err := f.authorizeTarget(ctx, call, p.Path, true); err != nil {
-		return err
-	}
-	_, err := f.runOp(ctx, func() (any, error) { return f.write(ctx, call, p) })
-	return err
-}
-
-func (f *FS) mkdirTyped(ctx context.Context, call Call, p mkdirArgs) error {
-	if err := p.Path.Validate(runtime.GOOS == "windows"); err != nil {
-		return err
-	}
-	if !p.Parents {
-		if err := f.authorizeTarget(ctx, call, p.Path, true); err != nil {
-			return err
+// validateArgs 是所有类型化参数的唯一业务校验入口。校验顺序与原 JSON
+// 入口一致；authorizeParsed 只接收已通过这里校验的参数。
+func validateArgs(method string, params any) error {
+	switch p := params.(type) {
+	case struct{}:
+		return nil
+	case pathArgs:
+		if p.Follow {
+			return protocol.FSFail("unsupported", "Following symbolic links is not available")
 		}
+		if p.Consistency != "" && (method != "read" || p.Consistency != "verified") {
+			return protocol.FSFail("unsupported", "Requested read consistency is unavailable")
+		}
+		return p.Path.Validate(runtime.GOOS == "windows")
+	case listArgs:
+		if p.Limit < 0 || p.Limit > 1000 || len(p.Cursor) > 2048 {
+			return protocol.FSFail("invalid_argument", "Invalid list bounds")
+		}
+		if p.Sort != "" && p.Sort != "name" {
+			return protocol.FSFail("unsupported", "Unsupported directory sort")
+		}
+		return p.Path.Validate(runtime.GOOS == "windows")
+	case writeArgs:
+		return validateWriteArgs(p)
+	case findArgs:
+		if p.Depth < 0 || p.Depth > 64 || p.Limit < 0 || p.Limit > 1000 || len(p.Glob) > 256 || strings.ContainsAny(p.Glob, `/\[]{}`) {
+			return protocol.FSFail("invalid_argument", "Invalid find bounds or basename glob")
+		}
+		return p.Path.Validate(runtime.GOOS == "windows")
+	case moveArgs:
+		return validateMoveArgs(p)
+	case mkdirArgs:
+		return p.Path.Validate(runtime.GOOS == "windows")
+	case removeArgs:
+		return validateRemoveArgs(p)
+	default:
+		return protocol.FSFail("unsupported", "Unknown fs method")
 	}
-	_, err := f.runOp(ctx, func() (any, error) { return f.mkdir(ctx, call, p) })
-	return err
 }
 
-func (f *FS) removeTyped(ctx context.Context, call Call, p removeArgs) error {
-	if err := validateRemoveArgs(p); err != nil {
-		return err
+// executeParsed 是 JSON 与 View 类型化调用的唯一业务执行链。
+func (f *FS) executeParsed(ctx context.Context, call Call, params any) (any, error) {
+	if err := validateArgs(call.Method, params); err != nil {
+		return nil, err
 	}
-	if err := f.authorizeTarget(ctx, call, p.Path, true); err != nil {
-		return err
+	if err := f.authorizeParsed(ctx, call, params); err != nil {
+		return nil, err
 	}
-	_, err := f.runOp(ctx, func() (any, error) { return f.remove(ctx, call, p) })
-	return err
+	return f.runOp(ctx, func() (any, error) { return f.dispatch(ctx, call, params) })
 }
 
-func (f *FS) moveTyped(ctx context.Context, call Call, p moveArgs) error {
-	if err := validateMoveArgs(p); err != nil {
-		return err
-	}
-	if err := f.authorizeTarget(ctx, call, p.Src, true); err != nil {
-		return err
-	}
-	if err := f.authorizeTarget(ctx, call, p.Dst, true); err != nil {
-		return err
-	}
-	_, err := f.runOp(ctx, func() (any, error) { return f.move(ctx, call, p) })
-	return err
-}
-func (f *FS) run(ctx context.Context, call Call) (any, error) {
-	return f.runOp(ctx, func() (any, error) { return f.dispatch(ctx, call) })
-}
-
-// runOp 是已授权调用的执行骨架：互斥、closed/ctx 检查与 fault 映射——
-// JSON 分发（run）与类型化入口（writeTyped 等）共用。
+// runOp 是已授权调用的执行骨架：互斥、closed/ctx 检查与 fault 映射。
 func (f *FS) runOp(ctx context.Context, op func() (any, error)) (value any, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -389,7 +348,7 @@ func (f *FS) runOp(ctx context.Context, op func() (any, error)) (value any, err 
 	return op()
 }
 
-func (f *FS) dispatch(ctx context.Context, call Call) (any, error) {
+func (f *FS) dispatch(ctx context.Context, call Call, params any) (any, error) {
 	switch call.Method {
 	case "home":
 		p := f.cfg.Home
@@ -437,40 +396,28 @@ func (f *FS) dispatch(ctx context.Context, call Call) (any, error) {
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 		return protocol.FSRootsResult{Roots: out}, nil
-	case "stat", "read":
-		var p pathArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.readOrStat(ctx, call, p)
-	case "list":
-		var p listArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.list(ctx, call, p)
-	case "write":
-		var p writeArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.write(ctx, call, p)
-	case "find":
-		var p findArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.find(ctx, call, p)
-	case "copy":
-		var p moveArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.copy(ctx, call, p)
-	case "move":
-		var p moveArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.move(ctx, call, p)
-	case "mkdir":
-		var p mkdirArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.mkdir(ctx, call, p)
-	case "remove":
-		var p removeArgs
-		_ = protocol.Decode(call.Args, &p)
-		return f.remove(ctx, call, p)
 	}
-	return nil, protocol.FSFail("unsupported", "Unknown fs method")
+	switch p := params.(type) {
+	case pathArgs:
+		return f.readOrStat(ctx, call, p)
+	case listArgs:
+		return f.list(ctx, call, p)
+	case writeArgs:
+		return f.write(ctx, call, p)
+	case findArgs:
+		return f.find(ctx, call, p)
+	case moveArgs:
+		if call.Method == "copy" {
+			return f.copy(ctx, call, p)
+		}
+		return f.move(ctx, call, p)
+	case mkdirArgs:
+		return f.mkdir(ctx, call, p)
+	case removeArgs:
+		return f.remove(ctx, call, p)
+	default:
+		return nil, protocol.FSFail("unsupported", "Unknown fs method")
+	}
 }
 func fault(err error) error {
 	if err == nil {
@@ -1083,8 +1030,12 @@ func (c Call) creator() string {
 	return Creator(c.Caller)
 }
 func (f *FS) Run(ctx context.Context, call Call) (any, error) {
-	if err := f.Authorize(ctx, call); err != nil {
+	if call.Command != "fs" {
+		return nil, protocol.FSFail("unsupported", "Command is not registered")
+	}
+	params, err := parseArgs(call.Method, call.Args)
+	if err != nil {
 		return nil, err
 	}
-	return f.run(ctx, call)
+	return f.executeParsed(ctx, call, params)
 }

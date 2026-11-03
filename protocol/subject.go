@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// 执行目标（§1.1）：1host 的合法取值中无需解析为物理 host 的两个保留字。
+// 执行目标（§1.1）：_host 的合法取值中无需解析为物理 host 的两个保留字。
 const (
 	HostCloud = "cloud"
 	HostPage  = "page"
@@ -15,7 +15,7 @@ const (
 // 边界的一部分：前端 JWT 的 sub deny 规则（FrontendDenyPattern）依赖此前缀精确
 // 匹配物理 host 的工具流量而不误伤 h.page.> 与其他会话 topic。
 //
-// host_id 本身**不带**前缀：1host 参数、连接级 caps/presence subject、host list
+// host_id 本身**不带**前缀：_host 参数、连接级 caps/presence subject、host list
 // 输出均用裸 id；仅会话级工具流量（ToolReqSubject/HostInboxSubject）的 host 段
 // 在构造时添加（hostSeg），解析时还原（ParseToolReqSubject）。
 // 改动必须同步 natsauth 的 host JWT sub allow（issueUserJWT，经 HostInboxSubject）。

@@ -14,7 +14,6 @@ import (
 	"github.com/veypi/aic-pod/libs/execution"
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/hostfs"
-	"github.com/veypi/vsh/commands"
 )
 
 func (c *Client) initTools() {
@@ -35,7 +34,6 @@ func (c *Client) initTools() {
 	}
 	// 技能包与 owner 手工服务统一由 command hub 装配；MCP 只是其中一种协议。
 	c.cmds = newCommandHub(c, reg)
-	reg.Register(commands.DefineCommand("commands", c.cmdHostCommands))
 	// 官方设备包启动定版（browser/cua），必须在首次 reload 之前。
 	if err := c.preinstallCommandPackages(); err != nil {
 		c.logf("commands: preinstall failed: %v", err)

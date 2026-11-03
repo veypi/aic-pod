@@ -41,14 +41,7 @@ type hostCommandRow struct {
 func (c *Client) cmdHostCommands(ctx context.Context, inv *commands.Invocation) error {
 	args := inv.Args
 	if len(args) == 0 {
-		if inv.GetRegisteredCommands == nil {
-			return commands.Exitf(inv, 1, "commands: registry unavailable")
-		}
-		for _, name := range inv.GetRegisteredCommands() {
-			if c.hostDiscoverable(name) {
-				fmt.Fprintln(inv.Stdout, name)
-			}
-		}
+		fmt.Fprintln(inv.Stdout, hostCommandsHelp)
 		return nil
 	}
 	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -136,6 +129,13 @@ func (c *Client) hostCommandRows() []hostCommandRow {
 	}
 	for alias, reason := range c.cmds.rejected {
 		rows = append(rows, hostCommandRow{Name: alias, Kind: "unknown", State: "rejected", Error: reason})
+	}
+	// 包级失败（目录缺失 / manifest 坏了）：没有别名可列，按 skill_id 单列一行，
+	// 让 owner 看得见「这个包没装上」，而不是只看到命令少了一截。
+	// 名字加 package: 前缀——包名常与命令别名同名（预装包 browser 的别名就是
+	// browser），不加前缀同一行名会出现两次，只能靠 kind 区分。
+	for skillID, reason := range c.cmds.brokenPackages() {
+		rows = append(rows, hostCommandRow{Name: "package:" + skillID, ID: skillID, Kind: "package", Source: commandSourceSkill, State: "rejected", Error: reason})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows

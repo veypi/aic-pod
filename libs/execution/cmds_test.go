@@ -77,6 +77,32 @@ func TestCmdCommandsListsRegistry(t *testing.T) {
 	}
 }
 
+func TestCmdCommandsDelegatesManagement(t *testing.T) {
+	t.Parallel()
+	reg := commands.NewRegistry()
+	var delegated []string
+	_ = RegisterPlatformCommands(reg, PlatformDeps{
+		Tasks: NewTaskTable(),
+		CommandManagement: func(_ context.Context, inv *commands.Invocation) error {
+			delegated = append([]string(nil), inv.Args...)
+			return nil
+		},
+	})
+	if _, _, err := runCmd(t, reg, "commands", "list", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(delegated, " ") != "list --json" {
+		t.Fatalf("delegated args = %v", delegated)
+	}
+	delegated = nil
+	if _, _, err := runCmd(t, reg, "commands"); err != nil {
+		t.Fatal(err)
+	}
+	if delegated != nil {
+		t.Fatalf("no-arg discovery must stay generic, delegated %v", delegated)
+	}
+}
+
 // commands 展示过滤（§2.2）：host/cloud 只展示核心自定义指令；未列出
 // 不影响执行（展示过滤不是白名单）。
 func TestCmdCommandsDisplayFilter(t *testing.T) {

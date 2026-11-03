@@ -261,17 +261,24 @@ func parseCommandManifestFile(root string) (*commandManifest, error) {
 	return m, nil
 }
 
-func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[string]*hostCommand, error) {
+// collectHostCommands 汇总设备上的命令定义。
+//
+// 单个包坏掉（目录缺失、manifest 缺失或非法、声明不合法）只跳过该包并把原因
+// 记进 broken，绝不掀掉整张注册表——一个坏包会让设备上所有命令（含 browser/cua
+// 这类预装包）一起失联，owner 只能对着空列表猜原因。
+// 只有安装状态本身读不出来才是致命错误。
+func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[string]*hostCommand, map[string]string, error) {
 	c.packageMu.RLock()
 	defer c.packageMu.RUnlock()
 	defs := map[string]*hostCommand{}
+	broken := map[string]string{}
 	state, err := c.loadCommandPackageState()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root, err := c.commandPackageRoot()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	records := make([]commandPackageRecord, 0, len(state.Packages))
 	for _, record := range state.Packages {
@@ -287,11 +294,13 @@ func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[strin
 		packageRoot := filepath.Join(root, record.SkillID)
 		manifest, err := parseCommandManifestFile(packageRoot)
 		if err != nil {
-			return nil, fmt.Errorf("skill %s: %w", record.SkillID, err)
+			broken[record.SkillID] = err.Error()
+			continue
 		}
 		packageDefs, err := skillCommands(record.SkillID, packageRoot, record.Order, manifest)
 		if err != nil {
-			return nil, fmt.Errorf("skill %s: %w", record.SkillID, err)
+			broken[record.SkillID] = err.Error()
+			continue
 		}
 		for id, def := range packageDefs {
 			def.Revision = record.Revision
@@ -311,7 +320,7 @@ func (c *Client) collectHostCommands(runtime map[string]*hostCommand) (map[strin
 		next.Local = c.options().CommandConfig[id]
 		defs[id] = next
 	}
-	return defs, nil
+	return defs, broken, nil
 }
 
 func (c *Client) clearCommandPackageConfig(skillID string) error {

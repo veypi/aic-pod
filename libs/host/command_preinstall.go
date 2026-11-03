@@ -66,10 +66,7 @@ func (c *Client) preinstallCommandPackages() error {
 	}
 	ids := make([]string, 0, len(cfg.PreinstalledCommandPackages))
 	for _, id := range cfg.PreinstalledCommandPackages {
-		if err := c.preinstallCommandPackage(root, &state, id); err != nil {
-			return fmt.Errorf("preinstall %s: %w", id, err)
-		}
-		defIDs, err := preinstalledCommandIDs(root, id)
+		defIDs, err := c.preinstallCommandPackage(root, &state, id)
 		if err != nil {
 			return fmt.Errorf("preinstall %s: %w", id, err)
 		}
@@ -113,32 +110,35 @@ func (c *Client) applyPreinstalledSandboxDefaults(ids []string) error {
 	})
 }
 
-func (c *Client) preinstallCommandPackage(root string, state *commandPackageState, id string) error {
+// preinstallCommandPackage 定版单个包，并复用首次校验所得 defs 返回排序后的
+// 定义 ID；调用方无需为派生 ID 再读一次最终目录的 manifest。
+func (c *Client) preinstallCommandPackage(root string, state *commandPackageState, id string) ([]string, error) {
 	dir, err := aicskills.Open(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tmp, err := os.MkdirTemp(root, ".preinstall-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(tmp)
 	if err := os.CopyFS(tmp, dir); err != nil {
-		return err
+		return nil, err
 	}
 	manifest, err := parseCommandManifestFile(tmp)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := skillCommands(id, tmp, 0, manifest); err != nil {
-		return fmt.Errorf("manifest.json: %w", err)
+	defs, err := skillCommands(id, tmp, 0, manifest)
+	if err != nil {
+		return nil, fmt.Errorf("manifest.json: %w", err)
 	}
 	final := filepath.Join(root, id)
 	// 旧包里的设备构建产物先带过来，随后被随发行预编译的二进制覆盖；
 	// 没有附带二进制的环境（如源码运行）仍可使用设备自行构建的 bin/。
 	preserveCommandPackageArtifacts(final, tmp)
 	if err := copyPreinstalledBinaries(tmp, id); err != nil {
-		return err
+		return nil, err
 	}
 
 	record, exists := state.Packages[id]
@@ -153,42 +153,27 @@ func (c *Client) preinstallCommandPackage(root string, state *commandPackageStat
 	if _, err := os.Stat(final); err == nil {
 		placeholder, err := os.MkdirTemp(root, ".backup-*")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := os.Remove(placeholder); err != nil {
-			return err
+			return nil, err
 		}
 		backup = placeholder
 		if err := os.Rename(final, backup); err != nil {
-			return err
+			return nil, err
 		}
 	} else if !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		if backup != "" {
 			_ = os.Rename(backup, final)
 		}
-		return err
+		return nil, err
 	}
 	state.Packages[id] = record
 	if backup != "" {
 		_ = os.RemoveAll(backup)
-	}
-	return nil
-}
-
-// preinstalledCommandIDs 返回预装包内命令的定义身份（skill:<包>:<命令>），
-// 与 pod 装配命令时用的身份同源（skillCommands）。
-func preinstalledCommandIDs(root, id string) ([]string, error) {
-	packageRoot := filepath.Join(root, id)
-	manifest, err := parseCommandManifestFile(packageRoot)
-	if err != nil {
-		return nil, err
-	}
-	defs, err := skillCommands(id, packageRoot, 0, manifest)
-	if err != nil {
-		return nil, err
 	}
 	ids := make([]string, 0, len(defs))
 	for defID := range defs {

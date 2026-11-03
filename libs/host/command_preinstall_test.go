@@ -77,6 +77,25 @@ func TestPreinstalledCommandPackages(t *testing.T) {
 	}
 }
 
+func TestPreinstallCommandPackageReturnsDefinitionIDs(t *testing.T) {
+	c, _ := testClient(t)
+	root, err := c.commandPackageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := c.loadCommandPackageState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := c.preinstallCommandPackage(root, &state, "browser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "skill:browser:browser" {
+		t.Fatalf("definition IDs = %v, want [skill:browser:browser]", ids)
+	}
+}
+
 func TestPreinstallWithoutShippedBinariesKeepsSource(t *testing.T) {
 	t.Setenv("AIC_SKILL_BIN_DIR", filepath.Join(t.TempDir(), "missing"))
 	c, _ := testClient(t)

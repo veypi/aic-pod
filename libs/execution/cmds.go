@@ -33,6 +33,9 @@ type PlatformDeps struct {
 	// Pull/Push 设备↔平台云盘文件传输（host-only；/fs/cloud HTTP 面 + 设备凭证，
 	// device-key-migration：替代已删除的 NATS fetch 通道）。nil 不注册（cloud/page）。
 	Pull, Push commands.CommandFunc
+	// CommandManagement 是 host 可选的 commands 管理面。无参发现始终由通用
+	// cmdCommands 执行；有子命令（含 --help）时委托此处理器，cloud/page 不注入。
+	CommandManagement commands.CommandFunc
 }
 
 type SSHDeps struct {
@@ -84,6 +87,9 @@ func helpRequested(args []string) bool {
 // 内建不占发现目录；未列出的指令照常可执行——这是展示过滤不是白名单）；
 // page（Discoverable=nil）展示全部已注册指令。
 func (d PlatformDeps) cmdCommands(ctx context.Context, inv *commands.Invocation) error {
+	if len(inv.Args) > 0 && d.CommandManagement != nil {
+		return d.CommandManagement(ctx, inv)
+	}
 	if helpRequested(inv.Args) {
 		fmt.Fprintln(inv.Stdout, "usage: commands — list commands available in this environment (run <cmd> --help for usage)")
 		return nil

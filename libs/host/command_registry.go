@@ -32,6 +32,9 @@ type commandHub struct {
 	mu        sync.RWMutex
 	active    map[string]*hostCommand
 	rejected  map[string]string
+	// broken 是装配失败的技能包（skill_id → 原因）。包级失败没有别名可列，
+	// 单列一份：commands list 看得见坏包，坏包也不再牵连其它命令。
+	broken    map[string]string
 	streams   map[string]commandStreamBinding
 	managers  map[string]*mcpx.Manager
 	processes map[string]*streamProcess
@@ -42,6 +45,7 @@ func newCommandHub(client *Client, reg *commands.Registry) *commandHub {
 	return &commandHub{
 		client: client, reg: reg,
 		active: map[string]*hostCommand{}, rejected: map[string]string{},
+		broken:  map[string]string{},
 		streams: map[string]commandStreamBinding{}, managers: map[string]*mcpx.Manager{},
 		processes: map[string]*streamProcess{}, runtime: map[string]*hostCommand{},
 	}
@@ -66,6 +70,17 @@ func (h *commandHub) rejection(alias string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rejected[alias]
+}
+
+// brokenPackages 返回装配失败的技能包（skill_id → 原因）；没有坏包时是空表。
+func (h *commandHub) brokenPackages() map[string]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make(map[string]string, len(h.broken))
+	for id, reason := range h.broken {
+		out[id] = reason
+	}
+	return out
 }
 
 func (h *commandHub) upsertRuntime(def *hostCommand) error {
@@ -99,11 +114,11 @@ func (h *commandHub) reload() error {
 }
 
 func (h *commandHub) reloadLocked() error {
-	defs, err := h.client.collectHostCommands(h.runtime)
+	defs, broken, err := h.client.collectHostCommands(h.runtime)
 	if err != nil {
 		return err
 	}
-	return h.rebuildLocked(defs)
+	return h.rebuildLocked(defs, broken)
 }
 
 // inheritCommandStreams 保留同一命令定义的流地址。地址属于常驻进程的运行态，
@@ -125,7 +140,7 @@ func inheritCommandStreams(old, next *hostCommand) bool {
 	return true
 }
 
-func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
+func (h *commandHub) rebuildLocked(defs map[string]*hostCommand, broken map[string]string) error {
 	winners := map[string]*hostCommand{}
 	skillAliases := map[string]bool{}
 	ids := make([]string, 0, len(defs))
@@ -153,6 +168,7 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 	oldActive := h.active
 	oldManagers := h.managers
 	oldProcesses := h.processes
+	oldBroken := h.broken
 	h.mu.RUnlock()
 
 	aliases := make([]string, 0, len(winners))
@@ -283,7 +299,16 @@ func (h *commandHub) rebuildLocked(defs map[string]*hostCommand) error {
 	h.mu.Lock()
 	h.active, h.rejected, h.streams = active, rejected, streamBindings
 	h.managers, h.processes = managers, processes
+	h.broken = broken
 	h.mu.Unlock()
+
+	// 新变坏的包只报一次：同一个坏包会被反复重装（退避重试），不逐次记日志。
+	for id, reason := range broken {
+		if _, existed := oldBroken[id]; existed {
+			continue
+		}
+		h.client.logf("commands: package %s skipped: %s", id, reason)
+	}
 
 	for alias, old := range oldManagers {
 		if managers[alias] != old {

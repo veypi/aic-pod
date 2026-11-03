@@ -97,9 +97,10 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			},
 		}),
 		Platform: execution.PlatformDeps{
-			Grant:       c.vshGrant,
-			GrantStatus: c.vshGrantStatus,
-			SSH:         execution.SSHDeps{SSH: c.ssh.SSH, SCP: c.ssh.SCP, SFTP: c.ssh.SFTP},
+			Grant:             c.vshGrant,
+			GrantStatus:       c.vshGrantStatus,
+			CommandManagement: c.cmdHostCommands,
+			SSH:               execution.SSHDeps{SSH: c.ssh.SSH, SCP: c.ssh.SCP, SFTP: c.ssh.SFTP},
 			// cloud 专属命令（sessions/list_hosts/send_user）由 AIC 自己注册。
 			// pull/push：设备↔平台云盘传输（/fs/cloud HTTP 面；skill 命令已随
 			// NATS fetch 通道一并退役——包装载改用 pull，aic docs/reference/skill.md §9.2）。

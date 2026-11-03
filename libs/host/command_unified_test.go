@@ -72,6 +72,17 @@ func runHostCommandManagement(t *testing.T, c *Client, args ...string) (string, 
 	return out.String(), err
 }
 
+func TestHostCommandsEmptyArgsShowsHelp(t *testing.T) {
+	c, _ := testClient(t)
+	out, err := runHostCommandManagement(t, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "usage:") || !strings.Contains(out, "commands list") {
+		t.Fatalf("empty-args help = %q", out)
+	}
+}
+
 func TestUnifiedProcessCommand(t *testing.T) {
 	c, _ := testClient(t)
 	_, err := runHostCommandManagement(t, c, "add", "hello",

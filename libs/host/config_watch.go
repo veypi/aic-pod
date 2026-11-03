@@ -19,7 +19,50 @@ import (
 // 提权边界：配置文件在设备所有者的 fs 规则之外（AI 的 fs 工具读不到它），
 // 因此这里的每次变更都是 owner 的显式动作，不是工具参数提权。
 
-const commandConfigPollInterval = 2 * time.Second
+const (
+	commandConfigPollInterval = 2 * time.Second
+	// 同一份坏配置的重试间隔：包坏了可能一直坏，不能每 2 秒重试一次。
+	commandConfigRetryInterval = 30 * time.Second
+	// 同一份坏配置的日志间隔：坏配置会被反复重试，日志必须限频——
+	// 否则一份坏配置能刷出几万行日志，真正的错误反而被淹没。
+	commandConfigLogInterval = 60 * time.Second
+)
+
+// configReloadGate 决定「这份配置要不要再试」与「失败要不要再记日志」。
+type configReloadGate struct {
+	last    string    // 最后一次成功应用的配置指纹
+	failed  string    // 最近一次失败的配置指纹
+	lastTry time.Time // 最近一次尝试时刻
+	lastLog time.Time // 最近一次记录失败的时刻
+}
+
+// shouldTry 判断这份配置现在要不要再装配一次（并记下尝试时刻）。
+func (g *configReloadGate) shouldTry(fingerprint string, now time.Time) bool {
+	if fingerprint == g.last {
+		return false
+	}
+	if fingerprint == g.failed && now.Sub(g.lastTry) < commandConfigRetryInterval {
+		return false
+	}
+	g.lastTry = now
+	return true
+}
+
+// fail 记录一次失败，返回是否该写日志。
+func (g *configReloadGate) fail(fingerprint string, now time.Time) bool {
+	write := fingerprint != g.failed || now.Sub(g.lastLog) >= commandConfigLogInterval
+	g.failed = fingerprint
+	if write {
+		g.lastLog = now
+	}
+	return write
+}
+
+// applied 记录一次成功装配。
+func (g *configReloadGate) applied(fingerprint string) {
+	g.last = fingerprint
+	g.failed = ""
+}
 
 // watchCommandConfig 轮询配置文件指纹，变化时重装配统一命令段。
 func (c *Client) watchCommandConfig(ctx context.Context) {
@@ -27,7 +70,7 @@ func (c *Client) watchCommandConfig(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	last := ""
+	gate := &configReloadGate{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -35,15 +78,21 @@ func (c *Client) watchCommandConfig(ctx context.Context) {
 		case <-time.After(commandConfigPollInterval):
 		}
 		fingerprint, err := fileFingerprint(path)
-		if err != nil || fingerprint == last {
+		if err != nil {
+			continue
+		}
+		now := time.Now()
+		if !gate.shouldTry(fingerprint, now) {
 			continue
 		}
 		if err := c.reloadCommandConfig(); err != nil {
-			// 坏配置不该把正在跑的命令掀了：保留旧状态，下轮再试。
-			c.logf("command config reload failed: %v", err)
+			// 坏配置不该把正在跑的命令掀了：保留旧状态，退避后再试。
+			if gate.fail(fingerprint, now) {
+				c.logf("command config reload failed: %v", err)
+			}
 			continue
 		}
-		last = fingerprint
+		gate.applied(fingerprint)
 		c.logf("command config reloaded: %s", path)
 	}
 }
