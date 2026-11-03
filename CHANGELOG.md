@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## Unreleased
+## v0.10.0 — 2026-11-02
 
 - **官方设备包预装：browser/cua 开箱即用（含预编译设备程序）**：pod 重新 require `aic-skills`（上次移除的是技能代码耦合，不是内容分发），启动时对两包做整目录原子定版到 `~/.aic/packages/<id>`（`libs/host/command_preinstall.go`），并从发行附带的资源目录把预编译 `bin/browser`、`bin/cua` 铺进包内——`run` 相对包根的现有解析不变，用户不再需要 `commands install` 与 Go 工具链。预装包不可 `commands install/update/uninstall`，随 pod 版本更新；`commands list` 行新增 `preinstalled` 标记。发行链：`make skill-bin-<os>-<arch>` 交叉编译设备程序并产 `aic-skill-bin-*.tar.gz`（CLI 解到可执行文件同目录），Desktop 经 `skill-bin-desktop` → extraResources `resources/skill-bin` + `main.js` 注入 `AIC_SKILL_BIN_DIR`；资源缺失时保留源码与旧构建产物，调用报明确错误，不静默。
 - **manifest 解析收敛为单一权威实现**：`parseCommandManifest` 改为调用 `aic-skills/manifest`（与 aic 云端、aic-skills 契约测试同一 parser）。行为变化：pod 此前对 `ui` 段接受任意 JSON，现在与云端同契约校验（非法 UI 同样整包拒绝）；pod 仍只消费 `host`。
