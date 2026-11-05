@@ -46,8 +46,44 @@ jobs:
         run: go test ./libs/execution
       - name: Test native files and authorization config
         run: go test ./libs/hostfs ./cfg
+      - name: Install Developer ID G2 chain (macOS)
+        # 2025 起 Apple 的 Developer ID 走 G2 签发链，macOS 不预装该中间证书与 G2 根；
+        # 缺它们时 codesign 无法为签名者构建证书链。证书随仓库（public CA，非机密）。
+        if: runner.os == 'Darwin'
+        run: |
+          for ca in desktop/build/certs/*.cer; do
+            security import "$ca" -k ~/Library/Keychains/login.keychain-db
+          done
+          security unlock-keychain ~/Library/Keychains/login.keychain-db
+      - name: Prepare notarization key (macOS)
+        if: runner.os == 'Darwin'
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          if [ -z "$APPLE_API_KEY_B64" ]; then
+            echo "未配置 APPLE_API_KEY：跳过公证（产物为已签名未公证）"
+            exit 0
+          fi
+          echo "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       - name: Build
+        env:
+          # 签名凭据：Developer ID 证书的 p12（base64）与口令；不配置则退回 ad-hoc 兜底
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # 公证凭据（APPLE_API_KEY 路径由上一步写入 GITHUB_ENV）
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: make ${{ matrix.target }}
+      - name: Verify signature (macOS)
+        if: runner.os == 'Darwin'
+        run: |
+          APP=$(ls -d dist/mac*/AIC\ Desktop.app | head -1)
+          codesign --verify --deep --strict "$APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier" || true
+          xcrun stapler validate "$APP" || echo "（无公证票据：未配置公证凭据时正常）"
+          spctl -a -vvv -t install "$APP" || echo "（Gatekeeper 未认可：未公证时正常）"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

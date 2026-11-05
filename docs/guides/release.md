@@ -68,6 +68,19 @@ macOS 按上游要求将随包 CuaDriver.app 安装到 `/Applications/CuaDriver.
 `<alias>:<stream>`（manifest `host.<alias>.streams` 声明），绘制后回传 ACK。Chrome 实例由包自管，
 Pod 不代管上游 daemon。
 
+## macOS 签名与公证
+
+mac 产物走 **Developer ID 签名 + Apple 公证**：签名用 electron-builder 内置流程（钥匙串里
+的有效 Developer ID Application 身份，CI 由 `CSC_LINK` 导入），公证用 `APPLE_API_KEY` /
+`APPLE_API_KEY_ID` / `APPLE_API_ISSUER` 三项凭据（electron-builder 自动执行并 staple）。
+`desktop/build/certs/` 随仓库带 G2 签发链的两张公开 CA 证书（2025 起 macOS 不预装，缺则
+codesign 建不出链）。**本地无有效证书时退回 ad-hoc 深签**（用户首次打开仍需在“隐私与安全性”
+手动放行），因此正式分发的包应由 CI 出。方案与风险见
+[development/macos-signing.md](development/macos-signing.md)。
+
+发布前置：GitHub Secrets 五项（`CSC_LINK` / `CSC_KEY_PASSWORD` / `APPLE_API_KEY` /
+`APPLE_API_KEY_ID` / `APPLE_API_ISSUER`）已配置；`CSC_KEY_PASSWORD` 必须是 ASCII。
+
 ## 验证命令
 
 ```sh

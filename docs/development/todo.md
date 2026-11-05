@@ -7,9 +7,15 @@
 
 ### macOS 分发签名与公证（2026-11-05）
 
-Desktop 的 mac 产物目前是 ad-hoc 深签（用户需在“隐私与安全性”手动放行）。Apple Developer
-Program 组织会籍已付款，接 Developer ID 签名 + 公证 + CI 接入的完整方案见
-[macos-signing.md](macos-signing.md)（含风险与退路、分阶段执行顺序）。
+Desktop 的 mac 产物改为 Developer ID 签名 + Apple 公证（代码已落地）：afterPack 钩子按可用
+证书分流真签名/ad-hoc，并给 `Contents/Resources` 下的裸 Mach-O 补签（osx-sign 不签
+Resources，不补会被公证拒）；`electron-builder.yml` 置 hardenedRuntime + entitlements +
+notarize；2025 起的 G2 签发链证书随仓库（`desktop/build/certs/`）带走；CI 已接入
+G2 链导入、公证凭据与验签步骤。完整方案见 [macos-signing.md](macos-signing.md)。
+
+待办：CI 首次跑通验证（本地 mbp 钥匙串信任库异常，签名改由 runner 执行）；GitHub Secrets
+配置与推送许可；notary 是否接受混编 Team ID 的嵌套第三方 app（Chrome for Testing /
+CuaDriver）实测；p12 口令轮换。
 
 ### 官方包预装后的收尾（2026-11-02）
 

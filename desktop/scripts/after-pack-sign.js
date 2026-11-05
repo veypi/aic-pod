@@ -32,6 +32,15 @@ const { Arch } = require("builder-util");
 
 const DEVELOPER_ID_PREFIX = "Developer ID Application:";
 
+// 2025 起 Apple 的 Developer ID 走 G2 签发链（issuer = Developer ID Certification
+// Authority / OU=G2），macOS 不预装该中间证书与 G2 根：签名钥匙串里缺它们时，
+// codesign 无法为签名者构建证书链（errSecInternalComponent + “unable to build
+// chain to self-signed root”）。随包带上这两张公开 CA 证书并导入签名钥匙串。
+const G2_CHAIN_CERTS = [
+  path.join(__dirname, "..", "build", "certs", "DeveloperIDG2CA.cer"),
+  path.join(__dirname, "..", "build", "certs", "AppleRootCA-G2.cer"),
+];
+
 // Mach-O 魔数（含大小端两种读法）；fat 二进制同样要签名。
 const MACHO_MAGICS = new Set([
   0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca,
@@ -74,6 +83,10 @@ function importCscLink() {
   run("security", ["create-keychain", "-p", password, name]);
   run("security", ["unlock-keychain", "-p", password, name]);
   run("security", ["import", p12, "-k", name, "-P", password, "-T", "/usr/bin/codesign"]);
+  // 把 G2 链导入同一钥匙串：签名者（Developer ID 证书）的签发者是 G2 中间证书。
+  for (const ca of G2_CHAIN_CERTS) {
+    if (fs.existsSync(ca)) run("security", ["import", ca, "-k", name]);
+  }
   // 不设分区列表，CI 里 codesign 会因密钥 ACL 报 “User interaction is not allowed”。
   // 分区列表与 electron-builder 自身导入 CSC_LINK 时保持一致（见 app-builder-lib macCodeSign）。
   // 注意：security CLI 处理非 ASCII 密码会报 “passphrase ... not correct”，此时不阻断构建

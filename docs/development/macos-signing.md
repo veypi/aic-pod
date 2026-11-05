@@ -1,6 +1,6 @@
 # macOS 分发签名与公证（Developer ID）
 
-- 文档状态：**未来规划（未实施）**。现状与契约见 [../guides/release.md](../guides/release.md)、[../../desktop/README.md](../../desktop/README.md)。
+- 文档状态：**代码已落地（2026-11-05），待 CI 首次跑通验证**。现状与契约见 [../guides/release.md](../guides/release.md)、[../../desktop/README.md](../../desktop/README.md)。
 - 目标：aic-desktop 的 macOS 产物用 Developer ID Application 证书签名并经 Apple 公证（notarization）+ staple，用户双击打开不再被 Gatekeeper 拦截；签名与公证在 GitHub Actions 内完成。
 - 不在本文范围：App Store 上架、iOS 分发、macOS 自动更新（依赖本文完成后另立）。
 
@@ -8,8 +8,8 @@
 
 | 事实 | 位置 |
 | --- | --- |
-| `mac.identity: null` → electron-builder 完全跳过签名 | [../../desktop/electron-builder.yml](../../desktop/electron-builder.yml) |
-| 打包后由 afterPack 钩子做 ad-hoc 深签 `codesign --force --deep --sign -` | [../../desktop/scripts/after-pack-adhoc-sign.js](../../desktop/scripts/after-pack-adhoc-sign.js) |
+| mac 段不写死 identity：electron-builder 在钥匙串找**有效**的 Developer ID Application 身份（CI 由 `CSC_LINK` 导入临时钥匙串）；无有效身份时整体跳过签名（无自动 ad-hoc 回退），由 afterPack 钩子走 ad-hoc 兜底 | [../../desktop/electron-builder.yml](../../desktop/electron-builder.yml) |
+| afterPack 钩子：校验随包运行依赖后按可用证书分流——有 Developer ID 身份则给 `Contents/Resources` 下的裸 Mach-O 补签（osx-sign 不签 Resources），无则 ad-hoc 深签 `codesign --force --deep --sign -` | [../../desktop/scripts/after-pack-sign.js](../../desktop/scripts/after-pack-sign.js) |
 | ad-hoc 是社区 workaround：electron-builder 26 直接 ad-hoc 会破坏摄像头/麦克风（electron-builder#9529） | 同上文件注释 |
 | 打包前由 beforePack 钩子同步运行依赖到 `desktop/vendor/`（Chrome for Testing / agent-browser / CuaDriver，按版本 + sha256 钉版） | [../../desktop/scripts/before-pack-browser.cjs](../../desktop/scripts/before-pack-browser.cjs) |
 | `desktop/vendor/` 被根 `.gitignore` 的 `vendor/` 忽略 → CI 上现下现取 | [.gitignore](../../.gitignore) |
@@ -98,46 +98,73 @@ codesign --force --sign "<identity>" --options runtime --timestamp \
 
 第三方已签名的嵌套 app（Google 的 Chrome for Testing.app、上游的 CuaDriver.app）**不重签**（重签会破坏它们自身的签名链）；混编 Team ID 是否被 notary 接受需实测（见风险表）。
 
-### 5. CI（`.github/workflows/build.yml`）
+### 5. G2 信任链（随包携带）
 
-在 desktop job 的 Build 之前插入证书导入（仅 macOS）：
+2025 起 Apple 的 Developer ID 改用 **G2 签发链**（issuer = `Developer ID Certification Authority / OU=G2 / O=Apple Inc.`），macOS **不预装**该中间证书与 G2 根：签名钥匙串里缺它们，codesign 就无法为签名者构建证书链（`errSecInternalComponent` + “unable to build chain to self-signed root”）。
+
+两张公开 CA 证书随仓库带走（`desktop/build/certs/`，非机密）：
+
+| 文件 | 主体 | 有效期 |
+| --- | --- | --- |
+| `DeveloperIDG2CA.cer` | Developer ID Certification Authority (G2) | 2031-09-17 |
+| `AppleRootCA-G2.cer` | Apple Root CA - G2 | 2039-04-30 |
+
+- 钩子在导入 p12 后把它们导进**同一临时钥匙串**（`after-pack-sign.js` 的 `G2_CHAIN_CERTS`）。
+- CI 另把它们导进 runner 的登录钥匙串（electron-builder 自己的临时钥匙串只含 p12）。
+- 旧的 `DeveloperIDCA.cer` 是 G1（2027-02-01 到期），**不适用**于本证书。
+
+### 6. CI（`.github/workflows/build.yml`）
+
+desktop job 已接入（仅 macOS runner）：
 
 ```yaml
-      - name: Import Developer ID certificate
+      - name: Install Developer ID G2 chain (macOS)
+        if: runner.os == 'Darwin'
+        run: |
+          for ca in desktop/build/certs/*.cer; do
+            security import "$ca" -k ~/Library/Keychains/login.keychain-db
+          done
+          security unlock-keychain ~/Library/Keychains/login.keychain-db
+      - name: Prepare notarization key (macOS)
         if: runner.os == 'Darwin'
         env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
         run: |
-          echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
-          security create-keychain -p aic-sign build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p aic-sign build.keychain
-          security import "$RUNNER_TEMP/developer-id.p12" -k build.keychain \
-            -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k aic-sign build.keychain
+          if [ -z "$APPLE_API_KEY_B64" ]; then
+            echo "未配置 APPLE_API_KEY：跳过公证（产物为已签名未公证）"
+            exit 0
+          fi
+          echo "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       - name: Build
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          AIC_DESKTOP_SIGN: identity
         run: make ${{ matrix.target }}
+      - name: Verify signature (macOS)
+        if: runner.os == 'Darwin'
+        run: |
+          APP=$(ls -d dist/mac*/AIC\ Desktop.app | head -1)
+          codesign --verify --deep --strict "$APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier" || true
+          xcrun stapler validate "$APP" || echo "（无公证票据：未配置公证凭据时正常）"
+          spctl -a -vvv -t install "$APP" || echo "（Gatekeeper 未认可：未公证时正常）"
 ```
 
 要点：
 
-- GitHub 托管 macOS runner 自带 `security` / `codesign`，无需额外安装。
-- `security set-key-partition-list` 必须做，否则 CI 里 codesign 会报 "User interaction is not allowed"。
-- `APPLE_API_KEY` 传 .p8 文件路径时需先把内容落盘；也可直接传 base64 并在步骤里解码。
-- 公证是异步的（上传 + Apple 处理，通常几分钟到半小时），失败时 electron-builder 会打印 notary 错误日志；建议公证失败也上传未公证产物，便于排查。
+- **签名凭据导入由 electron-builder 自己完成**（`CSC_LINK` + `CSC_KEY_PASSWORD` → 临时钥匙串 + `set-key-partition-list`）；钩子另建一把钥匙串给嵌套二进制补签，两者用同一张证书。
+- `CSC_KEY_PASSWORD` **必须用 ASCII**：非 ASCII 口令会让 `security set-key-partition-list -k` 报 “passphrase not correct”（钩子已容错不阻断，但 electron-builder 自身那步会失败）。
+- `APPLE_API_KEY` 传 .p8 文件路径，需先落盘（上面步骤用 base64 解码）；该私钥**只能下载一次**。
+- 公证是异步的（上传 + Apple 处理，通常几分钟到半小时）；失败时 electron-builder 打印 notary 日志。
 - macOS 只能 macOS runner 构建（已有 macos-15 / macos-14）。
 - 运行依赖由 beforePack 钩子现下（storage.googleapis.com / GitHub Releases），CI runner 直连即可，不依赖本机代理。
 - 用 GitHub **Environment**（protected）限制只有 tag 构建能取到 Secrets；`CSC_LINK` 泄露等于私钥泄露，需在账户页吊销并重签。
 
-### 6. Secrets 清单
+### 7. Secrets 清单
 
 | Secret | 内容 | 来源 |
 | --- | --- | --- |
@@ -194,7 +221,9 @@ xcrun notarytool log <submission-id> --key <p8> --key-id <id> --issuer <issuer>
 
 ## 未决
 
-- Team ID（证书签发后从证书全名取）待填。
-- notary 是否接受混编 Team ID 的嵌套第三方 app —— 实测确认。
-- 自动更新是否本轮一起做 —— 建议另立。
-- 公证主体显示名为英文（`Beijing Qiongju Technology Co., Ltd.`），App Store 中文显示名走 Seller Name，与本方案无关。
+- **CI 首次跑通待验**：本地 mbp 的钥匙串/信任库异常（`errSecInternalComponent`，Xcode 自建证书同样失败），签名与公证改由 CI 干净 runner 执行；跑通后回填本文验收结果。
+- **Team ID**：`CC6VQMAF97`（证书签发前从证书全名取得，已确认）。
+- ** notary 是否接受混编 Team ID 的嵌套第三方 app**（Chrome for Testing / CuaDriver 为上游 Team）——实测确认；被拒则按上表退路处理。
+- **自动更新**（electron-updater + GitHub Releases 更新源 + 签名校验）另立一轮。
+- **证书主体名只能是英文**（`Beijing Qiongju Technology Co., Ltd.`），App Store 中文显示名走 Seller Name，与本方案无关。
+- **p12 口令轮换**：当前口令已在前序会话与本机 JSON 备份中出现，CI 跑通后建议用随机口令重新导出并更新 Secrets。
