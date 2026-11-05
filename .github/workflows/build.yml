@@ -50,8 +50,9 @@ jobs:
         # 签名凭据自己装，不走 electron-builder 的 CSC_LINK 导入路径：后者建钥匙串用随机
         # 口令、却拿 p12 口令去 set-key-partition-list，那一步必然失败（且 CSC_* 跨平台，
         # 会把 mac 证书带去签 Windows exe）。
-        # 2025 起 Developer ID 走 G2 签发链，macOS 不预装中间证书与根 → 装进系统钥匙串
-        # 并标为信任锚；否则 find-identity -v 不认这张证书（“0 valid identities found”）。
+        # 2025 起 Developer ID 走 G2 签发链：经典 Apple Root CA 是信任锚，G2 中间证书
+        # 必须作为普通证书导入实际签名钥匙串；只装进系统钥匙串时 codesign 仍可能报
+        # “unable to build chain to self-signed root”。不要把中间证书标成信任根。
         # 注意：runner.os 的取值是 macOS / Linux / Windows，没有 Darwin。
         if: runner.os == 'macOS'
         env:
@@ -62,14 +63,8 @@ jobs:
             echo "未配置 CSC_LINK：跳过签名（产物走 ad-hoc 兜底）"
             exit 0
           fi
-          for ca in desktop/build/certs/*.cer; do
-            case "$ca" in
-              *AppleRootCA.cer) sudo security add-trusted-cert -d -r trustRoot \
-                -k /Library/Keychains/System.keychain "$ca" ;;
-              *) sudo security add-trusted-cert -d -r trustAsRoot \
-                -k /Library/Keychains/System.keychain "$ca" ;;
-            esac
-          done
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain desktop/build/certs/AppleRootCA.cer
           echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
           KC="$RUNNER_TEMP/aic-sign.keychain"
           KCPW="$(openssl rand -base64 32)"
@@ -80,19 +75,19 @@ jobs:
           security list-keychains -d user -s "$KC" $LIST
           security import "$RUNNER_TEMP/developer-id.p12" -k "$KC" \
             -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD"
+          security add-certificates -k "$KC" desktop/build/certs/DeveloperIDG2CA.cer
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC"
-          security find-identity -v -p codesigning
-          echo "---- 诊断：钥匙串与链的现场 ----"
-          echo "系统钥匙串证书总数: $(security find-certificate -a -p /Library/Keychains/System.keychain 2>/dev/null | grep -c 'BEGIN CERTIFICATE')"
-          for n in "Apple Root CA" "Developer ID Certification Authority" "Developer ID Application"; do
-            echo "  系统钥匙串含 [$n]: $(security find-certificate -a -c "$n" -p /Library/Keychains/System.keychain 2>/dev/null | grep -c 'BEGIN CERTIFICATE')"
-            echo "  登录钥匙串含 [$n]: $(security find-certificate -a -c "$n" -p ~/Library/Keychains/login.keychain-db 2>/dev/null | grep -c 'BEGIN CERTIFICATE')"
-            echo "  本步钥匙串含 [$n]: $(security find-certificate -a -c "$n" -p "$KC" 2>/dev/null | grep -c 'BEGIN CERTIFICATE')"
-          done
-          ls /Library/Keychains/ 2>&1 | head -8
-          openssl pkcs12 -in "$RUNNER_TEMP/developer-id.p12" -passin pass:"$CSC_KEY_PASSWORD" -nokeys -out "$RUNNER_TEMP/leaf.pem" 2>/dev/null
-          echo -n "从文件验链: "; security verify-cert -c "$RUNNER_TEMP/leaf.pem" 2>&1 | head -1
-          echo "---- 诊断结束 ----"
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" | awk '/Developer ID Application:/ {print $2; exit}')
+          if [ -z "$IDENTITY" ]; then
+            echo "未找到有效 Developer ID Application 身份"
+            exit 1
+          fi
+          # 完整打包前先签最小 Mach-O，避免证书链问题拖到数十分钟构建后才暴露。
+          cp /bin/echo "$RUNNER_TEMP/aic-sign-smoke"
+          codesign --force --sign "$IDENTITY" --keychain "$KC" \
+            --options runtime --timestamp "$RUNNER_TEMP/aic-sign-smoke"
+          codesign --verify --strict "$RUNNER_TEMP/aic-sign-smoke"
+          echo "Developer ID 最小签名验证通过: $IDENTITY"
       - name: Prepare notarization key (macOS)
         if: runner.os == 'macOS'
         env:
