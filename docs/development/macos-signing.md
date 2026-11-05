@@ -100,7 +100,7 @@ codesign --force --sign "<identity>" --options runtime --timestamp \
 
 ### 5. G2 信任链（随包携带）
 
-2025 起 Apple 的 Developer ID 改用 **G2 签发链**（issuer = `Developer ID Certification Authority / OU=G2 / O=Apple Inc.`），macOS **不预装**该中间证书与 G2 根：签名钥匙串里缺它们，codesign 就无法为签名者构建证书链（`errSecInternalComponent` + “unable to build chain to self-signed root”）。
+2025 起 Apple 的 Developer ID 改用 **G2 签发链**（issuer = `Developer ID Certification Authority / OU=G2 / O=Apple Inc.`）。G2 中间证书必须导入**实际签名钥匙串**；只安装到系统钥匙串时，codesign 仍可能无法为签名者构建证书链（`errSecInternalComponent` + “unable to build chain to self-signed root”）。
 
 两张公开 CA 证书随仓库带走（`desktop/build/certs/`，非机密）：
 
@@ -112,7 +112,7 @@ codesign --force --sign "<identity>" --options runtime --timestamp \
 **必须是经典 `Apple Root CA`**（apple.com/appleca/AppleIncRootCertificate.cer）：G2 中间证书的签发者就是它。`Apple Root CA - G2` 是另一个自签根，**不是**这条链的锚——装错时链建不出来，codesign 报 “unable to build chain to self-signed root for signer …”。
 
 - 钩子在导入 p12 后把它们导进**同一临时钥匙串**（`after-pack-sign.js` 的 `G2_CHAIN_CERTS`）。
-- CI 另把它们导进 runner 的登录钥匙串（electron-builder 自己的临时钥匙串只含 p12）。
+- CI 将经典根导入系统钥匙串并设为信任锚，将 G2 中间证书作为普通证书导入专用签名钥匙串；**不要把中间证书设为信任锚**。
 - 旧的 `DeveloperIDCA.cer` 是 G1（2027-02-01 到期），**不适用**于本证书。
 ### 6. CI（`.github/workflows/build.yml`）
 
@@ -129,14 +129,8 @@ desktop job 已接入（仅 macOS runner）：
             echo "未配置 CSC_LINK：跳过签名（产物走 ad-hoc 兜底）"
             exit 0
           fi
-          for ca in desktop/build/certs/*.cer; do
-            case "$ca" in
-              *AppleRootCA-G2.cer) sudo security add-trusted-cert -d -r trustRoot \
-                -k /Library/Keychains/System.keychain "$ca" ;;
-              *) sudo security add-trusted-cert -d -r trustAsRoot \
-                -k /Library/Keychains/System.keychain "$ca" ;;
-            esac
-          done
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain desktop/build/certs/AppleRootCA.cer
           echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
           KC="$RUNNER_TEMP/aic-sign.keychain"
           KCPW="$(openssl rand -base64 32)"
@@ -147,10 +141,11 @@ desktop job 已接入（仅 macOS runner）：
           security list-keychains -d user -s "$KC" $LIST
           security import "$RUNNER_TEMP/developer-id.p12" -k "$KC" \
             -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD"
+          security add-certificates -k "$KC" desktop/build/certs/DeveloperIDG2CA.cer
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC"
           security find-identity -v -p codesigning
       - name: Prepare notarization key (macOS)
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         env:
           APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
         run: |
@@ -158,8 +153,15 @@ desktop job 已接入（仅 macOS runner）：
             echo "未配置 APPLE_API_KEY：跳过公证（产物为已签名未公证）"
             exit 0
           fi
-          echo "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          if [[ "$APPLE_API_KEY_B64" == *"-----BEGIN PRIVATE KEY-----"* ]]; then
+            printf '%s\n' "$APPLE_API_KEY_B64" > "$RUNNER_TEMP/AuthKey.p8"
+          else
+            printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          fi
           chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          openssl pkey -in "$RUNNER_TEMP/AuthKey.p8" -noout -check
+          xcrun notarytool history --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
           echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       - name: Build (signed + notarized, macOS)
         if: runner.os == 'macOS'
@@ -184,10 +186,10 @@ desktop job 已接入（仅 macOS runner）：
 
 - **签名凭据自己装，不用 electron-builder 的 CSC_LINK 导入路径**：那条路径建钥匙串用随机口令、却拿 p12 口令去 `set-key-partition-list`（-k 要的是**钥匙串密码**）→ 必然失败；且 `CSC_*` 是**跨平台**变量，会把 mac 证书带去签 Windows exe（signtool 报错）。
 - **钥匙串必须进用户搜索列表**（`security list-keychains -d user -s`）：否则 codesign 解析不到签名者的证书链，报 “The specified item could not be found in the keychain”。
-- **G2 链要装进系统钥匙串并标为信任锚**（`sudo security add-trusted-cert -d -r trustRoot/-r trustAsRoot`）：只 `security import` 不给信任设置时，`find-identity -v` 不认这张证书（“0 valid identities found”），electron-builder 会静默跳过签名。
+- **根与中间证书分开放置**：经典 `Apple Root CA` 用 `sudo security add-trusted-cert -r trustRoot` 设置为信任锚；`DeveloperIDG2CA.cer` 用 `security add-certificates -k "$KC"` 导入实际签名钥匙串，不能标成信任根。完整打包前用一个最小 Mach-O 做 codesign 冒烟验证。
 - **`runner.os` 的取值是 `macOS` / `Linux` / `Windows`，没有 `Darwin`**：写成 `Darwin` 会让整段 macOS 步骤静默跳过（构建照样“成功”，但产物未签名）。
 - 钩子在无 CSC_LINK 时直接用**搜索列表里的有效身份**（CI 步骤已装好），并按同一证书补签嵌套二进制。
-- `APPLE_API_KEY` 传 .p8 文件路径，需先落盘（上面步骤用 base64 解码）；该私钥**只能下载一次**。
+- `APPLE_API_KEY` Secret 可存原始 PEM 或 base64；准备步骤落盘后立即用 `openssl pkey -check` 验证内容，并用 `notarytool history` 验证 Key ID / Issuer / 私钥组合。electron-builder 最终接收的是 .p8 文件路径；该私钥**只能下载一次**。
 - 公证是异步的（上传 + Apple 处理，通常几分钟到半小时）；失败时 electron-builder 打印 notary 日志。
 - macOS 只能 macOS runner 构建（已有 macos-15 / macos-14）。
 - 运行依赖由 beforePack 钩子现下（storage.googleapis.com / GitHub Releases），CI runner 直连即可，不依赖本机代理。
@@ -200,7 +202,7 @@ desktop job 已接入（仅 macOS runner）：
 | `CSC_LINK` | Developer ID Application 证书 .p12 的 base64 | Xcode 导出或 `security export` |
 | `CSC_KEY_PASSWORD` | p12 导出密码 | 自定 |
 | `CSC_NAME`（可选） | 证书全名 `Developer ID Application: Beijing Qiongju Technology Co., Ltd. (<TEAMID>)` | 账户页 |
-| `APPLE_API_KEY` | App Store Connect API 私钥 .p8（路径或 base64） | App Store Connect → Users and Access → Integrations → App Store Connect API |
+| `APPLE_API_KEY` | App Store Connect API 私钥 .p8（原始 PEM 或 base64） | App Store Connect → Users and Access → Integrations → App Store Connect API |
 | `APPLE_API_KEY_ID` | Key ID | 同上 |
 | `APPLE_API_ISSUER` | Issuer ID（团队页顶部 UUID） | 同上 |
 

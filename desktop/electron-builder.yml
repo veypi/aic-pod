@@ -49,8 +49,8 @@ mac:
   category: public.app-category.productivity
   # 签名与公证（方案见 docs/development/macos-signing.md）：
   # - identity 不写死：electron-builder 在钥匙串里找有效的 Developer ID Application
-  #   身份；CI 下由 CSC_LINK（p12 的 base64）临时导入。没有有效身份时 electron-builder
-  #   会整体跳过签名（无自动 ad-hoc 回退），由 afterPack 钩子走 ad-hoc 深签兜底
+  #   身份；CI 准备步骤将 p12 与 G2 中间证书导入专用签名钥匙串。没有有效身份时
+  #   electron-builder 会整体跳过签名（无自动 ad-hoc 回退），由 afterPack 钩子走 ad-hoc 深签兜底
   #   （本地开发路径，下载打开提示为「未验证开发者」）。
   # - hardenedRuntime 是公证前提；entitlements 是 Electron 跑起来的必要条件
   #   （allow-jit / allow-unsigned-executable-memory / disable-library-validation）。

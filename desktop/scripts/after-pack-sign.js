@@ -39,9 +39,9 @@ const { Arch } = require("builder-util");
 const DEVELOPER_ID_PREFIX = "Developer ID Application:";
 
 // 2025 起 Apple 的 Developer ID 走 G2 签发链（issuer = Developer ID Certification
-// Authority / OU=G2），macOS 不预装该中间证书与 G2 根：签名钥匙串里缺它们时，
-// codesign 无法为签名者构建证书链（errSecInternalComponent + “unable to build
-// chain to self-signed root”）。随包带上这两张公开 CA 证书并导入签名钥匙串。
+// Authority / OU=G2）。G2 中间证书必须导入实际签名钥匙串，否则 codesign 无法为
+// 签名者构建证书链（errSecInternalComponent + “unable to build chain to self-signed
+// root”）。该链的信任锚是经典 Apple Root CA，不是 Apple Root CA - G2。
 const G2_CHAIN_CERTS = [
   path.join(__dirname, "..", "build", "certs", "DeveloperIDG2CA.cer"),
   path.join(__dirname, "..", "build", "certs", "AppleRootCA.cer"),
