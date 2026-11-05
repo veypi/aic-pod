@@ -2,7 +2,7 @@
 // 仅平台白名单 host（配置 host + 默认域名与旧域名）：完整能力（api 转发/窗口控制/
 // 外链/桌宠）。浏览器命令通过 hosts_rtc/1 设备连接调用。
 // 本地设置页不在本 preload 范围：独立配置窗口走 settings-preload（独立 partition）。
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 // 白名单（主进程下发；allowed:hosts 返回平台 host 数组）
 let allowedHosts = []
@@ -16,6 +16,8 @@ if (allowedHosts.includes(location.host)) {
     isDesktop: true,
     // 本地 API 转发（主进程带 code 请求本地服务，方法名区分 GET/POST）
     api: (method, args) => ipcRenderer.invoke('local:api', method, args === undefined ? null : args),
+    // 用户主动选择的文件 → 原生绝对路径；普通文档仅形成 /fs/{host_id} 引用，不复制上传。
+    pathForFile: (file) => webUtils.getPathForFile(file),
     // 窗口控制（Electron 主进程操作主窗口）
     minimise: () => ipcRenderer.invoke('window:minimise'),
     maximise: () => ipcRenderer.invoke('window:maximise'),
