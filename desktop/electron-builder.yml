@@ -54,12 +54,12 @@ mac:
   #   （本地开发路径，下载打开提示为「未验证开发者」）。
   # - hardenedRuntime 是公证前提；entitlements 是 Electron 跑起来的必要条件
   #   （allow-jit / allow-unsigned-executable-memory / disable-library-validation）。
-  # - notarize 只在具备 APPLE_API_KEY / APPLE_ID / APPLE_KEYCHAIN 凭据时执行，
-  #   缺凭据自动跳过（本地开发不触网）。
+  # - 公证由 afterSign 钩子执行：提交后立即输出 submission ID，每 30 秒轮询，
+  #   默认 60 分钟超时；未提供 APPLE_API_KEY 时跳过（本地开发与手动 CI）。
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
-  notarize: true
+  notarize: false
   # 麦克风使用声明：缺失时 macOS 对 getUserMedia 静默返回无声轨（不报错、只出 -91dB 静音）
   extendInfo:
     NSMicrophoneUsageDescription: ivec 需要麦克风用于语音交互（桌宠/聊天语音输入）
@@ -76,5 +76,6 @@ linux:
   maintainer: veypi <i@veypi.com>
 # 打包钩子：同步/校验目标平台 Chrome；macOS 额外做签名准备（见 mac 段）
 afterPack: scripts/after-pack-sign.js
+afterSign: scripts/after-sign-notarize.js
 beforePack: scripts/before-pack-browser.cjs
 npmRebuild: false

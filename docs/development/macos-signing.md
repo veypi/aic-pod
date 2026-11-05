@@ -29,7 +29,7 @@ electron-builder 26 的签名/公证语义（已读 `node_modules/app-builder-li
 
 ## 方案
 
-签名（electron-builder 自带签名）→ 补签嵌套裸 Mach-O（afterSign 钩子）→ 公证 + staple（electron-builder 内置 notarize）。
+补签嵌套裸 Mach-O（afterPack）→ 外层签名（electron-builder）→ 提交公证、轮询与 staple（afterSign）。公证钩子提交后立即输出 submission ID，每 30 秒查询状态，默认等待上限 60 分钟。
 
 ### 1. electron-builder.yml
 
@@ -44,7 +44,7 @@ mac:
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
-  notarize: true
+  notarize: false  # 禁用内置无限 --wait，由 afterSign 做有超时的提交与轮询
   extendInfo:
     NSMicrophoneUsageDescription: ivec 需要麦克风用于语音交互（桌宠/聊天语音输入）
 ```
@@ -83,7 +83,7 @@ Electron 公证必备三件套 + 网络：
 - 无证书（本地开发 / CI 未配 Secrets）→ 保留现有 ad-hoc 深签，保证仍能出包。
 - 建议用显式开关 `AIC_DESKTOP_SIGN=identity|adhoc`（默认 `adhoc`），CI 签名构建时设 `identity`；避免"环境里恰好有证书"就改变签名路径。
 
-### 4. afterSign 钩子（新增 `scripts/after-sign-nested.mjs`）
+### 4. 嵌套裸 Mach-O 补签（afterPack）
 
 osx-sign 只签 app 本体、Frameworks、helper，**不签 `Contents/Resources/` 下的裸 Mach-O**；notary 对未签名的嵌套代码直接拒绝。需补签我们自己随包发的二进制（内层优先，不用 `--deep`）：
 
@@ -190,7 +190,8 @@ desktop job 已接入（仅 macOS runner）：
 - **`runner.os` 的取值是 `macOS` / `Linux` / `Windows`，没有 `Darwin`**：写成 `Darwin` 会让整段 macOS 步骤静默跳过（构建照样“成功”，但产物未签名）。
 - 钩子在无 CSC_LINK 时直接用**搜索列表里的有效身份**（CI 步骤已装好），并按同一证书补签嵌套二进制。
 - `APPLE_API_KEY` Secret 可存原始 PEM 或 base64；准备步骤落盘后立即用 `openssl pkey -check` 验证内容，并用 `notarytool history` 验证 Key ID / Issuer / 私钥组合。electron-builder 最终接收的是 .p8 文件路径；该私钥**只能下载一次**。
-- 公证是异步的（上传 + Apple 处理，通常几分钟到半小时）；失败时 electron-builder 打印 notary 日志。
+- 公证是异步的（上传 + Apple 处理）。`after-sign-notarize.js` 提交后立即打印 submission ID，每 30 秒输出状态；默认 60 分钟超时后 CI 失败，但 Apple 会继续处理，可凭 ID 用 `notarytool info/log` 查询。
+- 手动 `workflow_dispatch` 只签名不公证；正式 `v*` tag 才准备公证凭据。tag 构建的 stapler 与 Gatekeeper 验证是硬失败，不允许只打印警告。
 - macOS 只能 macOS runner 构建（已有 macos-15 / macos-14）。
 - 运行依赖由 beforePack 钩子现下（storage.googleapis.com / GitHub Releases），CI runner 直连即可，不依赖本机代理。
 - 用 GitHub **Environment**（protected）限制只有 tag 构建能取到 Secrets；`CSC_LINK` 泄露等于私钥泄露，需在账户页吊销并重签。
@@ -252,7 +253,7 @@ xcrun notarytool log <submission-id> --key <p8> --key-id <id> --issuer <issuer>
 
 ## 未决
 
-- **CI 首次跑通待验**：本地 mbp 的钥匙串/信任库异常（`errSecInternalComponent`，Xcode 自建证书同样失败），签名与公证改由 CI 干净 runner 执行；跑通后回填本文验收结果。
+- **签名链已跑通**：2026-11-05 CI 的 amd64 已完成 Developer ID 签名、公证、stapler 与 Gatekeeper 验收；根因是 G2 中间证书未进入实际签名钥匙串。新的 afterSign 轮询实现待正式 tag 验收。
 - **Team ID**：`CC6VQMAF97`（证书签发前从证书全名取得，已确认）。
 - ** notary 是否接受混编 Team ID 的嵌套第三方 app**（Chrome for Testing / CuaDriver 为上游 Team）——实测确认；被拒则按上表退路处理。
 - **自动更新**（electron-updater + GitHub Releases 更新源 + 签名校验）另立一轮。

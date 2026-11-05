@@ -8,8 +8,8 @@
  *    - 先给 Contents/Resources 下我们自带的裸 Mach-O 补签。osx-sign 只签 app 本体、
  *      Frameworks 与 helper，**不签 Resources 里的裸可执行文件**，而公证要求
  *      嵌套代码全部有有效签名，否则 Apple 直接拒收。
- *    - 外层 .app 的签名与公证随后由 electron-builder 用同一证书完成
- *      （见 electron-builder.yml 的 hardenedRuntime / entitlements / notarize）。
+ *    - 外层 .app 随后由 electron-builder 用同一证书签名；公证与 staple 由
+ *      afterSign 钩子完成（见 electron-builder.yml 与 after-sign-notarize.js）。
  *
  * 2) 没有证书（本地开发、CI 未配凭据）：保留 ad-hoc 深签兜底。下载打开提示从
  *    「已损坏」（需 xattr 清隔离）变为「未验证开发者」（系统设置 → 隐私与安全性 →
