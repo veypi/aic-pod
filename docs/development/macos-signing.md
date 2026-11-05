@@ -119,7 +119,7 @@ desktop job 已接入（仅 macOS runner）：
 
 ```yaml
       - name: Prepare signing credentials (macOS)
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -128,6 +128,14 @@ desktop job 已接入（仅 macOS runner）：
             echo "未配置 CSC_LINK：跳过签名（产物走 ad-hoc 兜底）"
             exit 0
           fi
+          for ca in desktop/build/certs/*.cer; do
+            case "$ca" in
+              *AppleRootCA-G2.cer) sudo security add-trusted-cert -d -r trustRoot \
+                -k /Library/Keychains/System.keychain "$ca" ;;
+              *) sudo security add-trusted-cert -d -r trustAsRoot \
+                -k /Library/Keychains/System.keychain "$ca" ;;
+            esac
+          done
           echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
           KC="$RUNNER_TEMP/aic-sign.keychain"
           KCPW="$(openssl rand -base64 32)"
@@ -138,7 +146,6 @@ desktop job 已接入（仅 macOS runner）：
           security list-keychains -d user -s "$KC" $LIST
           security import "$RUNNER_TEMP/developer-id.p12" -k "$KC" \
             -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD"
-          for ca in desktop/build/certs/*.cer; do security import "$ca" -k "$KC"; done
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC"
           security find-identity -v -p codesigning
       - name: Prepare notarization key (macOS)
@@ -154,16 +161,16 @@ desktop job 已接入（仅 macOS runner）：
           chmod 600 "$RUNNER_TEMP/AuthKey.p8"
           echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       - name: Build (signed + notarized, macOS)
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: make ${{ matrix.target }}
       - name: Build
-        if: runner.os != 'Darwin'
+        if: runner.os != 'macOS'
         run: make ${{ matrix.target }}
       - name: Verify signature (macOS)
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         run: |
           APP=$(ls -d dist/mac*/AIC\ Desktop.app | head -1)
           codesign --verify --deep --strict "$APP"
@@ -176,6 +183,8 @@ desktop job 已接入（仅 macOS runner）：
 
 - **签名凭据自己装，不用 electron-builder 的 CSC_LINK 导入路径**：那条路径建钥匙串用随机口令、却拿 p12 口令去 `set-key-partition-list`（-k 要的是**钥匙串密码**）→ 必然失败；且 `CSC_*` 是**跨平台**变量，会把 mac 证书带去签 Windows exe（signtool 报错）。
 - **钥匙串必须进用户搜索列表**（`security list-keychains -d user -s`）：否则 codesign 解析不到签名者的证书链，报 “The specified item could not be found in the keychain”。
+- **G2 链要装进系统钥匙串并标为信任锚**（`sudo security add-trusted-cert -d -r trustRoot/-r trustAsRoot`）：只 `security import` 不给信任设置时，`find-identity -v` 不认这张证书（“0 valid identities found”），electron-builder 会静默跳过签名。
+- **`runner.os` 的取值是 `macOS` / `Linux` / `Windows`，没有 `Darwin`**：写成 `Darwin` 会让整段 macOS 步骤静默跳过（构建照样“成功”，但产物未签名）。
 - 钩子在无 CSC_LINK 时直接用**搜索列表里的有效身份**（CI 步骤已装好），并按同一证书补签嵌套二进制。
 - `APPLE_API_KEY` 传 .p8 文件路径，需先落盘（上面步骤用 base64 解码）；该私钥**只能下载一次**。
 - 公证是异步的（上传 + Apple 处理，通常几分钟到半小时）；失败时 electron-builder 打印 notary 日志。

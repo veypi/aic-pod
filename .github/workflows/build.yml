@@ -50,8 +50,10 @@ jobs:
         # 签名凭据自己装，不走 electron-builder 的 CSC_LINK 导入路径：后者建钥匙串用随机
         # 口令、却拿 p12 口令去 set-key-partition-list，那一步必然失败（且 CSC_* 跨平台，
         # 会把 mac 证书带去签 Windows exe）。
-        # 2025 起 Developer ID 走 G2 签发链，macOS 不预装中间证书与根 → 一并导入。
-        if: runner.os == 'Darwin'
+        # 2025 起 Developer ID 走 G2 签发链，macOS 不预装中间证书与根 → 装进系统钥匙串
+        # 并标为信任锚；否则 find-identity -v 不认这张证书（“0 valid identities found”）。
+        # 注意：runner.os 的取值是 macOS / Linux / Windows，没有 Darwin。
+        if: runner.os == 'macOS'
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -60,6 +62,14 @@ jobs:
             echo "未配置 CSC_LINK：跳过签名（产物走 ad-hoc 兜底）"
             exit 0
           fi
+          for ca in desktop/build/certs/*.cer; do
+            case "$ca" in
+              *AppleRootCA-G2.cer) sudo security add-trusted-cert -d -r trustRoot \
+                -k /Library/Keychains/System.keychain "$ca" ;;
+              *) sudo security add-trusted-cert -d -r trustAsRoot \
+                -k /Library/Keychains/System.keychain "$ca" ;;
+            esac
+          done
           echo "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
           KC="$RUNNER_TEMP/aic-sign.keychain"
           KCPW="$(openssl rand -base64 32)"
@@ -70,11 +80,10 @@ jobs:
           security list-keychains -d user -s "$KC" $LIST
           security import "$RUNNER_TEMP/developer-id.p12" -k "$KC" \
             -T /usr/bin/codesign -T /usr/bin/productbuild -P "$CSC_KEY_PASSWORD"
-          for ca in desktop/build/certs/*.cer; do security import "$ca" -k "$KC"; done
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC"
           security find-identity -v -p codesigning
       - name: Prepare notarization key (macOS)
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         env:
           APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
         run: |
@@ -88,16 +97,16 @@ jobs:
       - name: Build (signed + notarized, macOS)
         # 签名凭据已在上面步骤装进搜索列表内的钥匙串；这里只给公证凭据
         # （APPLE_API_KEY 路径由上一步写入 GITHUB_ENV）。
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: make ${{ matrix.target }}
       - name: Build
-        if: runner.os != 'Darwin'
+        if: runner.os != 'macOS'
         run: make ${{ matrix.target }}
       - name: Verify signature (macOS)
-        if: runner.os == 'Darwin'
+        if: runner.os == 'macOS'
         run: |
           APP=$(ls -d dist/mac*/AIC\ Desktop.app | head -1)
           codesign --verify --deep --strict "$APP"
