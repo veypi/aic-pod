@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AIC Desktop 的 macOS 签名 entitlements。
+
+  前三项是 Electron 在 hardened runtime 下运行的必要条件：V8 需要 JIT 与
+  未签名可执行内存，Chromium 会加载未签名的动态库（需要关闭库校验）。
+  网络权限随桌面壳的实际能力开放（拉取后端资源、连设备与云端）。
+
+  麦克风/摄像头走 TCC（用户在「系统设置 → 隐私与安全性」里授权），
+  由 electron-builder.yml 的 extendInfo.NSMicrophoneUsageDescription 声明用途，
+  不靠 entitlement。
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+  </dict>
+</plist>

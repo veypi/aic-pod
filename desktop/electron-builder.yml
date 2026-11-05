@@ -47,12 +47,19 @@ mac:
   target: dmg
   icon: assets/icon.png
   category: public.app-category.productivity
-  # 测试版不做 Developer ID 签名/公证：identity: null 跳过 electron-builder 自带签名，
-  # 改由 afterPack 钩子对 .app 做 ad-hoc 深签（scripts/after-pack-adhoc-sign.js）——
-  # 下载打开提示从「已损坏」（需 xattr 清隔离）变为「未验证开发者」（可在系统设置 →
-  # 隐私与安全性 → 仍要打开）。直接 identity: "-" 会踩 electron-builder 26 的 ad-hoc
-  # 相机/麦克风失效坑（electron-builder#9529），故用打包后深签。
-  identity: null
+  # 签名与公证（方案见 docs/development/macos-signing.md）：
+  # - identity 不写死：electron-builder 在钥匙串里找有效的 Developer ID Application
+  #   身份；CI 下由 CSC_LINK（p12 的 base64）临时导入。没有有效身份时 electron-builder
+  #   会整体跳过签名（无自动 ad-hoc 回退），由 afterPack 钩子走 ad-hoc 深签兜底
+  #   （本地开发路径，下载打开提示为「未验证开发者」）。
+  # - hardenedRuntime 是公证前提；entitlements 是 Electron 跑起来的必要条件
+  #   （allow-jit / allow-unsigned-executable-memory / disable-library-validation）。
+  # - notarize 只在具备 APPLE_API_KEY / APPLE_ID / APPLE_KEYCHAIN 凭据时执行，
+  #   缺凭据自动跳过（本地开发不触网）。
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  notarize: true
   # 麦克风使用声明：缺失时 macOS 对 getUserMedia 静默返回无声轨（不报错、只出 -91dB 静音）
   extendInfo:
     NSMicrophoneUsageDescription: AIC Desktop 需要麦克风用于语音交互（桌宠/聊天语音输入）
@@ -67,7 +74,7 @@ linux:
   icon: assets/icon.png
   category: Utility
   maintainer: veypi <i@veypi.com>
-# 打包钩子：同步/校验目标平台 Chrome；macOS 额外 ad-hoc 深签（见 mac 段）
-afterPack: scripts/after-pack-adhoc-sign.js
+# 打包钩子：同步/校验目标平台 Chrome；macOS 额外做签名准备（见 mac 段）
+afterPack: scripts/after-pack-sign.js
 beforePack: scripts/before-pack-browser.cjs
 npmRebuild: false
