@@ -41,6 +41,7 @@
 | 文档 | 内容 | 何时读 |
 | --- | --- | --- |
 | [development/todo.md](development/todo.md) | 未完成工作（实机验收、发布收尾） | 评估计划时；已完成事实写 CHANGELOG |
+| [development/macos-signing.md](development/macos-signing.md) | macOS 分发签名与公证方案（Developer ID + 公证 + CI 接入） | 改桌面壳 macOS 打包或接签名公证前 |
 | [development/baselines/](development/baselines/) | browser 稳定性/性能基线数据（JSON） | 对比回归数据时 |
 
 ## 约定

@@ -5,6 +5,12 @@
 
 ## 待做
 
+### macOS 分发签名与公证（2026-11-05）
+
+Desktop 的 mac 产物目前是 ad-hoc 深签（用户需在“隐私与安全性”手动放行）。Apple Developer
+Program 组织会籍已付款，接 Developer ID 签名 + 公证 + CI 接入的完整方案见
+[macos-signing.md](macos-signing.md)（含风险与退路、分阶段执行顺序）。
+
 ### 官方包预装后的收尾（2026-11-02）
 
 browser/cua 已改为 pod 启动定版预装 + 发行包附带预编译 `bin/<name>`（见
