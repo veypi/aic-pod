@@ -5,7 +5,9 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.10.2 — 2026-11-05
+
+- **macOS 桌面壳改 Developer ID 签名 + Apple 公证**：产物从「ad-hoc 深签（用户首次打开需在隐私与安全性手动放行）」改为 Developer ID Application 签名并经 Apple 公证 + staple（正式分发的包由 CI 出）。要点：①`electron-builder.yml` 去掉写死的 `identity: null`，改置 `hardenedRuntime` + `build/entitlements.mac.plist`（Electron 必需：JIT / 未签名可执行内存 / 关闭库校验）+ `notarize: true`；②afterPack 钩子改名 `after-pack-sign.js`，按可用证书分流——有 Developer ID 身份时给 `Contents/Resources` 下的裸 Mach-O（Go 后端、agent-browser、预装包设备程序）补签（osx-sign 不签 Resources，嵌套代码未签会被公证拒），无证书时保留 ad-hoc 深签兜底；③随包携带 2025 起 Developer ID 的 **G2 签发链**证书（`desktop/build/certs/`，macOS 不预装，缺则 codesign 建不出链）；④CI 接入 G2 链导入、公证凭据（`APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`）与签名/票据校验步骤。方案与风险见 `docs/development/macos-signing.md`。
 
 - **bg kill / cancel(request_id) 不再谎报已杀**：kill 此前只发取消信号就立即回报 "killed"——执行若不理会 ctx 取消（进程内解释器类命令的经典坑），调用方会以为 CPU 已释放，实际执行仍在跑：2026-10-31 生产事故里 awk 解释器就是这样空转了 5 天（累计 119 CPU 小时）。现在 bg kill 会等执行真的停下（宽限 3s，`KillGrace`）：停了就照旧报 killed；没停就如实标 `kill-unresponsive`（`bg list` / `bg wait` 快照同步显示）并写平台告警日志，同时 `bg kill` 以非零退出码报 "ignored cancellation … it may keep consuming CPU"——不再谎称已杀。`cancel(request_id)` 接入同一宽限期检测；执行实际结束前快照保持 `running`，活跃任务不输出 `exit_code`。回归：`cmds_test.go`（尊重取消 → killed；不尊重 → kill-unresponsive + 报错 + JSON 无退出码），`engine_test.go` 覆盖宽限期快照、cancel 未响应告警和实际结束后的 killed/130。
 
