@@ -64,7 +64,7 @@ jobs:
           fi
           for ca in desktop/build/certs/*.cer; do
             case "$ca" in
-              *AppleRootCA-G2.cer) sudo security add-trusted-cert -d -r trustRoot \
+              *AppleRootCA.cer) sudo security add-trusted-cert -d -r trustRoot \
                 -k /Library/Keychains/System.keychain "$ca" ;;
               *) sudo security add-trusted-cert -d -r trustAsRoot \
                 -k /Library/Keychains/System.keychain "$ca" ;;

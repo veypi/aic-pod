@@ -44,7 +44,7 @@ const DEVELOPER_ID_PREFIX = "Developer ID Application:";
 // chain to self-signed root”）。随包带上这两张公开 CA 证书并导入签名钥匙串。
 const G2_CHAIN_CERTS = [
   path.join(__dirname, "..", "build", "certs", "DeveloperIDG2CA.cer"),
-  path.join(__dirname, "..", "build", "certs", "AppleRootCA-G2.cer"),
+  path.join(__dirname, "..", "build", "certs", "AppleRootCA.cer"),
 ];
 
 // Mach-O 魔数（含大小端两种读法）；fat 二进制同样要签名。

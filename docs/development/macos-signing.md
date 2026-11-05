@@ -107,12 +107,13 @@ codesign --force --sign "<identity>" --options runtime --timestamp \
 | 文件 | 主体 | 有效期 |
 | --- | --- | --- |
 | `DeveloperIDG2CA.cer` | Developer ID Certification Authority (G2) | 2031-09-17 |
-| `AppleRootCA-G2.cer` | Apple Root CA - G2 | 2039-04-30 |
+| `AppleRootCA.cer` | **Apple Root CA**（经典根，自签） | 2035-02-09 |
+
+**必须是经典 `Apple Root CA`**（apple.com/appleca/AppleIncRootCertificate.cer）：G2 中间证书的签发者就是它。`Apple Root CA - G2` 是另一个自签根，**不是**这条链的锚——装错时链建不出来，codesign 报 “unable to build chain to self-signed root for signer …”。
 
 - 钩子在导入 p12 后把它们导进**同一临时钥匙串**（`after-pack-sign.js` 的 `G2_CHAIN_CERTS`）。
 - CI 另把它们导进 runner 的登录钥匙串（electron-builder 自己的临时钥匙串只含 p12）。
 - 旧的 `DeveloperIDCA.cer` 是 G1（2027-02-01 到期），**不适用**于本证书。
-
 ### 6. CI（`.github/workflows/build.yml`）
 
 desktop job 已接入（仅 macOS runner）：
