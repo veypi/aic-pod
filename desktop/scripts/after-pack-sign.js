@@ -19,6 +19,11 @@
  * 顺序要点：afterPack 在 electron-builder 外层签名之前运行——嵌套代码必须先签好，
  * 否则外层封装的是未签名内容，签名校验与公证都会失败。
  *
+ * 临时钥匙串按 electron-builder 的做法建（app-builder-lib codeSign/macCodeSign.js）：
+ * 完整路径 + 随机钥匙串口令 + set-keychain-settings（不自动锁）+ **加入用户钥匙串
+ * 搜索列表**（否则 codesign 解析不到签名者的证书链：报 “The specified item could not
+ * be found in the keychain”）+ 导入后 set-key-partition-list。
+ *
  * 第三方已签名的嵌套 app（Chrome for Testing、CuaDriver）整棵跳过，不重签：
  * 重签会破坏上游自己的签名链。
  */
@@ -28,6 +33,7 @@ const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
+const crypto = require("node:crypto");
 const { Arch } = require("builder-util");
 
 const DEVELOPER_ID_PREFIX = "Developer ID Application:";
@@ -58,6 +64,15 @@ function capture(command, args) {
   }
 }
 
+// 用户钥匙串搜索列表（security list-keychains -d user 的输出是带引号的路径列表）
+function listUserKeychains() {
+  return capture("security", ["list-keychains", "-d", "user"])
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("\""))
+    .map((line) => line.slice(1, -1));
+}
+
 // 钥匙串里的有效签名身份。-v 只列未被判定为过期/不受信任的身份
 // （与 @electron/osx-sign 的选择口径一致：那里也用 find-identity -v）。
 function findValidDeveloperId(keychain) {
@@ -79,29 +94,38 @@ function importCscLink() {
   if (fs.existsSync(link)) fs.copyFileSync(link, p12);
   else fs.writeFileSync(p12, Buffer.from(link, "base64"));
   const password = process.env.CSC_KEY_PASSWORD || "";
-  const name = `aic-sign-${process.pid}.keychain-db`;
-  run("security", ["create-keychain", "-p", password, name]);
-  run("security", ["unlock-keychain", "-p", password, name]);
-  run("security", ["import", p12, "-k", name, "-P", password, "-T", "/usr/bin/codesign"]);
+  const keychain = path.join(directory, "aic-sign.keychain");
+  const keychainPassword = crypto.randomBytes(32).toString("base64");
+  run("security", ["create-keychain", "-p", keychainPassword, keychain]);
+  run("security", ["unlock-keychain", "-p", keychainPassword, keychain]);
+  run("security", ["set-keychain-settings", keychain]);
+  // 必须进搜索列表：否则 codesign 解析不到签名者的证书链。
+  const previous = listUserKeychains();
+  run("security", ["list-keychains", "-d", "user", "-s", keychain, ...previous]);
+  run("security", ["import", p12, "-k", keychain, "-T", "/usr/bin/codesign", "-T", "/usr/bin/productbuild", "-P", password]);
   // 把 G2 链导入同一钥匙串：签名者（Developer ID 证书）的签发者是 G2 中间证书。
   for (const ca of G2_CHAIN_CERTS) {
-    if (fs.existsSync(ca)) run("security", ["import", ca, "-k", name]);
+    if (fs.existsSync(ca)) run("security", ["import", ca, "-k", keychain]);
   }
   // 不设分区列表，CI 里 codesign 会因密钥 ACL 报 “User interaction is not allowed”。
   // 分区列表与 electron-builder 自身导入 CSC_LINK 时保持一致（见 app-builder-lib macCodeSign）。
-  // 注意：security CLI 处理非 ASCII 密码会报 “passphrase ... not correct”，此时不阻断构建
-  // （import 时的 -T /usr/bin/codesign 已给 codesign 授权）。
+  // 注意 -k 传的是**钥匙串密码**（不是 p12 口令）：传错会报 “passphrase not correct”。
   try {
-    run("security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, name]);
+    run("security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", keychainPassword, keychain]);
   } catch {
-    console.warn(`[sign] set-key-partition-list 失败（非 ASCII 密码常见），继续：${name}`);
+    console.warn("[sign] set-key-partition-list 失败，继续");
   }
-  return { name, path: path.join(os.homedir(), "Library", "Keychains", name) };
+  return { keychain, previous };
 }
 
 function resolveIdentity() {
+  // CI 已在独立步骤里把 p12 导入搜索列表内的钥匙串，此时直接用搜索列表里的有效身份。
+  if (!process.env.CSC_LINK) {
+    const identity = findValidDeveloperId(null);
+    return { identity, keychain: null, temporary: null };
+  }
   const temporary = importCscLink();
-  const keychain = temporary ? temporary.path : null;
+  const keychain = temporary ? temporary.keychain : null;
   let identity = findValidDeveloperId(keychain);
   if (!identity && process.env.CSC_NAME) {
     const valid = capture("security", ["find-identity", "-v", "-p", "codesigning"]);
@@ -177,9 +201,10 @@ module.exports = async (context) => {
   } finally {
     if (temporary) {
       try {
-        run("security", ["delete-keychain", temporary.name]);
+        run("security", ["list-keychains", "-d", "user", "-s", ...temporary.previous]);
+        run("security", ["delete-keychain", temporary.keychain]);
       } catch {
-        console.warn(`[sign] 临时钥匙串删除失败：${temporary.name}`);
+        console.warn(`[sign] 临时钥匙串清理失败：${temporary.keychain}`);
       }
     }
   }
