@@ -7,7 +7,7 @@
     content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:">
   <title>AIC 本地设置</title>
   <!--
-    AIC Desktop 本地设置页：单文件静态页（无框架、无构建、无本地 HTTP 服务）。
+    ivec 本地设置页：单文件静态页（无框架、无构建、无本地 HTTP 服务）。
     数据全部经 Electron 桥：window.aicDesktop.api(method, args) → 主进程 spawn
     `aic-backend config|bind|unbind` 子命令 / 读日志 / 重启后端子进程。
     页面由 main.js 的 app://aic 协议提供（真实 origin，localStorage 可用）。
@@ -425,7 +425,7 @@
     // ---- 设置桥（settings-preload → IPC local:api → 主进程） ----
     const bridge = (window.aicDesktop && window.aicDesktop.api) || null
     const call = (name, args) => {
-      if (!bridge) return Promise.reject(new Error('设置桥不可用（请在 AIC Desktop 中打开设置）'))
+      if (!bridge) return Promise.reject(new Error('设置桥不可用（请在 ivec 中打开设置）'))
       return Promise.resolve(bridge(name, args === undefined ? null : args))
     }
     const $pod = {
@@ -783,7 +783,7 @@
     saveBtn.onclick = save
     $('btnReconnect').onclick = reconnect
 
-    if (!bridge) setMsg('设置桥不可用（请在 AIC Desktop 中打开设置）', 'err')
+    if (!bridge) setMsg('设置桥不可用（请在 ivec 中打开设置）', 'err')
     boot()
   </script>
 </body>

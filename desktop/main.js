@@ -1,4 +1,4 @@
-// AIC Desktop — Electron 主进程（纯远程壳：Chromium 渲染平台 + Go 后端子进程）。
+// ivec — Electron 主进程（纯远程壳：Chromium 渲染平台 + Go 后端子进程）。
 //
 // 架构（固定视口 browser，设计见 aic/docs/reference/remote-screen.md）：
 //
@@ -125,19 +125,19 @@ app.on('will-quit', () => {
 // ---- 应用菜单 ----
 // mac 保留应用/编辑/视图菜单（Cmd+Q / Cmd+C+V / 开发者工具）；win/linux frameless 无菜单栏。
 // 应用菜单第一项不用 role:'appMenu'——dev 模式（npm start）下其 label 取进程 bundle 名
-// 固定显示 "Electron"；显式 label 让菜单栏在 dev/打包两种形态都显示 AIC Desktop。
+// 固定显示 "Electron"；显式 label 让菜单栏在 dev/打包两种形态都显示 ivec。
 if (process.platform === 'darwin') {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
-      label: 'AIC Desktop',
+      label: 'ivec',
       submenu: [
-        { role: 'about', label: '关于 AIC Desktop' },
+        { role: 'about', label: '关于 ivec' },
         { type: 'separator' },
-        { role: 'hide', label: '隐藏 AIC Desktop' },
+        { role: 'hide', label: '隐藏 ivec' },
         { role: 'hideOthers', label: '隐藏其他应用程序' },
         { role: 'unhide', label: '全部显示' },
         { type: 'separator' },
-        { role: 'quit', label: '退出 AIC Desktop' },
+        { role: 'quit', label: '退出 ivec' },
       ]
     },
     { role: 'editMenu' },
@@ -268,7 +268,7 @@ function failStartup(error) {
   const message = error.message || String(error)
   console.error('[startup]', message)
   platformView?.webContents.executeJavaScript(`window.__setError && window.__setError(${JSON.stringify(message)})`).catch(() => {})
-  dialog.showErrorBox('AIC Desktop 启动失败', message)
+  dialog.showErrorBox('ivec 启动失败', message)
   app.quit()
 }
 
@@ -835,7 +835,7 @@ function setStep(text) {
 // ---- 托盘：win 右下角 / mac 菜单栏 ----
 function createTray() {
   tray = new Tray(trayIcon)
-  tray.setToolTip('AIC Desktop')
+  tray.setToolTip('ivec')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开', click: () => focusMain() },
     { label: '本地配置', click: () => openSettings() },

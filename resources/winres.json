@@ -8,10 +8,10 @@
     "#1": {
       "0409": {
         "identity": {
-          "name": "AIC.Pod",
+          "name": "ivec",
           "version": "1.0.0.0"
         },
-        "description": "AIC Pod desktop client for AIC platform",
+        "description": "ivec desktop client for ivec.ai",
         "minimum-os": "vista",
         "execution-level": "asInvoker",
         "ui-access": false,
@@ -43,14 +43,14 @@
           "0409": {
             "Comments": "",
             "CompanyName": "ivec.ai",
-            "FileDescription": "AIC — desktop client for AIC platform",
+            "FileDescription": "ivec — desktop client for ivec.ai",
             "FileVersion": "0.5.2.0",
             "InternalName": "aic-desktop",
             "LegalCopyright": "Copyright (C) 2025-2026 ivec.ai",
             "LegalTrademarks": "",
             "OriginalFilename": "aic-windows-amd64.exe",
             "PrivateBuild": "",
-            "ProductName": "AIC",
+            "ProductName": "ivec",
             "ProductVersion": "0.5.2.0",
             "SpecialBuild": ""
           }

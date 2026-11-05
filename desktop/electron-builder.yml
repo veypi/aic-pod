@@ -1,6 +1,6 @@
 # electron-builder 打包配置（须在目标平台构建，无法交叉）
 appId: ai.ivec.desktop
-productName: AIC Desktop
+productName: ivec
 directories:
   output: ../dist
   buildResources: assets
@@ -62,7 +62,7 @@ mac:
   notarize: true
   # 麦克风使用声明：缺失时 macOS 对 getUserMedia 静默返回无声轨（不报错、只出 -91dB 静音）
   extendInfo:
-    NSMicrophoneUsageDescription: AIC Desktop 需要麦克风用于语音交互（桌宠/聊天语音输入）
+    NSMicrophoneUsageDescription: ivec 需要麦克风用于语音交互（桌宠/聊天语音输入）
 win:
   target: nsis
   icon: assets/icon.png

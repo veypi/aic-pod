@@ -44,3 +44,17 @@ dist
 
 # macOS
 .DS_Store
+
+# 移动端签名材料（私钥与证书，禁止入库；口令见 signing/PASSWORDS.md，本地私密）
+signing/
+mobile/android/keystore.properties
+mobile/android/*.jks
+mobile/android/*.p12
+mobile/android/*.keystore
+mobile/harmonyos/*.p12
+mobile/harmonyos/*.cer
+mobile/harmonyos/*.p7b
+mobile/ios/*.p12
+mobile/ios/*.cer
+mobile/ios/*.mobileprovision
+mobile/signing.env

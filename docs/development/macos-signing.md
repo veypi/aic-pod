@@ -46,7 +46,7 @@ mac:
   entitlementsInherit: build/entitlements.mac.inherit.plist
   notarize: true
   extendInfo:
-    NSMicrophoneUsageDescription: AIC Desktop 需要麦克风用于语音交互（桌宠/聊天语音输入）
+    NSMicrophoneUsageDescription: ivec 需要麦克风用于语音交互（桌宠/聊天语音输入）
 ```
 
 ### 2. entitlements（新增 `desktop/build/entitlements.mac.plist`）
@@ -236,15 +236,15 @@ desktop job 已接入（仅 macOS runner）：
 
 ```sh
 # 签名与结构
-codesign -dv --verbose=4 "dist/mac-arm64/AIC Desktop.app"
-codesign --verify --deep --strict "dist/mac-arm64/AIC Desktop.app"
-spctl -a -vvv -t install "dist/mac-arm64/AIC Desktop.app"
+codesign -dv --verbose=4 "dist/mac-arm64/ivec.app"
+codesign --verify --deep --strict "dist/mac-arm64/ivec.app"
+spctl -a -vvv -t install "dist/mac-arm64/ivec.app"
 
 # 公证票据
-xcrun stapler validate "dist/mac-arm64/AIC Desktop.app"
+xcrun stapler validate "dist/mac-arm64/ivec.app"
 
 # 嵌套二进制是否都签了
-codesign -dv --verbose=2 "dist/mac-arm64/AIC Desktop.app/Contents/Resources/backend/aic-backend"
+codesign -dv --verbose=2 "dist/mac-arm64/ivec.app/Contents/Resources/backend/aic-backend"
 
 # notary 处理结果
 xcrun notarytool log <submission-id> --key <p8> --key-id <id> --issuer <issuer>

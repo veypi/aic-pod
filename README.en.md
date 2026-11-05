@@ -9,7 +9,7 @@
 
 <!-- Demo asset slot: drop your 30s GIF on this line -->
 
-aic-pod is the device-side client of the AIC platform: it connects out over NATS WebSocket
+aic-pod is the device-side client of the ivec.ai platform: it connects out over NATS WebSocket
 and registers the host's abilities — command execution, file operations, browser automation,
 native GUI automation, ssh/scp forwarding — as tools an LLM can call. **It listens on no
 local port.**
@@ -85,7 +85,7 @@ atomic writes and only adds business validation of device parameters.
 
 | Environment variable | CLI flag | Config key | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `KEY` | `-key` | `key` | | Binding credential (required); obtained from the AIC platform |
+| `KEY` | `-key` | `key` | | Binding credential (required); obtained from the ivec.ai platform |
 | `HOST` | `-host` | `host` | `https://ivec-ai.com` | Platform endpoint (may carry a path prefix, e.g. `http://127.0.0.1:4000/rses/aiv`; the NATS endpoint is derived from it) |
 | `WORK_DIR` | `-work_dir` | `work_dir` | system temp dir | Working directory for command execution |
 | `EXEC_TIMEOUT` | `-exec_timeout` | `exec_timeout` | `30m` | Background execution timeout |
@@ -186,7 +186,7 @@ docker run -d \
 | --- | --- |
 | `--restart unless-stopped` | restart the container automatically after exit |
 | `-v /host:/workspace` | mount a host directory as the command working directory |
-| `-e KEY` | required; the binding credential from the AIC platform |
+| `-e KEY` | required; the binding credential from the ivec.ai platform |
 
 ### Logs
 
@@ -232,7 +232,7 @@ Artifacts: desktop is the main product (`aic-*`), the CLI is `aic-cli-*`.
 ```bash
 make                            # cli for the current platform → dist/aic-cli-<os>-<arch>
 make cli-all                    # cli for all platforms (linux/darwin/windows × amd64/arm64)
-make desktop-darwin-arm64       # desktop for macOS → dist/AIC Desktop.app + aic-desktop-darwin-arm64.dmg
+make desktop-darwin-arm64       # desktop for macOS → dist/ivec.app + aic-desktop-darwin-arm64.dmg
 make desktop-darwin-amd64       # desktop for macOS (Intel)
 make desktop-windows-amd64      # desktop for Windows (needs: brew install mingw-w64)
 make desktop-all                # desktop for all platforms (the Linux desktop build needs a container/CI)

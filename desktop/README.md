@@ -1,4 +1,4 @@
-# AIC Desktop（Electron）
+# ivec（Electron 桌面端）
 
 替代旧 wails3 壳：**Chromium 渲染 + Go 后端子进程**。渲染的是平台 HTTP 页面 +
 本地设置页（自定义 `app://aic` 协议；**本地不监听任何端口**），渲染器零前端构建——

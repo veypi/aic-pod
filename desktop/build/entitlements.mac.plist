@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  AIC Desktop 的 macOS 签名 entitlements。
+  ivec 的 macOS 签名 entitlements。
 
   前三项是 Electron 在 hardened runtime 下运行的必要条件：V8 需要 JIT 与
   未签名可执行内存，Chromium 会加载未签名的动态库（需要关闭库校验）。
