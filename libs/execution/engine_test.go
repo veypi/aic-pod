@@ -85,8 +85,10 @@ func TestTaskTableCapacity(t *testing.T) {
 		t.Fatalf("全局超额应拒: %v", err)
 	}
 	// kill 后执行实际结束（release）→ 容量恢复。
-	if err := tt.Kill(k2.ID, "o1", "s1"); err != nil {
-		t.Fatal(err)
+	// 新契约：kill 等执行真的停下；本例的 fake 执行不理会取消，故 kill 如实
+	// 报错（不谎称已杀），执行随后结束即结算终态与容量。
+	if err := tt.Kill(k2.ID, "o1", "s1"); err == nil {
+		t.Fatal("kill 应如实报告执行不理会取消")
 	}
 	close(releases[k2.ID])
 	snap, err := tt.Wait(context.Background(), k2.ID, 3*time.Second, "o1", "s1")
@@ -101,8 +103,9 @@ func TestTaskTableCapacity(t *testing.T) {
 	}
 }
 
-// TestTaskTableKillSettlesOnCompletion kill 语义：killed 状态即时可见（kill
-// 请求已受理），但终态与容量在执行实际结束后才结算（§2.6 实际结束后才报
+// TestTaskTableKillSettlesOnCompletion kill 语义：kill 请求已受理，但执行
+// 不理会取消时如实报 kill-unresponsive（不谎称已杀——谎报会让调用方以为
+// CPU 已释放）；终态与容量在执行实际结束后才结算（§2.6 实际结束后才报
 // 终态；kill 后、执行未退出前容量仍反映真实在跑数量）。
 func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
 	t.Parallel()
@@ -117,12 +120,12 @@ func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer close(release2)
-	if err := tt.Kill(k1.ID, "o1", "s1"); err != nil {
-		t.Fatal(err)
+	// kill 请求已受理，但本例的执行不理会取消：如实报 kill-unresponsive。
+	if err := tt.Kill(k1.ID, "o1", "s1"); err == nil {
+		t.Fatal("kill 应如实报告执行不理会取消")
 	}
-	// killed 即时可见。
 	snap, ok := tt.Get(k1.ID, "o1", "s1")
-	if !ok || snap.Status != "killed" || snap.ExitCode != 130 {
+	if !ok || snap.Status != "kill-unresponsive" || snap.ExitCode != 130 {
 		t.Fatalf("kill 后快照 = %+v ok=%v", snap, ok)
 	}
 	// 执行未实际退出：容量未释放，新登记仍撞满。

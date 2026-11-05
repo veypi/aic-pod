@@ -291,7 +291,7 @@ func TestCmdBGClosedLoop(t *testing.T) {
 	}
 }
 
-// bg kill 终止同一执行句柄（与 cancel 共用）。
+// bg kill 终止同一执行句柄（与 cancel 共用）：执行真的停了才报 killed。
 func TestCmdBGKillCancelsHandle(t *testing.T) {
 	t.Parallel()
 	tasks := NewTaskTable()
@@ -300,8 +300,12 @@ func TestCmdBGKillCancelsHandle(t *testing.T) {
 	ctx := identityCtx("u1", "s1", false)
 
 	cancelled := false
-	r := tasks.register(func() { cancelled = true }, "sleep 10", TaskMeta{Owner: "u1", Session: "s1"})
-	go func() { <-time.After(10 * time.Second); tasks.finish(r, &ExecResult{}, nil) }()
+	var r *Run
+	// 执行尊重取消：cancel 后立即结束（与真实脚本被 ctx 打断同形）。
+	r = tasks.register(func() {
+		cancelled = true
+		tasks.finish(r, &ExecResult{}, nil)
+	}, "sleep 10", TaskMeta{Owner: "u1", Session: "s1"})
 	task, err := tasks.adoptBackground(r)
 	if err != nil {
 		t.Fatal(err)
@@ -313,6 +317,45 @@ func TestCmdBGKillCancelsHandle(t *testing.T) {
 	snap, ok := tasks.Get(task.ID, "u1", "s1")
 	if !ok || snap.Status != "killed" || snap.ExitCode != 130 {
 		t.Fatalf("snapshot = %+v ok=%v", snap, ok)
+	}
+}
+
+// 回归（2026-11-05 生产事故）：执行不理会 ctx 取消时，bg kill 必须如实
+// 报错（kill-unresponsive），不能像以前那样回报 "killed" —— 谎报会让调用方
+// 以为 CPU 已释放，实际执行仍在跑（那次 awk 解释器空转了 5 天）。
+func TestCmdBGKillReportsUnresponsiveExecution(t *testing.T) {
+	t.Parallel()
+	tasks := NewTaskTable()
+	reg := commands.NewRegistry()
+	_ = RegisterPlatformCommands(reg, PlatformDeps{Tasks: tasks})
+	ctx := identityCtx("u1", "s1", false)
+
+	cancelled := false
+	// 执行不理会取消：cancel 只置标志，done 永不关闭（模拟解释器空转）。
+	r := tasks.register(func() { cancelled = true }, "sleep 10", TaskMeta{Owner: "u1", Session: "s1"})
+	task, err := tasks.adoptBackground(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runCmdCtx(ctx, t, reg, "bg", "kill", task.ID)
+	if err == nil {
+		t.Fatalf("bg kill must fail when execution ignores cancellation; out=%q", out)
+	}
+	if !strings.Contains(err.Error(), "ignored cancellation") {
+		t.Fatalf("error = %v, want %q", err, "ignored cancellation")
+	}
+	if !cancelled {
+		t.Fatal("cancel must still be requested")
+	}
+	snap, ok := tasks.Get(task.ID, "u1", "s1")
+	if !ok {
+		t.Fatal("task snapshot missing")
+	}
+	if snap.Status != "kill-unresponsive" {
+		t.Fatalf("status = %q, want kill-unresponsive", snap.Status)
+	}
+	if snap.ExitCode != 130 {
+		t.Fatalf("exit code = %d, want 130", snap.ExitCode)
 	}
 }
 

@@ -32,6 +32,12 @@ type TaskMeta struct {
 // ErrNoRun 是 cancel 的「无此活跃执行」哨兵（归属不匹配等同不存在）。
 var ErrNoRun = errors.New("no active execution")
 
+// KillGrace 是 kill 之后等待执行真正结束的宽限：取消是异步的，脚本可能
+// 不理会 ctx 取消（进程内解释器类命令的经典坑——2026-11-05 生产事故：
+// awk 解释器不接 ctx，bg kill 回报 killed 而解释器继续占满一个核 5 天）。
+// 宽限内结束=真 killed；未结束即判定「不理会取消」，如实回报而非谎称已杀。
+const KillGrace = 3 * time.Second
+
 // errRunFinished 转后台竞争回退：登记时执行已完成（不产生 bg 记录）。
 var errRunFinished = errors.New("execution already finished")
 
@@ -51,16 +57,18 @@ type Run struct {
 	startedAt    time.Time
 	seq          int
 	// 运行态（mu 守卫；完成/转后台/取消在此裁决）：
-	cancel     context.CancelFunc
-	done       chan struct{}
-	res        *ExecResult
-	err        error
-	settled    bool // 终态已结算（只发生一次）
-	killed     bool // kill 已受理（130 语义，覆盖自然退出码）
-	background bool
-	bgID       string
-	bgSeq      int
-	finishedAt time.Time
+	cancel  context.CancelFunc
+	done    chan struct{}
+	res     *ExecResult
+	err     error
+	settled bool // 终态已结算（只发生一次）
+	killed  bool // kill 已受理（130 语义，覆盖自然退出码）
+	// killUnresponsive：kill 已受理，但宽限内执行未结束（不理会 ctx 取消）。
+	killUnresponsive bool
+	background       bool
+	bgID             string
+	bgSeq            int
+	finishedAt       time.Time
 }
 
 // Done 完成通知（执行真正结束、日志等收尾完成后关闭）。
@@ -95,7 +103,7 @@ func (r *Run) BGID() string {
 type Task struct {
 	ID         string
 	Command    string
-	Status     string // running / done / timeout / killed / error
+	Status     string // running / done / timeout / killed / kill-unresponsive / error
 	ExitCode   int
 	StartedAt  time.Time
 	FinishedAt time.Time
@@ -269,6 +277,11 @@ func (t *TaskTable) evictLocked() {
 // statusLocked 派生展示状态（r.mu 已持有）：killed 恒优先（kill 时进程
 // 可能仍正常退出 0）。
 func statusLocked(r *Run) (status string, exit int, errStr string) {
+	// kill 已受理但执行不理会取消：如实报「没杀掉」——不再谎称 killed
+	// （谎称会让调用方以为 CPU 已释放，实际执行仍在跑）。
+	if r.killUnresponsive && !r.settled {
+		return "kill-unresponsive", 130, "cancellation ignored: execution still running"
+	}
 	if r.killed {
 		return "killed", 130, ""
 	}
@@ -363,6 +376,11 @@ func (t *TaskTable) Wait(ctx context.Context, id string, d time.Duration, owner,
 // Kill 请求终止 bg 任务：置 killed（快照即时可见 = kill 已受理）并取消
 // 同一执行；终态与容量释放在执行实际结束时结算（bg wait 等 Done，天然
 // 等到真正结束）。归属不匹配等同不存在。
+//
+// 取消是异步的：执行可能不理会 ctx 取消（进程内解释器类命令）。因此 kill
+// 后等 KillGrace 看它是否真的停了：停了=真 killed；没停=如实报
+// kill-unresponsive 并写平台告警日志（谎报 killed 会让调用方以为 CPU 已
+// 释放，实际执行仍在跑——2026-11-05 生产事故就是这么拖了 5 天）。
 func (t *TaskTable) Kill(id, owner, session string) error {
 	t.mu.Lock()
 	r, ok := t.byBG[id]
@@ -384,7 +402,18 @@ func (t *TaskTable) Kill(id, owner, session string) error {
 	if cancel != nil {
 		cancel()
 	}
-	return nil
+	select {
+	case <-r.done:
+		return nil
+	case <-time.After(KillGrace):
+	}
+	r.mu.Lock()
+	r.killUnresponsive = true
+	r.mu.Unlock()
+	if t.logf != nil {
+		t.logf("execution: bg kill %q — task ignored cancellation (still running %s after kill); it may keep consuming CPU", id, KillGrace)
+	}
+	return fmt.Errorf("bg: task %q ignored cancellation (still running %s after kill) — it may keep consuming CPU", id, KillGrace)
 }
 
 // CancelByRequest 按 request_id 取消执行（cancel 动作唯一查询路径；
