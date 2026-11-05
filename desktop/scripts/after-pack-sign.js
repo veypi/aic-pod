@@ -74,8 +74,15 @@ function importCscLink() {
   run("security", ["create-keychain", "-p", password, name]);
   run("security", ["unlock-keychain", "-p", password, name]);
   run("security", ["import", p12, "-k", name, "-P", password, "-T", "/usr/bin/codesign"]);
-  // 不设分区列表，CI 里 codesign 会因密钥 ACL 报 "User interaction is not allowed"。
-  run("security", ["set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", password, name]);
+  // 不设分区列表，CI 里 codesign 会因密钥 ACL 报 “User interaction is not allowed”。
+  // 分区列表与 electron-builder 自身导入 CSC_LINK 时保持一致（见 app-builder-lib macCodeSign）。
+  // 注意：security CLI 处理非 ASCII 密码会报 “passphrase ... not correct”，此时不阻断构建
+  // （import 时的 -T /usr/bin/codesign 已给 codesign 授权）。
+  try {
+    run("security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, name]);
+  } catch {
+    console.warn(`[sign] set-key-partition-list 失败（非 ASCII 密码常见），继续：${name}`);
+  }
   return { name, path: path.join(os.homedir(), "Library", "Keychains", name) };
 }
 
