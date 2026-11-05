@@ -6,6 +6,7 @@
 
 | 角色 | 值 | 说明 |
 |---|---|---|
+| 形状 | **满幅出血的 squircle**（超椭圆 n=5） | macOS 图标惯例：**第三方图标不会自动加圆角**，圆角与边距必须自己烘进 PNG；留透明边距 → Dock 里明显显小 |
 | 标记（icon） | **纯黑 `#000000`** | 描边式 logo，**只有黑白风格，无彩色版** |
 | 底色（field） | **`#f1f8ff`** | **所有 logo / 图标都带这层底**，不透明（底色是底色，不算 logo 配色） |
 | 暗色模式 | **CSS `filter: invert(1)`** | 整体反色 → 深底白标，暗色底上可见 |
@@ -19,7 +20,7 @@ favicon / 分享卡 / 网页 logo / 应用图标**共用同一份带底色的 SV
 
 | 资产 | 路径 | 说明 |
 |---|---|---|
-| **平台 logo（矢量）** | `aic/ui/assets/logo.svg` | **唯一真源**：240×240，`rx=48` 圆角 `#f1f8ff` 底 + 黑色描边标记（开口圆环 + A 字，stroke-width 12） |
+| **平台 logo（矢量）** | `aic/ui/assets/logo.svg` | **唯一真源**：240×240，**满幅 squircle 底 `#f1f8ff`**（超椭圆 n=5，96 段 path）+ 黑色描边标记（开口圆环 + A 字，stroke-width 12） |
 | 暗色反色规则 | `aic/ui/assets/global.css` | `:root[theme="dark"]` 与 `body[theme="dark"]` 两套选择器都覆盖 `img.brand-mark` / `.brand-mark img`（主题属性有两个落点：`root.html` 写 documentElement，`layout/theme.html` 写 body） |
 | 网页引用 | favicon / og:image / twitter:image / JSON-LD logo / header / dock —— 全部指这一个 logo.svg | 只有一份，不分 favicon 版 |
 | 桌面端托盘 | `aic-pod/desktop/assets/trayTemplate.png` / `@2x.png`（macOS 模板单色，系统自动反色）、`tray.png`（Linux/Windows，黑标记透明底） | 托盘是唯一保留透明底的场景（要叠在系统托盘上） |
@@ -33,8 +34,8 @@ favicon / 分享卡 / 网页 logo / 应用图标**共用同一份带底色的 SV
 
 | 文件 | 用途 | 规格要点 |
 |---|---|---|
-| `ivec-app-icon-{1024,512,256,216,180,152,120,76,60,48,32,16}.png` | **商店主图标** | 满幅 `#f1f8ff` 底 + 黑标记；**不透明、无 alpha、无自带圆角**（商店自己加圆角） |
-| `ivec-desktop-icon-{1024,512,256}.png` | 桌面端应用图标 | 透明底 + 圆角 `#f1f8ff` 方块 + 黑标记 |
+| `ivec-app-icon-{1024,512,256,216,180,152,120,76,60,48,32,16}.png` | **商店主图标** | 满幅 `#f1f8ff` 方块 + 黑标记（标记占画布 62%）；**不透明、无 alpha、无自带圆角**（商店自己加圆角） |
+| `ivec-desktop-icon-{1024,512,256}.png` | 桌面端应用图标 | **满幅出血 squircle**（n=5）+ `#f1f8ff` 底 + 黑标记（62%）；透明画布只留 squircle 外的四角 |
 | `ivec-adaptive-fg-{432,1024}.png` | Android 自适应图标**前景层** | 透明底 + 黑标记，图形收在中心 66% 安全区（背景层用 `#f1f8ff`） |
 | `ivec-mark-{1024,512,256,128}.png` | 透明底标记 | 托盘 / 深色底反色等特殊场景 |
 | `ivec-tray-128.png` | 托盘图标 | 透明底 + 黑标记（已接入 `aic-pod/desktop/assets/tray.png`） |
