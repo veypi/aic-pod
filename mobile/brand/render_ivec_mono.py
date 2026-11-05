@@ -28,7 +28,9 @@ BLACK = (0, 0, 0, 255)              # 标记颜色
 CLEAR = (0, 0, 0, 0)
 
 MARK_SPAN = 0.5875                  # 原生几何的标记宽度占画布比例（46..187 / 240）
-MARK_RATIO = 0.62                   # 目标：标记占画布比例
+MARK_RATIO = 0.54                   # 桌面图标：标记占画布比例
+FOOTPRINT = 0.84                    # 桌面图标：squircle 占画布比例（macOS 惯例约 0.82~0.85）
+STORE_MARK_RATIO = 0.58             # 商店图标：满幅方块，标记占画布比例
 
 
 def squircle_points(size, n=5.0, steps=192):
@@ -75,13 +77,17 @@ def stroke_mask(size, color=255, stroke=STROKE):
 
 
 def render(size, bg, mark_color=BLACK, mark_ratio=MARK_RATIO, shape="square",
-           stroke=STROKE, n=5.0):
-    """shape: square（商店，满幅方块） / squircle（桌面，满幅超椭圆） / none（透明底）。"""
+           stroke=STROKE, n=5.0, footprint=1.0):
+    """shape: square（商店，满幅方块） / squircle（桌面，squircle 按 footprint 留边距） / none（透明底）。"""
     base = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(base)
+    side = size * footprint
+    off = (size - side) / 2.0
     if shape == "squircle":
-        ImageDraw.Draw(base).polygon(squircle_points(size, n=n), fill=bg)
+        pts = squircle_points(int(side), n=n)
+        d.polygon([(x + off, y + off) for x, y in pts], fill=bg)
     elif shape == "square":
-        ImageDraw.Draw(base).rectangle([0, 0, size - 1, size - 1], fill=bg)
+        d.rectangle([0, 0, size - 1, size - 1], fill=bg)
     mask = stroke_mask(size, stroke=stroke)
     scale = (mark_ratio / MARK_SPAN) if mark_ratio else 1.0
     if scale != 1.0:
@@ -91,6 +97,34 @@ def render(size, bg, mark_color=BLACK, mark_ratio=MARK_RATIO, shape="square",
     layer.putalpha(mask)
     base.alpha_composite(layer)
     return base
+
+
+def logo_svg(footprint=FOOTPRINT, mark_ratio=MARK_RATIO, n=5.0, steps=96):
+    """网页 logo.svg：squircle 底（占画布 footprint）+ 标记（占画布 mark_ratio），与图标同规格。"""
+    k = mark_ratio / MARK_SPAN
+    cx, cy = 116.5, 120.0            # 原生标记的几何中心
+    tx = 120.0 - cx * k
+    ty = 120.0 - cy * k
+    side = 240.0 * footprint
+    off = (240.0 - side) / 2.0
+    pts = squircle_points(int(side), n=n, steps=steps)
+    path = "M" + " L".join(f"{x + off:.2f} {y + off:.2f}" for x, y in pts) + " Z"
+    return f'''<svg width="240" height="240" viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 平台 logo 唯一真源：squircle 底 #f1f8ff（占画布 {footprint:.0%}，macOS 图标惯例）+ 黑色标记（占 {mark_ratio:.0%}），不透明。
+       favicon / og:image / 分享卡 / 网页 header / dock / 桌面应用图标 / 商店图标 全部同一套风格。
+       暗色主题：页面 CSS filter: invert(1) 整体反色 → 深底白标。 -->
+  <path d="{path}" fill="#F1F8FF"/>
+  <g transform="translate({tx:.2f} {ty:.2f}) scale({k:.4f})">
+    <path
+      d="M187 76C173.5 57.3333 150 46 123 46C79.3695 46 46 79.5786 46 120C46 160.421 79.3695 194 123 194C150 194 173.5 182.667 187 164"
+      stroke="#000000" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M84 174L120 70L156 174" stroke="#000000" stroke-width="12" stroke-linecap="round"
+      stroke-linejoin="round"/>
+    <path d="M95 138H145" stroke="#000000" stroke-width="12" stroke-linecap="round"
+      stroke-linejoin="round"/>
+  </g>
+</svg>
+'''
 
 
 LOGO_SVG = '''<svg width="240" height="240" viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -113,24 +147,25 @@ def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
     os.makedirs(out, exist_ok=True)
 
-    # 桌面端：满幅 squircle + 黑标（与网页 logo.svg 同一风格）
+    # 桌面端：squircle（占画布 FOOTPRINT）+ 黑标（占画布 MARK_RATIO）—— 与网页 logo.svg 同一规格
     for s in (1024, 512, 256):
-        render(s, FIELD, shape="squircle").save(os.path.join(out, f"ivec-desktop-icon-{s}.png"))
+        render(s, FIELD, shape="squircle", footprint=FOOTPRINT,
+               mark_ratio=MARK_RATIO).save(os.path.join(out, f"ivec-desktop-icon-{s}.png"))
     # 商店图标：满幅方块（商店自己加圆角）
     for s in (1024, 512, 256, 216, 180, 152, 120, 76, 60, 48, 32, 16):
-        render(s, FIELD, shape="square").convert("RGB").save(
+        render(s, FIELD, shape="square", mark_ratio=STORE_MARK_RATIO).convert("RGB").save(
             os.path.join(out, f"ivec-app-icon-{s}.png"))
     # Android 自适应前景层（透明底 + 黑标，图形收 66% 安全区）
     for s in (432, 1024):
         render(s, CLEAR, mark_ratio=0.42, shape="none").save(
             os.path.join(out, f"ivec-adaptive-fg-{s}.png"))
-    # 透明底标记 + 托盘
+    # 透明底标记 + 托盘（没有 squircle 包裹，标记要放大到 ~86%）
     for s in (1024, 512, 256, 128):
-        render(s, CLEAR, shape="none").save(os.path.join(out, f"ivec-mark-{s}.png"))
-    render(128, CLEAR, shape="none").save(os.path.join(out, "ivec-tray-128.png"))
-    # 网页 logo.svg（squircle 底 + 原生几何标记）
+        render(s, CLEAR, mark_ratio=0.86, shape="none").save(os.path.join(out, f"ivec-mark-{s}.png"))
+    render(128, CLEAR, mark_ratio=0.86, shape="none").save(os.path.join(out, "ivec-tray-128.png"))
+    # 网页 logo.svg（squircle 底 + 同比例标记）
     with open(os.path.join(out, "logo.svg"), "w") as f:
-        f.write(LOGO_SVG.replace("{SQUIRCLE}", squircle_svg_path(240, n=5.0, steps=96)))
+        f.write(logo_svg())
 
     # 联络表
     pad, cell = 22, 170
