@@ -130,7 +130,7 @@ type bgJSON struct {
 
 func taskJSON(t Task) bgJSON {
 	j := bgJSON{ID: t.ID, State: t.Status, Script: t.Command, Output: t.LogOut, ErrorOutput: t.LogErr, Err: t.Err}
-	if t.Status != "running" {
+	if t.Status != "running" && t.Status != "kill-unresponsive" {
 		code := t.ExitCode
 		j.ExitCode = &code
 	}

@@ -149,6 +149,82 @@ func TestTaskTableKillSettlesOnCompletion(t *testing.T) {
 	}
 }
 
+// kill 宽限期不是终态：执行仍在跑时只能报 running，实际结束后才报 killed。
+func TestTaskTableKillGraceIsNotReportedAsKilled(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTable()
+	release := make(chan struct{})
+	cancelled := make(chan struct{})
+	r := tt.register(func() { close(cancelled) }, "t", TaskMeta{Owner: "o1", Session: "s1"})
+	go func() { <-release; tt.finish(r, &ExecResult{ExitCode: 0}, nil) }()
+	task, err := tt.adoptBackground(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	killDone := make(chan error, 1)
+	go func() { killDone <- tt.Kill(task.ID, "o1", "s1") }()
+	<-cancelled
+	snap, ok := tt.Get(task.ID, "o1", "s1")
+	if !ok || snap.Status != "running" || snap.ExitCode != 0 {
+		t.Fatalf("kill 宽限期快照 = %+v ok=%v, want running/0", snap, ok)
+	}
+	close(release)
+	if err := <-killDone; err != nil {
+		t.Fatalf("Kill() error = %v", err)
+	}
+	snap, ok = tt.Get(task.ID, "o1", "s1")
+	if !ok || snap.Status != "killed" || snap.ExitCode != 130 {
+		t.Fatalf("实际结束快照 = %+v ok=%v, want killed/130", snap, ok)
+	}
+}
+
+// cancel(request_id) 与 bg kill 共用真实状态：未响应时不能无限期显示 killed。
+func TestCancelByRequestReportsUnresponsiveBackgroundTask(t *testing.T) {
+	t.Parallel()
+	tt := NewTaskTable()
+	warned := make(chan struct{}, 1)
+	tt.SetLogf(func(format string, args ...any) {
+		select {
+		case warned <- struct{}{}:
+		default:
+		}
+	})
+	release := make(chan struct{})
+	cancelled := make(chan struct{})
+	r := tt.register(func() { close(cancelled) }, "t", TaskMeta{Owner: "o1", Session: "s1", RequestID: "req-cancel"})
+	go func() { <-release; tt.finish(r, &ExecResult{ExitCode: 0}, nil) }()
+	task, err := tt.adoptBackground(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.CancelByRequest("req-cancel", "o1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	<-cancelled
+	snap, ok := tt.Get(task.ID, "o1", "s1")
+	if !ok || snap.Status != "running" {
+		t.Fatalf("cancel 后未完成快照 = %+v ok=%v, want running", snap, ok)
+	}
+	select {
+	case <-warned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel 未响应后没有告警")
+	}
+	snap, ok = tt.Get(task.ID, "o1", "s1")
+	if !ok || snap.Status != "kill-unresponsive" {
+		t.Fatalf("宽限期后快照 = %+v ok=%v, want kill-unresponsive", snap, ok)
+	}
+	close(release)
+	snap, err = tt.Wait(context.Background(), task.ID, 3*time.Second, "o1", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Status != "killed" || snap.ExitCode != 130 {
+		t.Fatalf("实际结束快照 = %+v, want killed/130", snap)
+	}
+}
+
 // TestTaskTableEviction 完成任务表保留上限：超出逐出最旧。
 func TestTaskTableEviction(t *testing.T) {
 	t.Parallel()

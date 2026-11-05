@@ -7,7 +7,7 @@
 
 ## 未发布
 
-- **bg kill 不再谎报已杀**：kill 此前只发取消信号就立即回报 "killed"——执行若不理会 ctx 取消（进程内解释器类命令的经典坑），调用方会以为 CPU 已释放，实际执行仍在跑：2026-10-31 生产事故里 awk 解释器就是这样空转了 5 天（累计 119 CPU 小时）。现在 kill 会等执行真的停下（宽限 3s，`KillGrace`）：停了就照旧报 killed；没停就如实标 `kill-unresponsive`（`bg list` / `bg wait` 快照同步显示）并写平台告警日志，同时 `bg kill` 以非零退出码报 "ignored cancellation … it may keep consuming CPU"——不再谎称已杀。回归：`cmds_test.go`（尊重取消 → killed；不尊重 → kill-unresponsive + 报错），`engine_test.go` 两个 kill 语义用例按新契约改写。
+- **bg kill / cancel(request_id) 不再谎报已杀**：kill 此前只发取消信号就立即回报 "killed"——执行若不理会 ctx 取消（进程内解释器类命令的经典坑），调用方会以为 CPU 已释放，实际执行仍在跑：2026-10-31 生产事故里 awk 解释器就是这样空转了 5 天（累计 119 CPU 小时）。现在 bg kill 会等执行真的停下（宽限 3s，`KillGrace`）：停了就照旧报 killed；没停就如实标 `kill-unresponsive`（`bg list` / `bg wait` 快照同步显示）并写平台告警日志，同时 `bg kill` 以非零退出码报 "ignored cancellation … it may keep consuming CPU"——不再谎称已杀。`cancel(request_id)` 接入同一宽限期检测；执行实际结束前快照保持 `running`，活跃任务不输出 `exit_code`。回归：`cmds_test.go`（尊重取消 → killed；不尊重 → kill-unresponsive + 报错 + JSON 无退出码），`engine_test.go` 覆盖宽限期快照、cancel 未响应告警和实际结束后的 killed/130。
 
 - **坏包不再掀掉整台设备的命令面，坏配置日志限频**：`collectHostCommands` 此前把「任一技能包 manifest 坏/缺」当成整张命令注册表的致命错误——一条残留的坏包记录（包目录被删、manifest 缺失或是非法旧结构）就会让设备上所有命令（含 browser/cua 预装包）一起失联（`commands list` 返回空列表），而配置热加载每 2s 重试一次且逐次打日志，一份坏配置能刷出三万多行。现在按包隔离：坏包跳过、原因记进 `commands list`（新增 `package` 行，`state=rejected`，行名带 `package:` 前缀——包名常与命令别名同名，预装包 browser 的别名就是 browser，不加前缀同一行名会出现两次；skill_id 记在 `id` 列），其余包照常注册，新变坏的包在日志里只报一次；只有安装状态本身读不出来才是致命错误。配置热加载改为退避重试（同一份配置 30s 一次）+ 日志限频（60s 一条），坏配置不再刷屏。回归：`libs/host/command_broken_package_test.go`（坏包隔离 + 退避/限频门）。
 

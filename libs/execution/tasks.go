@@ -62,9 +62,11 @@ type Run struct {
 	res     *ExecResult
 	err     error
 	settled bool // 终态已结算（只发生一次）
-	killed  bool // kill 已受理（130 语义，覆盖自然退出码）
+	killed  bool // kill 已受理；实际结束后终态为 killed/130，覆盖自然退出码
 	// killUnresponsive：kill 已受理，但宽限内执行未结束（不理会 ctx 取消）。
+	// killWatch：是否已有取消宽限期观察者，避免 cancel 重试泄漏 goroutine。
 	killUnresponsive bool
+	killWatch        bool
 	background       bool
 	bgID             string
 	bgSeq            int
@@ -274,19 +276,19 @@ func (t *TaskTable) evictLocked() {
 	}
 }
 
-// statusLocked 派生展示状态（r.mu 已持有）：killed 恒优先（kill 时进程
-// 可能仍正常退出 0）。
+// statusLocked 派生展示状态（r.mu 已持有）：取消等待中不是终态；执行实际
+// 结束后 killed 覆盖自然退出码（进程可能因取消而正常退出 0）。
 func statusLocked(r *Run) (status string, exit int, errStr string) {
-	// kill 已受理但执行不理会取消：如实报「没杀掉」——不再谎称 killed
-	// （谎称会让调用方以为 CPU 已释放，实际执行仍在跑）。
-	if r.killUnresponsive && !r.settled {
-		return "kill-unresponsive", 130, "cancellation ignored: execution still running"
+	if !r.settled {
+		// kill 已受理但执行不理会取消：如实报「没杀掉」。宽限期内同样只能
+		// 报 running，不能提前声称 CPU 已释放。
+		if r.killUnresponsive {
+			return "kill-unresponsive", 130, "cancellation ignored: execution still running"
+		}
+		return "running", 0, ""
 	}
 	if r.killed {
 		return "killed", 130, ""
-	}
-	if !r.settled {
-		return "running", 0, ""
 	}
 	exitCode := 0
 	if r.res != nil {
@@ -373,9 +375,9 @@ func (t *TaskTable) Wait(ctx context.Context, id string, d time.Duration, owner,
 	return snapshotLocked(r), nil
 }
 
-// Kill 请求终止 bg 任务：置 killed（快照即时可见 = kill 已受理）并取消
-// 同一执行；终态与容量释放在执行实际结束时结算（bg wait 等 Done，天然
-// 等到真正结束）。归属不匹配等同不存在。
+// Kill 请求终止 bg 任务并取消同一执行；取消等待中快照仍为 running，终态
+// 与容量释放在执行实际结束时结算（bg wait 等 Done，天然等到真正结束）。
+// 归属不匹配等同不存在。
 //
 // 取消是异步的：执行可能不理会 ctx 取消（进程内解释器类命令）。因此 kill
 // 后等 KillGrace 看它是否真的停了：停了=真 killed；没停=如实报
@@ -396,29 +398,53 @@ func (t *TaskTable) Kill(id, owner, session string) error {
 		return fmt.Errorf("bg: task %q already finished (%s)", id, status)
 	}
 	r.killed = true
+	r.killWatch = true // 本次调用同步观察，cancel(request_id) 不再另派观察者
 	cancel := r.cancel
 	r.mu.Unlock()
 	t.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	select {
-	case <-r.done:
+	if t.waitKill(r, id) {
 		return nil
-	case <-time.After(KillGrace):
-	}
-	r.mu.Lock()
-	r.killUnresponsive = true
-	r.mu.Unlock()
-	if t.logf != nil {
-		t.logf("execution: bg kill %q — task ignored cancellation (still running %s after kill); it may keep consuming CPU", id, KillGrace)
 	}
 	return fmt.Errorf("bg: task %q ignored cancellation (still running %s after kill) — it may keep consuming CPU", id, KillGrace)
 }
 
+// waitKill 等待取消真正生效；超时后标 kill-unresponsive 并只告警一次。
+// 返回执行是否已实际结束。CancelByRequest 异步调用，Kill 同步调用。
+func (t *TaskTable) waitKill(r *Run, id string) bool {
+	timer := time.NewTimer(KillGrace)
+	defer timer.Stop()
+	select {
+	case <-r.done:
+		return true
+	case <-timer.C:
+	}
+
+	// done 与 timer 可能同时就绪；以记录的真实终态为准，避免边界误报。
+	r.mu.Lock()
+	if r.settled {
+		r.mu.Unlock()
+		return true
+	}
+	firstWarning := !r.killUnresponsive
+	r.killUnresponsive = true
+	r.mu.Unlock()
+	if firstWarning {
+		t.mu.Lock()
+		logf := t.logf
+		t.mu.Unlock()
+		if logf != nil {
+			logf("execution: bg task %q ignored cancellation (still running %s after kill); it may keep consuming CPU", id, KillGrace)
+		}
+	}
+	return false
+}
+
 // CancelByRequest 按 request_id 取消执行（cancel 动作唯一查询路径；
-// 前台与 bg 同表）。bg 记录置 killed（130 语义）；归属不匹配或已终结
-// 等同不存在。
+// 前台与 bg 同表）。bg 记录实际结束后才置 killed/130；宽限期内未结束同样
+// 标 kill-unresponsive。归属不匹配或已终结等同不存在。
 func (t *TaskTable) CancelByRequest(requestID, owner, session string) error {
 	t.mu.Lock()
 	r, ok := t.runs[requestID]
@@ -432,14 +458,23 @@ func (t *TaskTable) CancelByRequest(requestID, owner, session string) error {
 		t.mu.Unlock()
 		return ErrNoRun
 	}
+	watch := false
 	if r.background {
 		r.killed = true
+		if !r.killWatch {
+			r.killWatch = true
+			watch = true
+		}
 	}
+	bgID := r.bgID
 	cancel := r.cancel
 	r.mu.Unlock()
 	t.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if watch {
+		go t.waitKill(r, bgID)
 	}
 	return nil
 }

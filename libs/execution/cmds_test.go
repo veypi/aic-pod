@@ -357,6 +357,16 @@ func TestCmdBGKillReportsUnresponsiveExecution(t *testing.T) {
 	if snap.ExitCode != 130 {
 		t.Fatalf("exit code = %d, want 130", snap.ExitCode)
 	}
+	out, _, err = runCmdCtx(ctx, t, reg, "bg", "list", "--json")
+	if err != nil {
+		t.Fatalf("bg list --json error = %v", err)
+	}
+	if !strings.Contains(out, `"state":"kill-unresponsive"`) {
+		t.Fatalf("list --json = %q, want kill-unresponsive", out)
+	}
+	if strings.Contains(out, `"exit_code"`) {
+		t.Fatalf("list --json = %q, active task must not report an exit code", out)
+	}
 }
 
 // bg wait 预算：有界等待——指定秒数与剩余前台预算取小；预算外只查询。
