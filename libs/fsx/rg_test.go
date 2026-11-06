@@ -5,9 +5,11 @@ package fsx
 // 参数类失败自报 invalid_argument，不再落 protocol.AsFault 的 internal 兜底。
 
 import (
+	"io/fs"
 	"testing"
 
 	"github.com/veypi/aic-pod/protocol"
+	"github.com/veypi/vigo/contrib/ufs"
 )
 
 func TestRgClampsContextAndLimit(t *testing.T) {
@@ -25,8 +27,11 @@ func TestRgClampsContextAndLimit(t *testing.T) {
 	if r.Attrs["limit"] != "200" {
 		t.Fatalf("limit 未钳制到上限: %v", r.Attrs)
 	}
-	if r.Attrs["rows"] == "" || r.Attrs["rows"] == "0" {
-		t.Fatalf("钳制后应正常出结果: %v", r.Attrs)
+	if _, ok := r.Attrs["rows"]; ok {
+		t.Fatalf("rows 应从正文统计，不应复制到 attrs: %v", r.Attrs)
+	}
+	if _, ok := r.Attrs["action"]; ok {
+		t.Fatalf("action 已由请求表达，不应复制到 attrs: %v", r.Attrs)
 	}
 
 	// 负值同样钳制到下限（不报错）
@@ -52,6 +57,73 @@ func TestRgClampsContextAndLimit(t *testing.T) {
 	r = runFS(t, env, map[string]any{"action": "rg", "path": "/", "limit": 5000})
 	if r.Attrs["limit"] != "200" {
 		t.Fatalf("列举模式 limit 未钳制: %v", r.Attrs)
+	}
+}
+
+type readDirCountFS struct {
+	ufs.FS
+	reads map[string]int
+}
+
+func (f *readDirCountFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	f.reads[name]++
+	return f.FS.ReadDir(name)
+}
+
+func TestRgStopsWalkingAtLimit(t *testing.T) {
+	t.Run("content", func(t *testing.T) {
+		env := newTestEnv(t)
+		runWrite(t, env, "/a/hit.txt", "match\n")
+		runWrite(t, env, "/z/unreached.txt", "match\n")
+		counter := &readDirCountFS{FS: env.FS, reads: map[string]int{}}
+		env.FS = counter
+
+		r := runFS(t, env, map[string]any{
+			"action": "rg", "path": "/", "pattern": "match", "limit": 1,
+		})
+		if r.Attrs["truncated"] != "true" {
+			t.Fatalf("limit 结果不正确: %v", r.Attrs)
+		}
+		if counter.reads["/z"] != 0 {
+			t.Fatal("达到 limit 后仍遍历了后续目录")
+		}
+	})
+
+	t.Run("file list", func(t *testing.T) {
+		env := newTestEnv(t)
+		runWrite(t, env, "/a/first.txt", "first\n")
+		runWrite(t, env, "/z/unreached.txt", "second\n")
+		counter := &readDirCountFS{FS: env.FS, reads: map[string]int{}}
+		env.FS = counter
+
+		r := runFS(t, env, map[string]any{
+			"action": "rg", "path": "/", "limit": 1,
+		})
+		if r.Attrs["truncated"] != "true" {
+			t.Fatalf("limit 结果不正确: %v", r.Attrs)
+		}
+		if counter.reads["/z"] != 0 {
+			t.Fatal("文件列举达到 limit 后仍遍历了后续目录")
+		}
+	})
+}
+
+func TestRgSingleFileAtLimitIsNotTruncated(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"content", map[string]any{"action": "rg", "path": "/only.txt", "pattern": "match", "limit": 1}},
+		{"file list", map[string]any{"action": "rg", "path": "/only.txt", "limit": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			runWrite(t, env, "/only.txt", "match\n")
+			r := runFS(t, env, tc.args)
+			if _, ok := r.Attrs["truncated"]; ok {
+				t.Fatalf("单文件恰好达到 limit 不该输出 truncated: %v", r.Attrs)
+			}
+		})
 	}
 }
 

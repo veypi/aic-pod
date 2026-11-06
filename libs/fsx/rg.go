@@ -5,10 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -260,19 +260,22 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	if err != nil {
 		return nil, fsOpErr("rg", err)
 	}
-	// 候选文件集：单文件直搜（显式路径不受 glob 过滤，也不做 minified 跳过——
-	// 用户显式指定文件即明确意图）；目录递归按字节序遍历（minified 默认跳过）。
-	var candidates []string
-	var res *Result
+	// 单文件直搜（显式路径不受 glob 过滤，也不做 minified 跳过）；目录搜索
+	// 边遍历边扫描，达到输出限制立即停止，不再预先收集完整候选文件集。
+	var files rgFileIter
+	includeMinified := p.All
 	if !info.IsDir() {
-		candidates = []string{abs}
-		res, err = rgSearch(env, abs, candidates, re, limit, rgCtx, true)
-	} else {
-		if werr := rgWalkDepth(ctx, env, abs, p.Glob, p.All, func(p string) { candidates = append(candidates, p) }, 0); werr != nil {
-			return nil, fsOpErr("rg", werr)
+		files = func(yield func(string) bool) error {
+			yield(abs)
+			return nil
 		}
-		res, err = rgSearch(env, abs, candidates, re, limit, rgCtx, p.All)
+		includeMinified = true
+	} else {
+		files = func(yield func(string) bool) error {
+			return rgWalkDepth(ctx, env, abs, p.Glob, p.All, yield, 0)
+		}
 	}
+	res, err := rgSearch(env, abs, files, re, limit, rgCtx, includeMinified)
 	clampNote(res, "limit", p.Limit, limit)
 	clampNote(res, "context", p.Context, rgCtx)
 	return res, err
@@ -288,9 +291,14 @@ func hasUpper(s string) bool {
 	return false
 }
 
-// rgWalkDepth 递归收集目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
+// rgFileIter 按需产出文件；yield 返回 false 时以 errRgStop 提前结束遍历。
+type rgFileIter func(yield func(path string) bool) error
+
+var errRgStop = errors.New("rg iteration stopped")
+
+// rgWalkDepth 递归遍历目录下的文件（对齐真实 rg：默认跳过隐藏文件与隐藏目录，
 // --hidden 收录；skipDirs 恒跳过；glob 按文件名过滤）。depth 为递归深度（入口传 0）。
-func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidden bool, fn func(path string), depth int) error {
+func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidden bool, fn func(path string) bool, depth int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -320,8 +328,8 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 		if hiddenName && !hidden {
 			continue
 		}
-		if globOK(globs, name) {
-			fn(joinSub(dir, name))
+		if globOK(globs, name) && !fn(joinSub(dir, name)) {
+			return errRgStop
 		}
 	}
 	return nil
@@ -379,7 +387,7 @@ func globOK(globs []string, name string) bool {
 	return false
 }
 
-// rgFiles 实现 --files：递归列出文件（字节序，limit 上限）。
+// rgFiles 实现 --files：边遍历边输出，达到行数或字节预算立即停止。
 func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidden bool, limit int, depths ...*int) (*Result, error) {
 	depth := 0
 	if len(depths) > 0 && depths[0] != nil {
@@ -402,43 +410,44 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	if err != nil {
 		return nil, fsOpErr("rg", err)
 	}
-	var files []string
-	if !info.IsDir() {
-		// 单文件显式路径：直出（不受隐藏/glob 过滤，对齐真实 rg 显式路径语义）
-		files = []string{abs}
-	} else if err := rgWalkDepth(ctx, env, abs, globs, hidden, func(p string) { files = append(files, p) }, depth); err != nil {
-		return nil, fsOpErr("rg", err)
-	}
-	// UTF-8 字节序排序（禁止 locale 相关排序，§5.4）
-	sort.Strings(files)
-	truncated := len(files) > limit
-	if truncated {
-		files = files[:limit]
-	}
-
-	r := newResult("rg", abs)
+	r := newResult(abs)
 	jb := newRGJSONBuf(`]}`) // 预留数组+顶层闭合（2 字节）
 	jb.write(`{"files":[`)
 	rows := 0
-	for i, f := range files {
+	truncated := false
+	yield := func(f string) bool {
 		fj, err := json.Marshal(f)
 		if err != nil {
-			continue
+			return true
 		}
 		s := string(fj)
-		if i > 0 {
+		if rows > 0 {
 			s = "," + s // 逗号与元素原子写入，防悬空逗号
 		}
 		if !jb.write(s) {
 			truncated = true
-			break
+			return false
 		}
 		rows++
+		if rows >= limit {
+			return false
+		}
+		return true
+	}
+	if !info.IsDir() {
+		// 单文件显式路径：直出（不受隐藏/glob 过滤，对齐真实 rg 显式路径语义）
+		yield(abs)
+	} else if err := rgWalkDepth(ctx, env, abs, globs, hidden, yield, depth); err != nil {
+		if !errors.Is(err, errRgStop) {
+			return nil, fsOpErr("rg", err)
+		}
+		truncated = true
 	}
 	jb.close(`]}`)
 	r.Content = jb.done()
-	r.set("rows", rows)
-	r.set("truncated", truncated)
+	if truncated {
+		r.set("truncated", true)
+	}
 	return r, nil
 }
 
@@ -559,11 +568,11 @@ func rgEmit(next func() (int, string, bool), re *regexp.Regexp, rgCtx, maxRows i
 	return rows, truncated
 }
 
-// rgSearch 实现内容搜索：逐文件扫描+上下文展开，全局 limit 截断。
-// includeMinified=false 时 minified 文件（isMinified）跳过并计入 attrs.skipped
+// rgSearch 实现内容搜索：文件按需到达，逐文件扫描+上下文展开，全局 limit 截断。
+// includeMinified=false 时 minified 文件（isMinified）跳过并写入正文 note
 // （all=true 收录；显式单文件路径恒 includeMinified=true）。
-func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limit, rgCtx int, includeMinified bool) (*Result, error) {
-	r := newResult("rg", abs)
+func rgSearch(env *Env, abs string, files rgFileIter, re *regexp.Regexp, limit, rgCtx int, includeMinified bool) (*Result, error) {
+	r := newResult(abs)
 	// 预留最大 note 空间：内容写满即截断，收尾（数组闭合+可选 note）恒可写
 	jb := newRGJSONBuf(rgNoteMax)
 	jb.write(`{"files":[`)
@@ -572,18 +581,18 @@ func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limi
 	clipped := false
 	skipped := 0
 	firstFile := true
-	for _, f := range candidates {
+	walkErr := files(func(f string) bool {
 		if contentRows >= limit {
 			truncated = true
-			break
+			return false
 		}
 		if !includeMinified && isMinified(env, f) {
 			skipped++
-			continue
+			return true
 		}
 		frows, ftrunc, err := rgFileRows(env, f, re, rgCtx, limit-contentRows)
 		if err != nil || len(frows) == 0 {
-			continue // 读不了的文件/二进制文件跳过
+			return true // 读不了的文件/二进制文件跳过
 		}
 		if ftrunc {
 			truncated = true
@@ -593,7 +602,7 @@ func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limi
 		fb.WriteString(`{"path":`)
 		pj, err := json.Marshal(f)
 		if err != nil {
-			continue
+			return true
 		}
 		fb.Write(pj)
 		fb.WriteString(`,"matches":[`)
@@ -627,7 +636,7 @@ func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limi
 			fRows++
 		}
 		if fRows == 0 {
-			continue
+			return true
 		}
 		chunk := fb.String() + `]}`
 		if !firstFile {
@@ -635,10 +644,20 @@ func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limi
 		}
 		if !jb.write(chunk) {
 			truncated = true
-			break
+			return false
 		}
 		firstFile = false
 		contentRows += fRows
+		if contentRows >= limit {
+			return false
+		}
+		return true
+	})
+	if walkErr != nil {
+		if !errors.Is(walkErr, errRgStop) {
+			return nil, fsOpErr("rg", walkErr)
+		}
+		truncated = true
 	}
 	if skipped > 0 {
 		jb.close(fmt.Sprintf(rgNoteFmt, skipped))
@@ -649,10 +668,8 @@ func rgSearch(env *Env, abs string, candidates []string, re *regexp.Regexp, limi
 		truncated = true
 	}
 	r.Content = jb.done()
-	r.set("rows", contentRows)
-	r.set("truncated", truncated)
-	if skipped > 0 {
-		r.set("skipped", skipped)
+	if truncated {
+		r.set("truncated", true)
 	}
 	return r, nil
 }
