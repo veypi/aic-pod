@@ -70,6 +70,9 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 	if err := c.registerManagedGit(reg); err != nil {
 		return nil, err
 	}
+	if err := c.registerOpen(reg); err != nil {
+		return nil, err
+	}
 	engine, err := execution.NewEngine(execution.EngineConfig{
 		Registry: reg,
 		BaseEnv:  hostIdentityBaseEnv(),
@@ -123,7 +126,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 
 func (c *Client) hostDiscoverable(name string) bool {
 	switch name {
-	case "commands", "bg", "grant", "ssh", "scp", "sftp", "pull", "push", "html-to-markdown":
+	case "commands", "bg", "grant", "ssh", "scp", "sftp", "pull", "push", "open", "html-to-markdown":
 		return true
 	}
 	return c.cmds != nil && c.cmds.has(name)

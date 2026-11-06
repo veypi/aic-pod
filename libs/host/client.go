@@ -80,13 +80,14 @@ type Client struct {
 	authToken       string // 凭证前 3 段 JWT（NATS CONNECT token / HTTP Bearer 上线形态；第 4 段 secret 不出设备）
 	secret          string // 凭证第 4 段（HKDF 根：K_tool / RTC 票据）
 	replay          *replayCache
-	procs           *vbox.Manager    // exec 子进程统一托管（§5.8/§5.9）
-	perms           *permissionState // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
-	vsh             vshState         // vsh 引擎装配态（script 执行，惰性构建）
-	ssh             *sshx.Runner     // 托管 ssh/scp/sftp
-	git             *gitx.Runner     // 托管 git 的 ssh 传输
-	sshRun          sshProcessRunner // nil uses the managed native process runner
-	gitRun          sshProcessRunner // nil uses the managed native process runner（managed git 传输）
+	procs           *vbox.Manager                       // exec 子进程统一托管（§5.8/§5.9）
+	perms           *permissionState                    // 唯一运行权限状态（FS/net/SSH/cmd 基表 + 会话临时授权）
+	vsh             vshState                            // vsh 引擎装配态（script 执行，惰性构建）
+	ssh             *sshx.Runner                        // 托管 ssh/scp/sftp
+	git             *gitx.Runner                        // 托管 git 的 ssh 传输
+	sshRun          sshProcessRunner                    // nil uses the managed native process runner
+	gitRun          sshProcessRunner                    // nil uses the managed native process runner（managed git 传输）
+	openRun         func(context.Context, string) error // nil uses the OS native opener
 	rtcMu           sync.RWMutex
 	files           *hostfs.FS
 	bytes           *hostfs.Bytes

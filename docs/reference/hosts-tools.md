@@ -41,7 +41,7 @@ stdio 服务懒启动并复用一个 SDK session。进程由 vbox 负责；manag
 
 所有统一注册服务的调用门都是别名本身（`grant cmd <alias>` 放行该服务全部工具与流）。技能包服务默认受沙箱约束，免沙箱只能由设备 owner 用 `commands config <alias> --no-sandbox` 授予（包内 manifest 不许声明沙箱姿态）；官方 browser/CUA 通常需要免沙箱，以访问 Chrome 私有状态和系统桌面。进程 cwd/env/沙箱固定；按调用 session 获得的临时文件权限不扩展常驻进程沙箱。服务授权是设备能力授权，原生 fs 规则不会隔离浏览器或桌面操作。browser 默认用上游 `--filesystem-root` 限制显式文件参数为 Pod 工作目录；其余业务权限由上游服务负责。原生 exec 的 nosandbox 需可信审批；第三方 MCP 的 no_sandbox 只能由设备所有者在配置中设置。
 
-exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`commands`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`pull`/`push`）+ 已登记的服务根命令（技能包安装的服务与 `commands add` 添加的服务；`<alias>` 无参列工具目录，`<alias> <tool> --help` 看参数表）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令与已登记服务，常见命令不重复列出。（2026-10-12：`skill` 命令在设备端退役——包/文件拉取改用 `pull`，走 /fs/cloud HTTP 面。）
+exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`/`cut`/`sort` 等内建）+ 三个 contrib 命令（`jq`、`awk`、`html-to-markdown`）+ 本端平台命令（`commands`/`ssh`/`scp`/`sftp`/`grant`/`bg`/`pull`/`push`/`open`）+ 已登记的服务根命令（技能包安装的服务与 `commands add` 添加的服务；`<alias>` 无参列工具目录，`<alias> <tool> --help` 看参数表）。cloud（aic）与设备共用同一核心命令集（同一 `execution.NewRegistry()`）；`commands` 指令只展示平台自定义指令与已登记服务，常见命令不重复列出。（2026-10-12：`skill` 命令在设备端退役——包/文件拉取改用 `pull`，走 /fs/cloud HTTP 面。）
 
 ## 结果与边界
 
@@ -74,5 +74,6 @@ exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`
 - `skills` 工具的 search/load 读取云端静态内容，fork 创建副本（均 cloud 端接线）。安装脚本、CLI 或 MCP 程序按说明执行。
 - **设备凭证 = vbase 静态秘钥**（device-key-migration 2026-10-12）：config `key` 存复合凭证 `<host_id>.<vbase 四段 credential>`；NATS CONNECT token 与 HTTP Bearer 均为四段 credential；第 4 段 secret 是本地 HKDF 根（K_tool/RTC 票据不变）。e1. 自签连接 proof、nonce 防重放、enc1. 存储、credVer 与 NATS fetch 分块通道全删。
 - **pull/push**（设备端平台命令）：设备 ↔ 平台云盘走 /fs/cloud HTTP 面——`pull <云端路径> [本地路径]`（目录递归：一次 ?depth=5 列表 + 逐文件 GET）、`push <本地路径> <云端路径>`（目录 v1 拒绝）；Bearer 由 pod 进程注入不进沙箱 env；非 loopback 的 http:// 拒绝发凭证；exec 规则 `pull`/`push` 门（默认开，锁 deny 的设备用 `grant cmd pull` 收放）。
+- **open**（设备端虚拟命令）：`open <path>` 或 `open --stdin` 用系统默认应用打开本地文件/目录（macOS `/usr/bin/open`、Windows `rundll32 url.dll,FileProtocolHandler`、Linux `xdg-open`），不经 shell。路径先按当前 cwd 解析并检查 FS 读权限；UI 的 `$fs.openNative` 经 stdin 发送原生路径，AI 与普通 exec 使用同一命令。
 
 旧技能 provider、设备安装表、包根命令、旧通用媒体流、host 端 skill 命令与 fetch 通道已删除，没有兼容入口。
