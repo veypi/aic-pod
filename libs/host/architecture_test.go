@@ -88,6 +88,30 @@ func newConfinedTestClient(t *testing.T) *Client {
 	return c
 }
 
+func TestHostCurlPlatformRelativeURL(t *testing.T) {
+	withGlobal(t, func(o *cfg.Options) { o.NetPolicy = cfg.PolicyOpen })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/public/ping" {
+			_, _ = w.Write([]byte(r.Header.Get("Authorization")))
+			return
+		}
+		_, _ = w.Write([]byte(r.Header.Get("Authorization")))
+	}))
+	defer server.Close()
+	t.Setenv("HOME", t.TempDir())
+	c := New(Options{Host: server.URL, WorkDir: t.TempDir(), NoSandbox: false})
+	c.authToken = "test-token"
+	c.sessionRoot = t.TempDir()
+	if c.initErr != nil {
+		t.Fatal(c.initErr)
+	}
+	t.Cleanup(func() { c.Close() })
+	result := runManagedScript(t, c, "curl -sS /skills/cloud/demo/manifest; echo; curl -sS /api/public/ping", "")
+	if result.ExitCode != 0 || result.Stdout != "Bearer test-token\n" {
+		t.Fatalf("platform curl result = %+v", result)
+	}
+}
+
 func TestNativeNetCapabilityFailureIsLocal(t *testing.T) {
 	withGlobal(t, func(o *cfg.Options) {
 		o.NetPolicy = cfg.PolicyOpen

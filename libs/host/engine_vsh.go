@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/veypi/aic-pod/protocol"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,20 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			// 内存占用与文件大小无关（磁盘与沙箱 fs 规则自行兜底）。
 			Rules: func(ctx context.Context) vbox.NetRuleSet {
 				return c.perms.netSnapshot(execution.SessionFromContext(ctx))
+			},
+			Platform: &execution.PlatformHTTPConfig{
+				BaseURL:      c.options().Host,
+				AuthPrefixes: execution.DefaultPlatformAuthPrefixes,
+				Inject: func(_ context.Context, req *http.Request) error {
+					if c.authToken == "" {
+						return fmt.Errorf("device credential is not configured")
+					}
+					if req.URL.Scheme == "http" && !isLoopbackHost(req.URL.Hostname()) {
+						return fmt.Errorf("refusing to send device credentials over plaintext http")
+					}
+					req.Header.Set("Authorization", "Bearer "+c.authToken)
+					return nil
+				},
 			},
 		}),
 		Platform: execution.PlatformDeps{

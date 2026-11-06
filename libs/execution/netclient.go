@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -60,6 +61,8 @@ type NetClientConfig struct {
 	// 默认 false = 忽略。cloud 必须 false：代理使 dial 目标变为代理服务器，
 	// 绕过私网阻断（SSRF 防护失效）；host 端 AllowPrivate 已放行，可开启。
 	UseProxy bool
+	// Platform 支持 curl /xxx 平台相对 URL、按路径注入身份及可选进程内派发。
+	Platform *PlatformHTTPConfig
 	// DialContext/Resolver 测试注入；nil = 系统默认。
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	Resolver    interface {
@@ -90,19 +93,28 @@ func NewNetClient(cfg NetClientConfig) *NetClient {
 func (c *NetClient) Do(ctx context.Context, req *vshnet.Request) (*vshnet.Response, error) {
 	start := time.Now()
 	audit := NetAudit{Method: req.Method, URL: req.URL}
-	if c.cfg.UseProxy {
-		audit.Proxy = req.ProxyURL
-	}
 	defer func() { audit.Duration = time.Since(start) }()
 
-	current := req.URL
+	current, err := c.resolvePlatformURL(req.URL)
+	if err != nil {
+		audit.Reason = err.Error()
+		c.emit(audit)
+		return nil, err
+	}
+	audit.URL = current
 	body := req.Body
 	for hop := 0; ; hop++ {
-		if err := c.checkTarget(ctx, current); err != nil {
-			audit.Blocked = true
-			audit.Reason = err.Error()
-			c.emit(audit)
-			return nil, err
+		audit.Proxy = ""
+		if c.cfg.UseProxy && !c.isPlatformURL(current) {
+			audit.Proxy = req.ProxyURL
+		}
+		if !c.isInternalPlatformURL(current) {
+			if err := c.checkTarget(ctx, current); err != nil {
+				audit.Blocked = true
+				audit.Reason = err.Error()
+				c.emit(audit)
+				return nil, err
+			}
 		}
 		resp, cancel, err := c.round(ctx, req, current, body)
 		if err != nil {
@@ -189,7 +201,7 @@ func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL strin
 			return d.DialContext(ctx, network, addr)
 		},
 	}
-	if c.cfg.UseProxy && req.ProxyURL != "" {
+	if c.cfg.UseProxy && req.ProxyURL != "" && !c.isPlatformURL(rawURL) {
 		// 走代理时 dial 目标变为代理服务器本身（其上私网/环回检查仍生效）；
 		// 目标 host 的规则表复核不受影响（checkTarget 按原始 URL 逐跳过门）。
 		proxyURL, perr := vshnet.ParseProxyURL(req.ProxyURL)
@@ -223,6 +235,17 @@ func (c *NetClient) round(ctx context.Context, req *vshnet.Request, rawURL strin
 	}
 	for k, v := range req.Headers {
 		hreq.Header.Set(k, v)
+	}
+	if c.shouldInjectPlatformAuth(rawURL) && c.cfg.Platform.Inject != nil {
+		if err := c.cfg.Platform.Inject(ctx, hreq); err != nil {
+			cancel()
+			return nil, nil, fmt.Errorf("inject platform identity: %w", err)
+		}
+	}
+	if c.isInternalPlatformURL(rawURL) {
+		recorder := httptest.NewRecorder()
+		c.cfg.Platform.Handler.ServeHTTP(recorder, hreq)
+		return recorder.Result(), cancel, nil
 	}
 	resp, err := client.Do(hreq)
 	if err != nil {
