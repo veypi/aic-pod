@@ -181,14 +181,13 @@ func TestPullPushExecRuleGate(t *testing.T) {
 	}
 }
 
-func TestCloudFSPlaintextGuard(t *testing.T) {
-	if _, err := newCloudFS("http://example.com", "cred"); err == nil {
-		t.Fatal("plaintext http to non-loopback must be refused")
+func TestCloudFSAllowsConfiguredPlatformHTTP(t *testing.T) {
+	for _, base := range []string{"http://192.168.31.3:4002", "http://127.0.0.1:4000", "https://ivec-ai.com"} {
+		if _, err := newCloudFS(base, "cred"); err != nil {
+			t.Fatalf("configured platform %s should be allowed: %v", base, err)
+		}
 	}
-	if _, err := newCloudFS("http://127.0.0.1:4000", "cred"); err != nil {
-		t.Fatalf("loopback http should be allowed: %v", err)
-	}
-	if _, err := newCloudFS("https://ivec-ai.com", "cred"); err != nil {
-		t.Fatalf("https should be allowed: %v", err)
+	if _, err := newCloudFS("not a URL", "cred"); err == nil {
+		t.Fatal("invalid platform host should be rejected")
 	}
 }

@@ -4,8 +4,8 @@ package host
 // 走 /fs/cloud HTTP 面（device-key-migration：替代已删除的 NATS fetch 分块通道）。
 //
 // 凭证纪律：Bearer（凭证前 3 段 JWT，第 4 段 secret 不出设备）由 pod 进程内
-// HTTP client 注入——不写沙箱子进程 env、不随命令参数回显。护栏：平台地址
-// 非 loopback 且为 http:// 时拒绝发送凭证（防明文泄露）。
+// HTTP client 注入——不写沙箱子进程 env、不随命令参数回显。pull/push 只访问
+// pod 配置并协商的平台地址，AI 不能指定其他凭证目标；允许内网明文 HTTP 部署。
 //
 // 落盘/读取一律经 inv.FS（vsh 策略与 jail 自动生效）；pull 目录 = 一次
 // ?depth=5 递归 JSON 列表 + 逐文件 GET（覆盖语义同 curl -o：PUT 即截断写）；
@@ -44,7 +44,7 @@ type cloudFS struct {
 	http *http.Client
 }
 
-// newCloudFS 装配客户端；非 loopback 的 http:// 地址拒绝（不明文发凭证）。
+// newCloudFS 装配客户端；目标只能来自 pod 配置的平台地址。
 func newCloudFS(platformHost, credential string) (*cloudFS, error) {
 	base := strings.TrimRight(strings.TrimSpace(platformHost), "/")
 	if base == "" {
@@ -53,9 +53,6 @@ func newCloudFS(platformHost, credential string) (*cloudFS, error) {
 	u, err := url.Parse(base)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("invalid platform host %q", platformHost)
-	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
-		return nil, fmt.Errorf("refusing to send credentials over plaintext http to non-loopback host %s", u.Host)
 	}
 	return &cloudFS{base: base, cred: credential, http: &http.Client{Timeout: 5 * time.Minute}}, nil
 }
