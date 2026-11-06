@@ -39,7 +39,6 @@ type FSEntry struct {
 	Kind       string `json:"kind"`
 	Size       *int64 `json:"size,omitempty"`
 	ModifiedAt string `json:"modified_at,omitempty"`
-	Version    string `json:"version"`
 	MediaType  string `json:"media_type,omitempty"`
 }
 
@@ -101,9 +100,22 @@ type FSUploadWriteResult struct {
 	Offset int64 `json:"offset"`
 }
 type FSCondition struct {
-	Absent  bool   `json:"absent,omitempty"`
-	Version string `json:"version,omitempty"`
-	Any     bool   `json:"any,omitempty"`
+	Absent bool   `json:"absent,omitempty"`
+	Hash   string `json:"hash,omitempty"`
+	Any    bool   `json:"any,omitempty"`
+}
+
+func validContentHash(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, c := range value[len("sha256:"):] {
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'f' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (c FSCondition) Validate() error {
@@ -111,8 +123,11 @@ func (c FSCondition) Validate() error {
 	if c.Absent {
 		n++
 	}
-	if c.Version != "" {
+	if c.Hash != "" {
 		n++
+		if !validContentHash(c.Hash) {
+			return Fail("invalid_file_hash", "Content hash must be sha256:<64 lowercase hex>")
+		}
 	}
 	if c.Any {
 		n++
@@ -122,17 +137,23 @@ func (c FSCondition) Validate() error {
 	}
 	return nil
 }
-func (c FSCondition) Check(version string, exists bool) error {
+
+// Check 校验写入条件。内容哈希仅由 write 传入；其他操作收到 hash 条件时
+// 明确报 unsupported，不能退化为不校验。
+func (c FSCondition) Check(exists bool, contentHash ...string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
 	if c.Absent && exists {
 		return Fail("already_exists", "Destination already exists")
 	}
-	if c.Version != "" && (!exists || c.Version != version) {
-		f := Fail("version_conflict", "File changed since it was read")
-		f.Details = map[string]any{"current_version": version}
-		return f
+	if c.Hash != "" {
+		if len(contentHash) != 1 {
+			return Fail("unsupported", "Content-hash conditions are only supported for write")
+		}
+		if !exists || c.Hash != contentHash[0] {
+			return Fail("file_hash_conflict", "File content changed since it was read")
+		}
 	}
 	return nil
 }

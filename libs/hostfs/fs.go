@@ -121,7 +121,6 @@ func (f *FS) Close() error {
 
 type pathArgs struct {
 	Path        protocol.FSPath `json:"path"`
-	IfVersion   string          `json:"if_version,omitempty"`
 	Follow      bool            `json:"follow_symlinks,omitempty"`
 	Consistency string          `json:"consistency,omitempty"`
 }
@@ -145,7 +144,6 @@ type mkdirArgs struct {
 }
 type removeArgs struct {
 	Path      protocol.FSPath `json:"path"`
-	IfVersion string          `json:"if_version"`
 	Recursive bool            `json:"recursive,omitempty"`
 	MissingOK bool            `json:"missing_ok,omitempty"`
 }
@@ -260,9 +258,6 @@ func validateWriteArgs(p writeArgs) error {
 }
 
 func validateMoveArgs(p moveArgs) error {
-	if p.IfVersion == "" {
-		return protocol.FSFail("invalid_argument", "if_version is required")
-	}
 	if err := p.Condition.Validate(); err != nil {
 		return err
 	}
@@ -273,9 +268,6 @@ func validateMoveArgs(p moveArgs) error {
 }
 
 func validateRemoveArgs(p removeArgs) error {
-	if p.IfVersion == "" {
-		return protocol.FSFail("invalid_argument", "if_version is required")
-	}
 	return p.Path.Validate(runtime.GOOS == "windows")
 }
 
@@ -389,7 +381,7 @@ func (f *FS) dispatch(ctx context.Context, call Call, params any) (any, error) {
 					Read:             safeReadSupported(),
 					Write:            atomicReplaceSupported() && f.cfg.Check(ctx, call, r.Path, true) == nil,
 					AtomicReplace:    atomicReplaceSupported(),
-					ConditionalWrite: "runtime_serialized",
+					ConditionalWrite: "content_sha256",
 				},
 				Limits: protocol.FSRootLimits{DirectoryEntries: f.cfg.MaxDirectoryEntries},
 			})
@@ -611,11 +603,27 @@ func entry(p protocol.FSPath, info fs.FileInfo) protocol.FSEntry {
 			media = "application/octet-stream"
 		}
 	}
-	return protocol.FSEntry{Path: p, Name: info.Name(), Kind: kind, Size: size, ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), Version: version(info), MediaType: media}
+	return protocol.FSEntry{Path: p, Name: info.Name(), Kind: kind, Size: size, ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano), MediaType: media}
 }
-func version(info fs.FileInfo) string {
+
+// fileStamp 只在单次读取/目录操作内部检测对象变化，不对外暴露，也不是保存版本。
+func fileStamp(info fs.FileInfo) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%d/%d/%d/%s", info.Size(), info.ModTime().UnixNano(), info.Mode(), fileIdentity(info))))
-	return "fv_" + hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])
+}
+
+// fileContentHash 只服务于前端可选的条件覆盖；普通写入和 AI fs 工具不算它。
+func fileContentHash(root *os.Root, name string) (string, error) {
+	file, err := openRegular(root, name)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error) {
 	r, abs, err := f.check(ctx, call, p.Path, false)
@@ -632,9 +640,7 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 		return nil, err
 	}
 	e := entry(p.Path, info)
-	if p.IfVersion != "" && p.IfVersion != e.Version {
-		return nil, protocol.FSFail("version_conflict", "File version changed")
-	}
+	stamp := fileStamp(info)
 	if call.Method == "stat" {
 		return e, nil
 	}
@@ -646,12 +652,12 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 		return nil, err
 	}
 	actual, err := file.Stat()
-	if err != nil || !os.SameFile(info, actual) || version(actual) != e.Version {
+	if err != nil || !os.SameFile(info, actual) || fileStamp(actual) != stamp {
 		file.Close()
 		return nil, protocol.FSFail("source_changed", "File changed while being opened")
 	}
 	requested := joinRoot(r, p.Path.Segments)
-	src, err := f.cfg.Bytes.AddFileFor(call.Owner, call.creator(), file, info.Size(), e.Version, e.MediaType, func(ctx context.Context) error {
+	src, err := f.cfg.Bytes.AddFileFor(call.Owner, call.creator(), file, info.Size(), e.MediaType, func(ctx context.Context) error {
 		if err := f.cfg.Check(ctx, call, requested, false); err != nil {
 			return err
 		}
@@ -662,10 +668,10 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 		if err != nil {
 			return err
 		}
-		if version(now) != e.Version {
+		if fileStamp(now) != stamp {
 			return protocol.FSFail("source_changed", "File changed during range read")
 		}
-		// 路径对象与句柄对象必须是同一对象（替换/删除即失效）。unix 的 version 变化
+		// 路径对象与句柄对象必须是同一对象（替换/删除即失效）。unix 的文件戳变化
 		// 由 ctime（unlink 递增）承担；Windows 的 CreationTime/属性不随替换变化，
 		// 需显式 SameFile 校验，否则旧句柄会继续提供已被替换对象的旧内容。
 		current, err := os.Lstat(requested)
@@ -681,9 +687,9 @@ func (f *FS) readOrStat(ctx context.Context, call Call, p pathArgs) (any, error)
 }
 
 type cursor struct {
-	Query   string `json:"q"`
-	Version string `json:"v"`
-	Offset  int    `json:"o"`
+	Query    string `json:"q"`
+	Revision string `json:"r"`
+	Offset   int    `json:"o"`
 }
 
 // Directory browsing may follow a directory alias, but authorizes both names
@@ -742,7 +748,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 	if len(entries) > f.cfg.MaxDirectoryEntries {
 		return nil, protocol.FSFail("overloaded", "Directory exceeds this backend's enumeration limit")
 	}
-	revision := version(info)
+	revision := fileStamp(info)
 	queryRaw, _ := json.Marshal(struct {
 		Path   protocol.FSPath
 		Hidden bool
@@ -753,7 +759,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 	if p.Cursor != "" {
 		raw, e := base64.RawURLEncoding.DecodeString(p.Cursor)
 		var c cursor
-		if e != nil || protocol.Decode(raw, &c) != nil || c.Query != query || c.Version != revision || c.Offset < 0 {
+		if e != nil || protocol.Decode(raw, &c) != nil || c.Query != query || c.Revision != revision || c.Offset < 0 {
 			return nil, protocol.FSFail("cursor_invalid", "Directory cursor is stale or has different options")
 		}
 		start = c.Offset
@@ -784,7 +790,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 			continue
 		}
 		if len(out) == limit {
-			raw, _ := json.Marshal(cursor{Query: query, Version: revision, Offset: visible})
+			raw, _ := json.Marshal(cursor{Query: query, Revision: revision, Offset: visible})
 			next = base64.RawURLEncoding.EncodeToString(raw)
 			break
 		}
@@ -806,7 +812,7 @@ func (f *FS) list(ctx context.Context, call Call, p listArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version(after) != revision {
+	if fileStamp(after) != revision {
 		return nil, protocol.FSFail("cursor_invalid", "Directory changed during enumeration")
 	}
 	return protocol.FSListResult{Entries: out, NextCursor: next, Revision: revision}, nil
@@ -839,7 +845,7 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	oldVersion := ""
+	oldHash := ""
 	// 新文件默认 0644（与 umask-022 工具链一致——git/编辑器同仓产物不再
 	// 出现 600/644 混排）；替换已存在文件时保留原 mode。staging 临时文件
 	// 仍 0600（瞬态私有，提交前 chmod 到最终 mode）。
@@ -848,10 +854,15 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 		if !existing.Mode().IsRegular() {
 			return nil, protocol.FSFail("unsupported", "Cannot replace a directory or link")
 		}
-		oldVersion = version(existing)
 		mode = existing.Mode().Perm()
+		if p.Condition.Hash != "" {
+			oldHash, err = fileContentHash(h, name)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
-	if err = p.Condition.Check(oldVersion, exists); err != nil {
+	if err = p.Condition.Check(exists, oldHash); err != nil {
 		return nil, err
 	}
 	temp := protocol.NewID(".aic-write-")
@@ -870,8 +881,8 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 		return nil, err
 	}
 	// Windows finalizes last-write time when the writable handle closes. Keep
-	// a read handle to the same object so the returned version survives Close
-	// and the subsequent commit still uses a pinned, verified staging file.
+	// a read handle to the same object so the subsequent commit still uses a
+	// pinned, verified staging file.
 	if runtime.GOOS == "windows" {
 		reader, err := openRegular(h, temp)
 		if err != nil {
@@ -899,18 +910,26 @@ func (f *FS) write(ctx context.Context, call Call, p writeArgs) (any, error) {
 		return nil, err
 	}
 	current, err := h.Lstat(name)
-	currentVersion := ""
+	currentHash := ""
 	currentExists := err == nil
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	if currentExists {
 		if !current.Mode().IsRegular() {
-			return nil, protocol.FSFail("version_conflict", "Destination type changed")
+			if p.Condition.Hash != "" {
+				return nil, protocol.FSFail("file_hash_conflict", "Destination type changed")
+			}
+			return nil, protocol.FSFail("source_changed", "Destination type changed")
 		}
-		currentVersion = version(current)
+		if p.Condition.Hash != "" {
+			currentHash, err = fileContentHash(h, name)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
-	if err = p.Condition.Check(currentVersion, currentExists); err != nil {
+	if err = p.Condition.Check(currentExists, currentHash); err != nil {
 		return nil, err
 	}
 	// Atomic no-replace works without hard-link support (e.g. Windows FAT
@@ -985,15 +1004,12 @@ func (f *FS) remove(ctx context.Context, call Call, p removeArgs) (any, error) {
 		return nil, err
 	}
 	defer h.Close()
-	info, err := h.Lstat(name)
+	_, err = h.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) && p.MissingOK {
 		return protocol.FSRemoveResult{Removed: false}, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	if version(info) != p.IfVersion {
-		return nil, protocol.FSFail("version_conflict", "Destination changed before removal")
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err

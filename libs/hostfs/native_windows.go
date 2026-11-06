@@ -72,7 +72,7 @@ func openRegular(root *os.Root, name string) (*os.File, error) {
 
 func fileIdentity(info fs.FileInfo) string {
 	// FileInfo.Sys exposes creation time and attributes on Windows. Keep access
-	// time out of versions; reads change it. Open/read also verify os.SameFile.
+	// time out of file stamps; reads change it. Open/read also verify os.SameFile.
 	if data, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
 		return fmt.Sprintf("%d/%d/%d", data.CreationTime.HighDateTime, data.CreationTime.LowDateTime, data.FileAttributes)
 	}

@@ -27,7 +27,7 @@ func TestCancelledCopyRetainsExplicitPartialEffects(t *testing.T) {
 		}
 		return check(ctx, call, path, write)
 	}
-	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("dst"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}})
+	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("dst"), Condition: protocol.FSCondition{Absent: true}})
 	if op.Status != "cancelled" || op.Error == nil || op.Error.Effect != "partial" || op.Error.Details.(map[string]any)["completed"] != 2 {
 		t.Fatalf("copy cancellation hid committed entries: %+v / %+v", op, op.Error)
 	}
@@ -44,17 +44,17 @@ func TestTreeCopyMoveFindAndRemove(t *testing.T) {
 	value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src", "nested"), Parents: true}))
 	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: loc("src", "nested", "中文%.txt"), Source: f.upload(t, []byte("\xef\xbb\xbfx\r\n")), Condition: protocol.FSCondition{Absent: true}}))
 	src := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
-	value[map[string]any](t, f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("clone"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}}))
+	value[map[string]any](t, f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("clone"), Condition: protocol.FSCondition{Absent: true}}))
 	body, err := os.ReadFile(filepath.Join(f.root, "clone", "nested", "中文%.txt"))
 	if err != nil || string(body) != "\xef\xbb\xbfx\r\n" {
 		t.Fatalf("copy corrupted content: %q %v", body, err)
 	}
 	clone := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("clone")}))
-	conflict := f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("src"), IfVersion: clone.Version, Condition: protocol.FSCondition{Absent: true}})
+	conflict := f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("src"), Condition: protocol.FSCondition{Absent: true}})
 	if conflict.Error == nil || conflict.Error.Code != "already_exists" {
 		t.Fatalf("move replaced an existing directory: %+v", conflict)
 	}
-	moved := value[protocol.FSEntry](t, f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("moved"), IfVersion: clone.Version, Condition: protocol.FSCondition{Absent: true}}))
+	moved := value[protocol.FSEntry](t, f.call(t, "move", moveArgs{Src: clone.Path, Dst: loc("moved"), Condition: protocol.FSCondition{Absent: true}}))
 	found := value[struct {
 		Entries   []protocol.FSEntry `json:"entries"`
 		Truncated bool               `json:"truncated"`
@@ -62,7 +62,7 @@ func TestTreeCopyMoveFindAndRemove(t *testing.T) {
 	if len(found.Entries) != 2 || found.Truncated {
 		t.Fatalf("find: %+v", found)
 	}
-	value[map[string]any](t, f.call(t, "remove", removeArgs{Path: moved.Path, IfVersion: moved.Version, Recursive: true}))
+	value[map[string]any](t, f.call(t, "remove", removeArgs{Path: moved.Path, Recursive: true}))
 	if _, err = os.Stat(filepath.Join(f.root, "moved")); !os.IsNotExist(err) {
 		t.Fatalf("tree still present: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestFindToleratesUnreadableChildren(t *testing.T) {
 		t.Fatalf("root error swallowed: %+v", op)
 	}
 	tree := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("tree")}))
-	if op := f.call(t, "remove", removeArgs{Path: tree.Path, IfVersion: tree.Version, Recursive: true}); op.Error == nil || op.Error.Code != "flaky_source" {
+	if op := f.call(t, "remove", removeArgs{Path: tree.Path, Recursive: true}); op.Error == nil || op.Error.Code != "flaky_source" {
 		t.Fatalf("write side did not stay strict: %+v", op)
 	}
 }
@@ -147,9 +147,9 @@ func TestTreeOperationsValidateEntirePlanBeforeEffects(t *testing.T) {
 			src := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("src")}))
 			var op outcome
 			if method == "remove" {
-				op = f.call(t, method, removeArgs{Path: src.Path, IfVersion: src.Version, Recursive: true})
+				op = f.call(t, method, removeArgs{Path: src.Path, Recursive: true})
 			} else {
-				op = f.call(t, method, moveArgs{Src: src.Path, Dst: loc("dst"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}})
+				op = f.call(t, method, moveArgs{Src: src.Path, Dst: loc("dst"), Condition: protocol.FSCondition{Absent: true}})
 			}
 			if op.Error == nil || op.Error.Code != "permission_denied" || op.Error.Effect != "none" {
 				t.Fatalf("policy failure: %+v", op)
@@ -167,7 +167,7 @@ func TestTreeOperationsValidateEntirePlanBeforeEffects(t *testing.T) {
 func TestRecursiveCopyRejectsSelfAndMkdirPreflightsDeniedPaths(t *testing.T) {
 	f := setup(t)
 	src := value[protocol.FSEntry](t, f.call(t, "mkdir", mkdirArgs{Path: loc("src")}))
-	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("src", "inside"), IfVersion: src.Version, Condition: protocol.FSCondition{Absent: true}})
+	op := f.call(t, "copy", moveArgs{Src: src.Path, Dst: loc("src", "inside"), Condition: protocol.FSCondition{Absent: true}})
 	if op.Error == nil || op.Error.Code != "invalid_argument" {
 		t.Fatalf("recursive self copy accepted: %+v", op)
 	}

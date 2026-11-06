@@ -102,14 +102,12 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsOpErr("ls", err)
 	}
 
-	r := newResult("ls", abs)
+	r := newResult(abs)
 	// 单文件：直接返回文件条目（前端 tree_cache 走 dir===false 分支）
 	if !info.IsDir() {
 		e := lsEntry{Name: path.Base(abs), Dir: false, Size: info.Size(), ModTime: info.ModTime().Unix()}
 		b, _ := json.Marshal(e)
 		r.Content = string(b)
-		r.set("rows", 1)
-		r.set("truncated", false)
 		return r, nil
 	}
 
@@ -128,8 +126,6 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	out := lsDirOut{Branch: branch, Cwd: abs, Dir: true, IsRepo: isRepo, Items: items, Truncated: st.truncated}
 	b, _ := json.Marshal(out)
 	r.Content = string(b)
-	r.set("rows", st.count)
-	r.set("truncated", st.truncated)
 	return r, nil
 }
 

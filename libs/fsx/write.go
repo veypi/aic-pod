@@ -13,16 +13,14 @@ import (
 // 成功极简、失败详尽；path 等请求侧已知信息不回显；Content 为 JSON
 // 文档——parse it, do not regex）。
 type writeOutcome struct {
-	OK    bool   `json:"ok"`
-	Lines int    `json:"lines"`
-	Bytes int    `json:"bytes"`
-	V     string `json:"v"`
+	OK    bool `json:"ok"`
+	Lines int  `json:"lines"`
+	Bytes int  `json:"bytes"`
 }
 
 type editOutcome struct {
 	OK      bool          `json:"ok"`
 	Applied int           `json:"applied"`
-	V       string        `json:"v,omitempty"` // 写后内容版本（无落盘则无）
 	Errors  []editFailure `json:"errors,omitempty"`
 }
 
@@ -69,10 +67,8 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsOpErr("write", err)
 	}
 	lines := countLines(content)
-	r := newResult("write", "")
-	r.Content = marshalOutcome(writeOutcome{OK: true, Lines: lines, Bytes: len(content), V: contentVersion(content)})
-	r.set("ok", true)
-	r.set("lines", lines)
+	r := newResult("")
+	r.Content = marshalOutcome(writeOutcome{OK: true, Lines: lines, Bytes: len(content)})
 	return r, nil
 }
 
@@ -178,24 +174,16 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		dg = newEditDiagnoser(content)
 	}
 
-	r := newResult("edit", "")
+	r := newResult("")
 	if applied == 0 {
 		// 全失败：不落盘，返回 ok:false + 全量诊断。
 		r.Content = marshalOutcome(editOutcome{OK: false, Applied: 0, Errors: failures})
-		r.set("ok", false)
-		r.set("edits", 0)
-		r.set("edits_failed", len(failures))
 		return r, nil
 	}
 	if err := env.FS.WriteFile(abs, []byte(content), 0o644); err != nil {
 		return nil, fsOpErr("edit", err)
 	}
-	out := editOutcome{OK: len(failures) == 0, Applied: applied, V: contentVersion(content), Errors: failures}
+	out := editOutcome{OK: len(failures) == 0, Applied: applied, Errors: failures}
 	r.Content = marshalOutcome(out)
-	r.set("ok", out.OK)
-	r.set("edits", applied)
-	if len(failures) > 0 {
-		r.set("edits_failed", len(failures))
-	}
 	return r, nil
 }

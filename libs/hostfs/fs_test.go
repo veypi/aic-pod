@@ -5,6 +5,8 @@ package hostfs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"github.com/veypi/aic-pod/protocol"
 	"os"
@@ -96,18 +98,14 @@ func (f *fixture) upload(t *testing.T, data []byte) protocol.FSResourceRef {
 	}
 	return src.Ref
 }
-func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
+func TestRawContentSaveAndEmptyFiles(t *testing.T) {
 	f := setup(t)
 	data := append([]byte{0xef, 0xbb, 0xbf}, []byte(strings.Repeat("line\r\n", 1800)+"last line without newline")...)
 	path := loc("note.txt")
-	saved := value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, data), Condition: protocol.FSCondition{Absent: true}}))
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, data), Condition: protocol.FSCondition{Absent: true}}))
 	disk, err := os.ReadFile(filepath.Join(f.root, "note.txt"))
 	if err != nil || !bytes.Equal(disk, data) {
 		t.Fatal("saved bytes differ")
-	}
-	current := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: path}))
-	if current.Version != saved.Version {
-		t.Fatal("commit returned a stale version")
 	}
 	src := value[ByteSource](t, f.call(t, "read", pathArgs{Path: path}))
 	var read bytes.Buffer
@@ -118,11 +116,7 @@ func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
 		t.Fatal("read changed line endings/BOM/long text")
 	}
 	next := f.upload(t, []byte{0, 255, 1, 0})
-	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: next, Condition: protocol.FSCondition{Version: saved.Version}}))
-	stale := f.call(t, "write", writeArgs{Path: path, Source: next, Condition: protocol.FSCondition{Version: saved.Version}})
-	if stale.Error == nil || stale.Error.Code != "version_conflict" {
-		t.Fatalf("stale save accepted: %+v", stale)
-	}
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: next, Condition: protocol.FSCondition{Any: true}}))
 	if err = f.store.Copy(context.Background(), f.owner, src.Ref, 0, nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("old live source was not invalidated")
 	}
@@ -131,6 +125,31 @@ func TestRawContentConditionalSaveAndEmptyFiles(t *testing.T) {
 		t.Fatal("empty file was lost")
 	}
 }
+func TestContentHashConditionalSave(t *testing.T) {
+	f := setup(t)
+	path := loc("hash.txt")
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, []byte("before")), Condition: protocol.FSCondition{Absent: true}}))
+	sum := sha256.Sum256([]byte("before"))
+	baseHash := "sha256:" + hex.EncodeToString(sum[:])
+
+	// AI/其他后台写入不携带前端哈希；人的旧基准随后必须被拒绝。
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, []byte("ai")), Condition: protocol.FSCondition{Any: true}}))
+	stale := f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, []byte("human")), Condition: protocol.FSCondition{Hash: baseHash}})
+	if stale.Error == nil || stale.Error.Code != "file_hash_conflict" {
+		t.Fatalf("stale content-hash save accepted: %+v", stale)
+	}
+	if disk, err := os.ReadFile(filepath.Join(f.root, "hash.txt")); err != nil || string(disk) != "ai" {
+		t.Fatalf("stale save changed disk content to %q, %v", disk, err)
+	}
+
+	sum = sha256.Sum256([]byte("ai"))
+	currentHash := "sha256:" + hex.EncodeToString(sum[:])
+	value[protocol.FSEntry](t, f.call(t, "write", writeArgs{Path: path, Source: f.upload(t, []byte("human")), Condition: protocol.FSCondition{Hash: currentHash}}))
+	if disk, err := os.ReadFile(filepath.Join(f.root, "hash.txt")); err != nil || string(disk) != "human" {
+		t.Fatalf("matching hash was not saved: %q, %v", disk, err)
+	}
+}
+
 func TestPathsPolicyAndLinks(t *testing.T) {
 	f := setup(t)
 	for _, path := range []protocol.FSPath{loc("..", "outside"), loc("a/b"), loc(""), {RootID: "unknown", Segments: []string{}}, loc("denied.txt")} {
@@ -182,7 +201,7 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 	if changed.Error == nil || changed.Error.Code != "cursor_invalid" {
 		t.Fatalf("stale cursor accepted: %+v", changed)
 	}
-	if op := f.call(t, "remove", removeArgs{Path: loc("empty-dir"), IfVersion: dir.Version}); op.Status != "succeeded" {
+	if op := f.call(t, "remove", removeArgs{Path: loc("empty-dir")}); op.Status != "succeeded" {
 		t.Fatalf("remove empty directory: %+v", op)
 	}
 	if err := os.Mkdir(filepath.Join(f.root, "full"), 0o700); err != nil {
@@ -191,8 +210,7 @@ func TestDirectoryPagingMkdirAndNonRecursiveRemove(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "full", "x"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	full := value[protocol.FSEntry](t, f.call(t, "stat", pathArgs{Path: loc("full")}))
-	if op := f.call(t, "remove", removeArgs{Path: loc("full"), IfVersion: full.Version}); op.Status == "succeeded" {
+	if op := f.call(t, "remove", removeArgs{Path: loc("full")}); op.Status == "succeeded" {
 		t.Fatal("implicitly recursive remove")
 	}
 }

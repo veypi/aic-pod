@@ -23,3 +23,15 @@ func TestFSOpErrMatchesErrText(t *testing.T) {
 		t.Fatal("fsOpErr(nil) 应返回 nil")
 	}
 }
+
+func TestReadAttrsMinimal(t *testing.T) {
+	env := newTestEnv(t)
+	runWrite(t, env, "/r.txt", "a\nb\nc\n")
+	r := runFS(t, env, map[string]any{"action": "read", "path": "/r.txt", "offset": 2, "limit": 1})
+	if r.Content != "2\tb\n" {
+		t.Fatalf("read 正文 = %q", r.Content)
+	}
+	if len(r.Attrs) != 3 || r.Attrs["path"] != "/r.txt" || r.Attrs["range"] != "2-2" || r.Attrs["total_lines"] != "3" {
+		t.Fatalf("read attrs 只应保留 path/range/total_lines: %v", r.Attrs)
+	}
+}

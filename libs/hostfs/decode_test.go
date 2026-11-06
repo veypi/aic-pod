@@ -72,9 +72,9 @@ func TestParsedArgsUseExpectedAuthorizationPathsAndWriteModes(t *testing.T) {
 		{name: "stat", method: "stat", args: pathArgs{Path: loc("item")}, want: []authorizationRecord{{base: "item", write: false}}},
 		{name: "list", method: "list", args: listArgs{Path: loc("item")}, want: []authorizationRecord{{base: "item", write: false}}},
 		{name: "find", method: "find", args: findArgs{Path: loc("item")}, want: []authorizationRecord{{base: "item", write: false}}},
-		{name: "remove", method: "remove", args: removeArgs{Path: loc("item"), IfVersion: "v1"}, want: []authorizationRecord{{base: "item", write: true}}},
-		{name: "move source and target", method: "move", args: moveArgs{Src: loc("src"), Dst: loc("dst"), IfVersion: "v1", Condition: protocol.FSCondition{Absent: true}}, want: []authorizationRecord{{base: "src", write: true}, {base: "dst", write: true}}},
-		{name: "copy source and target", method: "copy", args: moveArgs{Src: loc("src"), Dst: loc("dst"), IfVersion: "v1", Condition: protocol.FSCondition{Absent: true}}, want: []authorizationRecord{{base: "src", write: false}, {base: "dst", write: true}}},
+		{name: "remove", method: "remove", args: removeArgs{Path: loc("item")}, want: []authorizationRecord{{base: "item", write: true}}},
+		{name: "move source and target", method: "move", args: moveArgs{Src: loc("src"), Dst: loc("dst"), Condition: protocol.FSCondition{Absent: true}}, want: []authorizationRecord{{base: "src", write: true}, {base: "dst", write: true}}},
+		{name: "copy source and target", method: "copy", args: moveArgs{Src: loc("src"), Dst: loc("dst"), Condition: protocol.FSCondition{Absent: true}}, want: []authorizationRecord{{base: "src", write: false}, {base: "dst", write: true}}},
 		{name: "mkdir", method: "mkdir", args: mkdirArgs{Path: loc("item")}, want: []authorizationRecord{{base: "item", write: true}}},
 		{name: "mkdir parents defers to created levels", method: "mkdir", args: mkdirArgs{Path: loc("parent", "item"), Parents: true}},
 	} {
@@ -115,7 +115,7 @@ func TestExecuteParsedValidatesTypedArgumentsBeforeAuthorization(t *testing.T) {
 	}{
 		{method: "write", params: writeArgs{Path: loc("item")}},
 		{method: "mkdir", params: mkdirArgs{}},
-		{method: "remove", params: removeArgs{Path: loc("item")}},
+		{method: "remove", params: removeArgs{}},
 		{method: "move", params: moveArgs{Src: loc("src"), Dst: loc("dst")}},
 	} {
 		t.Run(tc.method, func(t *testing.T) {

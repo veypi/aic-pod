@@ -16,7 +16,7 @@ import (
 //   - host/page（env.ImageData=true）：返回 image_data（data URI，自包含），
 //     超 600KB 自动压缩为 jpeg 并设置 image_compressed。
 func imageResult(env *Env, abs string, data []byte, mime string) (*Result, error) {
-	r := newResult("read", abs)
+	r := newResult(abs)
 	r.Attrs["mime"] = mime
 	r.set("size", len(data))
 	w, h := imageDimensions(data)

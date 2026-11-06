@@ -76,18 +76,10 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		body = cut
 		end = start - 1 + strings.Count(body, "\n")
 	}
-	truncated := end < total
-
-	r := newResult("read", abs)
+	r := newResult(abs)
 	r.Content = body
-	r.Attrs["mime"] = "text/plain"
 	r.set("total_lines", total)
-	r.set("rows", end-(start-1))
 	r.set("range", fmt.Sprintf("%d-%d", start, end))
-	r.set("truncated", truncated)
-	if truncated {
-		r.set("hint", readHint(total, start, end))
-	}
 	if n := readNote(fb, offset, total, start, end, limitNote); n != "" {
 		r.set("note", n)
 	}
@@ -96,12 +88,9 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 
 // emptyReadResult 空文件（0 行）read：空正文 + 说明（§4.2 回退语义，不再报错）。
 func emptyReadResult(abs string, offset int, limitNote string) *Result {
-	r := newResult("read", abs)
-	r.Attrs["mime"] = "text/plain"
+	r := newResult(abs)
 	r.set("total_lines", 0)
-	r.set("rows", 0)
 	r.set("range", "0-0")
-	r.set("truncated", false)
 	var parts []string
 	switch {
 	case offset < 1:
@@ -162,11 +151,6 @@ func readNote(fb, offset, total, start, end int, limitNote string) string {
 		parts = append(parts, limitNote)
 	}
 	return strings.Join(parts, "; ")
-}
-
-// readHint 截断时的翻页提示（放 attrs 而非 content，避免被当作正文，§4.2）。
-func readHint(total, offset, end int) string {
-	return fmt.Sprintf("file has %d lines; this call returned %d-%d; pass offset=%d to continue reading", total, offset, end, end+1)
 }
 
 // fsReadLarge 流式读取大文件（>8MB）：单次按行扫描，总行数精确统计，
@@ -244,17 +228,10 @@ func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Re
 	}
 
 	end := start - 1 + kept
-	truncated := end < total
-	r2 := newResult("read", abs)
+	r2 := newResult(abs)
 	r2.Content = b.String()
-	r2.Attrs["mime"] = "text/plain"
 	r2.set("total_lines", total)
-	r2.set("rows", kept)
 	r2.set("range", fmt.Sprintf("%d-%d", start, end))
-	r2.set("truncated", truncated)
-	if truncated {
-		r2.set("hint", readHint(total, start, end))
-	}
 	if n := readNote(fb, offset, total, start, end, limitNote); n != "" {
 		r2.set("note", n)
 	}
@@ -299,7 +276,7 @@ func readTailWindow(env *Env, abs string, start, limit int) (string, int, error)
 // binaryResult 生成二进制 read 结果（§4.2）：mime + size；可展示图片按 §2.2 图片标准。
 func binaryResult(env *Env, abs string, data []byte) (*Result, error) {
 	mime := detectMIME(data, abs)
-	r := newResult("read", abs)
+	r := newResult(abs)
 	r.Attrs["mime"] = mime
 	r.set("size", len(data))
 	if fsxsdk.IsViewableImageMime(mime) {
@@ -316,7 +293,7 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 		return nil, fsOpErr("read", err)
 	}
 	mime := detectMIME(head, abs)
-	r := newResult("read", abs)
+	r := newResult(abs)
 	r.Attrs["mime"] = mime
 	r.set("size", info.Size())
 	if fsxsdk.IsViewableImageMime(mime) {

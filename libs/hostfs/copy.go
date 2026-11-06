@@ -31,9 +31,6 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version(info) != p.IfVersion {
-		return nil, protocol.FSFail("version_conflict", "Copy source changed")
-	}
 	if info.IsDir() && !p.Condition.Absent {
 		return nil, protocol.FSFail("unsupported", "Directory copy requires an absent destination")
 	}
@@ -66,7 +63,7 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 		if err != nil {
 			return nil, partial(err, completed)
 		}
-		if version(current) != version(e.info) {
+		if fileStamp(current) != fileStamp(e.info) {
 			return nil, partial(protocol.FSFail("source_changed", "Copy source changed"), completed)
 		}
 		dst := destination(e.path)
@@ -77,7 +74,7 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 			if len(plan) == 1 {
 				condition = p.Condition
 			}
-			err = f.copyFile(ctx, call, e.path, dst, version(e.info), condition)
+			err = f.copyFile(ctx, call, e.path, dst, condition)
 		}
 		if err != nil {
 			return nil, partial(err, completed)
@@ -91,10 +88,10 @@ func (f *FS) copy(ctx context.Context, call Call, p moveArgs) (any, error) {
 	return protocol.FSCopyResult{Entry: entry(p.Dst, current), Completed: completed}, nil
 }
 
-func (f *FS) copyFile(ctx context.Context, call Call, src, dst protocol.FSPath, version string, condition protocol.FSCondition) error {
+func (f *FS) copyFile(ctx context.Context, call Call, src, dst protocol.FSPath, condition protocol.FSCondition) error {
 	readCall := call
 	readCall.Method = "read"
-	value, err := f.readOrStat(ctx, readCall, pathArgs{Path: src, IfVersion: version})
+	value, err := f.readOrStat(ctx, readCall, pathArgs{Path: src})
 	if err != nil {
 		return err
 	}

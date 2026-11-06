@@ -14,22 +14,19 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
 // View adapts text editing/search to the same FS implementation used by RTC.
-// Versions observed during this invocation become preconditions on its writes.
+// AI write/edit 使用无条件覆盖；内容哈希只由前端结构化保存通道传入。
 func (f *FS) View(ctx context.Context, c protocol.Caller) ufs.FS {
-	return &fileView{f: f, ctx: ctx, call: Call{Caller: c, Owner: Owner(c), Command: "fs"}, versions: map[string]string{}}
+	return &fileView{f: f, ctx: ctx, call: Call{Caller: c, Owner: Owner(c), Command: "fs"}}
 }
 
 type fileView struct {
-	f        *FS
-	ctx      context.Context
-	call     Call
-	mu       sync.Mutex
-	versions map[string]string
+	f    *FS
+	ctx  context.Context
+	call Call
 }
 
 func (v *fileView) location(name string) (protocol.FSPath, error) {
@@ -68,11 +65,6 @@ func (v *fileView) callAs(method string) Call {
 	call.Method = method
 	return call
 }
-func (v *fileView) remember(name string, info fs.FileInfo) {
-	v.mu.Lock()
-	v.versions[name] = version(info)
-	v.mu.Unlock()
-}
 
 // echoPath 把底层错误里的路径改写为调用者传入的形态（fileView 各方法用
 // `defer func() { err = echoPath(name, err) }()` 统一回显）：pod 侧 os.Root 系调用
@@ -101,11 +93,7 @@ func (v *fileView) Stat(name string) (result fs.FileInfo, err error) {
 	}
 	v.f.mu.Lock()
 	defer v.f.mu.Unlock()
-	info, err := v.f.info(v.ctx, v.call, p, false)
-	if err == nil {
-		v.remember(name, info)
-	}
-	return info, err
+	return v.f.info(v.ctx, v.call, p, false)
 }
 func (v *fileView) Open(name string) (result fs.File, err error) {
 	defer func() { err = echoPath(name, err) }()
@@ -136,11 +124,10 @@ func (v *fileView) Open(name string) (result fs.File, err error) {
 		return nil, err
 	}
 	actual, err := file.Stat()
-	if err != nil || !os.SameFile(actual, info) || version(actual) != version(info) {
+	if err != nil || !os.SameFile(actual, info) || fileStamp(actual) != fileStamp(info) {
 		file.Close()
 		return nil, protocol.FSFail("source_changed", "File changed during open")
 	}
-	v.remember(name, info)
 	return &checkedFile{File: file, check: func() error {
 		if err := v.ctx.Err(); err != nil {
 			return err
@@ -152,7 +139,7 @@ func (v *fileView) Open(name string) (result fs.File, err error) {
 		if err != nil {
 			return err
 		}
-		if version(current) != version(info) {
+		if fileStamp(current) != fileStamp(info) {
 			return protocol.FSFail("source_changed", "File changed while reading")
 		}
 		return nil
@@ -235,22 +222,6 @@ func (v *fileView) ReadDir(name string) (result []fs.DirEntry, err error) {
 	}
 	return out, nil
 }
-func (v *fileView) condition(name string) (protocol.FSCondition, error) {
-	v.mu.Lock()
-	observed := v.versions[name]
-	v.mu.Unlock()
-	if observed != "" {
-		return protocol.FSCondition{Version: observed}, nil
-	}
-	info, err := v.Stat(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return protocol.FSCondition{Absent: true}, nil
-	}
-	if err != nil {
-		return protocol.FSCondition{}, err
-	}
-	return protocol.FSCondition{Version: version(info)}, nil
-}
 func (v *fileView) commit(name string, r io.Reader, size int64, condition protocol.FSCondition) error {
 	p, err := v.location(name)
 	if err != nil {
@@ -266,18 +237,10 @@ func (v *fileView) commit(name string, r io.Reader, size int64, condition protoc
 }
 func (v *fileView) WriteFile(name string, data []byte, perm fs.FileMode) (err error) {
 	defer func() { err = echoPath(name, err) }()
-	condition, err := v.condition(name)
-	if err != nil {
-		return err
-	}
-	return v.commit(name, bytes.NewReader(data), int64(len(data)), condition)
+	return v.commit(name, bytes.NewReader(data), int64(len(data)), protocol.FSCondition{Any: true})
 }
 func (v *fileView) Create(name string) (result ufs.File, err error) {
 	defer func() { err = echoPath(name, err) }()
-	condition, err := v.condition(name)
-	if err != nil {
-		return nil, err
-	}
 	file, err := os.CreateTemp(v.f.cfg.Bytes.dir, "text-")
 	if err != nil {
 		return nil, err
@@ -287,7 +250,7 @@ func (v *fileView) Create(name string) (result ufs.File, err error) {
 		if err != nil {
 			return err
 		}
-		return v.commit(name, io.NewSectionReader(file, 0, info.Size()), info.Size(), condition)
+		return v.commit(name, io.NewSectionReader(file, 0, info.Size()), info.Size(), protocol.FSCondition{Any: true})
 	}}, nil
 }
 
@@ -335,14 +298,7 @@ func (v *fileView) RemoveAll(name string) (err error) {
 	if err != nil {
 		return err
 	}
-	info, err := v.Stat(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	_, err = v.f.executeParsed(v.ctx, v.callAs("remove"), removeArgs{Path: p, IfVersion: version(info), Recursive: true, MissingOK: true})
+	_, err = v.f.executeParsed(v.ctx, v.callAs("remove"), removeArgs{Path: p, Recursive: true, MissingOK: true})
 	return err
 }
 func (v *fileView) Rename(from, to string) (err error) {
@@ -356,15 +312,7 @@ func (v *fileView) Rename(from, to string) (err error) {
 	if err != nil {
 		return err
 	}
-	info, err := v.Stat(from)
-	if err != nil {
-		return err
-	}
-	condition, err := v.condition(to)
-	if err != nil {
-		return err
-	}
-	_, err = v.f.executeParsed(v.ctx, v.callAs("move"), moveArgs{Src: src, Dst: dst, IfVersion: version(info), Condition: condition})
+	_, err = v.f.executeParsed(v.ctx, v.callAs("move"), moveArgs{Src: src, Dst: dst, Condition: protocol.FSCondition{Any: true}})
 	return err
 }
 func (v *fileView) Search(path, glob, pattern string, limit int, ignore bool) ([]ufs.SearchMatch, error) {

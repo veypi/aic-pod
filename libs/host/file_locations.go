@@ -63,6 +63,7 @@ func osHomePtr(p protocol.FSPath) *protocol.FSPath {
 	return &p
 }
 
+// attachFileURL 按需生成公开链接；工具结果不再默认携带重复的 file_url。
 // Public file URLs retain full device paths, including files outside WorkDir.
 func (c *Client) attachFileURL(attrs map[string]string) {
 	if attrs == nil || attrs["path"] == "" || !filepath.IsAbs(attrs["path"]) {

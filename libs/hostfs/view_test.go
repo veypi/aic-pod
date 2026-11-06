@@ -83,7 +83,7 @@ func TestViewErrorsEchoCallerPath(t *testing.T) {
 	}
 }
 
-func TestViewRejectsStaleWrite(t *testing.T) {
+func TestViewWriteDoesNotUseMetadataVersions(t *testing.T) {
 	f := setup(t)
 	path := filepath.ToSlash(filepath.Join(f.fs.roots["home"].Path, "note.txt"))
 	if err := os.WriteFile(path, []byte("before"), 0600); err != nil {
@@ -96,11 +96,11 @@ func TestViewRejectsStaleWrite(t *testing.T) {
 	if err := os.WriteFile(path, []byte("changed externally"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := view.WriteFile(path, []byte("stale"), 0600); err == nil || protocol.AsFault(err).Code != "version_conflict" {
-		t.Fatal("stale write accepted", err)
+	if err := view.WriteFile(path, []byte("ai write"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != "changed externally" {
-		t.Fatal("stale write changed destination", err)
+	if data, err := os.ReadFile(path); err != nil || string(data) != "ai write" {
+		t.Fatal("AI write must remain unconditional", err)
 	}
 }
 

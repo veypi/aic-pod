@@ -80,18 +80,12 @@ func TestFsWriteStructuredResult(t *testing.T) {
 	if m["ok"] != true || m["lines"] != 2.0 || m["bytes"] != 12.0 {
 		t.Fatalf("write 结果字段不对: %v", m)
 	}
-	if m["v"] == "" {
-		t.Fatalf("write 结果缺 v: %v", m)
-	}
 	if _, hasPath := m["path"]; hasPath {
 		t.Fatalf("结果不应回显 path: %v", m)
 	}
-	// attrs 只保留 UI 消费键
-	if r.Attrs["lines"] != "2" || r.Attrs["ok"] != "true" {
-		t.Fatalf("attrs 不对: %v", r.Attrs)
-	}
-	if _, hasPath := r.Attrs["path"]; hasPath {
-		t.Fatalf("attrs 不应带 path: %v", r.Attrs)
+	// 正文是结果统计的唯一来源，attrs 不再复制 ok/lines/action。
+	if len(r.Attrs) != 0 {
+		t.Fatalf("write 不应带业务 attrs: %v", r.Attrs)
 	}
 }
 
@@ -103,7 +97,7 @@ func TestFsEditSuccessMinimal(t *testing.T) {
 		map[string]string{"oldText": "gamma", "newText": "GAMMA"},
 	)
 	m := parseOutcome(t, r)
-	if m["ok"] != true || m["applied"] != 2.0 || m["v"] == "" {
+	if m["ok"] != true || m["applied"] != 2.0 {
 		t.Fatalf("成功结果不对: %v", m)
 	}
 	// 成功极简：无 errors / path
@@ -113,11 +107,8 @@ func TestFsEditSuccessMinimal(t *testing.T) {
 	if _, has := m["path"]; has {
 		t.Fatalf("全成功不应回显 path: %v", m)
 	}
-	if r.Attrs["ok"] != "true" || r.Attrs["edits"] != "2" {
-		t.Fatalf("attrs 不对: %v", r.Attrs)
-	}
-	if _, has := r.Attrs["edits_failed"]; has {
-		t.Fatalf("全成功不应带 edits_failed: %v", r.Attrs)
+	if len(r.Attrs) != 0 {
+		t.Fatalf("edit 不应带业务 attrs: %v", r.Attrs)
 	}
 	if got := readFile(t, env, "/e.txt"); got != "alpha BETA GAMMA\n" {
 		t.Fatalf("文件内容: %q", got)
@@ -149,15 +140,15 @@ func TestFsEditPartialFailure(t *testing.T) {
 		map[string]string{"oldText": "nothing-here-xxx", "newText": "y"},
 	)
 	m := parseOutcome(t, r)
-	if m["ok"] != false || m["applied"] != 1.0 || m["v"] == "" {
+	if m["ok"] != false || m["applied"] != 1.0 {
 		t.Fatalf("部分失败结果不对: %v", m)
 	}
 	errs := errorsOf(t, m)
 	if len(errs) != 1 || errs[0]["i"] != 2.0 || errs[0]["reason"] != "not-found" {
 		t.Fatalf("errors 不对: %v", errs)
 	}
-	if r.Attrs["ok"] != "false" || r.Attrs["edits"] != "1" || r.Attrs["edits_failed"] != "1" {
-		t.Fatalf("attrs 不对: %v", r.Attrs)
+	if len(r.Attrs) != 0 {
+		t.Fatalf("部分失败也不应复制业务 attrs: %v", r.Attrs)
 	}
 	// 成功条目已落盘
 	if got := readFile(t, env, "/e.txt"); got != "alpha BETA gamma\n" {
@@ -173,9 +164,6 @@ func TestFsEditAllFailedNoError(t *testing.T) {
 	m := parseOutcome(t, r)
 	if m["ok"] != false || m["applied"] != 0.0 {
 		t.Fatalf("全失败结果不对: %v", m)
-	}
-	if _, has := m["v"]; has {
-		t.Fatalf("未落盘不应带 v: %v", m)
 	}
 	errs := errorsOf(t, m)
 	if len(errs) != 1 || errs[0]["reason"] != "not-found" {
@@ -311,24 +299,5 @@ func TestFsEditOperationalErrors(t *testing.T) {
 	if _, err := RunFS(context.Background(), env, raw); err == nil ||
 		!strings.Contains(err.Error(), "not a text file") {
 		t.Fatalf("二进制应报 not a text file: %v", err)
-	}
-}
-
-func TestContentVersionStable(t *testing.T) {
-	if contentVersion("abc") != contentVersion("abc") {
-		t.Fatal("同内容同版本")
-	}
-	if contentVersion("abc") == contentVersion("abd") {
-		t.Fatal("不同内容应不同版本")
-	}
-	// 写后 v = 内容版本（跨调用一致）
-	env := newTestEnv(t)
-	w := parseOutcome(t, runWrite(t, env, "/v.txt", "alpha\n"))
-	if w["v"] != contentVersion("alpha\n") {
-		t.Fatalf("write v 与内容版本不一致: %v", w["v"])
-	}
-	e := parseOutcome(t, runEdit(t, env, "/v.txt", map[string]string{"oldText": "alpha", "newText": "beta"}))
-	if e["v"] != contentVersion("beta\n") {
-		t.Fatalf("edit v 与内容版本不一致: %v", e["v"])
 	}
 }

@@ -26,7 +26,6 @@ type ByteSource struct {
 	Seekable  bool                   `json:"seekable"`
 	Immutable bool                   `json:"immutable"`
 	SHA256    string                 `json:"sha256,omitempty"`
-	Version   string                 `json:"version,omitempty"`
 	Lifetime  string                 `json:"lifetime"`
 }
 type byteSource struct {
@@ -213,7 +212,7 @@ func (b *Bytes) UploadFor(ctx context.Context, owner, creator string, reader io.
 
 // AddFileFor transfers ownership of file, including on failure. verify rechecks
 // both policy and source identity before/during/after a range read.
-func (b *Bytes) AddFileFor(owner, creator string, file *os.File, size int64, version, mediaType string, verify func(context.Context) error) (ByteSource, error) {
+func (b *Bytes) AddFileFor(owner, creator string, file *os.File, size int64, mediaType string, verify func(context.Context) error) (ByteSource, error) {
 	if creator == "" {
 		creator = owner
 	}
@@ -237,7 +236,7 @@ func (b *Bytes) AddFileFor(owner, creator string, file *os.File, size int64, ver
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	descriptor := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: size, Version: version, MediaType: mediaType, Seekable: true, Lifetime: "fs_source"}
+	descriptor := ByteSource{Ref: protocol.FSResourceRef{ID: id, Epoch: b.epoch, Kind: "bytes"}, Size: size, MediaType: mediaType, Seekable: true, Lifetime: "fs_source"}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed || b.closingCreators[creator] {

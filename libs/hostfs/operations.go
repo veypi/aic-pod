@@ -22,7 +22,6 @@ type findArgs struct {
 type moveArgs struct {
 	Src       protocol.FSPath      `json:"src"`
 	Dst       protocol.FSPath      `json:"dst"`
-	IfVersion string               `json:"if_version"`
 	Condition protocol.FSCondition `json:"condition"`
 }
 type walkEntry struct {
@@ -218,15 +217,12 @@ func (f *FS) removeTree(ctx context.Context, call Call, p removeArgs) (any, erro
 	if len(p.Path.Segments) == 0 {
 		return nil, protocol.FSFail("permission_denied", "Cannot remove a root")
 	}
-	info, err := f.info(ctx, call, p.Path, true)
+	_, err := f.info(ctx, call, p.Path, true)
 	if errors.Is(err, fs.ErrNotExist) && p.MissingOK {
 		return map[string]bool{"removed": false}, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	if version(info) != p.IfVersion {
-		return nil, protocol.FSFail("version_conflict", "Removal source changed")
 	}
 	var planned []walkEntry
 	err = f.walk(ctx, call, p.Path, 256, true, false, false, func(e walkEntry) error { planned = append(planned, e); return nil })
@@ -243,10 +239,10 @@ func (f *FS) removeTree(ctx context.Context, call Call, p removeArgs) (any, erro
 		if err != nil {
 			return nil, partial(err, completed)
 		}
-		if !os.SameFile(current, e.info) || (!current.IsDir() && version(current) != version(e.info)) {
-			return nil, partial(protocol.FSFail("version_conflict", "Removal source changed"), completed)
+		if !os.SameFile(current, e.info) || (!current.IsDir() && fileStamp(current) != fileStamp(e.info)) {
+			return nil, partial(protocol.FSFail("source_changed", "Removal source changed"), completed)
 		}
-		_, err = f.remove(ctx, call, removeArgs{Path: e.path, IfVersion: version(current)})
+		_, err = f.remove(ctx, call, removeArgs{Path: e.path})
 		if err != nil {
 			return nil, partial(err, completed)
 		}
@@ -281,9 +277,6 @@ func (f *FS) move(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version(info) != p.IfVersion {
-		return nil, protocol.FSFail("version_conflict", "Move source changed")
-	}
 	// Moving a directory also moves every descendant across policy boundaries.
 	if err = f.walk(ctx, call, p.Src, 256, true, false, false, func(e walkEntry) error {
 		dst := protocol.FSPath{RootID: p.Dst.RootID, Segments: append(append([]string{}, p.Dst.Segments...), e.path.Segments[len(p.Src.Segments):]...)}
@@ -299,19 +292,15 @@ func (f *FS) move(ctx context.Context, call Call, p moveArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version(current) != p.IfVersion {
-		return nil, protocol.FSFail("version_conflict", "Move source changed")
+	if !os.SameFile(current, info) || fileStamp(current) != fileStamp(info) {
+		return nil, protocol.FSFail("source_changed", "Move source changed")
 	}
-	target, err := dh.Lstat(dn)
+	_, err = dh.Lstat(dn)
 	exists := err == nil
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	v := ""
-	if exists {
-		v = version(target)
-	}
-	if err = p.Condition.Check(v, exists); err != nil {
+	if err = p.Condition.Check(exists); err != nil {
 		return nil, err
 	}
 	if err = ctx.Err(); err != nil {

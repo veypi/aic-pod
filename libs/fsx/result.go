@@ -2,10 +2,8 @@ package fsx
 
 import (
 	"fmt"
-	"hash/fnv"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,24 +17,19 @@ type Result struct {
 	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
-func newResult(action, path string) *Result {
-	r := &Result{Attrs: map[string]string{"action": action}}
+func newResult(path string) *Result {
+	r := &Result{}
 	if path != "" {
-		r.Attrs["path"] = path
+		r.Attrs = map[string]string{"path": path}
 	}
 	return r
 }
 
 func (r *Result) set(k string, v any) {
+	if r.Attrs == nil {
+		r.Attrs = map[string]string{}
+	}
 	r.Attrs[k] = fmt.Sprint(v)
-}
-
-// contentVersion 返回内容的 FNV-1a 64bit 十六进制（写后版本号；供 P3
-// baseVersion 校验取用，JS 端为 BigInt 等价实现）。
-func contentVersion(s string) string {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(s))
-	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // ---- 上限（§2.5） ----

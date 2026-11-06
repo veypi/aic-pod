@@ -84,9 +84,6 @@ func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *proto
 			Gate:        c.fsGate(caller.Origin),
 		}
 		result, err := fsx.RunAction(ctx, env, in.Action, in.Args)
-		if result != nil {
-			c.attachFileURL(result.Attrs)
-		}
 		// FS 层失败按需归类（not_found / permission_denied / filesystem_error），
 		// 其余交给 AsFault（internal 等）。
 		return result, fsFault(err)

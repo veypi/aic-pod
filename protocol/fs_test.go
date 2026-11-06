@@ -67,21 +67,35 @@ func TestFSFaultClassification(t *testing.T) {
 }
 
 func TestWriteConditionsRequireExplicitIntent(t *testing.T) {
-	for _, condition := range []FSCondition{{}, {Absent: true, Any: true}, {Version: "v1", Any: true}} {
-		if err := condition.Check("v1", true); err == nil {
+	const hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	for _, condition := range []FSCondition{{}, {Absent: true, Any: true}, {Hash: hash, Any: true}} {
+		if err := condition.Check(true); err == nil {
 			t.Fatal("ambiguous write condition accepted")
 		}
 	}
-	if err := (FSCondition{Absent: true}).Check("v1", true); err == nil {
+	if err := (FSCondition{Absent: true}).Check(true); err == nil {
 		t.Fatal("create overwrote existing file")
 	}
-	if err := (FSCondition{Version: "v1"}).Check("v2", true); err == nil {
-		t.Fatal("stale version accepted")
-	}
-	if err := (FSCondition{Version: "v1"}).Check("v1", true); err != nil {
+	if err := (FSCondition{Any: true}).Check(true); err != nil {
 		t.Fatal(err)
 	}
-	if err := (FSCondition{Any: true}).Check("v2", true); err != nil {
+	if err := (FSCondition{Hash: hash}).Check(true, hash); err != nil {
 		t.Fatal(err)
 	}
+	if err := (FSCondition{Hash: hash}).Check(false, ""); protocolCode(err) != "file_hash_conflict" {
+		t.Fatalf("deleted file hash conflict = %v", err)
+	}
+	if err := (FSCondition{Hash: hash}).Check(true); protocolCode(err) != "unsupported" {
+		t.Fatalf("non-write hash condition = %v", err)
+	}
+	if err := (FSCondition{Hash: "bad"}).Check(true, "bad"); protocolCode(err) != "invalid_file_hash" {
+		t.Fatalf("invalid content hash = %v", err)
+	}
+}
+
+func protocolCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	return AsFault(err).Code
 }
