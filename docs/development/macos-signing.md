@@ -29,7 +29,7 @@ electron-builder 26 的签名/公证语义（已读 `node_modules/app-builder-li
 
 ## 方案
 
-补签嵌套裸 Mach-O（afterPack）→ 外层签名（electron-builder）→ 提交公证、轮询与 staple（afterSign）。公证钩子提交后立即输出 submission ID，每 30 秒查询状态，默认等待上限 60 分钟。
+补签嵌套裸 Mach-O（afterPack）→ 外层签名（electron-builder）→ 提交公证、轮询与 staple（afterSign）。公证钩子提交后立即输出 submission ID，每 30 秒查询状态，默认等待上限 4 小时。
 
 ### 1. electron-builder.yml
 
@@ -190,7 +190,11 @@ desktop job 已接入（仅 macOS runner）：
 - **`runner.os` 的取值是 `macOS` / `Linux` / `Windows`，没有 `Darwin`**：写成 `Darwin` 会让整段 macOS 步骤静默跳过（构建照样“成功”，但产物未签名）。
 - 钩子在无 CSC_LINK 时直接用**搜索列表里的有效身份**（CI 步骤已装好），并按同一证书补签嵌套二进制。
 - `APPLE_API_KEY` Secret 可存原始 PEM 或 base64；准备步骤落盘后立即用 `openssl pkey -check` 验证内容，并用 `notarytool history` 验证 Key ID / Issuer / 私钥组合。electron-builder 最终接收的是 .p8 文件路径；该私钥**只能下载一次**。
-- 公证是异步的（上传 + Apple 处理）。`after-sign-notarize.js` 提交后立即打印 submission ID，每 30 秒输出状态；默认 60 分钟超时后 CI 失败，但 Apple 会继续处理，可凭 ID 用 `notarytool info/log` 查询。
+- 公证是异步的（上传 + Apple 处理）。`after-sign-notarize.js` 提交后立即打印 submission ID，每 30 秒输出状态。
+- **实测 Apple 队列可能耗时 1～13 小时**（2026-11-05 四个 submission 最终全部 Accepted，其中三个是在 CI 超时后才被接受）。所以等待窗口默认 4 小时，超时**不判失败**：
+  1. afterSign 把已签名的 `.app` zip 与 submission ID 写入 `dist/notary-pending/`，CI 上传为 `signed-app-<target>` artifact；未 staple 的 DMG 不上传、不进 Release。
+  2. 其它平台照常发布；mac 资产之后用手动工作流 **`notarize-finalize`** 补齐：输入 build run id + target + tag，它下载已签名 app、继续等 Apple（单次 300 分钟，可用同一 submission ID 无限重跑），接受后 staple、`electron-builder --prepackaged` 重打 DMG（prepackaged 跳过打包与签名，不会覆盖 staple 票据）并 `gh release upload --clobber`。
+  3. 随时可查状态：`node desktop/scripts/notary-wait.js --id <submission-id> --once`（需 APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER 环境变量；`--history` 列全部）。
 - 手动 `workflow_dispatch` 只签名不公证；正式 `v*` tag 才准备公证凭据。tag 构建的 stapler 与 Gatekeeper 验证是硬失败，不允许只打印警告。
 - macOS 只能 macOS runner 构建（已有 macos-15 / macos-14）。
 - 运行依赖由 beforePack 钩子现下（storage.googleapis.com / GitHub Releases），CI runner 直连即可，不依赖本机代理。
@@ -253,7 +257,8 @@ xcrun notarytool log <submission-id> --key <p8> --key-id <id> --issuer <issuer>
 
 ## 未决
 
-- **签名链已跑通**：2026-11-05 CI 的 amd64 已完成 Developer ID 签名、公证、stapler 与 Gatekeeper 验收；根因是 G2 中间证书未进入实际签名钥匙串。新的 afterSign 轮询实现待正式 tag 验收。
+- **签名链已跑通**：2026-11-05 CI 的 amd64 已完成 Developer ID 签名、公证、stapler 与 Gatekeeper 验收；根因是 G2 中间证书未进入实际签名钥匙串。
+- **两段式公证待验收**：afterSign 轮询 + notarize-finalize 补 staple 流程待正式 tag 跑通；GitHub 托管 job 上限 6 小时，故等待窗口拆成构建期 4 小时 + finalize 5 小时可重跑。
 - **Team ID**：`CC6VQMAF97`（证书签发前从证书全名取得，已确认）。
 - ** notary 是否接受混编 Team ID 的嵌套第三方 app**（Chrome for Testing / CuaDriver 为上游 Team）——实测确认；被拒则按上表退路处理。
 - **自动更新**（electron-updater + GitHub Releases 更新源 + 签名校验）另立一轮。
