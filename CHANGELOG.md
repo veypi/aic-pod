@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## v0.10.2 — 2026-11-07
+## v0.10.3 — 2026-11-07
 
 - **设备端常驻文件索引（rg 加速）**：新增 `libs/indexer` 常驻索引服务——按 `index_roots`（默认工作目录）维护文件名与内容候选索引，文件变更经 fsnotify（darwin 用平台原生 watch）增量刷新；`fsx` 的 rg 内容/文件枚举与 vsh 内建 rg 均在「可提取必选字面量」时先向索引取候选子集再逐文件真实匹配（索引不可用或未覆盖时回退实时遍历）。新增配置项 `index_roots`（设备设置面可改，目录必须存在）。测试：`libs/indexer`、`libs/fsx`、`libs/host`。**设备端需升级 pod 生效。**
 
@@ -15,7 +15,9 @@
 
 - **hostfs 保存条件统一为内容 SHA-256**：结构化 write 新增可选 `condition.hash`，仅在传哈希时流式读取当前内容并在运行时互斥内校验后原子替换；不传 hash 的写入及 AI `fs write/edit` 保持无条件覆盖。删除文件元数据 `Version`、`if_version` 与旧 `version` 写条件，AI fs 结果同步移除 FNV `v`；删除/移动/复制不再要求版本参数。单次读取和目录操作仅在内部使用不对外暴露的文件戳检测对象变化。按测试版策略不提供新旧字段兼容。**发布顺序：先部署包含新前端协议的 aic 后端与页面，再升级各设备 pod；严格 JSON 解码会拒绝新旧混用。**
 
-### 2026-11-05 首发内容
+- **CI 签名校验不再写死 app 名**：`.github/workflows/build.yml` 的 Verify signature 步骤写死了旧产品名 `AIC Desktop.app`，而产物早已改名 `ivec.app`（`productName` 换名时漏改 workflow）——`ls` 取不到路径 → `codesign` 报 "No such file" → macOS 作业必红，v0.10.2 的 CI 就红在这一步，Release 未生成。现按 `dist/mac*/*.app` 定位产物，取不到时直接报错并打印 dist 内容；CI 另补跑新增的 `libs/indexer` 测试。
+
+## v0.10.2 — 2026-11-05
 
 - **macOS 桌面壳改 Developer ID 签名 + Apple 公证**：产物从「ad-hoc 深签（用户首次打开需在隐私与安全性手动放行）」改为 Developer ID Application 签名并经 Apple 公证 + staple（正式分发的包由 CI 出）。要点：①`electron-builder.yml` 去掉写死的 `identity: null`，改置 `hardenedRuntime` + `build/entitlements.mac.plist`（Electron 必需：JIT / 未签名可执行内存 / 关闭库校验）+ `notarize: true`；②afterPack 钩子改名 `after-pack-sign.js`，按可用证书分流——有 Developer ID 身份时给 `Contents/Resources` 下的裸 Mach-O（Go 后端、agent-browser、预装包设备程序）补签（osx-sign 不签 Resources，嵌套代码未签会被公证拒），无证书时保留 ad-hoc 深签兜底；③随包携带 2025 起 Developer ID 的 **G2 签发链**证书（`desktop/build/certs/`，macOS 不预装，缺则 codesign 建不出链）；④CI 接入 G2 链导入、公证凭据（`APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`）与签名/票据校验步骤。方案与风险见 `docs/development/macos-signing.md`。
 
