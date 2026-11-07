@@ -7,6 +7,12 @@
 
 ## 未发布
 
+- **设备端常驻文件索引（rg 加速）**：新增 `libs/indexer` 常驻索引服务——按 `index_roots`（默认工作目录）维护文件名与内容候选索引，文件变更经 fsnotify（darwin 用平台原生 watch）增量刷新；`fsx` 的 rg 内容/文件枚举与 vsh 内建 rg 均在「可提取必选字面量」时先向索引取候选子集再逐文件真实匹配（索引不可用或未覆盖时回退实时遍历）。新增配置项 `index_roots`（设备设置面可改，目录必须存在）。测试：`libs/indexer`、`libs/fsx`、`libs/host`。**设备端需升级 pod 生效。**
+
+- **hostfs 递归 rg 跳过无权限目录**：递归搜索遇到读目录被拒时按原生 rg 语义跳过该目录继续搜兄弟目录（此前整次搜索失败）。测试：`libs/fsx`。**设备端需升级 pod 生效。**
+
+- **桌面壳把平台明文地址提升为安全上下文**：平台地址为明文 http 且非 loopback 时浏览器不视为安全上下文，`navigator.storage` 不可用 → page 端文件能力（fs 工具 `_host=page`、二进制上传引用、OPFS 类技能）整体失效。桌面壳在 app ready 之前用 Chromium 开关 `--unsafely-treat-insecure-origin-as-secure` 把该 origin 提升为安全上下文（开关仅进程启动期可追加，故此处同步取一次后端 `config get` 的平台地址）；运行期改地址不在启动期名单内时提示重启客户端。`AIC_TRUST_INSECURE_ORIGIN=0` 可关闭。**需重新打包桌面端生效。**
+
 - **hostfs 保存条件统一为内容 SHA-256**：结构化 write 新增可选 `condition.hash`，仅在传哈希时流式读取当前内容并在运行时互斥内校验后原子替换；不传 hash 的写入及 AI `fs write/edit` 保持无条件覆盖。删除文件元数据 `Version`、`if_version` 与旧 `version` 写条件，AI fs 结果同步移除 FNV `v`；删除/移动/复制不再要求版本参数。单次读取和目录操作仅在内部使用不对外暴露的文件戳检测对象变化。按测试版策略不提供新旧字段兼容。**发布顺序：先部署包含新前端协议的 aic 后端与页面，再升级各设备 pod；严格 JSON 解码会拒绝新旧混用。**
 
 ## v0.10.2 — 2026-11-05
