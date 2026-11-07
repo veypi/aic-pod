@@ -17,12 +17,13 @@
 // 设置能力（platform:check/open）仅设置窗（app://aic 协议）可调；
 // local:api 的设置面分支两类 frame 都可用，但只落盘 config.yaml（无 HTTP、无端口、无 code）。
 const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol } = require('electron')
-const { spawn } = require('child_process')
+const { spawn, execFileSync } = require('child_process')
 const { waitForStartup } = require('./backend-startup.cjs')
 const { createBackend } = require('./backend.cjs')
 const { capturePlatform } = require('./screenshot.cjs')
 const { composeLocalStatus } = require('./host-state.cjs')
 const { browserExecutable, agentBrowserBinaryName } = require('./runtime-paths.cjs')
+const { insecureOriginFor, hostFromConfigOutput } = require('./secure-origin.cjs')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
@@ -49,6 +50,63 @@ const DEFAULT_HOST = 'https://ivec-ai.com'
 const LEGACY_HOSTS = ['ivec.ai']
 const { createHostPolicy } = require('./platform-hosts.cjs')
 const hostPolicy = createHostPolicy({ platform: DEFAULT_HOST, defaultHost: DEFAULT_HOST, legacyHosts: LEGACY_HOSTS })
+
+// ---- 平台 origin 的安全上下文（page 端文件能力依赖 OPFS）----
+// 明文 http + 非 loopback 的平台地址不是「安全上下文」：浏览器不暴露 navigator.storage，
+// page 端文件能力整体失效（fs 工具 _host=page、二进制文件上传引用、OPFS 类技能），
+// 页面报「fs write: OPFS not available in this browser」。
+// 桌面壳在 app ready 之前把这类 origin 提升为安全上下文
+// （Chromium: --unsafely-treat-insecure-origin-as-secure）——开关只在进程启动期可追加，
+// 故此处同步取一次平台地址（后端 config get 子命令：配置真相只有一份，不在本壳重复解析 YAML）。
+// AIC_TRUST_INSECURE_ORIGIN=0 可关闭（回到「非安全上下文 = page 端能力缺失」）。
+let trustedInsecureOrigin = ''
+let originNoticeShown = false
+
+// 同步取平台地址（app ready 前唯一可用入口：后端子命令只读配置，不起常驻会话）。
+function platformHostSync() {
+  try {
+    const out = execFileSync(backendBin, ['config', 'get'], { encoding: 'utf8', timeout: 5000, windowsHide: true })
+    return hostFromConfigOutput(out)
+  } catch (e) {
+    return '' // 后端二进制缺失 / 配置不可读 → 无从判定，按未提升处理
+  }
+}
+
+if (process.env.AIC_TRUST_INSECURE_ORIGIN !== '0') {
+  const origin = insecureOriginFor(platformHostSync())
+  if (origin) {
+    app.commandLine.appendSwitch('unsafely-treat-insecure-origin-as-secure', origin)
+    trustedInsecureOrigin = origin
+    console.log('[secure-origin] 平台 origin 提升为安全上下文：' + origin)
+  }
+}
+
+// 运行期平台地址若仍需提升、但不在启动期已提升的名单内（首配后改地址等），
+// 开关无法追加 → 明确提示重启客户端，不静默带着残缺能力跑。
+function ensureOriginTrusted(origin) {
+  const need = insecureOriginFor(origin)
+  if (!need || need === trustedInsecureOrigin || originNoticeShown) return
+  originNoticeShown = true
+  const detail =
+    `平台地址 ${origin} 是明文 HTTP，不是安全上下文：page 端文件能力不可用\n` +
+    '（fs 工具 _host=page、二进制文件上传引用、OPFS 类技能）。\n' +
+    '重启客户端后生效——桌面壳启动时会把该地址提升为安全上下文。'
+  dialog
+    .showMessageBox({
+      type: 'warning',
+      buttons: ['稍后', '立即重启'],
+      defaultId: 1,
+      cancelId: 0,
+      message: '需要重启客户端以启用 page 端文件能力',
+      detail,
+    })
+    .then(({ response }) => {
+      if (response === 1) {
+        app.relaunch()
+        app.exit(0)
+      }
+    })
+}
 
 // ---- 设置窗自定义协议（2026-09-22 去本地管理 API） ----
 // app://aic/<path> → desktop/settings-ui/<path>；实现见 settings-protocol.cjs。
@@ -192,6 +250,7 @@ async function start() {
   if (!cfg) throw new Error('无法读取本地服务配置，请检查本地服务日志')
   if (cfg && cfg.host) host = cfg.host
   hostPolicy.replace(host)
+  ensureOriginTrusted(host) // 运行期地址不在启动期提升名单内 → 提示重启
   // 默认打开地址：host + home_path（默认 /；非法值回退 /）
   homePath = (cfg && cfg.home_path) || '/'
   if (typeof homePath !== 'string' || !homePath.startsWith('/') || homePath.startsWith('//')) homePath = '/'
@@ -390,6 +449,7 @@ async function syncHostFromConfig() {
   if (!cfg || !cfg.host) return
   host = cfg.host
   hostPolicy.remember(host)
+  ensureOriginTrusted(host)
 }
 
 async function probeRoot(url) {
@@ -666,6 +726,7 @@ function registerIpc() {
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
     hostPolicy.remember(u)
+    ensureOriginTrusted(u)
     loadMain(u)
     // 不关闭配置窗口：配置页内任何操作（保存/获取）都不得让配置页消失
     return true
