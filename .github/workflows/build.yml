@@ -46,6 +46,8 @@ jobs:
         run: go test ./libs/execution
       - name: Test native files and authorization config
         run: go test ./libs/hostfs ./cfg
+      - name: Test resident file index
+        run: go test ./libs/indexer
       - name: Prepare signing credentials (macOS)
         # 签名凭据自己装，不走 electron-builder 的 CSC_LINK 导入路径：后者建钥匙串用随机
         # 口令、却拿 p12 口令去 set-key-partition-list，那一步必然失败（且 CSC_* 跨平台，
@@ -137,7 +139,14 @@ jobs:
       - name: Verify signature (macOS)
         if: runner.os == 'macOS'
         run: |
-          APP=$(ls -d dist/mac*/AIC\ Desktop.app | head -1)
+          # app 目录名随 productName 变化（现为 ivec.app），不写死名字。
+          APP=$(ls -d dist/mac*/*.app 2>/dev/null | head -1)
+          if [[ -z "$APP" ]]; then
+            echo "未找到签名产物：dist/mac*/*.app 为空" >&2
+            ls -R dist | head -50 >&2
+            exit 1
+          fi
+          echo "签名产物：$APP"
           codesign --verify --deep --strict "$APP"
           codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Authority|TeamIdentifier" || true
           if [[ "${{ steps.notary.outputs.pending }}" == "true" ]]; then
