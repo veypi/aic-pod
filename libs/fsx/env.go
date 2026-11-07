@@ -13,6 +13,7 @@ import (
 
 	"github.com/veypi/aic-pod/protocol"
 	"github.com/veypi/vigo/contrib/ufs"
+	"github.com/veypi/vsh/commands"
 )
 
 // Env 是 fsx 薄层环境（自 vcore.Env 收敛：剥除 VirtualRoot/Roots/ProtectRoots/
@@ -31,6 +32,8 @@ type Env struct {
 	// VirtualRoot 为 true 时 FS 根 "/" 是虚拟挂载列表（host windows 盘符根，
 	// ls/rg 根目录特判）；cloud 恒 false。
 	VirtualRoot bool
+	// FileIndex 是 host 可选的常驻 rg 候选索引；nil 保持实时遍历。
+	FileIndex commands.FileIndex
 	// Resolve 把调用路径归一为 FS 内绝对路径（jail 由调用方实现：
 	// 越界返回错误）；nil = 词法绝对化（相对 → Workdir 下）。
 	ResolveFunc func(p string) (string, error)

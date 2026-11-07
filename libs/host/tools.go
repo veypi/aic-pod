@@ -81,6 +81,7 @@ func (c *Client) handleFS(ctx context.Context, caller protocol.Caller, in *proto
 			Workdir:     filepath.ToSlash(c.options().WorkDir),
 			ImageData:   true, // host 端图片经 image_data 返回（§2.2）
 			VirtualRoot: runtime.GOOS == "windows",
+			FileIndex:   c.index,
 			Gate:        c.fsGate(caller.Origin),
 		}
 		result, err := fsx.RunAction(ctx, env, in.Action, in.Args)

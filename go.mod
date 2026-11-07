@@ -3,6 +3,8 @@ module github.com/veypi/aic-pod
 go 1.27.0
 
 require (
+	github.com/fsnotify/fsevents v0.2.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pion/ice/v4 v4.4.2

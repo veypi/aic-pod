@@ -30,6 +30,7 @@ func optionsOf(o cfg.Options, deviceType, version string, onLog func(string, ...
 		Host:          o.Host,
 		Key:           o.Key,
 		WorkDir:       o.WorkDir,
+		IndexRoots:    o.IndexRoots,
 		DeviceType:    deviceType,
 		Version:       version,
 		ExecTimeout:   timeout,

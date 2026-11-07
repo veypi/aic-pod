@@ -98,6 +98,7 @@ type EngineConfig struct {
 	// 不跨 exec 持久，ExecRequest.Env 覆盖同名键）。
 	BaseEnv      map[string]string
 	FileCommands commands.FileCommandResolver
+	FileIndex    commands.FileIndex
 	ExecPolicy   ExecPolicy
 	// Logf 可选日志。
 	Logf func(format string, args ...any)
@@ -169,6 +170,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		vshcore.WithPolicy(pol),
 		vshcore.WithBaseEnv(cfg.BaseEnv),
 		vshcore.WithFileCommandResolver(cfg.FileCommands),
+		vshcore.WithFileIndex(cfg.FileIndex),
 		vshcore.WithFileSystem(vshcore.CustomFileSystem(factory, "/")),
 		vshcore.WithTracing(vshcore.TraceConfig{Mode: vshcore.TraceRedacted}),
 	}

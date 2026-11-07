@@ -131,6 +131,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			Discoverable: c.hostDiscoverable,
 		},
 		FileCommands: commands.FileCommandResolverFunc(c.resolveFileCommand),
+		FileIndex:    c.index,
 		ExecPolicy:   c,
 	})
 	if err != nil {

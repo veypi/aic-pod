@@ -6,6 +6,7 @@ package fsx
 
 import (
 	"io/fs"
+	"strings"
 	"testing"
 
 	"github.com/veypi/aic-pod/protocol"
@@ -106,6 +107,44 @@ func TestRgStopsWalkingAtLimit(t *testing.T) {
 			t.Fatal("文件列举达到 limit 后仍遍历了后续目录")
 		}
 	})
+}
+
+type readDirErrorFS struct {
+	ufs.FS
+	path string
+	err  error
+}
+
+func (f *readDirErrorFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == f.path {
+		return nil, f.err
+	}
+	return f.FS.ReadDir(name)
+}
+
+func TestRgSkipsPermissionDeniedDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "content", args: map[string]any{"action": "rg", "path": "/", "pattern": "match"}},
+		{name: "file list", args: map[string]any{"action": "rg", "path": "/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			runWrite(t, env, "/a/denied/secret.txt", "match\n")
+			runWrite(t, env, "/a/visible.txt", "match\n")
+			env.FS = &readDirErrorFS{FS: env.FS, path: "/a/denied", err: fs.ErrPermission}
+
+			r := runFS(t, env, tc.args)
+			if !strings.Contains(r.Content, "visible.txt") {
+				t.Fatalf("可读兄弟目录未被搜索: %s", r.Content)
+			}
+			if strings.Contains(r.Content, "secret.txt") {
+				t.Fatalf("权限拒绝目录不应出现在结果中: %s", r.Content)
+			}
+		})
+	}
 }
 
 func TestRgSingleFileAtLimitIsNotTruncated(t *testing.T) {

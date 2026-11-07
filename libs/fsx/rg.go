@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"regexp"
 	"strconv"
 	"strings"
@@ -270,6 +271,8 @@ func fsRg(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 			return nil
 		}
 		includeMinified = true
+	} else if indexed, ok := rgIndexedContent(ctx, env, abs, p.Pattern, p.Glob, p.All, nil); ok {
+		files = indexed
 	} else {
 		files = func(yield func(string) bool) error {
 			return rgWalkDepth(ctx, env, abs, p.Glob, p.All, yield, 0)
@@ -304,6 +307,12 @@ func rgWalkDepth(ctx context.Context, env *Env, dir string, globs []string, hidd
 	}
 	entries, err := env.FS.ReadDir(dir)
 	if err != nil {
+		// Recursive search treats an unreadable directory like native rg's
+		// non-fatal traversal error: skip it and keep searching siblings.
+		// The explicit root is still statted and rejected by the caller.
+		if errors.Is(err, fs.ErrPermission) {
+			return nil
+		}
 		return err
 	}
 	for _, e := range entries {
@@ -437,11 +446,19 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	if !info.IsDir() {
 		// 单文件显式路径：直出（不受隐藏/glob 过滤，对齐真实 rg 显式路径语义）
 		yield(abs)
-	} else if err := rgWalkDepth(ctx, env, abs, globs, hidden, yield, depth); err != nil {
-		if !errors.Is(err, errRgStop) {
-			return nil, fsOpErr("rg", err)
+	} else {
+		files := rgFileIter(func(yield func(string) bool) error {
+			return rgWalkDepth(ctx, env, abs, globs, hidden, yield, depth)
+		})
+		if indexed, ok := rgIndexedFiles(ctx, env, abs, globs, hidden, depth); ok {
+			files = indexed
 		}
-		truncated = true
+		if err := files(yield); err != nil {
+			if !errors.Is(err, errRgStop) {
+				return nil, fsOpErr("rg", err)
+			}
+			truncated = true
+		}
 	}
 	jb.close(`]}`)
 	r.Content = jb.done()

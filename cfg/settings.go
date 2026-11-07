@@ -18,6 +18,7 @@ type SettingsView struct {
 	Host        string   `json:"host"`
 	Key         string   `json:"key"`
 	WorkDir     string   `json:"work_dir"`
+	IndexRoots  []string `json:"index_roots"`
 	ExecTimeout string   `json:"exec_timeout"`
 	HomePath    string   `json:"home_path"`
 	ExecPolicy  string   `json:"exec_policy"`
@@ -36,7 +37,7 @@ type SettingsView struct {
 func SettingsSnapshot() *SettingsView {
 	o := Global
 	return &SettingsView{Version: Version,
-		Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, ExecTimeout: o.ExecTimeout,
+		Host: o.Host, Key: o.Key, WorkDir: o.WorkDir, IndexRoots: o.IndexRoots, ExecTimeout: o.ExecTimeout,
 		HomePath:   o.NormalizedHomePath(),
 		ExecPolicy: o.ExecPolicy, ExecRules: o.ExecRules,
 		FsPolicy: o.FsPolicy, FsRules: o.FsRules,
@@ -56,6 +57,7 @@ func SettingsSnapshot() *SettingsView {
 type SettingsUpdate struct {
 	Host        string    `json:"host"`
 	WorkDir     string    `json:"work_dir"`
+	IndexRoots  *[]string `json:"index_roots"`
 	ExecTimeout string    `json:"exec_timeout"`
 	HomePath    string    `json:"home_path"`
 	ExecPolicy  string    `json:"exec_policy"`
@@ -128,6 +130,26 @@ func (u *SettingsUpdate) Apply() error {
 		wd = abs
 	}
 	fileCfg.WorkDir = wd
+	if u.IndexRoots != nil {
+		roots := make([]string, 0, len(*u.IndexRoots))
+		for _, configured := range *u.IndexRoots {
+			root := strings.TrimSpace(configured)
+			if root == "" {
+				continue
+			}
+			root = ExpandHome(root)
+			abs, err := filepath.Abs(root)
+			if err != nil {
+				return &InvalidArg{Field: "index_roots", Reason: err.Error()}
+			}
+			st, err := os.Stat(abs)
+			if err != nil || !st.IsDir() {
+				return &InvalidArg{Field: "index_roots", Reason: "not a directory: " + abs}
+			}
+			roots = append(roots, abs)
+		}
+		fileCfg.IndexRoots = roots
+	}
 	fileCfg.ExecTimeout = strings.TrimSpace(u.ExecTimeout)
 	u.applyAuth(fileCfg)
 	// home_path：必须以单个 / 开头（// 开头是协议相对 URL，拼接后会跳转到别的站点，拒绝）

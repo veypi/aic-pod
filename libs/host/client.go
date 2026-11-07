@@ -26,6 +26,7 @@ import (
 	"github.com/veypi/aic-pod/libs/fsx"
 	"github.com/veypi/aic-pod/libs/gitx"
 	"github.com/veypi/aic-pod/libs/hostfs"
+	"github.com/veypi/aic-pod/libs/indexer"
 	"github.com/veypi/aic-pod/libs/sshx"
 
 	"github.com/veypi/aic-pod/libs/rtc"
@@ -40,6 +41,7 @@ type Options struct {
 	Host          string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
 	Key           string        // 设备凭证复合串 "<host_id>.<vbase 四段 credential>"（必填，平台设备页签发）
 	WorkDir       string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
+	IndexRoots    []string      // rg 常驻文件名/内容索引根；空 = WorkDir
 	DeviceName    string        // 展示名称，默认 hostname
 	DeviceType    string        // 客户端类型（cli/desktop/...），默认 cli
 	Version       string        // 客户端版本号（va.b.c，§6.3 版本门禁）
@@ -92,6 +94,7 @@ type Client struct {
 	files           *hostfs.FS
 	bytes           *hostfs.Bytes
 	initErr         error
+	index           *indexer.Service
 	rtcSvc          *rtc.Service // hosts_rtc/3 直连服务
 	logf            func(string, ...any)
 }
@@ -140,6 +143,15 @@ func New(opts Options) *Client {
 		procs:  procs,
 		perms:  perms,
 		logf:   logf,
+	}
+	indexRoots := opts.IndexRoots
+	if len(indexRoots) == 0 {
+		indexRoots = []string{opts.WorkDir}
+	}
+	if idx, err := indexer.New(indexer.Config{Roots: indexRoots, Logf: logf}); err != nil {
+		c.logf("index: initialization failed; rg remains real-time: %v", err)
+	} else {
+		c.index = idx
 	}
 
 	if dc, err := protocol.ParseDeviceCredential(opts.Key); err == nil {
@@ -294,6 +306,9 @@ func (c *Client) Close() error {
 	}
 	if c.bytes != nil {
 		_ = c.bytes.Close()
+	}
+	if c.index != nil {
+		_ = c.index.Close()
 	}
 	if c.cmds != nil {
 		c.cmds.close()
