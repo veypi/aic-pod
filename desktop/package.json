@@ -1,7 +1,7 @@
 {
   "name": "aic-desktop",
   "productName": "ivec",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "ivec — Electron shell + Go backend (host agent)",
   "main": "main.js",
   "private": true,

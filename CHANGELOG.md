@@ -5,6 +5,24 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.10.4 — 2026-11-07
+
+- **asar 打包补上 `secure-origin.cjs`**：`main.js` require 了它，但 `electron-builder.yml`
+  的 `files` 列表没列（新增文件时漏同步）——linux/windows 桌面包在 asar 校验步骤报
+  “缺失/无法解析: /main.js → ./secure-origin.cjs”而构建失败。桌面壳把平台明文地址
+  提升为安全上下文的逻辑此前根本进不了包。
+- **`libs/indexer` 的 fsevents 后端只在 `darwin && cgo` 下编译**：fsevents 是 cgo 绑定，
+  交叉编译 darwin（`CGO_ENABLED=0`）时整包编译不过（`undefined: EventFlags` 等），
+  darwin/arm64 的 cli 与桌面构建直接失败。改为 cgo 不可用时回退 fsnotify 后端
+  （`watch_fsnotify.go` 的 build tag 放宽到 `!darwin || !cgo`）。
+- **`stapler validate` 遇网络抖动重试**：validate 要访问 Apple 票据服务（CloudKit），
+  CI runner 偶发 “The network connection was lost”（Error 68）直接判失败。现在重试
+  3 次（间隔 15s）再判定；票据已写入本地 app，失败多半是网络而非包本身。
+- **indexer 测试按规范路径取索引根**：Windows 上索引根按 `protocol.NormalizeHostPath`
+  规范（`C:/…` → `/c/…`），测试原先用 `filepath.ToSlash` 得到 `C:/…`，与索引内部的
+  规范形式对不上——Windows 上查询全部落空、索引退化为实时遍历。测试改用与实现相同的
+  规范路径。设备端 Windows pod 的索引行为因此与 macOS/Linux 对齐。
+
 ## v0.10.3 — 2026-11-07
 
 - **设备端常驻文件索引（rg 加速）**：新增 `libs/indexer` 常驻索引服务——按 `index_roots`（默认工作目录）维护文件名与内容候选索引，文件变更经 fsnotify（darwin 用平台原生 watch）增量刷新；`fsx` 的 rg 内容/文件枚举与 vsh 内建 rg 均在「可提取必选字面量」时先向索引取候选子集再逐文件真实匹配（索引不可用或未覆盖时回退实时遍历）。新增配置项 `index_roots`（设备设置面可改，目录必须存在）。测试：`libs/indexer`、`libs/fsx`、`libs/host`。**设备端需升级 pod 生效。**

@@ -23,7 +23,7 @@ func TestCandidatesContentFilesAndScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(root)
+	canonical := canonicalRootPath(t, root)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, FilesOnly: true}, func(paths []string) bool {
 		return len(paths) == 3
 	})
@@ -39,7 +39,7 @@ func TestCandidatesContentFilesAndScope(t *testing.T) {
 	if _, ok := s.Candidates(context.Background(), commands.FileIndexQuery{Root: canonical, Literals: []string{"x"}}); ok {
 		t.Fatal("short literal must fall back to live search")
 	}
-	if _, ok := s.Candidates(context.Background(), commands.FileIndexQuery{Root: filepath.ToSlash(t.TempDir()), FilesOnly: true}); ok {
+	if _, ok := s.Candidates(context.Background(), commands.FileIndexQuery{Root: canonicalRootPath(t, t.TempDir()), FilesOnly: true}); ok {
 		t.Fatal("outside index_roots must fall back to live search")
 	}
 }
@@ -53,7 +53,7 @@ func TestWatcherCreateModifyRenameAndDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(root)
+	canonical := canonicalRootPath(t, root)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, FilesOnly: true}, func(paths []string) bool {
 		return len(paths) == 1
 	})
@@ -98,7 +98,7 @@ func TestSymlinkedRootKeepsCallerPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(link)
+	canonical := canonicalRootPath(t, link)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, Literals: []string{"needle"}}, func(paths []string) bool {
 		return slices.Contains(paths, canonical+"/a.txt")
 	})
@@ -116,7 +116,7 @@ func TestHiddenCandidatesRequireOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(root)
+	canonical := canonicalRootPath(t, root)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, Literals: []string{"needle"}}, func(paths []string) bool {
 		return len(paths) == 1 && paths[0] == canonical+"/visible.txt"
 	})
@@ -136,7 +136,7 @@ func TestSkipsNoiseTreesAndFallsBackForExplicitNoiseRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(root)
+	canonical := canonicalRootPath(t, root)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, Literals: []string{"needle"}}, func(paths []string) bool {
 		return slices.Contains(paths, canonical+"/visible.txt")
 	})
@@ -157,7 +157,7 @@ func TestUnindexedFileRemainsContentCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(root)
+	canonical := canonicalRootPath(t, root)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, FilesOnly: true}, func(paths []string) bool {
 		return len(paths) == 1
 	})
@@ -175,7 +175,7 @@ func TestBinaryFileIsNotAContentCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	canonical := filepath.ToSlash(root)
+	canonical := canonicalRootPath(t, root)
 	waitCandidates(t, s, commands.FileIndexQuery{Root: canonical, FilesOnly: true}, func(paths []string) bool {
 		return len(paths) == 1
 	})
@@ -183,6 +183,18 @@ func TestBinaryFileIsNotAContentCandidate(t *testing.T) {
 	if !ok || len(paths) != 0 {
 		t.Fatalf("binary file should not be rechecked for content: %v, %v", paths, ok)
 	}
+}
+
+// canonicalRootPath returns the index's canonical form of a native path
+// (Windows: /c/... via protocol.NormalizeHostPath, others: absolute slash
+// path). Tests must query the index with this form, not filepath.ToSlash.
+func canonicalRootPath(t *testing.T, native string) string {
+	t.Helper()
+	canonical, _, err := canonicalRoot(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }
 
 func waitCandidates(t *testing.T, s *Service, query commands.FileIndexQuery, predicate func([]string) bool) {

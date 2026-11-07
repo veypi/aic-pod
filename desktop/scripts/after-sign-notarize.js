@@ -51,6 +51,24 @@ function preservePending(context, archive, id) {
   );
 }
 
+// stapler validate 需要访问 Apple 的票据服务（CloudKit），CI runner 上会偶发
+// “The network connection was lost”（Error 68）。票据此时已写入本地 app，失败
+// 多半是网络抖动——重试几次再判定失败。
+function validateStapled(appPath, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      execFileSync("xcrun", ["stapler", "validate", appPath], { stdio: "inherit" });
+      return;
+    } catch (err) {
+      if (attempt >= attempts) throw err;
+      console.log(
+        `[notary] stapler validate 第 ${attempt} 次失败，重试中：${err.message}`,
+      );
+      execFileSync("sleep", ["15"]);
+    }
+  }
+}
+
 module.exports = async (context) => {
   if (context.electronPlatformName !== "darwin") return;
   const credential = credentials();
@@ -94,7 +112,7 @@ module.exports = async (context) => {
     }
 
     execFileSync("xcrun", ["stapler", "staple", appPath], { stdio: "inherit" });
-    execFileSync("xcrun", ["stapler", "validate", appPath], { stdio: "inherit" });
+    validateStapled(appPath);
     console.log(`[notary] 公证与 staple 完成：${id}`);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
