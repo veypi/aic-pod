@@ -9,14 +9,21 @@ jobs:
   desktop:
     name: desktop (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # GitHub 于 2026-11-02 退役 macos-14 runner（作业在启动前即被取消），Intel x64
+    # 现在只剩付费的 larger runner label。标记 experimental：没有配额时该作业失败
+    # 不阻塞其余平台，也不阻塞 Release。
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: ${{ matrix.timeout || 360 }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15          # arm64
             target: desktop-darwin-arm64
-          - os: macos-14          # x64
+          - os: macos-15-intel    # x64（付费 larger runner）
             target: desktop-darwin-amd64
+            experimental: true
+            timeout: 90
           - os: windows-latest
             target: desktop-windows-amd64
           - os: ubuntu-latest
