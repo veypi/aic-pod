@@ -23,6 +23,8 @@
   规范形式对不上——Windows 上查询全部落空、索引退化为实时遍历。测试改用与实现相同的
   规范路径。设备端 Windows pod 的索引行为因此与 macOS/Linux 对齐。
 
+- **停止发布 macOS Intel（x64）桌面包**：GitHub 于 2026-11-02 退役 `macos-14` runner（作业在分配到 runner 前即被取消，报 “configuration 'macos-14-*-us-default' is not supported”），Intel x64 只剩付费的 larger runner label `macos-15-intel`——决定不再发布 Intel 桌包，CI 的 desktop 矩阵只剩 macOS arm64 / Windows x64 / Linux x64，Release 不再被 Intel 作业拖住。CLI 仍提供 `cli-darwin-amd64`（arm64 runner 上交叉编译的纯 Go 产物，不依赖 Intel runner）；本地 `make desktop-darwin-amd64` 仍可出 Intel 包。
+
 ## v0.10.3 — 2026-11-07
 
 - **设备端常驻文件索引（rg 加速）**：新增 `libs/indexer` 常驻索引服务——按 `index_roots`（默认工作目录）维护文件名与内容候选索引，文件变更经 fsnotify（darwin 用平台原生 watch）增量刷新；`fsx` 的 rg 内容/文件枚举与 vsh 内建 rg 均在「可提取必选字面量」时先向索引取候选子集再逐文件真实匹配（索引不可用或未覆盖时回退实时遍历）。新增配置项 `index_roots`（设备设置面可改，目录必须存在）。测试：`libs/indexer`、`libs/fsx`、`libs/host`。**设备端需升级 pod 生效。**
