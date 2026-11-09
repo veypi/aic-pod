@@ -31,7 +31,7 @@ func TestReadAttrsMinimal(t *testing.T) {
 	if r.Content != "2\tb\n" {
 		t.Fatalf("read 正文 = %q", r.Content)
 	}
-	if len(r.Attrs) != 3 || r.Attrs["path"] != "/r.txt" || r.Attrs["range"] != "2-2" || r.Attrs["total_lines"] != "3" {
-		t.Fatalf("read attrs 只应保留 path/range/total_lines: %v", r.Attrs)
+	if len(r.Attrs) != 2 || r.Attrs["range"] != "2-2" || r.Attrs["total_lines"] != "3" {
+		t.Fatalf("read attrs 只应保留 range/total_lines（path 不回显）: %v", r.Attrs)
 	}
 }

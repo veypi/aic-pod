@@ -227,6 +227,7 @@ type ExecResult struct {
 	StdoutTruncated bool
 	StderrTruncated bool
 	Duration        time.Duration
+	Attrs           map[string]string
 }
 
 // Exec 执行脚本（panic 隔离：引擎 panic 不带崩 pod 进程）。
@@ -291,6 +292,7 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (res *ExecResult, er
 		StdoutTruncated: result.StdoutTruncated,
 		StderrTruncated: result.StderrTruncated,
 		Duration:        result.Duration,
+		Attrs:           result.Attrs,
 	}
 	return res, nil
 }

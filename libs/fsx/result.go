@@ -17,12 +17,10 @@ type Result struct {
 	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
-func newResult(path string) *Result {
-	r := &Result{}
-	if path != "" {
-		r.Attrs = map[string]string{"path": path}
-	}
-	return r
+// newResult 构造空结果。path 不回显（2026-11-08 用户裁定）：请求 tool_input
+// 已带 path，结果侧不再重复；前端文件链接一律用输入 path 构造。
+func newResult() *Result {
+	return &Result{}
 }
 
 func (r *Result) set(k string, v any) {

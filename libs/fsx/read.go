@@ -62,7 +62,7 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 	}
 	total := len(lines)
 	if total == 0 {
-		return emptyReadResult(abs, offset, limitNote), nil
+		return emptyReadResult(offset, limitNote), nil
 	}
 	start, end, fb := readWindow(offset, limit, total)
 
@@ -76,7 +76,7 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		body = cut
 		end = start - 1 + strings.Count(body, "\n")
 	}
-	r := newResult(abs)
+	r := newResult()
 	r.Content = body
 	r.set("total_lines", total)
 	r.set("range", fmt.Sprintf("%d-%d", start, end))
@@ -87,8 +87,8 @@ func fsRead(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 }
 
 // emptyReadResult 空文件（0 行）read：空正文 + 说明（§4.2 回退语义，不再报错）。
-func emptyReadResult(abs string, offset int, limitNote string) *Result {
-	r := newResult(abs)
+func emptyReadResult(offset int, limitNote string) *Result {
+	r := newResult()
 	r.set("total_lines", 0)
 	r.set("range", "0-0")
 	var parts []string
@@ -203,7 +203,7 @@ func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Re
 		}
 	}
 	if total == 0 {
-		return emptyReadResult(abs, offset, limitNote), nil
+		return emptyReadResult(offset, limitNote), nil
 	}
 
 	fb := fbNone
@@ -228,7 +228,7 @@ func fsReadLarge(env *Env, abs string, offset, limit int, limitNote string) (*Re
 	}
 
 	end := start - 1 + kept
-	r2 := newResult(abs)
+	r2 := newResult()
 	r2.Content = b.String()
 	r2.set("total_lines", total)
 	r2.set("range", fmt.Sprintf("%d-%d", start, end))
@@ -273,16 +273,16 @@ func readTailWindow(env *Env, abs string, start, limit int) (string, int, error)
 	return b.String(), kept, nil
 }
 
-// binaryResult 生成二进制 read 结果（§4.2）：mime + size；可展示图片按 §2.2 图片标准。
+// binaryResult 生成二进制 read 结果（§4.2）：mime + size，正文为空（事实全在
+// attrs，不再重写 path/mime/size）；可展示图片按 §2.2 图片标准。
 func binaryResult(env *Env, abs string, data []byte) (*Result, error) {
 	mime := detectMIME(data, abs)
-	r := newResult(abs)
-	r.Attrs["mime"] = mime
-	r.set("size", len(data))
 	if fsxsdk.IsViewableImageMime(mime) {
 		return imageResult(env, abs, data, mime)
 	}
-	r.Content = fmt.Sprintf("Binary file: %s (%s, %d bytes)", abs, mime, len(data))
+	r := newResult()
+	r.Attrs = map[string]string{"mime": mime}
+	r.set("size", len(data))
 	return r, nil
 }
 
@@ -293,9 +293,6 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 		return nil, fsOpErr("read", err)
 	}
 	mime := detectMIME(head, abs)
-	r := newResult(abs)
-	r.Attrs["mime"] = mime
-	r.set("size", info.Size())
 	if fsxsdk.IsViewableImageMime(mime) {
 		if env.ImageData {
 			// host/page 端图片仍需整读以压缩产出 image_data（§4.2 环境能力差异）
@@ -305,10 +302,13 @@ func largeBinaryResult(env *Env, abs string, head []byte) (*Result, error) {
 			}
 			return imageResult(env, abs, data, mime)
 		}
-		r.Attrs["image_path"] = abs
-		r.Content = fmt.Sprintf("Image file: %s (%s, %d bytes)", abs, mime, info.Size())
+		r := newResult()
+		r.Attrs = map[string]string{"mime": mime, "image_path": abs}
+		r.set("size", info.Size())
 		return r, nil
 	}
-	r.Content = fmt.Sprintf("Binary file: %s (%s, %d bytes)", abs, mime, info.Size())
+	r := newResult()
+	r.Attrs = map[string]string{"mime": mime}
+	r.set("size", info.Size())
 	return r, nil
 }

@@ -67,7 +67,7 @@ func fsWrite(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsOpErr("write", err)
 	}
 	lines := countLines(content)
-	r := newResult("")
+	r := newResult()
 	r.Content = marshalOutcome(writeOutcome{OK: true, Lines: lines, Bytes: len(content)})
 	return r, nil
 }
@@ -174,7 +174,7 @@ func fsEdit(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		dg = newEditDiagnoser(content)
 	}
 
-	r := newResult("")
+	r := newResult()
 	if applied == 0 {
 		// 全失败：不落盘，返回 ok:false + 全量诊断。
 		r.Content = marshalOutcome(editOutcome{OK: false, Applied: 0, Errors: failures})

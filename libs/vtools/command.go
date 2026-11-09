@@ -418,7 +418,7 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 	if err != nil {
 		var callErr *CallError
 		if errors.As(err, &callErr) {
-			if werr := WriteResult(inv, callErr.Result, jsonOut); werr != nil {
+			if werr := writeProviderResult(inv, callErr.Result, jsonOut); werr != nil {
 				return werr
 			}
 			return &commands.ExitError{Code: 1}
@@ -430,5 +430,5 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 			return commands.Exitf(inv, 1, "%s: %s", alias, err)
 		}
 	}
-	return WriteResult(inv, result, jsonOut)
+	return writeProviderResult(inv, result, jsonOut)
 }

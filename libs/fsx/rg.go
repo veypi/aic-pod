@@ -419,7 +419,7 @@ func rgFiles(ctx context.Context, env *Env, target string, globs []string, hidde
 	if err != nil {
 		return nil, fsOpErr("rg", err)
 	}
-	r := newResult(abs)
+	r := newResult()
 	jb := newRGJSONBuf(`]}`) // 预留数组+顶层闭合（2 字节）
 	jb.write(`{"files":[`)
 	rows := 0
@@ -589,7 +589,7 @@ func rgEmit(next func() (int, string, bool), re *regexp.Regexp, rgCtx, maxRows i
 // includeMinified=false 时 minified 文件（isMinified）跳过并写入正文 note
 // （all=true 收录；显式单文件路径恒 includeMinified=true）。
 func rgSearch(env *Env, abs string, files rgFileIter, re *regexp.Regexp, limit, rgCtx int, includeMinified bool) (*Result, error) {
-	r := newResult(abs)
+	r := newResult()
 	// 预留最大 note 空间：内容写满即截断，收尾（数组闭合+可选 note）恒可写
 	jb := newRGJSONBuf(rgNoteMax)
 	jb.write(`{"files":[`)

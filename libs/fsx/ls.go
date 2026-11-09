@@ -102,7 +102,7 @@ func fsLs(ctx context.Context, env *Env, p *fsParams) (*Result, error) {
 		return nil, fsOpErr("ls", err)
 	}
 
-	r := newResult(abs)
+	r := newResult()
 	// 单文件：直接返回文件条目（前端 tree_cache 走 dir===false 分支）
 	if !info.IsDir() {
 		e := lsEntry{Name: path.Base(abs), Dir: false, Size: info.Size(), ModTime: info.ModTime().Unix()}

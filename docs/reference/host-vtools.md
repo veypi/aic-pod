@@ -20,6 +20,7 @@ Provider 最小接口仍是 `Tools(ctx)` 与 `Call(ctx, tool, args)`；当前生
 MCP `isError` 映射为 `CallError`，结果照常渲染但命令退出非零。
 
 `--image-preview` 由 MCP 适配器实现，只缩放成功结果中的图片，不改变上游 structuredContent。
+MCP ImageContent 统一经 vsh ResultAttrs 传递：单图 `image_data`、多图 `image_datas`，stdout 不再携带图片 base64；图片 content 的位置与元数据保留并标记附件位置。
 普通工具调用直接使用服务根命令；不再有调试直通入口。
 
 ## 2. 注册与生命周期

@@ -47,11 +47,13 @@ exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`
 
 原生 RTC 请求与 NATS 消息上限 1 MiB。RTC 工具响应不超过 16 KiB 时为 JSON 文本，更大的响应使用 4 字节大端总长度头和连续的 16 KiB 二进制片段，完整 JSON 上限 16 MiB；并发响应按整包串行发送，认证文本不参与二进制重组。前端有界重组并校验 UTF-8，未完成响应超时或连接关闭时释放缓存；发送失败关闭连接，使待处理请求立即失败。此能力需前端与 Pod 同步升级。
 
-服务命令复用现有 exec 结果规则：AI 路径可返回预览与日志引用，RTC 直连返回结果，包括 CUA 截图的标准 MCP image 内容。引擎的 stdout/stderr 内存采集上限仍分别为 8 MiB、1 MiB；仅 RTC 前台执行完成后，对截断的流从本次执行自有日志中有界补全，最终响应仍受 16 MiB JSON 总上限约束。补全不重新执行命令；日志读取失败或结果超限明确返回错误并保留可用日志元数据，不返回半截成功结果。NATS 预览与日志引用规则保持不变。
+服务命令复用现有 exec 结果规则：AI 路径可返回预览与日志引用，RTC 直连返回完整结果。vsh 的 `ResultAttrs` 将命令元数据随 `ExecutionResult.Attrs` 传到 `protocol.Output.Attrs`，host 自己的 exit_code/stderr/truncated 等系统键优先。引擎的 stdout/stderr 内存采集上限仍分别为 8 MiB、1 MiB；仅 RTC 前台执行完成后，对截断的流从本次执行自有日志中有界补全，最终响应仍受 16 MiB JSON 总上限约束。补全不重新执行命令；日志读取失败或结果超限明确返回错误并保留可用日志元数据，不返回半截成功结果。NATS 预览与日志引用规则保持不变。
 
-服务根命令 `<alias> <tool> --image-preview WIDTHxHEIGHT` 显式启用设备端图片预览，每边必须为 1..4096。成功结果中的 image 内容等比缩入指定尺寸、小图不放大，JPEG 质量从 70 起按需降低，单图不超过 600 KiB；上游 structuredContent、capture_id、annotations 与其他元数据保留，图片 `_meta["aic.dev/image-preview"]` 增加 `source_width/source_height/width/height`，供调用方还原上游截图坐标。CUA UI 使用 `1280x720`。工具错误结果不转换，压缩失败不重跑工具；普通调用默认透传，无需增加截图文件或文件授权。
+服务根命令 `<alias> <tool> --image-preview WIDTHxHEIGHT` 显式启用设备端图片预览，每边必须为 1..4096。成功结果中的 image 内容等比缩入指定尺寸、小图不放大，JPEG 质量从 70 起按需降低，单图不超过 600 KiB；上游 structuredContent、capture_id、annotations 与其他元数据保留，图片 `_meta["aic.dev/image-preview"]` 增加 `source_width/source_height/width/height`，供调用方还原上游截图坐标。CUA UI 使用 `1280x720`。工具错误结果不做预览转换，压缩失败不重跑工具。
 
-大文件走 fs source/upload 分块。工具失败使用 isError 并退出非零，可保留部分结果。除显式图片预览外，工具名称、schema、content、structuredContent、isError 与 _meta 使用上游值。执行取消使用 cancel(request_id) 或 bg kill，MCP 协议细节由 Pod SDK 处理。
+所有 MCP Provider 的 ImageContent 在命令输出前统一脱离 stdout：单图字节进入 attrs `image_data`，多图进入 JSON 数组 `image_datas`；content 保留位置、mime 与其他元数据，`data` 清空，`_meta["aic.dev/image-data"]` 标记对应 attr/index。AI 由平台现有图片通道落盘为视觉附件；RTC 的通用 execCall 按标记回填标准 MCP ImageContent。转换同时适用于工具错误结果，不识别 browser/CUA 等服务名，不需要截图文件或文件授权；无效图片、压缩失败或图片总量超限明确报错。
+
+大文件走 fs source/upload 分块。工具失败使用 isError 并退出非零，可保留部分结果。除显式图片预览与统一图片字节脱离外，工具名称、schema、content、structuredContent、isError 与 _meta 使用上游值。执行取消使用 cancel(request_id) 或 bg kill，MCP 协议细节由 Pod SDK 处理。
 
 `commands` 管理面提供 list/info/add/remove/config/start/stop/restart；不引入调试直通、prompts、sampling、任务引擎或技能依赖求解器。服务的业务权限仍由对应服务负责，MCP 传输本身不是沙箱。
 

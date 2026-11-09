@@ -1,8 +1,12 @@
 package host
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,6 +129,46 @@ func TestMCPCommandIsNotDiscoverable(t *testing.T) {
 	for _, line := range strings.Split(out.Content, "\n") {
 		if strings.TrimSpace(line) == "mcp" {
 			t.Fatal("removed mcp command is still discoverable")
+		}
+	}
+}
+
+func TestMCPImageUsesExecResultAttrs(t *testing.T) {
+	withGlobal(t, func(o *cfg.Options) { o.ExecPolicy, o.NetPolicy = cfg.PolicyOpen, cfg.PolicyOpen })
+	var raw bytes.Buffer
+	if err := png.Encode(&raw, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	service := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
+	mcp.AddTool(service, &mcp.Tool{Name: "shot"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			StructuredContent: map[string]any{"capture_id": "one"},
+			Content:           []mcp.Content{&mcp.ImageContent{Data: raw.Bytes(), MIMEType: "image/png"}},
+		}, nil, nil
+	})
+	endpoint := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return service }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true}))
+	defer endpoint.Close()
+	c, _ := testClient(t)
+	if _, err := runHostCommandManagement(t, c, "add", "fixture", "--protocol", "mcp", "--url", endpoint.URL); err != nil {
+		t.Fatal(err)
+	}
+	for _, direct := range []bool{false, true} {
+		caller := testCaller()
+		caller.Direct = direct
+		response := callTool(t, c, context.Background(), caller, execRequest("fixture shot --json", 30000))
+		out := decoded[protocol.Output](t, response.Result)
+		if response.Error != nil || !strings.HasPrefix(out.Attrs["image_data"], "data:image/png;base64,") {
+			t.Fatalf("direct=%t response=%+v attrs=%v", direct, response, out.Attrs)
+		}
+		if strings.Contains(out.Content, base64.StdEncoding.EncodeToString(raw.Bytes())) {
+			t.Fatalf("direct=%t stdout still contains image base64", direct)
+		}
+		var result mcp.CallToolResult
+		if err := json.Unmarshal([]byte(out.Content), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Content[0].(*mcp.ImageContent).Data) != 0 {
+			t.Fatalf("direct=%t image data was not detached", direct)
 		}
 	}
 }

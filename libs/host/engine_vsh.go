@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/veypi/aic-pod/protocol"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -271,7 +272,10 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		snapshot = logs.CloseResult(res)
 	})
 
-	attrs := map[string]string{"action": "exec"}
+	attrs := map[string]string{}
+	if outcome.Result != nil {
+		maps.Copy(attrs, outcome.Result.Attrs)
+	}
 	// spillLogs 在执行晚于响应返回的分支强制落盘并挂出日志地址（响应发出
 	// 后执行仍可能续写——路径必须先存在且持续可写）。
 	spillLogs := func() {
@@ -295,7 +299,7 @@ func (c *Client) execScript(ctx context.Context, caller protocol.Caller, reqID s
 		attrs["background"] = "true"
 		attrs["id"] = outcome.Task.ID
 		return &protocol.Output{
-			Content: fmt.Sprintf("execution backgrounded (id=%s); output: %s", outcome.Task.ID, logOut),
+			Content: "execution backgrounded; manage with bg wait <id> / bg kill <id> (id and log path in attrs)",
 			Attrs:   attrs,
 		}, nil
 	case execution.OutcomeCapacity:

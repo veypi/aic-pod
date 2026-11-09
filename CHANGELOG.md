@@ -5,6 +5,15 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.10.5 — 2026-11-10
+
+- **MCP 图片统一走执行结果 attrs（2026-11-09）**：vsh 新增 ResultAttrs 后，vtools 将所有 MCP Provider 的 ImageContent 从 stdout 脱离——单图写 `image_data`、多图写 `image_datas`，content 以 `_meta["aic.dev/image-data"]` 标记附件位置；host 透传 attrs，AI 不再收到大段 base64 文本。支持错误结果、--image-preview 后转换、总量限制与显式失败；RTC 由平台通用 execCall 回填标准 MCP 图片。无 browser/CUA 专属分支。测试：vsh commands/root（含 race）、pod vtools/execution/host 定向、aic fs/sessionctx/runtime 与 hosts/tools JS。**需同步升级 vsh、aic-pod 与平台后端；前端热更新。**
+
+- **工具结果去冗余第二轮：输入不回显 + 正文/attrs 单写（2026-11-08，用户定）**：①fs 结果 attrs 不再回显 `path`（read/ls/rg 全删，`newResult` 改无参）——请求 tool_input 已带路径，前端文件链接一律用输入 path 构造；②图片/二进制 read 正文清空（原 `Image file: …`/`Binary file: …` 整行重写 attrs 已有的 path/mime/size），事实全在 attrs：`mime/size/dimensions`（尺寸从正文挪入）+ 图片通道 `image_path/image_data/image_compressed` 不变；③exec 结果删 `attrs.action`（工具名在 tool_call 里），转后台正文不再重复 id/日志路径（attrs `background/id/output` 已有）。落点：`libs/fsx/{result,read,image,ls,rg,write}.go`、`libs/host/engine_vsh.go`；aic 仓 tools/{exec,mem,skills,web_search,aigc} 与 page 端 {page_fs,fsops}.js 同步。测试：fsx/execution/host 定向 + aic tools 六包全绿，page_fs 29/29、runtime 153/153。**后端与设备 pod 需重启/升级；前端热更新。**
+
+- **open 执行策略不再误拒带空格的原生命令路径**：`exec_policy: open` 恢复「除显式 deny 外全放行」语义，Windows 的 `/c/Program Files/...` 等路径不再因无法写成规则身份而被前置拒绝；deny 模式仍保持保守，显式 deny 规则不变。回归：`cfg/execrules_test.go`。
+- **发行依赖对齐**：vsh 升级 v0.3.5（ResultAttrs），aic-skills 升级 v0.4.3（browser/cua 预装包与官方技能内容更新）；删除本地工作区对未发布 API 的依赖，确保 CI 可仅按已发布模块构建。
+
 ## v0.10.4 — 2026-11-07
 
 - **asar 打包补上 `secure-origin.cjs`**：`main.js` require 了它，但 `electron-builder.yml`

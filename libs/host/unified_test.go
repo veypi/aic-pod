@@ -133,8 +133,11 @@ func TestExecScriptForeground(t *testing.T) {
 	if !strings.Contains(res.Content, "hello-vsh") {
 		t.Fatalf("content = %q", res.Content)
 	}
-	if res.Attrs["exit_code"] != "0" || res.Attrs["action"] != "exec" {
+	if res.Attrs["exit_code"] != "0" {
 		t.Fatalf("attrs = %v", res.Attrs)
+	}
+	if _, ok := res.Attrs["action"]; ok {
+		t.Fatalf("action 已由请求表达，不应回显: %v", res.Attrs)
 	}
 	// 惰性落盘（§2.5，2026-10-07）：同步完成且未截断的执行不建文件，
 	// attrs 不挂 output/error_output（有路径 ⟺ 有更多内容）。

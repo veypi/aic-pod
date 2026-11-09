@@ -45,19 +45,25 @@ func ValidateExecRules(rows []string) error {
 
 // CommandAllowed 按首命中判定命令准入。调用方可同时提供解析名与解析路径；
 // 任一身份命中当前行即由该行决定，后续行不再读取。
+// open 语义是「除显式 deny 外全放行」：不做身份合法性前置闸，带空格等
+// 无法写成规则的身份（如 Windows 的 /c/Program Files/...）也能执行；
+// 这类身份匹配不上任何规则行（规则本身禁止空白），落到 open 默认放行。
+// deny 模式保持保守：至少一个身份合法才参与判定，否则拒绝。
 func CommandAllowed(mode string, rows []string, names ...string) bool {
 	if mode != "open" && mode != "deny" {
 		return false
 	}
-	valid := false
-	for _, name := range names {
-		if ValidateCommandName(name) == nil {
-			valid = true
-			break
+	if mode == "deny" {
+		valid := false
+		for _, name := range names {
+			if ValidateCommandName(name) == nil {
+				valid = true
+				break
+			}
 		}
-	}
-	if !valid {
-		return false
+		if !valid {
+			return false
+		}
 	}
 	for _, raw := range rows {
 		allow, target, err := ParseExecRule(raw)
