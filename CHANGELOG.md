@@ -5,6 +5,10 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **内置 cua-driver 升级到 0.47.19**：`desktop/cua.json` 的固定版本 + sha256 同步更新（darwin/win32/linux 三平台资产均取自上游 `cua-driver-rs-v0.47.19` release，sha256 与官方 `release-manifest.json` 对账一致）。上游本次把感知协议改了：`get_window_state` 默认只返回紧凑 Markdown 树（`tree_format:"markdown"`），结构化 `elements` 数组需显式请求；新增 `since` 差分读、`display_only` 实时预览、`screenshot_format:"jpeg"`；`element_token` 变为 `<snapshot_id>:N` 形式且旧 token 会被拒（`stale_element_token`）；新增 4 个工具（`run_steps` 批处理、`run_script` JS 脚本、`browser_select` 原生下拉、`get_guide` 按需指南），无工具删除。本仓无代码依赖被移除的字段，UI 使用的 `include_accessibility_tree`/`max_dimension`/`max_image_dimension`/`capture_id`/`delivery_mode`/`on_screen_only`/`prompt` 参数全部保留，`capture_id` 格式不变（坐标绑定不受影响）。bundle id 与签名主体（`com.trycua.driver` / `YCK386LBJ7`）未变，macOS 辅助功能与屏幕录制授权跨版本延续。**需重新打包桌面端生效**；macOS 上已安装的 `/Applications/CuaDriver.app` 需同步升级（`cua-driver stop` 停旧 daemon 后再换），客户端与 daemon 版本不一致会导致 MCP 代理失败。
+
 ## v0.10.6 — 2026-11-12
 
 - **设备预装包内容更新到 aic-skills v0.4.4**：pod 启动定版把 browser/cua 刷成内嵌版本，本版内嵌内容含：browser 画面链路保连接（订阅者长时间不确认时停止喂帧但保留连接，页面补一次确认就恢复喂帧）、cua UI 改用平台公共设备选择器 `<widgets-host-connector>` 并支持复用组件已建立的工具连接、create 手册补公共组件与 `$hosts` 契约、video_studio 4K H.264 档位与舞台加载态。**设备端需升级到本版才能拿到新的 browser/cua 内容。**

@@ -1,21 +1,21 @@
 {
   "product": "cua-driver",
   "repo": "trycua/cua",
-  "version": "0.33.2",
-  "tag": "cua-driver-rs-v0.33.2",
+  "version": "0.47.19",
+  "tag": "cua-driver-rs-v0.47.19",
   "license": "MIT",
   "assets": {
     "darwin": {
-      "file": "cua-driver-rs-0.33.2-darwin-universal.tar.gz",
-      "sha256": "4e85284bb568fd1a837a84f66c432f680106a01f21a0eb2d9ebf5729610943b2",
+      "file": "cua-driver-rs-0.47.19-darwin-universal.tar.gz",
+      "sha256": "b21d57752c4f0dbd044de504870c848610108ac39d8781923496d30dcf1faa8b",
       "payload": "CuaDriver.app",
       "keep": [
         "CuaDriver.app"
       ]
     },
     "win32": {
-      "file": "cua-driver-rs-0.33.2-windows-x86_64.zip",
-      "sha256": "de2cb60ff6e24dd20d27794069c609209d01e3da05c2a5e6503771d0027e9cb8",
+      "file": "cua-driver-rs-0.47.19-windows-x86_64.zip",
+      "sha256": "43181907e6d3f4c60f6fab0269af2dbcaca4c1dda830d7b9ed7f524eef0f8fd9",
       "payload": "cua-driver.exe",
       "keep": [
         "cua-driver.exe",
@@ -24,8 +24,8 @@
       ]
     },
     "linux": {
-      "file": "cua-driver-rs-0.33.2-linux-x86_64.tar.gz",
-      "sha256": "933616e6a05866f24b69dda0faaba717d648359d33e26bb28f95cb35665cad64",
+      "file": "cua-driver-rs-0.47.19-linux-x86_64.tar.gz",
+      "sha256": "5c299fc169d0d0fd137be2c237abf615084f9569a769fda7d3c9674ce7bcfe82",
       "payload": "cua-driver",
       "keep": [
         "cua-driver",

@@ -13,7 +13,7 @@
 | 服务 | 实现 | 形态 |
 | --- | --- | --- |
 | `browser` | 包内 Go 服务，CDP 驱动 Chrome（Launch 或 `BROWSER_CDP_URL` attach） | 启动预装，vsh 根命令 `browser`，自带实时画面 UI |
-| `cua` | 包内启动器包装官方 `cua-driver mcp`（0.33.2） | 启动预装，vsh 根命令 `cua` |
+| `cua` | 包内启动器包装官方 `cua-driver mcp`（0.47.19） | 启动预装，vsh 根命令 `cua` |
 | `blender` | 直接启动现成 `uvx blender-mcp` | stdio MCP，工具面完全来自上游（详见 blender 技能手册） |
 
 owner 手工服务也走统一 `commands` 配置与命令面；stdio 服务懒启动并复用一个 SDK session，进程由 vbox 托管；一次取消不关闭服务。
