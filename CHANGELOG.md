@@ -5,6 +5,11 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## v0.10.6 — 2026-11-12
+
+- **设备预装包内容更新到 aic-skills v0.4.4**：pod 启动定版把 browser/cua 刷成内嵌版本，本版内嵌内容含：browser 画面链路保连接（订阅者长时间不确认时停止喂帧但保留连接，页面补一次确认就恢复喂帧）、cua UI 改用平台公共设备选择器 `<widgets-host-connector>` 并支持复用组件已建立的工具连接、create 手册补公共组件与 `$hosts` 契约、video_studio 4K H.264 档位与舞台加载态。**设备端需升级到本版才能拿到新的 browser/cua 内容。**
+- **依赖水位**：aic-skills v0.4.3 → v0.4.4；vbox v0.3.4 → v0.4.0（移除未使用的导出 API `IneffectiveRows` 并删除 shadowed 行日志，内核落地语义不变）。
+
 ## v0.10.5 — 2026-11-10
 
 - **MCP 图片统一走执行结果 attrs（2026-11-09）**：vsh 新增 ResultAttrs 后，vtools 将所有 MCP Provider 的 ImageContent 从 stdout 脱离——单图写 `image_data`、多图写 `image_datas`，content 以 `_meta["aic.dev/image-data"]` 标记附件位置；host 透传 attrs，AI 不再收到大段 base64 文本。支持错误结果、--image-preview 后转换、总量限制与显式失败；RTC 由平台通用 execCall 回填标准 MCP 图片。无 browser/CUA 专属分支。测试：vsh commands/root（含 race）、pod vtools/execution/host 定向、aic fs/sessionctx/runtime 与 hosts/tools JS。**需同步升级 vsh、aic-pod 与平台后端；前端热更新。**
