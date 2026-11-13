@@ -90,7 +90,7 @@ func TestCommandFlagMapping(t *testing.T) {
 		t.Fatalf("mapped args: %+v", args)
 	}
 	// --flag=value 与可空类型
-	if _, _, err := run(t, p, "echo", "echo", "--maybe=yo"); err != nil {
+	if _, _, err := run(t, p, "echo", "echo", "--maybe=yo", "--text", "hi"); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.calls[1].args["maybe"]; got != "yo" {
@@ -100,6 +100,7 @@ func TestCommandFlagMapping(t *testing.T) {
 
 // --flag= 显式空串必须能传给 string 参数（解析层曾把 --flag= 与裸 flag
 // 同映射为 raw==""，空串永远传不进去）；裸 --flag 仍报错。
+// 注：text 是 schema 的 required，调用必须带上（客户端前置校验必填）。
 func TestCommandEmptyStringFlag(t *testing.T) {
 	p := newFixture(t)
 	if _, _, err := run(t, p, "echo", "echo", "--text="); err != nil {
@@ -108,7 +109,7 @@ func TestCommandEmptyStringFlag(t *testing.T) {
 	if got, ok := p.calls[0].args["text"]; !ok || got != "" {
 		t.Fatalf("--text= 应传空串: %+v", p.calls[0].args)
 	}
-	if _, _, err := run(t, p, "echo", "echo", "--maybe="); err != nil {
+	if _, _, err := run(t, p, "echo", "echo", "--text", "x", "--maybe="); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.calls[1].args["maybe"]; got != "" {
@@ -215,6 +216,102 @@ func TestCommandReservedFlagShadowed(t *testing.T) {
 	}
 	if got := p2.calls[0].args["json"]; got != "v" {
 		t.Fatalf("reserved-named arg via --input: %+v", p2.calls[0].args)
+	}
+}
+
+// runStdin 走调用内核并提供 stdin（--flag - 从 stdin 取值）。
+func runStdin(t *testing.T, p Provider, alias, stdin string, args ...string) (string, string, error) {
+	t.Helper()
+	var out, errBuf strings.Builder
+	err := RunProvider(context.Background(), &commands.Invocation{
+		Args: args, Stdin: strings.NewReader(stdin), Stdout: &out, Stderr: &errBuf,
+	}, alias, p)
+	return out.String(), errBuf.String(), err
+}
+
+// --flag - 的值从 stdin 读：长文本不经 shell 转义、不经 JSON 拼装。
+func TestCommandFlagValueFromStdin(t *testing.T) {
+	p := newFixture(t)
+	if _, _, err := runStdin(t, p, "echo", "piped text\n", "echo", "--text", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.calls[0].args["text"]; got != "piped text" {
+		t.Fatalf("stdin 值应去掉尾随换行: %+v", p.calls[0].args)
+	}
+	if _, _, err := runStdin(t, p, "echo", "7\n", "echo", "--text", "x", "--times", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.calls[1].args["times"]; got != int64(7) {
+		t.Fatalf("stdin 数值: %+v", p.calls[1].args)
+	}
+}
+
+// 等号形式 --flag=- 是字面量 "-"（不走 stdin）。
+func TestCommandStdinEqualsFormIsLiteral(t *testing.T) {
+	p := newFixture(t)
+	if _, _, err := run(t, p, "echo", "echo", "--text=-"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.calls[0].args["text"]; got != "-" {
+		t.Fatalf("--text=- 应为字面量: %+v", p.calls[0].args)
+	}
+}
+
+// stdin 只能被消费一次：--input - 与 --flag - 不能同时用。
+func TestCommandStdinConflict(t *testing.T) {
+	p := newFixture(t)
+	_, _, err := runStdin(t, p, "echo", "{}", "echo", "--input", "-", "--text", "-")
+	if exitCode(err) != 2 || !strings.Contains(err.Error(), "stdin can only be consumed once") {
+		t.Fatalf("stdin 冲突: %v", err)
+	}
+	if len(p.calls) != 0 {
+		t.Fatalf("stdin 冲突时不应调用工具: %+v", p.calls)
+	}
+}
+
+// enum 越界与必填缺失都是参数面错误（退 2），报错自带候选值与可映射清单。
+func TestCommandEnumAndRequired(t *testing.T) {
+	p := &fakeProvider{tools: []Tool{{Name: "pick", InputSchema: json.RawMessage(`{
+	  "type": "object",
+	  "properties": {"mode": {"type": "string", "enum": ["fast", "slow"]}},
+	  "required": ["mode"]
+	}`)}}}
+	if _, _, err := run(t, p, "pick", "pick", "--mode", "fly"); exitCode(err) != 2 || !strings.Contains(err.Error(), "is not one of fast, slow") {
+		t.Fatalf("enum 越界: %v", err)
+	}
+	if _, _, err := run(t, p, "pick", "pick", "--mode", "fast"); err != nil {
+		t.Fatal(err)
+	}
+	p3 := &fakeProvider{tools: []Tool{{Name: "pick", InputSchema: json.RawMessage(`{
+	  "type": "object",
+	  "properties": {"mode": {"type": "string"}, "opt": {"type": "string"}},
+	  "required": ["mode"]
+	}`)}}}
+	if _, _, err := run(t, p3, "pick", "pick", "--opt", "x"); exitCode(err) != 2 || !strings.Contains(err.Error(), "missing required argument --mode") {
+		t.Fatalf("缺必填: %v", err)
+	}
+}
+
+// 类型错必须带可映射 flag 清单（调用方知道还能传什么）。
+func TestCommandFlagErrorListsMappable(t *testing.T) {
+	p := newFixture(t)
+	_, _, err := run(t, p, "echo", "echo", "--text", "x", "--times", "soon")
+	if exitCode(err) != 2 || !strings.Contains(err.Error(), "mappable:") {
+		t.Fatalf("类型错应带可映射清单: %v", err)
+	}
+}
+
+// 文本目录直接给出参数面：可映射 flag 与必须走 --input 的属性。
+func TestCommandCatalogShowsFlags(t *testing.T) {
+	p := newFixture(t)
+	out, _, err := run(t, p, "echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--text (string, required)", "--times (integer)", "--meta", "via --input"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("目录缺 %q:\n%s", want, out)
+		}
 	}
 }
 

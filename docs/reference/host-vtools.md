@@ -8,12 +8,57 @@
 每个 MCP 服务 alias 登记一个 vsh 根命令：
 
 ```text
-<alias>                              工具目录
+<alias>                              工具目录（含每个工具的 flag 摘要）
+<alias> <tool> --help                按 inputSchema 渲染参数表
 <alias> <tool> [--flag value]...     标量参数按 inputSchema 映射
-<alias> <tool> --input JSON|-        复杂 JSON 参数
-<alias> <tool> --json                全量结构化结果
-<alias> <tool> --help                上游参数表
+<alias> <tool> --input JSON|-        复杂 JSON 参数（对象/数组）
+<alias> <tool> [--json] [--image-preview WIDTHxHEIGHT]
 ```
+
+### 1.1 参数来源与优先级
+
+同名参数优先级（高→低）：flag 显式值 > `--input` JSON 对象的同名键 > schema default
+（只在参数表展示，不在客户端下发）。缺必填参数：客户端已取到 schema 时退 2
+（`missing required argument --x`）；纯 `--input` 直达不额外往返，交给服务端校验。
+
+### 1.2 flag 映射规则
+
+| schema type | flag | 取值 |
+| --- | --- | --- |
+| string | `--s v` / `--s=v` | 原样不 trim；空串写 `--s=`；裸 `--s` 报错 |
+| boolean | `--b` / `--b=v` | 布尔解析；裸写即 true |
+| integer | `--i v` | 十进制整数 |
+| number | `--n v` | 浮点数 |
+| object / array | 不可映射 | 只能走 `--input` |
+
+`type` 是数组时取第一个非 `null` 项。enum 越界退 2（`is not one of ...`）。
+命令面保留名 `json` / `input` / `image-preview` / `help` / `h` 遮蔽同名工具参数：
+这些参数只能走 `--input`（参数表会标注）。类型错与未知 flag 的报错都附带该工具
+**可映射的 flag 清单**。
+
+### 1.3 值来源：stdin
+
+`--<flag> -`（空格形式）表示该参数的值从 stdin 读；`--<flag>=-`（等号形式）表示字面量 `-`。
+stdin 只能被消费一次：`--input -` 与 `--flag -` 不能同时用（退 2）。string 去掉末尾换行，
+数值/布尔去空白。
+
+```sh
+cat strategy.lua | pbz strategy_set --phase exploring --code -
+pbz strategy_set --phase exploring --code - < strategy.lua
+```
+
+长文本（代码、配置、prompt）因此不必手拼 JSON，也不必嵌套 shell 转义。
+
+### 1.4 目录与参数表
+
+`<alias>` 无参输出工具目录，并在每条工具下附带 flag 摘要（名/类型/必填/枚举），非标量属性
+单列 `via --input`；`<alias> --json` 输出完整 tools 数组（含 inputSchema）；
+`<alias> <tool> --help` 输出该工具的参数表。
+
+### 1.5 退出码
+
+0 成功；1 服务级失败（MCP `isError`、传输失败）；2 参数面错误（未知 flag、类型错、enum 越界、
+缺必填、stdin 冲突、用法错）；141 SIGPIPE。
 
 Provider 最小接口仍是 `Tools(ctx)` 与 `Call(ctx, tool, args)`；当前生产适配器只有
 `vtools.MCP`。配置热加载由 command hub 重建注册表；未变化的命令保留原 manager/session。

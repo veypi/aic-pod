@@ -4,7 +4,9 @@
 //
 // 形态（见 docs/reference/host-vtools.md）：
 //   - `<alias> <tool> [--flag value]... [--input JSON|-] [--json]`；
-//     无参打印工具目录；`<alias> <tool> --help` 按 inputSchema 渲染参数表。
+//     无参打印工具目录（附每个工具的 flag 摘要）；`<alias> <tool> --help`
+//     按 inputSchema 渲染参数表；`--<flag> -` 从 stdin 读该参数的值
+//     （等号形式 `--flag=-` 为字面量，stdin 只能被消费一次）。
 //   - 注册即时、连接懒惰：首次执行才连接（command hub 的 mcpx.Manager）。
 //   - 命令准入由 vsh 统一处理。RTC 流通道统一由 command hub 以
 //     `<alias>:<stream>` 承载（见 libs/host/command_registry.go）。

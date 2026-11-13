@@ -5,6 +5,10 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
+## 未发布
+
+- **MCP 命令调用面：标量映射 + stdin 取值 + 自助参数表**：设备侧 MCP 服务命令（`<alias> <tool>`）按工具 `inputSchema` 把标量属性（string/number/integer/boolean）映射为同名 flag，复杂对象/数组仍走 `--input`；新增 `--<flag> -` 从 stdin 读该参数的值（等号形式 `--flag=-` 为字面量），长文本（代码、配置、prompt）不再需要手拼 JSON 或嵌套 shell 转义；文本工具目录直接列出每个工具的 flag 名/类型/必填/枚举，非标量属性标注 `via --input`；参数面错误（类型错、enum 越界、缺必填）退 2 且自带可映射 flag 清单与候选值。**行为变更**：空格形式 `--flag -` 的字面量 "-" 语义改为读 stdin（取字面量用 `--flag=-`）；客户端在已取到 schema 时前置校验 required/enum（此前一律交给服务端）。落点：`libs/vtools/command.go`、`docs/reference/host-vtools.md`。测试：vtools 包全绿。**需升级设备 pod 生效。**
+
 ## v0.10.7 — 2026-11-13
 
 - **CUA 主桌面改为 H.264 实时流（aic-skills v0.4.5 / cua 1.3.5）**：新增随包预编译的 `bin/cua_cast`，`cua` 继续负责官方 CuaDriver MCP 输入与权限，主桌面视频走 `cua_cast:view` + WebCodecs；删除应用窗口列表、截图轮询与全部旧画面 fallback。Windows 使用 DXGI `ddagrab`，默认 30fps，NVIDIA 可启用 `h264_nvenc` 超低延迟；单击与滚轮取消固定等待。PBZ 游戏实机验证延迟基本不可感知、风扇负载下降。**需升级设备 pod 以同时更新包内容和设备二进制；前端页面也随平台内建包更新。**
