@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/veypi/vsh/commands"
 )
@@ -17,20 +18,39 @@ import (
 const maxInputBytes = 1 << 20
 
 // reservedFlags 是命令面保留 flag：工具 schema 里的同名属性无法经 flag 传递
-// （--json/--input/--image-preview/--help 先被命令面消费），只能走 --input。
-var reservedFlags = map[string]bool{"json": true, "input": true, "image-preview": true, "help": true, "h": true}
+// （--json/--input/--image-preview/--timeout/--help 先被命令面消费），只能走 --input。
+var reservedFlags = map[string]bool{"json": true, "input": true, "image-preview": true, "timeout": true, "help": true, "h": true}
 
 func aliasUsage(alias string) string {
 	return `usage:
   ` + alias + `                          列出该服务的工具目录
   ` + alias + ` <tool> --help            按 inputSchema 渲染参数表
-  ` + alias + ` <tool> [--flag value]... [--input JSON|-] [--json] [--image-preview WIDTHxHEIGHT]
+  ` + alias + ` <tool> [--flag value]... [--input JSON|-] [--json] [--image-preview WIDTHxHEIGHT] [--timeout DUR]
 
 标量参数（string/number/integer/boolean）自动映射为同名 flag；布尔可裸写
 （--flag = true）；复杂对象/数组走 --input（JSON 对象，flag 覆盖同名键）。
 flag 的值写 - 时从 stdin 读该参数（等号形式 --flag=- 表示字面量 "-"）；
 stdin 只能被消费一次（--input - 与 --flag - 不能同时用）。
-以 -- 开头的值用 --flag=value 形式。--image-preview 仅部分服务支持。`
+以 -- 开头的值用 --flag=value 形式。--image-preview 仅部分服务支持。
+--timeout 限制本次调用的时长（如 30s / 2m），超时退 1。`
+}
+
+// parseTimeout 解析 --timeout 的时长（支持 Go 时长语法与纯秒数）。
+func parseTimeout(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, errors.New("--timeout requires a value")
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d <= 0 {
+			return 0, fmt.Errorf("invalid --timeout %q: must be positive", raw)
+		}
+		return d, nil
+	}
+	if secs, err := strconv.ParseFloat(raw, 64); err == nil && secs > 0 {
+		return time.Duration(secs * float64(time.Second)), nil
+	}
+	return 0, fmt.Errorf("invalid --timeout %q: use a duration like 30s or 2m", raw)
 }
 
 // schemaProp 是 inputSchema 单个属性的最小投影。
@@ -347,6 +367,7 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 		hasInput     bool
 		jsonOut      bool
 		preview      string
+		timeoutRaw   string
 		help         bool
 		stdinTaken   bool
 		flagValues   = map[string]string{}
@@ -389,6 +410,15 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 			}
 			preview = args[n+1]
 			n++
+		case a == "--timeout":
+			if n+1 >= len(args) {
+				return commands.Exitf(inv, 2, "%s: --timeout requires a value", alias)
+			}
+			if timeoutRaw != "" {
+				return commands.Exitf(inv, 2, "%s: --timeout may only be specified once", alias)
+			}
+			timeoutRaw = args[n+1]
+			n++
 		case strings.HasPrefix(a, "--"):
 			body := strings.TrimPrefix(a, "--")
 			if i := strings.IndexByte(body, '='); i >= 0 {
@@ -424,6 +454,17 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 		return commands.Exitf(inv, 2, "%s", aliasUsage(alias))
 	}
 
+	// --timeout 是客户端侧 deadline：服务挂住时不无限期阻塞调用方
+	if timeoutRaw != "" {
+		d, err := parseTimeout(timeoutRaw)
+		if err != nil {
+			return commands.Exitf(inv, 2, "%s: %s", alias, err)
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
+
 	// schema 只在需要时取（--help / flag 转换 / 工具名校验）；纯 --input
 	// 调用直达，不多花一次 tools/list 往返。
 	var (
@@ -434,6 +475,9 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 	if needSchema {
 		tools, err := p.Tools(ctx)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return commands.Exitf(inv, 1, "%s: timed out after %s", alias, timeoutRaw)
+			}
 			return commands.Exitf(inv, 1, "%s: %s", alias, err)
 		}
 		toolDef = FindTool(tools, tool)
@@ -552,6 +596,9 @@ func RunProvider(ctx context.Context, inv *commands.Invocation, alias string, p 
 				return werr
 			}
 			return &commands.ExitError{Code: 1}
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return commands.Exitf(inv, 1, "%s: timed out after %s", alias, timeoutRaw)
 		}
 		return commands.Exitf(inv, 1, "%s: %s", alias, err)
 	}

@@ -7,7 +7,7 @@
 
 ## 未发布
 
-- **MCP 命令调用面：标量映射 + stdin 取值 + 自助参数表**：设备侧 MCP 服务命令（`<alias> <tool>`）按工具 `inputSchema` 把标量属性（string/number/integer/boolean）映射为同名 flag，复杂对象/数组仍走 `--input`；新增 `--<flag> -` 从 stdin 读该参数的值（等号形式 `--flag=-` 为字面量），长文本（代码、配置、prompt）不再需要手拼 JSON 或嵌套 shell 转义；文本工具目录直接列出每个工具的 flag 名/类型/必填/枚举，非标量属性标注 `via --input`；参数面错误（类型错、enum 越界、缺必填）退 2 且自带可映射 flag 清单与候选值。**行为变更**：空格形式 `--flag -` 的字面量 "-" 语义改为读 stdin（取字面量用 `--flag=-`）；客户端在已取到 schema 时前置校验 required/enum（此前一律交给服务端）。落点：`libs/vtools/command.go`、`docs/reference/host-vtools.md`。测试：vtools 包全绿。**需升级设备 pod 生效。**
+- **MCP 命令调用面：标量映射 + stdin 取值 + 自助参数表**：设备侧 MCP 服务命令（`<alias> <tool>`）按工具 `inputSchema` 把标量属性（string/number/integer/boolean）映射为同名 flag，复杂对象/数组仍走 `--input`；新增 `--<flag> -` 从 stdin 读该参数的值（等号形式 `--flag=-` 为字面量），长文本（代码、配置、prompt）不再需要手拼 JSON 或嵌套 shell 转义；文本工具目录直接列出每个工具的 flag 名/类型/必填/枚举，非标量属性标注 `via --input`；参数面错误（类型错、enum 越界、缺必填）退 2 且自带可映射 flag 清单与候选值；新增 `--timeout DUR` 客户端侧 deadline，服务挂住时退 1 报 `timed out` 而非无限期阻塞调用方。**行为变更**：空格形式 `--flag -` 的字面量 "-" 语义改为读 stdin（取字面量用 `--flag=-`）；客户端在已取到 schema 时前置校验 required/enum（此前一律交给服务端）。落点：`libs/vtools/command.go`、`docs/reference/host-vtools.md`。测试：vtools 包全绿。**需升级设备 pod 生效。**
 
 ## v0.10.7 — 2026-11-13
 

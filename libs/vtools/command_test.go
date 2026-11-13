@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/veypi/vsh/commands"
 )
@@ -95,6 +96,43 @@ func TestCommandFlagMapping(t *testing.T) {
 	}
 	if got := p.calls[1].args["maybe"]; got != "yo" {
 		t.Fatalf("nullable string: %+v", got)
+	}
+}
+
+// slowProvider 模拟服务挂住：用于验证 --timeout 的客户端侧 deadline。
+type slowProvider struct {
+	delay time.Duration
+}
+
+func (s *slowProvider) Tools(context.Context) ([]Tool, error) {
+	return []Tool{{Name: "slow"}}, nil
+}
+
+func (s *slowProvider) Call(ctx context.Context, _ string, _ map[string]any) (any, error) {
+	select {
+	case <-time.After(s.delay):
+		return map[string]any{"ok": true}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// --timeout 是客户端侧 deadline：服务挂住时退 1 而不是无限期阻塞。
+func TestCommandTimeout(t *testing.T) {
+	p := &slowProvider{delay: 300 * time.Millisecond}
+	_, _, err := run(t, p, "slow", "slow", "--timeout", "20ms")
+	if exitCode(err) != 1 || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout: %v", err)
+	}
+	if _, _, err := run(t, p, "slow", "slow", "--timeout", "bogus"); exitCode(err) != 2 {
+		t.Fatalf("invalid timeout: %v", err)
+	}
+	if _, _, err := run(t, p, "slow", "slow", "--timeout", "0"); exitCode(err) != 2 {
+		t.Fatalf("zero timeout: %v", err)
+	}
+	// 时长足够时正常完成
+	if _, _, err := run(t, p, "slow", "slow", "--timeout", "5s"); err != nil {
+		t.Fatalf("sufficient timeout: %v", err)
 	}
 }
 
