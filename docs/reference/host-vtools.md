@@ -12,7 +12,7 @@
 <alias> <tool> --help                按 inputSchema 渲染参数表
 <alias> <tool> [--flag value]...     标量参数按 inputSchema 映射
 <alias> <tool> --input JSON|-        复杂 JSON 参数（对象/数组）
-<alias> <tool> [--json] [--image-preview WIDTHxHEIGHT] [--timeout DUR]
+<alias> <tool> [--json] [--image-preview WIDTHxHEIGHT]
 ```
 
 ### 1.1 参数来源与优先级
@@ -57,13 +57,8 @@ pbz strategy_set --phase exploring --code - < strategy.lua
 
 ### 1.5 退出码
 
-0 成功；1 服务级失败（MCP `isError`、传输失败、超时）；2 参数面错误（未知 flag、类型错、enum 越界、
+0 成功；1 服务级失败（MCP `isError`、传输失败）；2 参数面错误（未知 flag、类型错、enum 越界、
 缺必填、stdin 冲突、用法错）；141 SIGPIPE。
-
-### 1.6 调用超时
-
-`--timeout DUR`（如 `30s` / `2m` / `500ms`，也接受纯秒数）是**客户端侧 deadline**：服务挂住时
-命令退 1 并报 `timed out after 30s`，调用方不无限期阻塞。不传则不设客户端 deadline。
 
 Provider 最小接口仍是 `Tools(ctx)` 与 `Call(ctx, tool, args)`；当前生产适配器只有
 `vtools.MCP`。配置热加载由 command hub 重建注册表；未变化的命令保留原 manager/session。
