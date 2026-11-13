@@ -204,8 +204,10 @@ lazily while later calls share the connection.
 - `browser` — a Go service inside the package; it ships its own Chrome and drives it over CDP.
   Tool surface: `targets` / `attach` / `navigate` / `snapshot` / `click` / `fill` / `screenshot` …;
   the live view rides the package's `browser:view` stream channel.
-- `cua` — a launcher inside the package that starts the official `cua-driver mcp`; tool names and
-  parameters follow upstream.
+- `cua` — launches the official `cua-driver mcp` for permissions and input, while the separate
+  `cua_cast` service streams the primary desktop as H.264 over `cua_cast:view`. Windows uses DXGI
+  `ddagrab`, macOS uses `avfoundation`, and the browser decodes with WebCodecs; screenshot polling
+  has been removed. During the test phase FFmpeg must be available on PATH.
 
 The desktop build ships Chrome and the official native programs; the standalone CLI builds and
 installs what the packages need as described in each package manual.

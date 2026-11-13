@@ -5,8 +5,11 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.10.7 — 2026-11-13
 
+- **CUA 主桌面改为 H.264 实时流（aic-skills v0.4.5 / cua 1.3.5）**：新增随包预编译的 `bin/cua_cast`，`cua` 继续负责官方 CuaDriver MCP 输入与权限，主桌面视频走 `cua_cast:view` + WebCodecs；删除应用窗口列表、截图轮询与全部旧画面 fallback。Windows 使用 DXGI `ddagrab`，默认 30fps，NVIDIA 可启用 `h264_nvenc` 超低延迟；单击与滚轮取消固定等待。PBZ 游戏实机验证延迟基本不可感知、风扇负载下降。**需升级设备 pod 以同时更新包内容和设备二进制；前端页面也随平台内建包更新。**
+- **发行构建补齐 `cua_cast`**：`make skill-bin-<os>-<arch>` 现在同时构建 `browser`、`cua` 与 `cua_cast`，Desktop `resources/skill-bin` 和 CLI 的 `aic-skill-bin-*.tar.gz` 会带上视频服务，避免新 UI 因缺 `bin/cua_cast` 无法启动。
+- **依赖水位**：aic-skills v0.4.4 → v0.4.5。
 - **内置 cua-driver 升级到 0.47.19**：`desktop/cua.json` 的固定版本 + sha256 同步更新（darwin/win32/linux 三平台资产均取自上游 `cua-driver-rs-v0.47.19` release，sha256 与官方 `release-manifest.json` 对账一致）。上游本次把感知协议改了：`get_window_state` 默认只返回紧凑 Markdown 树（`tree_format:"markdown"`），结构化 `elements` 数组需显式请求；新增 `since` 差分读、`display_only` 实时预览、`screenshot_format:"jpeg"`；`element_token` 变为 `<snapshot_id>:N` 形式且旧 token 会被拒（`stale_element_token`）；新增 4 个工具（`run_steps` 批处理、`run_script` JS 脚本、`browser_select` 原生下拉、`get_guide` 按需指南），无工具删除。本仓无代码依赖被移除的字段，UI 使用的 `include_accessibility_tree`/`max_dimension`/`max_image_dimension`/`capture_id`/`delivery_mode`/`on_screen_only`/`prompt` 参数全部保留，`capture_id` 格式不变（坐标绑定不受影响）。bundle id 与签名主体（`com.trycua.driver` / `YCK386LBJ7`）未变，macOS 辅助功能与屏幕录制授权跨版本延续。**需重新打包桌面端生效**；macOS 上已安装的 `/Applications/CuaDriver.app` 需同步升级（`cua-driver stop` 停旧 daemon 后再换），客户端与 daemon 版本不一致会导致 MCP 代理失败。
 
 ## v0.10.6 — 2026-11-12

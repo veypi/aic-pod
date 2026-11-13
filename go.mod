@@ -11,7 +11,7 @@ require (
 	github.com/pion/webrtc/v4 v4.2.20
 	github.com/pkg/sftp v1.13.11
 	github.com/rs/zerolog v1.34.0
-	github.com/veypi/aic-skills v0.4.4
+	github.com/veypi/aic-skills v0.4.5
 	github.com/veypi/vbox v0.4.0
 	github.com/veypi/vigo v0.8.2
 	github.com/veypi/vsh v0.3.5

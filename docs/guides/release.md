@@ -9,7 +9,7 @@ MCP 服务注册、技能包命令与流的装配。
 | 产物 | 构建入口 | 包含内容 |
 | --- | --- | --- |
 | Pod CLI | `make build`、`make cli-<os>-<arch>` | 原生执行、FS、MCP 服务注册、技能包命令/流装配、设备传输 |
-| 预装包设备程序 | `make skill-bin-<os>-<arch>` | 预编译 `browser`/`cua`（`dist/skill-bin/<os>-<arch>/` + `aic-skill-bin-<os>-<arch>.tar.gz`） |
+| 预装包设备程序 | `make skill-bin-<os>-<arch>` | 预编译 `browser`/`cua`/`cua_cast`（`dist/skill-bin/<os>-<arch>/` + `aic-skill-bin-<os>-<arch>.tar.gz`） |
 | Desktop | `make desktop-<os>-<arch>`（含 `skill-bin-desktop`） | Go 后端、Electron、固定版本运行依赖与预装包设备程序（供技能包使用） |
 | 云端技能 | aic-skills 静态 embed 与 cloud 发布流程 | SKILL.md、UI、API、表定义、包根 manifest.json 与 src/ 源码、普通资源 |
 
@@ -67,6 +67,11 @@ macOS 按上游要求将随包 CuaDriver.app 安装到 `/Applications/CuaDriver.
 浏览器画面入口是 browser 技能自带 UI：包内 Go 服务经 CDP screencast 推帧，RTC 通道为
 `<alias>:<stream>`（manifest `host.<alias>.streams` 声明），绘制后回传 ACK。Chrome 实例由包自管，
 Pod 不代管上游 daemon。
+
+CUA 主桌面画面由独立 `cua_cast` 服务经 `cua_cast:view` 推送 H.264 Annex B，页面用 WebCodecs
+硬解；`cua` 只承担官方 MCP 权限与输入。Windows 用 DXGI `ddagrab`，macOS 用 `avfoundation`，
+默认 30fps，NVIDIA 可配置 `CUA_CAST_ENCODER=h264_nvenc`。发行构建必须同时附带 `bin/cua`
+与 `bin/cua_cast`；测试期 FFmpeg 仍需设备自行安装并放入 PATH。
 
 ## macOS 签名与公证
 

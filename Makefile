@@ -64,7 +64,7 @@ cli-%:
 	@echo "→ $(BIN_DIR)/$(CLI_NAME)-$*"
 
 # 官方预装包（browser/cua）的设备程序：在 aic-skills 根模块内构建（设备上独立
-# 构建才需要 src/go.mod.example）。产物 = dist/skill-bin/<os>-<arch>/<pkg>/<pkg>[.exe]
+# 构建才需要 src/go.mod.example）。产物 = dist/skill-bin/<os>-<arch>/<pkg>/<程序>[.exe]
 # + aic-skill-bin-<os>-<arch>.tar.gz（CLI 发行附带，解到 aic-cli 同目录即可）。
 # Pod 启动定版时把 <资源目录>/<pkg>/ 铺进包内 bin/（见 libs/host/command_preinstall.go）。
 skill-bin-%:
@@ -77,6 +77,9 @@ skill-bin-%:
 		ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
 		mkdir -p "$$out/$$pkg"; \
 		(cd "$$skills_dir" && GOOS=$$os GOARCH=$$arch go build -ldflags "-s -w" -o "$$out/$$pkg/$$pkg$$ext" ./$$pkg/src) || exit 1; \
+		if [ "$$pkg" = "cua" ]; then \
+			(cd "$$skills_dir" && GOOS=$$os GOARCH=$$arch go build -ldflags "-s -w" -o "$$out/cua/cua_cast$$ext" ./cua/src/cua_cast) || exit 1; \
+		fi; \
 	done; \
 	stage="$(abspath $(BIN_DIR))/.skill-bin-pack-$$os-$$arch"; \
 	rm -rf "$$stage"; mkdir -p "$$stage"; cp -R "$$out" "$$stage/skill-bin"; \

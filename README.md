@@ -186,7 +186,9 @@ browser 与 cua 是普通技能包（与第三方包同形态），由 Pod 启�
 - `browser`——包内 Go 服务，自带 Chrome 并用 CDP 驱动；工具面为
   `targets` / `attach` / `navigate` / `snapshot` / `click` / `fill` / `screenshot` 等，
   实时画面走包声明的 `browser:view` 流通道。
-- `cua`——包内启动器，拉起官方 `cua-driver mcp`；工具名与参数遵循官方上游。
+- `cua`——包内启动器拉起官方 `cua-driver mcp`，负责权限与输入；独立的 `cua_cast`
+  通过 `cua_cast:view` 提供主桌面 H.264 实时流。Windows 使用 DXGI `ddagrab`，macOS 使用
+  `avfoundation`，浏览器以 WebCodecs 硬解；不再使用截图轮询。测试期 FFmpeg 需在 PATH 中。
 
 Desktop 附带 Chrome 与官方原生程序；独立 CLI 按包内手册构建与安装。
 
