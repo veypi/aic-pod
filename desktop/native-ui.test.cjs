@@ -45,3 +45,22 @@ test('Desktop 设置不再提供手工设备 key 绑定', () => {
   assert.ok(!source.includes('$pod.bind'))
   assert.ok(!source.includes('$pod.unbind'))
 })
+
+test('原生登录页：不显示平台服务器地址、用平台图标、带三方登录入口', () => {
+  const source = read('settings-ui/login.html')
+  assert.ok(!source.includes('id="server"'), 'login page still shows the server address')
+  assert.ok(!source.includes('login.server'), 'login page still renders the server label')
+  assert.match(source, /src="\/assets\/icon\.png"/)
+  assert.match(source, /third_party/)
+  assert.match(source, /config\.providers/)
+})
+
+test('原生登录页开在独立小窗口，不再塞进平台视图', () => {
+  const source = read('main.js')
+  const start = source.indexOf('function showNativeLogin()')
+  const end = source.indexOf('function openAuthWindow(')
+  assert.ok(start > 0 && end > start)
+  const body = source.slice(start, end)
+  assert.ok(!body.includes('platformView.webContents.loadURL'))
+  assert.match(body, /loginWin = new BrowserWindow\(/)
+})

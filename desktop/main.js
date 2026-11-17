@@ -120,11 +120,13 @@ const settingsUiDir = path.join(__dirname, 'settings-ui')
 settingsProtocol.registerScheme(protocol)
 
 function registerSettingsProtocol() {
-  settingsProtocol.registerHandler({ protocol, session, uiDir: settingsUiDir })
+  settingsProtocol.registerHandler({ protocol, session, uiDir: settingsUiDir, assetsDir: path.join(__dirname, 'assets') })
 }
 
 let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
 let platformView = null // 平台页视图（恒占满 contentView）
+let loginWin = null // 原生登录窗口（独立小窗）
+let authWin = null // 三方授权窗口（应用内完成 OAuth）
 let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /agents/{aid}/pet）
 let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
 let keepWin = null // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
@@ -301,6 +303,8 @@ async function buildNativeApp(server) {
       loadMain(platformUrl())
     },
     onChanged: (authState) => {
+      // 登录成功：登录窗让位给工作区。
+      if (authState.signedIn && loginWin && !loginWin.isDestroyed()) loginWin.close()
       if (platformView && !platformView.webContents.isDestroyed()) {
         platformView.webContents.send('aic-host:event', { event: 'auth.changed', payload: authState })
       }
@@ -310,6 +314,7 @@ async function buildNativeApp(server) {
   return value
 }
 
+// 原生登录页：独立的小窗口（规范尺寸的原生页面），不再塞进主窗口的平台视图。
 function showNativeLogin() {
   clearPlatformRetry()
   // 旧账户的 SharedWorker / 网页用户 NATS 不能越过登出或账户切换继续存活。
@@ -317,12 +322,63 @@ function showNativeLogin() {
   keepWin = null
   if (petWin && !petWin.isDestroyed()) petWin.destroy()
   petWin = null
-  if (!platformView || platformView.webContents.isDestroyed()) return
-  const url = SETTINGS_ORIGIN + '/login.html'
-  if (platformView.webContents.getURL() === url) platformView.webContents.send('native:auth:sync')
-  else platformView.webContents.loadURL(url)
-  mainWin?.show()
-  mainWin?.focus()
+  if (loginWin && !loginWin.isDestroyed()) {
+    loginWin.webContents.send('native:auth:sync')
+    loginWin.show()
+    loginWin.focus()
+    return
+  }
+  loginWin = new BrowserWindow({
+    width: 400,
+    height: 700,
+    minWidth: 380,
+    maxWidth: 520,
+    resizable: true,
+    frame: true,
+    center: true,
+    title: 'ivec.ai',
+    autoHideMenuBar: true,
+    backgroundColor: '#f3f5f9',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'login-preload.js'),
+    },
+  })
+  loginWin.on('closed', () => { loginWin = null })
+  loginWin.loadURL(SETTINGS_ORIGIN + '/login.html')
+}
+
+// 三方授权窗口：在应用内完成 OAuth。回调落在平台侧，会话 cookie 进入本应用的
+// Electron 会话，随后由 nativeApp.adoptSession() 接管。
+function openAuthWindow(url) {
+  if (authWin && !authWin.isDestroyed()) {
+    authWin.focus()
+    return
+  }
+  authWin = new BrowserWindow({
+    width: 520,
+    height: 720,
+    frame: true,
+    center: true,
+    title: 'ivec.ai',
+    autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  })
+  authWin.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (/^https?:\/\//.test(target)) shell.openExternal(target)
+    return { action: 'deny' }
+  })
+  const adopt = () => {
+    if (!nativeApp) return
+    nativeApp.adoptSession().then(result => {
+      if (result && authWin && !authWin.isDestroyed()) authWin.close()
+    }).catch(() => { })
+  })
+  authWin.webContents.on('did-navigate', (_e, target) => { if (samePlatform(target)) adopt() })
+  authWin.on('closed', () => { authWin = null; adopt() })
+  authWin.loadURL(url)
 }
 
 async function waitForNativeConnected(timeoutMs) {
@@ -756,6 +812,11 @@ function registerIpc() {
         return await nativeApp.activate()
       case 'switch_account':
         return await nativeApp.switchAccount()
+      case 'third_party': {
+        const result = await nativeApp.thirdPartyLogin(String(a.provider || ''))
+        openAuthWindow(result.auth_url)
+        return { ok: true }
+      }
       default:
         throw new Error('invalid native auth method')
     }

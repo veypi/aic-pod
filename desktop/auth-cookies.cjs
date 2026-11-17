@@ -124,8 +124,48 @@ function credentialsFromResponse(response, body, now = Date.now()) {
   }
 }
 
-function publicAuthState(credentials) {
-  if (!credentials) return { signedIn: false, user: null, expiresAt: 0 }
+// credentialsFromCookies 从会话 cookie（第三方授权在应用内完成后）重建凭据。
+// 与 credentialsFromResponse 同口径：只认 HttpOnly 的 access + refresh，且两个 token 同属一个用户。
+function credentialsFromCookies(cookies, now = Date.now()) {
+  const list = Array.isArray(cookies) ? cookies : []
+  const pick = (suffix, type) => {
+    const byName = list.find(item => new RegExp(suffix + '$', 'i').test(String(item.name || '')))
+    if (byName) return byName
+    return list.find(item => {
+      try { return decodeJWT(String(item.value || '')).type === type } catch (_) { return false }
+    })
+  }
+  const access = pick('access', 'access')
+  const refresh = pick('refresh', 'refresh')
+  if (!access || !refresh || !access.value || !refresh.value) return null
+  const payload = decodeJWT(access.value)
+  if (payload.type !== 'access' || payload.mod !== 'inherit') return null
+  const uid = tokenUID(access.value)
+  const refreshPayload = decodeJWT(refresh.value)
+  if (refreshPayload.type !== 'refresh' || tokenUID(refresh.value) !== uid) return null
+  const expiresAt = Number.isFinite(payload.exp) ? payload.exp * 1000 : now + 900 * 1000
+  const cookieOf = item => ({
+    name: String(item.name || ''),
+    value: String(item.value || ''),
+    path: item.path || '/',
+    secure: !!item.secure,
+    httpOnly: true,
+    sameSite: 'strict',
+    expires: 0,
+    maxAge: NaN,
+  })
+  return {
+    accessToken: access.value,
+    refreshToken: refresh.value,
+    accessCookie: cookieOf(access),
+    refreshCookie: cookieOf(refresh),
+    cookies: [],
+    user: { id: uid },
+    expiresAt,
+  }
+}
+
+function publicAuthState(credentials) {  if (!credentials) return { signedIn: false, user: null, expiresAt: 0 }
   return {
     signedIn: true,
     user: credentials.user || { id: tokenUID(credentials.accessToken) },
@@ -165,6 +205,7 @@ module.exports = {
   decodeJWT,
   tokenUID,
   credentialsFromResponse,
+  credentialsFromCookies,
   publicAuthState,
   validateSessionProfile,
 }

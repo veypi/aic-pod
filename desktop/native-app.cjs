@@ -6,7 +6,7 @@ const { createAuthStore } = require('./auth-store.cjs')
 const { createNativeAuth } = require('./native-auth.cjs')
 const { createElectronCookies } = require('./electron-cookies.cjs')
 const { createDeviceIdentity } = require('./device-identity.cjs')
-const { normalizeServer } = require('./auth-cookies.cjs')
+const { normalizeServer, credentialsFromCookies } = require('./auth-cookies.cjs')
 
 function createNativeApp({
   server,
@@ -150,6 +150,22 @@ function createNativeApp({
     return { ok: true }
   }
 
+  // 三方登录：拿到授权地址，由主进程开窗口跳过去（应用内窗口完成后接管会话）。
+  async function thirdPartyLogin(provider) {
+    const redirect = `${base}/u`
+    const authUrl = await auth.authorizeThirdParty(provider, redirect)
+    return { auth_url: authUrl }
+  }
+
+  // 接管会话：三方授权完成后，会话 cookie 已落在 Electron 会话里。
+  async function adoptSession() {
+    const cookies = await cookies.pull()
+    const next = credentialsFromCookies(cookies, Date.now())
+    if (!next) return null
+    await auth.adopt(next)
+    return activate()
+  }
+
   async function stop() {
     active = false
     await backend.stop()
@@ -191,6 +207,8 @@ function createNativeApp({
     refresh,
     signOut,
     openLogin,
+    thirdPartyLogin,
+    adoptSession,
     stop,
     switchAccount,
     loginPassword: input => login('loginPassword', input),

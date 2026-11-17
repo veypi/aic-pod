@@ -184,7 +184,45 @@ function createNativeAuth({
       smsEnabled,
       termsURL: values['auth.legal.terms_url'] || '',
       privacyURL: values['auth.legal.privacy_url'] || '',
+      providers: await fetchProviders(),
     }
+  }
+
+  // 已启用的三方登录提供商（登录页只展示这些）。
+  async function fetchProviders() {
+    try {
+      const { payload } = await request('/vb/api/oauth/providers/public')
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      return items
+        .map(item => ({ code: String(item.code || ''), name: String(item.name || item.code || ''), icon: String(item.icon || '') }))
+        .filter(item => item.code)
+    } catch (_) {
+      return []
+    }
+  }
+
+  // 第三方授权地址：跳转后由浏览器/应用内窗口完成授权，回调落在平台侧。
+  async function authorizeThirdParty(provider, redirect) {
+    const code = String(provider || '').trim()
+    if (!code) throw new NativeAuthError('未指定第三方登录提供商', { code: 'invalid_provider' })
+    const target = String(redirect || '')
+    const query = `/vb/api/auth/authorize/thirdparty?provider=${encodeURIComponent(code)}` +
+      (target ? `&redirect=${encodeURIComponent(target)}` : '')
+    const { payload } = await request(query)
+    const url = payload?.auth_url
+    if (!url) throw new NativeAuthError('服务端未返回授权地址', { code: 'no_auth_url' })
+    return url
+  }
+
+  // 接管会话：第三方授权在应用内完成后，会话 cookie 已落在 Electron 会话里。
+  async function adopt(next) {
+    if (!next) throw new NativeAuthError('未找到可接管的会话', { status: 401, code: 'authentication_required' })
+    const uid = tokenUID(next.accessToken)
+    if (next.user.id !== uid) throw new NativeAuthError('登录用户身份不一致', { code: 'account_mismatch' })
+    await store.saveLogin(next)
+    credentials = next
+    await syncCookies(credentials)
+    return emit()
   }
 
   return {
@@ -195,6 +233,8 @@ function createNativeAuth({
     accessToken,
     ensureProfile,
     fetchAuthConfig,
+    authorizeThirdParty,
+    adopt,
     signOut,
     loginPassword: ({ username, password }) => authenticate('/vb/api/auth/login', { username, password }),
     loginCode: ({ type, target, code }) => authenticate('/vb/api/auth/login/code', { type, target, code }),

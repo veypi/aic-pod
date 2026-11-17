@@ -31,19 +31,29 @@ function registerScheme(protocol) {
   ])
 }
 
-function registerHandler({ protocol, session, uiDir }) {
+function registerHandler({ protocol, session, uiDir, assetsDir }) {
   const handler = async (request) => {
     let rel = SETTINGS_PAGE
     try { rel = decodeURIComponent(new URL(request.url).pathname || SETTINGS_PAGE) } catch (e) { /* 忽略 */ }
     if (rel === '/') rel = SETTINGS_PAGE
     const notFound = () => new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } })
-    const file = path.resolve(uiDir, '.' + path.posix.normalize(rel))
-    if (file !== uiDir && !file.startsWith(uiDir + path.sep)) return notFound() // 目录穿越护栏
-    try {
-      const body = await fs.promises.readFile(file)
-      const mime = SETTINGS_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
-      return new Response(body, { headers: { 'Content-Type': mime } })
-    } catch (e) { return notFound() }
+    // /assets/* → 桌面资源目录（平台图标等）；其余 → 设置窗目录。
+    const roots = [
+      { prefix: '/assets/', dir: assetsDir },
+      { prefix: '/', dir: uiDir },
+    ]
+    for (const root of roots) {
+      if (!root.dir || !rel.startsWith(root.prefix)) continue
+      const sub = rel.slice(root.prefix.length)
+      const file = path.resolve(root.dir, '.' + path.posix.normalize('/' + sub))
+      if (file !== root.dir && !file.startsWith(root.dir + path.sep)) return notFound() // 目录穿越护栏
+      try {
+        const body = await fs.promises.readFile(file)
+        const mime = SETTINGS_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream'
+        return new Response(body, { headers: { 'Content-Type': mime } })
+      } catch (e) { return notFound() }
+    }
+    return notFound()
   }
   // 默认 session + 设置窗独立 partition：自定义协议逐 session 注册，缺一处即 ERR_UNKNOWN_URL_SCHEME
   protocol.handle(SETTINGS_SCHEME, handler)

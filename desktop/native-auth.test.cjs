@@ -7,7 +7,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { createNativeAuth } = require('./native-auth.cjs')
 const { createAuthStore } = require('./auth-store.cjs')
-const { credentialsFromResponse, validateSessionProfile } = require('./auth-cookies.cjs')
+const { credentialsFromResponse, credentialsFromCookies, validateSessionProfile } = require('./auth-cookies.cjs')
 
 const UID_A = '0123456789abcdef0123456789abcdef'
 const UID_B = 'fedcba9876543210fedcba9876543210'
@@ -68,6 +68,53 @@ async function setup(fetchImpl, now = () => Date.now()) {
   })
   return { auth, store, dir, synced, cleared }
 }
+
+test('三方授权地址由服务端签发，adopt 接管会话并广播登录态', async () => {
+  const exp = Math.floor(Date.now() / 1000) + 900
+  const calls = []
+  const { auth, store, synced } = await setup(async (url, options) => {
+    calls.push({ url, options })
+    if (url.includes('/vb/api/auth/authorize/thirdparty')) {
+      return response({ body: { auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x' }, cookies: false })
+    }
+    throw new Error('unexpected request ' + url)
+  })
+  const authUrl = await auth.authorizeThirdParty('google', 'http://localhost:4000/u')
+  assert.match(authUrl, /^https:\/\/accounts\.google\.com\//)
+  const authorize = calls.find(call => call.url.includes('/authorize/thirdparty'))
+  assert.match(authorize.url, /provider=google/)
+  assert.match(authorize.url, /redirect=http%3A%2F%2Flocalhost%3A4000%2Fu/)
+  await assert.rejects(() => auth.authorizeThirdParty(''), /未指定第三方登录提供商/)
+
+  const next = credentialsFromCookies([
+    { name: 'vb_access', value: jwt(UID_A, 'access', exp), secure: true, httpOnly: true },
+    { name: 'vb_refresh', value: jwt(UID_A, 'refresh', exp + 86400), secure: true, httpOnly: true },
+  ], Date.now())
+  assert.ok(next)
+  const state = await auth.adopt(next)
+  assert.equal(state.signedIn, true)
+  assert.equal(state.user.id, UID_A)
+  assert.equal(synced.length, 1)
+  assert.equal(store.current().user.id, UID_A)
+})
+
+test('会话 cookie 重建凭据：两个 token 必须同属一个用户', () => {
+  const exp = Math.floor(Date.now() / 1000) + 900
+  const next = credentialsFromCookies([
+    { name: 'vb_access', value: jwt(UID_A, 'access', exp), secure: true, httpOnly: true },
+    { name: 'vb_refresh', value: jwt(UID_A, 'refresh', exp + 86400), secure: true, httpOnly: true },
+  ], Date.now())
+  assert.ok(next)
+  assert.equal(next.user.id, UID_A)
+  assert.equal(next.accessCookie.name, 'vb_access')
+  assert.equal(next.refreshCookie.name, 'vb_refresh')
+  const mixed = credentialsFromCookies([
+    { name: 'vb_access', value: jwt(UID_A, 'access', exp) },
+    { name: 'vb_refresh', value: jwt(UID_B, 'refresh', exp) },
+  ], Date.now())
+  assert.equal(mixed, null)
+  assert.equal(credentialsFromCookies([], Date.now()), null)
+})
 
 test('登录只从 Set-Cookie 取 token，ensure 使用原始 Bearer 并保存完整 Host 档案', async () => {
   const calls = []

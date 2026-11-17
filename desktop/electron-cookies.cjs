@@ -34,7 +34,19 @@ function createElectronCookies({ server, session }) {
     }
     await jar.flushStore()
   }
-  return { sync, clear }
+  // 读回当前站点的会话 cookie（第三方授权在应用内完成后据此接管会话）。
+  async function pull() {
+    const items = await jar.get({ url: serverURL(server, '/') })
+    return items.map(item => ({
+      name: item.name,
+      value: item.value,
+      path: item.path || '/',
+      secure: !!item.secure,
+      httpOnly: !!item.httpOnly,
+      sameSite: item.sameSite || 'strict',
+    }))
+  }
+  return { sync, clear, pull }
 }
 
 module.exports = { createElectronCookies, toElectronCookie }
