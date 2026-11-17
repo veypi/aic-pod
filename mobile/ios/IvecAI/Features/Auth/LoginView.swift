@@ -86,14 +86,18 @@ struct LoginView: View {
             OAuthWebSheet(
                 target: target,
                 platformHost: config.server.host,
-                cancelTitle: config.t("settings.cancel")
-            ) { cookies in
-                do {
-                    try auth.adopt(cookies: cookies)
-                } catch {
-                    errorMessage = config.errorText(error)
+                cancelTitle: config.t("settings.cancel"),
+                onCookies: { cookies in
+                    do {
+                        try auth.adopt(cookies: cookies)
+                    } catch {
+                        errorMessage = config.errorText(error)
+                    }
+                },
+                onError: { message in
+                    errorMessage = message
                 }
-            }
+            )
         }
     }
 

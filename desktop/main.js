@@ -487,6 +487,19 @@ function openAuthWindow(url) {
   authWin.webContents.on("did-navigate", (_e, target) => {
     if (samePlatform(target)) adopt();
   });
+  // 授权页加载失败（外网不通 / DNS / 代理）时不能留一个白窗：直接把原因写出来。
+  authWin.webContents.on(
+    "did-fail-load",
+    (_e, code, description, failedUrl, isMainFrame) => {
+      if (!isMainFrame || code === -3) return;
+      const body = `<!doctype html><meta charset="utf-8"><body style="margin:0;padding:28px;font:14px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;color:#c73535;word-break:break-all">` +
+        `<p style="font-size:15px;font-weight:600;margin:0 0 10px">授权页加载失败</p>` +
+        `<p style="margin:0 0 10px">${description || "网络错误"}（${code}）</p>` +
+        `<p style="margin:0;color:#6d7787;font-size:12px">${failedUrl}</p>` +
+        `<p style="margin:16px 0 0;color:#6d7787;font-size:12px">请检查网络 / 代理后重新点登录。</p></body>`;
+      authWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(body));
+    },
+  );
   authWin.on("closed", () => {
     authWin = null;
     adopt();

@@ -22,15 +22,25 @@ struct OAuthWebSheet: View {
     let cancelTitle: String
     /// 授权完成：拿到会话 cookie。
     var onCookies: ([HTTPCookie]) -> Void
+    /// 加载失败（外网不通 / DNS / 代理）：把原因交回登录页，不留白窗。
+    var onError: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            OAuthWebView(url: target.url, platformHost: platformHost) { cookies in
-                onCookies(cookies)
-                dismiss()
-            }
+            OAuthWebView(
+                url: target.url,
+                platformHost: platformHost,
+                onCookies: { cookies in
+                    onCookies(cookies)
+                    dismiss()
+                },
+                onError: { message in
+                    onError(message)
+                    dismiss()
+                }
+            )
             .ignoresSafeArea(edges: .bottom)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -46,9 +56,10 @@ private struct OAuthWebView: UIViewRepresentable {
     let url: URL
     let platformHost: String?
     let onCookies: ([HTTPCookie]) -> Void
+    let onError: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(platformHost: platformHost, onCookies: onCookies)
+        Coordinator(platformHost: platformHost, onCookies: onCookies, onError: onError)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -66,11 +77,31 @@ private struct OAuthWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         let platformHost: String?
         let onCookies: ([HTTPCookie]) -> Void
+        let onError: (String) -> Void
         private var finished = false
 
-        init(platformHost: String?, onCookies: @escaping ([HTTPCookie]) -> Void) {
+        init(platformHost: String?, onCookies: @escaping ([HTTPCookie]) -> Void,
+             onError: @escaping (String) -> Void) {
             self.platformHost = platformHost
             self.onCookies = onCookies
+            self.onError = onError
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            fail(error)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            fail(error)
+        }
+
+        private func fail(_ error: Error) {
+            // -999 是正常打断（用户取消/重定向），不算错误。
+            if (error as NSError).code == NSURLErrorCancelled { return }
+            guard !finished else { return }
+            finished = true
+            let message = "授权页加载失败：\(error.localizedDescription)"
+            DispatchQueue.main.async { self.onError(message) }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
