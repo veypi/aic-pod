@@ -16,43 +16,77 @@
 // 平台能力仅白名单 host；aicHost 进一步限定当前平台 origin。native:auth 仅限原生登录页，
 // local:api 的平台面只有固定 Pod 管理方法，设置面仅限 app://aic/settings.html。
 // desktop-session 使用私有 stdio，不开放 HTTP、端口或通用本地管理 API。
-const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol, safeStorage } = require('electron')
-const { spawn, execFileSync } = require('child_process')
-const { waitForStartup } = require('./backend-startup.cjs')
-const { createBackend } = require('./backend.cjs')
-const { capturePlatform } = require('./screenshot.cjs')
-const { composeLocalStatus } = require('./host-state.cjs')
-const { browserExecutable, agentBrowserBinaryName } = require('./runtime-paths.cjs')
-const { insecureOriginFor, hostFromConfigOutput } = require('./secure-origin.cjs')
-const { createNativeApp } = require('./native-app.cjs')
-const { attachSessionRPC } = require('./session-rpc.cjs')
-const { normalizeServer } = require('./auth-cookies.cjs')
-const fs = require('fs')
-const net = require('net')
-const os = require('os')
-const path = require('path')
+const {
+  app,
+  BaseWindow,
+  BrowserWindow,
+  WebContentsView,
+  Tray,
+  Menu,
+  ipcMain,
+  shell,
+  dialog,
+  session,
+  screen,
+  globalShortcut,
+  protocol,
+  safeStorage,
+} = require("electron");
+const { spawn, execFileSync } = require("child_process");
+const { waitForStartup } = require("./backend-startup.cjs");
+const { createBackend } = require("./backend.cjs");
+const { capturePlatform } = require("./screenshot.cjs");
+const { composeLocalStatus } = require("./host-state.cjs");
+const {
+  browserExecutable,
+  agentBrowserBinaryName,
+} = require("./runtime-paths.cjs");
+const {
+  insecureOriginFor,
+  hostFromConfigOutput,
+} = require("./secure-origin.cjs");
+const { createNativeApp } = require("./native-app.cjs");
+const { attachSessionRPC } = require("./session-rpc.cjs");
+const { normalizeServer } = require("./auth-cookies.cjs");
+const fs = require("fs");
+const net = require("net");
+const os = require("os");
+const path = require("path");
 
 // ---- 常量 ----
-const isDev = !app.isPackaged
+const isDev = !app.isPackaged;
 // kiosk/展示场景：AIC_FULLSCREEN=1 或 --fullscreen 参数 → 启动即全屏（大屏展示用）
 const startFullscreen =
-  process.env.AIC_FULLSCREEN === '1' || process.argv.includes('--fullscreen')
+  process.env.AIC_FULLSCREEN === "1" || process.argv.includes("--fullscreen");
 const backendBin = isDev
-  ? path.join(__dirname, 'bin', 'aic-backend' + (process.platform === 'win32' ? '.exe' : ''))
-  : path.join(process.resourcesPath, 'backend', 'aic-backend' + (process.platform === 'win32' ? '.exe' : ''))
-const trayIcon = process.platform === 'darwin'
-  ? path.join(__dirname, 'assets', 'trayTemplate.png')
-  : path.join(__dirname, 'assets', 'tray.png')
-let petSize = 100 // 桌宠窗口边长（右键菜单缩放 50–400，随 pet-pos.json 持久化）
-const probeTimeout = 5000 // {host}/root.html 探测超时
-const platformRetryMin = 10000 // 平台不可达复查起步间隔
-const platformRetryMax = 30000 // 复查退避上限
-const DEFAULT_HOST = 'https://ivec-ai.com'
+  ? path.join(
+      __dirname,
+      "bin",
+      "aic-backend" + (process.platform === "win32" ? ".exe" : ""),
+    )
+  : path.join(
+      process.resourcesPath,
+      "backend",
+      "aic-backend" + (process.platform === "win32" ? ".exe" : ""),
+    );
+const trayIcon =
+  process.platform === "darwin"
+    ? path.join(__dirname, "assets", "trayTemplate.png")
+    : path.join(__dirname, "assets", "tray.png");
+let petSize = 100; // 桌宠窗口边长（右键菜单缩放 50–400，随 pet-pos.json 持久化）
+const probeTimeout = 5000; // {host}/root.html 探测超时
+const platformRetryMin = 10000; // 平台不可达复查起步间隔
+const platformRetryMax = 30000; // 复查退避上限
+const DEFAULT_HOST = "https://ivec-ai.com";
 // LEGACY_HOSTS：旧平台域名（ivec.ai 现 301 至 ivec-ai.com），作为受信任 host 保留，
 // 兼容旧配置与跳转后的页面 origin。
-const LEGACY_HOSTS = ['ivec.ai']
-const { createHostPolicy } = require('./platform-hosts.cjs')
-const hostPolicy = createHostPolicy({ platform: DEFAULT_HOST, defaultHost: DEFAULT_HOST, legacyHosts: LEGACY_HOSTS })
+const LEGACY_HOSTS = ["ivec.ai"];
+const { createHostPolicy } = require("./platform-hosts.cjs");
+const hostPolicy = createHostPolicy({
+  platform: DEFAULT_HOST,
+  defaultHost: DEFAULT_HOST,
+  legacyHosts: LEGACY_HOSTS,
+});
 
 // ---- 平台 origin 的安全上下文（page 端文件能力依赖 OPFS）----
 // 明文 http + 非 loopback 的平台地址不是「安全上下文」：浏览器不暴露 navigator.storage，
@@ -62,230 +96,288 @@ const hostPolicy = createHostPolicy({ platform: DEFAULT_HOST, defaultHost: DEFAU
 // （Chromium: --unsafely-treat-insecure-origin-as-secure）——开关只在进程启动期可追加，
 // 故此处同步取一次平台地址（后端 config get 子命令：配置真相只有一份，不在本壳重复解析 YAML）。
 // AIC_TRUST_INSECURE_ORIGIN=0 可关闭（回到「非安全上下文 = page 端能力缺失」）。
-let trustedInsecureOrigin = ''
-let originNoticeShown = false
+let trustedInsecureOrigin = "";
+let originNoticeShown = false;
 
 // 同步取平台地址（app ready 前唯一可用入口：后端子命令只读配置，不起常驻会话）。
 function platformHostSync() {
   try {
-    const out = execFileSync(backendBin, ['config', 'get'], { encoding: 'utf8', timeout: 5000, windowsHide: true })
-    return hostFromConfigOutput(out)
+    const out = execFileSync(backendBin, ["config", "get"], {
+      encoding: "utf8",
+      timeout: 5000,
+      windowsHide: true,
+    });
+    return hostFromConfigOutput(out);
   } catch (e) {
-    return '' // 后端二进制缺失 / 配置不可读 → 无从判定，按未提升处理
+    return ""; // 后端二进制缺失 / 配置不可读 → 无从判定，按未提升处理
   }
 }
 
-if (process.env.AIC_TRUST_INSECURE_ORIGIN !== '0') {
-  const origin = insecureOriginFor(platformHostSync())
+if (process.env.AIC_TRUST_INSECURE_ORIGIN !== "0") {
+  const origin = insecureOriginFor(platformHostSync());
   if (origin) {
-    app.commandLine.appendSwitch('unsafely-treat-insecure-origin-as-secure', origin)
-    trustedInsecureOrigin = origin
-    console.log('[secure-origin] 平台 origin 提升为安全上下文：' + origin)
+    app.commandLine.appendSwitch(
+      "unsafely-treat-insecure-origin-as-secure",
+      origin,
+    );
+    trustedInsecureOrigin = origin;
+    console.log("[secure-origin] 平台 origin 提升为安全上下文：" + origin);
   }
 }
 
 // 运行期平台地址若仍需提升、但不在启动期已提升的名单内（首配后改地址等），
 // 开关无法追加 → 明确提示重启客户端，不静默带着残缺能力跑。
 function ensureOriginTrusted(origin) {
-  const need = insecureOriginFor(origin)
-  if (!need || need === trustedInsecureOrigin || originNoticeShown) return
-  originNoticeShown = true
+  const need = insecureOriginFor(origin);
+  if (!need || need === trustedInsecureOrigin || originNoticeShown) return;
+  originNoticeShown = true;
   const detail =
     `平台地址 ${origin} 是明文 HTTP，不是安全上下文：page 端文件能力不可用\n` +
-    '（fs 工具 _host=page、二进制文件上传引用、OPFS 类技能）。\n' +
-    '重启客户端后生效——桌面壳启动时会把该地址提升为安全上下文。'
+    "（fs 工具 _host=page、二进制文件上传引用、OPFS 类技能）。\n" +
+    "重启客户端后生效——桌面壳启动时会把该地址提升为安全上下文。";
   dialog
     .showMessageBox({
-      type: 'warning',
-      buttons: ['稍后', '立即重启'],
+      type: "warning",
+      buttons: ["稍后", "立即重启"],
       defaultId: 1,
       cancelId: 0,
-      message: '需要重启客户端以启用 page 端文件能力',
+      message: "需要重启客户端以启用 page 端文件能力",
       detail,
     })
     .then(({ response }) => {
       if (response === 1) {
-        app.relaunch()
-        app.exit(0)
+        app.relaunch();
+        app.exit(0);
       }
-    })
+    });
 }
 
 // ---- 设置窗自定义协议（2026-09-22 去本地管理 API） ----
 // app://aic/<path> → desktop/settings-ui/<path>；实现见 settings-protocol.cjs。
-const settingsProtocol = require('./settings-protocol.cjs')
-const { SETTINGS_ORIGIN, SETTINGS_PAGE } = settingsProtocol
-const settingsUiDir = path.join(__dirname, 'settings-ui')
+const settingsProtocol = require("./settings-protocol.cjs");
+const { SETTINGS_ORIGIN, SETTINGS_PAGE } = settingsProtocol;
+const settingsUiDir = path.join(__dirname, "settings-ui");
 // standard+secure 才有真实 origin（localStorage 可用）且不被当跨源阻塞；须在 app ready 前注册
-settingsProtocol.registerScheme(protocol)
+settingsProtocol.registerScheme(protocol);
 
 function registerSettingsProtocol() {
-  settingsProtocol.registerHandler({ protocol, session, uiDir: settingsUiDir, assetsDir: path.join(__dirname, 'assets') })
+  settingsProtocol.registerHandler({
+    protocol,
+    session,
+    uiDir: settingsUiDir,
+    assetsDir: path.join(__dirname, "assets"),
+  });
 }
 
-let mainWin = null // 主窗口（BaseWindow：平台页与 browser 画面展示）
-let platformView = null // 平台页视图（恒占满 contentView）
-let loginWin = null // 原生登录窗口（独立小窗）
-let authWin = null // 三方授权窗口（应用内完成 OAuth）
-let petWin = null // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /agents/{aid}/pet）
-let settingsWin = null // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
-let keepWin = null // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
-let keepExpectedUrl = '' // keepWin 当前期望地址（did-fail-load 延迟重试的竞态护栏）
-let tray = null
-let quitting = false
-let petDragOff = null // 桌宠拖动：鼠标相对窗口偏移
-let petPos = null // 桌宠当前位置 {x, y}（内存缓存，创建/拖动时更新）
-let petPosTimer = null // 桌宠位置写盘防抖 timer
-let host = DEFAULT_HOST // 平台地址（配置读取）
-let homePath = '/' // 平台首页路径（配置 home_path；启动与复查跳转共用）
-let platformWaiting = false // 主视图停在 loading、平台不可达复查中
-let platformWaitTimer = null // 复查定时器
-let platformProbing = false // 复查探测进行中（防并发探测）
-let platformRetryMs = platformRetryMin // 当前复查间隔（10s 起步，×2 退避到 30s）
-let nativeApp = null // 原生认证状态与 Session Host 生命周期的唯一所有者
-let sessionRPC = null // 当前 Go 子进程的私有 stdio 控制通道
+let mainWin = null; // 主窗口（BaseWindow：平台页与 browser 画面展示）
+let platformView = null; // 平台页视图（恒占满 contentView）
+let loginWin = null; // 原生登录窗口（独立小窗）
+let authWin = null; // 三方授权窗口（应用内完成 OAuth）
+let petWin = null; // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /agents/{aid}/pet）
+let settingsWin = null; // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
+let keepWin = null; // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
+let keepExpectedUrl = ""; // keepWin 当前期望地址（did-fail-load 延迟重试的竞态护栏）
+let tray = null;
+let quitting = false;
+let petDragOff = null; // 桌宠拖动：鼠标相对窗口偏移
+let petPos = null; // 桌宠当前位置 {x, y}（内存缓存，创建/拖动时更新）
+let petPosTimer = null; // 桌宠位置写盘防抖 timer
+let host = DEFAULT_HOST; // 平台地址（配置读取）
+let homePath = "/"; // 平台首页路径（配置 home_path；启动与复查跳转共用）
+let platformWaiting = false; // 主视图停在 loading、平台不可达复查中
+let platformWaitTimer = null; // 复查定时器
+let platformProbing = false; // 复查探测进行中（防并发探测）
+let platformRetryMs = platformRetryMin; // 当前复查间隔（10s 起步，×2 退避到 30s）
+let nativeApp = null; // 原生认证状态与 Session Host 生命周期的唯一所有者
+let sessionRPC = null; // 当前 Go 子进程的私有 stdio 控制通道
 
 const backendCtl = createBackend({
   spawn,
   binary: backendBin,
-  env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv(), ...cuaBundleEnv(), ...agentBrowserEnv(), ...skillBinEnv() },
+  env: {
+    ...process.env,
+    AIC_DEVICE_TYPE: "desktop",
+    ...browserEnv(),
+    ...cuaBundleEnv(),
+    ...agentBrowserEnv(),
+    ...skillBinEnv(),
+  },
   waitForStartup,
   onFatal: (error) => {
-    if (nativeApp) nativeApp.handleBackendFatal(error)
-    else failStartup(error)
+    if (nativeApp) nativeApp.handleBackendFatal(error);
+    else failStartup(error);
   },
   session: {
     enabled: () => !!nativeApp,
     attach: (child) => {
-      sessionRPC?.close()
+      sessionRPC?.close();
       sessionRPC = attachSessionRPC(child, {
         bootstrap: () => nativeApp.sessionRPC.bootstrap(),
         accessToken: () => nativeApp.sessionRPC.accessToken(),
         onError: (error) => {
-          nativeApp?.handleBackendFatal(error)
-          backendCtl.stop().catch(() => {})
+          nativeApp?.handleBackendFatal(error);
+          backendCtl.stop().catch(() => {});
         },
-      })
+      });
     },
   },
-})
+});
 
 // ---- 单实例（唯一 ID，第二实例聚焦现有窗口；本地服务端口唯一） ----
 if (!app.requestSingleInstanceLock()) {
-  app.quit()
+  app.quit();
 } else {
-  app.on('second-instance', () => focusMain())
-  app.whenReady().then(start).catch(failStartup)
-  app.on('activate', () => focusMain()) // mac Dock 图标点击
-  app.on('before-quit', (event) => { quitFlushingCookies(event) })
+  app.on("second-instance", () => focusMain());
+  app.whenReady().then(start).catch(failStartup);
+  app.on("activate", () => focusMain()); // mac Dock 图标点击
+  app.on("before-quit", (event) => {
+    quitFlushingCookies(event);
+  });
 }
 
 // 退出前把 cookie 刷到盘（2026-10-10）：Chromium 对 cookie 是批量延迟写盘，容器/进程在
 // 写盘前被杀时，最近一次刷新（vbase 每次刷新都轮换 refresh token）的 Set-Cookie 会丢——
 // 下一次启动拿旧 token 去刷新，服务端按重放处置。平台侧已放宽（上一代 jti 可重试），
 // 这里补客户端一层：优雅退出必须把 cookie 落到磁盘（强杀/SIGKILL 拦不住，只能减少面）。
-let cookieFlushStarted = false
+let cookieFlushStarted = false;
 function quitFlushingCookies(event) {
-  if (cookieFlushStarted) { quitting = true; return }
-  cookieFlushStarted = true
-  event.preventDefault()
-  const finish = () => { quitting = true; app.quit() }
-  const timer = setTimeout(finish, 1500)
-  const done = () => { clearTimeout(timer); finish() }
+  if (cookieFlushStarted) {
+    quitting = true;
+    return;
+  }
+  cookieFlushStarted = true;
+  event.preventDefault();
+  const finish = () => {
+    quitting = true;
+    app.quit();
+  };
+  const timer = setTimeout(finish, 1500);
+  const done = () => {
+    clearTimeout(timer);
+    finish();
+  };
   try {
-    session.defaultSession.cookies.flushStore().then(done, done)
-  } catch (e) { done() }
+    session.defaultSession.cookies.flushStore().then(done, done);
+  } catch (e) {
+    done();
+  }
 }
 
 // ---- 后端子进程回收（will-quit → SIGTERM → Go 优雅退出） ----
 // 注册在启动流程最前：除正常退出外，spawn 超时/启动中途失败等提前 app.quit() 的
 // 路径同样要回收子进程（原先注册在 start() 末尾，这些路径漏 kill 会留下孤儿后端）。
-app.on('will-quit', () => {
-  backendCtl.terminate()
-})
+app.on("will-quit", () => {
+  backendCtl.terminate();
+});
 
 // ---- 应用菜单 ----
 // mac 保留应用/编辑/视图菜单（Cmd+Q / Cmd+C+V / 开发者工具）；win/linux frameless 无菜单栏。
 // 应用菜单第一项不用 role:'appMenu'——dev 模式（npm start）下其 label 取进程 bundle 名
 // 固定显示 "Electron"；显式 label 让菜单栏在 dev/打包两种形态都显示 ivec。
-if (process.platform === 'darwin') {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    {
-      label: 'ivec',
-      submenu: [
-        { role: 'about', label: '关于 ivec' },
-        { type: 'separator' },
-        { role: 'hide', label: '隐藏 ivec' },
-        { role: 'hideOthers', label: '隐藏其他应用程序' },
-        { role: 'unhide', label: '全部显示' },
-        { type: 'separator' },
-        { role: 'quit', label: '退出 ivec' },
-      ]
-    },
-    { role: 'editMenu' },
-    {
-      label: '视图',
-      // 主窗口是 BaseWindow（无 webContents），role:reload/toggleDevTools/togglefullscreen
-      // 会找 focusedWindow().webContents → undefined 抛异常（2026-09-10 实测报错）——
-      // 三个能力全部改成显式 handler。
-      submenu: [
-        // 等待平台中 → 「重新加载」= 立即复查（重载 loading.html 本身不会重新探测）
-        { label: '重新加载', accelerator: 'CmdOrCtrl+R', click: () => (platformWaiting ? retryPlatform() : platformView?.webContents.reload()) },
-        { label: '开发者工具', accelerator: process.platform === 'darwin' ? 'Alt+Cmd+I' : 'Ctrl+Shift+I', click: () => platformView?.webContents.toggleDevTools() },
-        { type: 'separator' },
-        { label: '切换全屏', accelerator: process.platform === 'darwin' ? 'Ctrl+Cmd+F' : 'F11', click: () => { if (mainWin && !mainWin.isDestroyed()) mainWin.setFullScreen(!mainWin.isFullScreen()) } },
-      ],
-    },
-    { role: 'windowMenu' },
-  ]))
+if (process.platform === "darwin") {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "ivec",
+        submenu: [
+          { role: "about", label: "关于 ivec" },
+          { type: "separator" },
+          { role: "hide", label: "隐藏 ivec" },
+          { role: "hideOthers", label: "隐藏其他应用程序" },
+          { role: "unhide", label: "全部显示" },
+          { type: "separator" },
+          { role: "quit", label: "退出 ivec" },
+        ],
+      },
+      { role: "editMenu" },
+      {
+        label: "视图",
+        // 主窗口是 BaseWindow（无 webContents），role:reload/toggleDevTools/togglefullscreen
+        // 会找 focusedWindow().webContents → undefined 抛异常（2026-09-10 实测报错）——
+        // 三个能力全部改成显式 handler。
+        submenu: [
+          // 等待平台中 → 「重新加载」= 立即复查（重载 loading.html 本身不会重新探测）
+          {
+            label: "重新加载",
+            accelerator: "CmdOrCtrl+R",
+            click: () =>
+              platformWaiting
+                ? retryPlatform()
+                : platformView?.webContents.reload(),
+          },
+          {
+            label: "开发者工具",
+            accelerator:
+              process.platform === "darwin" ? "Alt+Cmd+I" : "Ctrl+Shift+I",
+            click: () => platformView?.webContents.toggleDevTools(),
+          },
+          { type: "separator" },
+          {
+            label: "切换全屏",
+            accelerator: process.platform === "darwin" ? "Ctrl+Cmd+F" : "F11",
+            click: () => {
+              if (mainWin && !mainWin.isDestroyed())
+                mainWin.setFullScreen(!mainWin.isFullScreen());
+            },
+          },
+        ],
+      },
+      { role: "windowMenu" },
+    ]),
+  );
 } else {
-  Menu.setApplicationMenu(null)
+  Menu.setApplicationMenu(null);
 }
 
 // dev 模式 Dock 图标：打包版由 electron-builder 写死在 App bundle；dev（npm start）
 // 默认是 Electron 原子图标——用 setIcon 统一为 ai.svg 生成的新图标。
-if (process.platform === 'darwin' && app.dock) {
-  app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'))
+if (process.platform === "darwin" && app.dock) {
+  app.dock.setIcon(path.join(__dirname, "assets", "icon.png"));
 }
 
 async function start() {
   createMainWindow(() => {
-    platformView?.webContents.loadFile(path.join(__dirname, 'loading.html'))
-  })
+    platformView?.webContents.loadFile(path.join(__dirname, "loading.html"));
+  });
   session.defaultSession.registerPreloadScript({
-    type: 'frame',
-    id: 'aic-remote-preload',
-    filePath: path.join(__dirname, 'remote-preload.js'),
-  })
+    type: "frame",
+    id: "aic-remote-preload",
+    filePath: path.join(__dirname, "remote-preload.js"),
+  });
   session.defaultSession.registerPreloadScript({
-    type: 'frame',
-    id: 'aic-login-preload',
-    filePath: path.join(__dirname, 'login-preload.js'),
-  })
+    type: "frame",
+    id: "aic-login-preload",
+    filePath: path.join(__dirname, "login-preload.js"),
+  });
 
-  registerSettingsProtocol()
-  registerIpc()
-  startCmdServer()
+  registerSettingsProtocol();
+  registerIpc();
+  startCmdServer();
 
-  setStep('正在读取配置…')
-  const cfg = await readConfig().catch(() => null)
-  if (!cfg) throw new Error('无法读取本地服务配置，请检查本地服务日志')
-  if (cfg.host) host = cfg.host
-  hostPolicy.replace(host)
-  ensureOriginTrusted(host)
-  homePath = cfg.home_path || '/'
-  if (typeof homePath !== 'string' || !homePath.startsWith('/') || homePath.startsWith('//')) homePath = '/'
+  setStep("正在读取配置…");
+  const cfg = await readConfig().catch(() => null);
+  if (!cfg) throw new Error("无法读取本地服务配置，请检查本地服务日志");
+  if (cfg.host) host = cfg.host;
+  hostPolicy.replace(host);
+  ensureOriginTrusted(host);
+  homePath = cfg.home_path || "/";
+  if (
+    typeof homePath !== "string" ||
+    !homePath.startsWith("/") ||
+    homePath.startsWith("//")
+  )
+    homePath = "/";
 
-  nativeApp = await buildNativeApp(host)
+  nativeApp = await buildNativeApp(host);
   try {
-    createTray()
+    createTray();
   } catch (err) {
-    console.error('[tray] create failed:', err.message)
+    console.error("[tray] create failed:", err.message);
   }
 
   // 只有恢复登录、ensure、Session Host 真实连接全部成功后才进入工作区。
   // 未登录或任一步骤失败都停留在原生页，不再先打开 Web /login。
-  await nativeApp.boot()
+  await nativeApp.boot();
 }
 
 async function buildNativeApp(server) {
@@ -293,130 +385,170 @@ async function buildNativeApp(server) {
     server,
     safeStorage,
     electronSession: session,
-    userDataPath: app.getPath('userData'),
+    userDataPath: app.getPath("userData"),
     backend: backendCtl,
     hostname: os.hostname(),
     waitConnected: waitForNativeConnected,
     showLogin: showNativeLogin,
     loadWorkspace: async () => {
-      if (!await probeRoot(host)) throw new Error('平台不可达，请检查服务器地址或网络')
-      loadMain(platformUrl())
+      if (!(await probeRoot(host)))
+        throw new Error("平台不可达，请检查服务器地址或网络");
+      loadMain(platformUrl());
     },
     onChanged: (authState) => {
       // 登录成功：登录窗让位给工作区。
-      if (authState.signedIn && loginWin && !loginWin.isDestroyed()) loginWin.close()
+      if (authState.signedIn && loginWin && !loginWin.isDestroyed())
+        loginWin.close();
       if (platformView && !platformView.webContents.isDestroyed()) {
-        platformView.webContents.send('aic-host:event', { event: 'auth.changed', payload: authState })
+        platformView.webContents.send("aic-host:event", {
+          event: "auth.changed",
+          payload: authState,
+        });
       }
     },
-  })
-  await value.init()
-  return value
+  });
+  await value.init();
+  return value;
 }
 
 // 原生登录页：独立的小窗口（规范尺寸的原生页面），不再塞进主窗口的平台视图。
 function showNativeLogin() {
-  clearPlatformRetry()
+  clearPlatformRetry();
   // 旧账户的 SharedWorker / 网页用户 NATS 不能越过登出或账户切换继续存活。
-  if (keepWin && !keepWin.isDestroyed()) keepWin.destroy()
-  keepWin = null
-  if (petWin && !petWin.isDestroyed()) petWin.destroy()
-  petWin = null
+  if (keepWin && !keepWin.isDestroyed()) keepWin.destroy();
+  keepWin = null;
+  if (petWin && !petWin.isDestroyed()) petWin.destroy();
+  petWin = null;
   if (loginWin && !loginWin.isDestroyed()) {
-    loginWin.webContents.send('native:auth:sync')
-    loginWin.show()
-    loginWin.focus()
-    return
+    loginWin.webContents.send("native:auth:sync");
+    loginWin.show();
+    loginWin.focus();
+    return;
   }
   loginWin = new BrowserWindow({
     width: 400,
-    height: 700,
+    height: 760,
     minWidth: 380,
     maxWidth: 520,
     resizable: true,
     frame: true,
     center: true,
-    title: 'ivec.ai',
+    title: "ivec.ai",
     autoHideMenuBar: true,
-    backgroundColor: '#f3f5f9',
+    backgroundColor: "#f3f5f9",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      preload: path.join(__dirname, 'login-preload.js'),
+      preload: path.join(__dirname, "login-preload.js"),
     },
-  })
-  loginWin.on('closed', () => { loginWin = null })
-  loginWin.loadURL(SETTINGS_ORIGIN + '/login.html')
+  });
+  loginWin.on("closed", () => {
+    loginWin = null;
+  });
+  loginWin.loadURL(SETTINGS_ORIGIN + "/login.html");
 }
 
 // 三方授权窗口：在应用内完成 OAuth。回调落在平台侧，会话 cookie 进入本应用的
 // Electron 会话，随后由 nativeApp.adoptSession() 接管。
 function openAuthWindow(url) {
   if (authWin && !authWin.isDestroyed()) {
-    authWin.focus()
-    return
+    authWin.focus();
+    return;
   }
   authWin = new BrowserWindow({
     width: 520,
     height: 720,
     frame: true,
     center: true,
-    title: 'ivec.ai',
+    title: "ivec.ai",
     autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-  })
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
   authWin.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (/^https?:\/\//.test(target)) shell.openExternal(target)
-    return { action: 'deny' }
-  })
+    if (/^https?:\/\//.test(target)) shell.openExternal(target);
+    return { action: "deny" };
+  });
   const adopt = () => {
-    if (!nativeApp) return
-    nativeApp.adoptSession().then(result => {
-      if (result && authWin && !authWin.isDestroyed()) authWin.close()
-    }).catch(() => { })
-  })
-  authWin.webContents.on('did-navigate', (_e, target) => { if (samePlatform(target)) adopt() })
-  authWin.on('closed', () => { authWin = null; adopt() })
-  authWin.loadURL(url)
+    if (!nativeApp) return;
+    nativeApp
+      .adoptSession()
+      .then((result) => {
+        if (result && authWin && !authWin.isDestroyed()) authWin.close();
+      })
+      .catch(() => {});
+  };
+  authWin.webContents.on("did-navigate", (_e, target) => {
+    if (samePlatform(target)) adopt();
+  });
+  authWin.on("closed", () => {
+    authWin = null;
+    adopt();
+  });
+  authWin.loadURL(url);
 }
 
 async function waitForNativeConnected(timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-  let status = null
+  const deadline = Date.now() + timeoutMs;
+  let status = null;
   for (;;) {
-    status = await localStatus()
-    if (status.connected || !backendAlive() || Date.now() >= deadline) return status
-    await new Promise(resolve => setTimeout(resolve, 400))
+    status = await localStatus();
+    if (status.connected || !backendAlive() || Date.now() >= deadline)
+      return status;
+    await new Promise((resolve) => setTimeout(resolve, 400));
   }
 }
 
-let clientBridgeL10n = null
+let clientBridgeL10n = null;
 function nativeLoginTexts() {
   if (!clientBridgeL10n) {
     const file = isDev
-      ? path.join(__dirname, '..', 'client-bridge', 'l10n.json')
-      : path.join(process.resourcesPath, 'client-bridge', 'l10n.json')
-    clientBridgeL10n = JSON.parse(fs.readFileSync(file, 'utf8'))
+      ? path.join(__dirname, "..", "client-bridge", "l10n.json")
+      : path.join(process.resourcesPath, "client-bridge", "l10n.json");
+    clientBridgeL10n = JSON.parse(fs.readFileSync(file, "utf8"));
   }
-  const locale = String(app.getLocale() || '').toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US'
-  return { locale, texts: clientBridgeL10n[locale] || clientBridgeL10n['en-US'] }
+  const locale = String(app.getLocale() || "")
+    .toLowerCase()
+    .startsWith("zh")
+    ? "zh-CN"
+    : "en-US";
+  return {
+    locale,
+    texts: clientBridgeL10n[locale] || clientBridgeL10n["en-US"],
+  };
 }
 
 function publicNativeAuthState() {
-  const value = nativeApp?.state() || { signedIn: false, user: null, expiresAt: 0 }
-  return { signedIn: value.signedIn, user: value.user, expiresAt: value.expiresAt }
+  const value = nativeApp?.state() || {
+    signedIn: false,
+    user: null,
+    expiresAt: 0,
+  };
+  return {
+    signedIn: value.signedIn,
+    user: value.user,
+    expiresAt: value.expiresAt,
+  };
 }
 
 // ---- 内置 cua-driver 目录提示（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----
 // 固定版本随包分发（签名/公证原样，TCC 授权归 com.trycua.driver）。cjs 只看
 // 目录存在性；Pod 默认配置直接启动其中的官方 cua-driver mcp。
 function cuaBundleEnv() {
-  const plat = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+  const plat =
+    process.platform === "darwin"
+      ? "darwin"
+      : process.platform === "win32"
+        ? "win32"
+        : "linux";
   const dir = app.isPackaged
-    ? path.join(process.resourcesPath, 'cua', plat)
-    : path.join(__dirname, 'vendor', 'cua', plat)
-  return fs.existsSync(dir) ? { AIC_CUA_BUNDLE_DIR: dir } : {}
+    ? path.join(process.resourcesPath, "cua", plat)
+    : path.join(__dirname, "vendor", "cua", plat);
+  return fs.existsSync(dir) ? { AIC_CUA_BUNDLE_DIR: dir } : {};
 }
 
 // ---- 内置 Chrome 可执行文件路径（vendor/browser → resources/browser） ----
@@ -425,96 +557,135 @@ function cuaBundleEnv() {
 // （与打包前同步/校验 scripts/sync-browser.mjs 同一事实源）。
 function browserEnv() {
   const root = app.isPackaged
-    ? path.join(process.resourcesPath, 'browser')
-    : path.join(__dirname, 'vendor', 'browser')
-  const executable = browserExecutable(root, process.platform, process.arch)
-  return fs.existsSync(executable) ? { AIC_BROWSER_PATH: executable } : {}
+    ? path.join(process.resourcesPath, "browser")
+    : path.join(__dirname, "vendor", "browser");
+  const executable = browserExecutable(root, process.platform, process.arch);
+  return fs.existsSync(executable) ? { AIC_BROWSER_PATH: executable } : {};
 }
 
 // 官方 agent-browser 原生二进制（随包分发；当前仓内无消费者，留给 owner 自配 MCP 服务）。
 function agentBrowserEnv() {
   const dir = app.isPackaged
-    ? path.join(process.resourcesPath, 'agent-browser')
-    : path.join(__dirname, 'vendor', 'agent-browser', `${process.platform}-${process.arch}`)
-  const executable = path.join(dir, agentBrowserBinaryName(process.platform))
-  return fs.existsSync(executable) ? { AIC_AGENT_BROWSER_PATH: executable } : {}
+    ? path.join(process.resourcesPath, "agent-browser")
+    : path.join(
+        __dirname,
+        "vendor",
+        "agent-browser",
+        `${process.platform}-${process.arch}`,
+      );
+  const executable = path.join(dir, agentBrowserBinaryName(process.platform));
+  return fs.existsSync(executable)
+    ? { AIC_AGENT_BROWSER_PATH: executable }
+    : {};
 }
 
 // 官方预装包（browser/cua）的设备程序：发布时预编译（make skill-bin-desktop）
 // → resources/skill-bin/<pkg>/；Pod 启动定版时复制进包内 bin/，用户无需 Go 工具链。
 function skillBinEnv() {
   const dir = app.isPackaged
-    ? path.join(process.resourcesPath, 'skill-bin')
-    : path.join(__dirname, 'vendor', 'skill-bin')
-  return fs.existsSync(dir) ? { AIC_SKILL_BIN_DIR: dir } : {}
+    ? path.join(process.resourcesPath, "skill-bin")
+    : path.join(__dirname, "vendor", "skill-bin");
+  return fs.existsSync(dir) ? { AIC_SKILL_BIN_DIR: dir } : {};
 }
 
 // ---- 后端子进程状态（原生生命周期由 nativeApp 统一管理） ----
-const backendAlive = () => backendCtl.alive()
+const backendAlive = () => backendCtl.alive();
 
 function failStartup(error) {
-  if (quitting) return
-  quitting = true
-  const message = error.message || String(error)
-  console.error('[startup]', message)
-  platformView?.webContents.executeJavaScript(`window.__setError && window.__setError(${JSON.stringify(message)})`).catch(() => {})
-  dialog.showErrorBox('ivec 启动失败', message)
-  app.quit()
+  if (quitting) return;
+  quitting = true;
+  const message = error.message || String(error);
+  console.error("[startup]", message);
+  platformView?.webContents
+    .executeJavaScript(
+      `window.__setError && window.__setError(${JSON.stringify(message)})`,
+    )
+    .catch(() => {});
+  dialog.showErrorBox("ivec 启动失败", message);
+  app.quit();
 }
 
 // ---- 本机设置（Go 子命令：config get|set / bind|unbind；stdin 传 JSON / 凭证） ----
 // 设置面 = config.yaml（唯一来源）：与方法名一一对应，无 HTTP、无端口、无 code。
 // 失败信息可读化（2026-09-23）：logv 的 console 输出走 stdout（带 ANSI 颜色），
 // 只收 stderr 会让 UI 只剩「退出码 N」——取 stdout/stderr 里最后一个非空行作为原因。
-const ansiRe = /\x1b\[[0-9;]*m/g
-const zerologPrefixRe = /^\d{1,2}:\d{2}(AM|PM)\s+(TRC|DBG|INF|WRN|ERR|FTL|PNC)\s+\S+\s*>\s*/
+const ansiRe = /\x1b\[[0-9;]*m/g;
+const zerologPrefixRe =
+  /^\d{1,2}:\d{2}(AM|PM)\s+(TRC|DBG|INF|WRN|ERR|FTL|PNC)\s+\S+\s*>\s*/;
 function cmdErrorTail(err, out) {
   for (const raw of [err, out]) {
-    const lines = String(raw || '').replace(ansiRe, '').split('\n').map((l) => l.trim()).filter(Boolean)
-    if (lines.length) return lines[lines.length - 1].replace(zerologPrefixRe, '')
+    const lines = String(raw || "")
+      .replace(ansiRe, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length)
+      return lines[lines.length - 1].replace(zerologPrefixRe, "");
   }
-  return ''
+  return "";
 }
 
 function runBackendCmd(args, input, { timeoutMs = 15000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(backendBin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
-    let out = ''
-    let err = ''
+    const child = spawn(backendBin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
     const timer = setTimeout(() => {
-      try { child.kill('SIGKILL') } catch (e) { /* 忽略 */ }
-      reject(new Error(`aic-backend ${args.join(' ')} 超时（${timeoutMs / 1000}s）`))
-    }, timeoutMs)
-    child.stdout.on('data', (d) => { out += d.toString() })
-    child.stderr.on('data', (d) => { err += d.toString() })
-    child.on('error', (e) => { clearTimeout(timer); reject(e) })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      if (code !== 0) reject(new Error(cmdErrorTail(err, out) || `aic-backend ${args.join(' ')} 退出码 ${code}`))
-      else resolve(out)
-    })
-    if (input != null) child.stdin.write(String(input))
-    child.stdin.end()
-  })
+      try {
+        child.kill("SIGKILL");
+      } catch (e) {
+        /* 忽略 */
+      }
+      reject(
+        new Error(`aic-backend ${args.join(" ")} 超时（${timeoutMs / 1000}s）`),
+      );
+    }, timeoutMs);
+    child.stdout.on("data", (d) => {
+      out += d.toString();
+    });
+    child.stderr.on("data", (d) => {
+      err += d.toString();
+    });
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0)
+        reject(
+          new Error(
+            cmdErrorTail(err, out) ||
+              `aic-backend ${args.join(" ")} 退出码 ${code}`,
+          ),
+        );
+      else resolve(out);
+    });
+    if (input != null) child.stdin.write(String(input));
+    child.stdin.end();
+  });
 }
 
 // 读有效配置（config get → JSON 视图；含 key，仅主进程内部使用）
 async function readConfig() {
-  return JSON.parse(await runBackendCmd(['config', 'get']))
+  return JSON.parse(await runBackendCmd(["config", "get"]));
 }
 
 async function writeConfig(patch) {
-  await runBackendCmd(['config', 'set'], JSON.stringify(patch || {}))
+  await runBackendCmd(["config", "set"], JSON.stringify(patch || {}));
 }
 
 // 后端连接状态：读 $HOME/.aic/state.json（Go 侧在连接成功 / 断开 / 认证
 // 失败 / 重试失败时原子写；pid 核对防陈旧文件误读）。
 async function readState() {
   try {
-    const raw = await fs.promises.readFile(path.join(configDir(), 'state.json'), 'utf8')
-    return JSON.parse(raw)
+    const raw = await fs.promises.readFile(
+      path.join(configDir(), "state.json"),
+      "utf8",
+    );
+    return JSON.parse(raw);
   } catch (e) {
-    return null
+    return null;
   }
 }
 
@@ -522,70 +693,85 @@ async function readState() {
 // 「重连假成功」修复——此前只报「进程存活 + key 非空」，认证失败被后台静默
 // 重试时仍显示已连接）。合成逻辑在 host-state.cjs（带 node 单测）。
 async function localStatus() {
-  const cfg = await readConfig().catch(() => null)
+  const cfg = await readConfig().catch(() => null);
   const out = composeLocalStatus({
     alive: backendAlive(),
-    key: nativeApp ? '' : (cfg && cfg.key) || '',
+    key: nativeApp ? "" : (cfg && cfg.key) || "",
     session: nativeApp?.currentProfile() || null,
     childPid: backendCtl.child ? backendCtl.child.pid : null,
     state: await readState(),
     hostname: os.hostname(),
-  })
-  if (!out.version && cfg && cfg.version) out.version = cfg.version
-  return out
+  });
+  if (!out.version && cfg && cfg.version) out.version = cfg.version;
+  return out;
 }
 
 // 日志尾部（Go logv 写 $HOME/.aic/aic.log；截断起点落在行中间时丢弃首段）
-const logReadMax = 256 << 10
+const logReadMax = 256 << 10;
 async function readLogTail() {
-  const p = path.join(configDir(), 'aic.log')
-  let fh
-  try { fh = await fs.promises.open(p, 'r') } catch (e) {
-    if (e.code === 'ENOENT') return { log: '' }
-    throw e
+  const p = path.join(configDir(), "aic.log");
+  let fh;
+  try {
+    fh = await fs.promises.open(p, "r");
+  } catch (e) {
+    if (e.code === "ENOENT") return { log: "" };
+    throw e;
   }
   try {
-    const st = await fh.stat()
-    const start = st.size > logReadMax ? st.size - logReadMax : 0
-    const len = Number(st.size - start)
-    const buf = Buffer.alloc(len)
-    const { bytesRead } = await fh.read(buf, 0, len, start)
-    let text = buf.subarray(0, bytesRead).toString('utf8')
-    if (start > 0) { const i = text.indexOf('\n'); if (i >= 0) text = text.slice(i + 1) }
-    return { log: text }
-  } finally { await fh.close() }
+    const st = await fh.stat();
+    const start = st.size > logReadMax ? st.size - logReadMax : 0;
+    const len = Number(st.size - start);
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fh.read(buf, 0, len, start);
+    let text = buf.subarray(0, bytesRead).toString("utf8");
+    if (start > 0) {
+      const i = text.indexOf("\n");
+      if (i >= 0) text = text.slice(i + 1);
+    }
+    return { log: text };
+  } finally {
+    await fh.close();
+  }
 }
 
 // check_host：探测 {host}/root.html（补 https://、去尾斜杠）
 async function checkHost(raw) {
-  let base = String(raw || '').trim()
-  if (!base) throw new Error('host is empty')
-  if (!base.includes('://')) base = 'https://' + base
-  let u
-  try { u = new URL(base) } catch (e) { throw new Error('invalid host (http/https only)') }
-  if (!/^https?:$/.test(u.protocol) || !u.host) throw new Error('invalid host (http/https only)')
-  return { ok: await probeRoot(u.origin), url: base.replace(/\/+$/, '') + '/root.html' }
+  let base = String(raw || "").trim();
+  if (!base) throw new Error("host is empty");
+  if (!base.includes("://")) base = "https://" + base;
+  let u;
+  try {
+    u = new URL(base);
+  } catch (e) {
+    throw new Error("invalid host (http/https only)");
+  }
+  if (!/^https?:$/.test(u.protocol) || !u.host)
+    throw new Error("invalid host (http/https only)");
+  return {
+    ok: await probeRoot(u.origin),
+    url: base.replace(/\/+$/, "") + "/root.html",
+  };
 }
 
 // 配置变更后同步主进程缓存的平台地址（只增不减：已在跑的平台页不应因改地址失联）
 async function syncHostFromConfig() {
-  const cfg = await readConfig().catch(() => null)
-  if (!cfg || !cfg.host) return
-  host = cfg.host
-  hostPolicy.remember(host)
-  ensureOriginTrusted(host)
+  const cfg = await readConfig().catch(() => null);
+  if (!cfg || !cfg.host) return;
+  host = cfg.host;
+  hostPolicy.remember(host);
+  ensureOriginTrusted(host);
 }
 
 async function probeRoot(url) {
-  const base = String(url || '').replace(/\/+$/, '')
-  if (!/^https?:\/\//.test(base)) return false
+  const base = String(url || "").replace(/\/+$/, "");
+  if (!/^https?:\/\//.test(base)) return false;
   try {
-    const r = await fetch(base + '/root.html', {
+    const r = await fetch(base + "/root.html", {
       signal: AbortSignal.timeout(probeTimeout),
-    })
-    return r.ok || r.status === 304
+    });
+    return r.ok || r.status === 304;
   } catch (e) {
-    return false
+    return false;
   }
 }
 
@@ -594,338 +780,432 @@ async function probeRoot(url) {
 // 静态 loading.html，同样无效），只能重启应用。现在等待态按 10s→20s→30s 退避复查
 // {host}/root.html，可达即载入平台；host/homePath 每轮现取，期间在设置窗改地址也会被带上。
 function platformUrl() {
-  return host.replace(/\/+$/, '') + homePath
+  return host.replace(/\/+$/, "") + homePath;
 }
 
 function clearPlatformRetry() {
-  clearTimeout(platformWaitTimer)
-  platformWaitTimer = null
-  platformWaiting = false
+  clearTimeout(platformWaitTimer);
+  platformWaitTimer = null;
+  platformWaiting = false;
 }
 
 function paintWaitingStep() {
-  setStep('平台不可达——每 ' + platformRetryMs / 1000 + 's 自动重试（也可在「设置」窗口检查地址）')
+  setStep(
+    "平台不可达——每 " +
+      platformRetryMs / 1000 +
+      "s 自动重试（也可在「设置」窗口检查地址）",
+  );
 }
 
 function schedulePlatformRetry(first) {
-  if (platformWaitTimer || quitting) return
-  if (!first) platformRetryMs = Math.min(platformRetryMs * 2, platformRetryMax)
-  platformWaiting = true
-  platformWaitTimer = setTimeout(retryPlatform, platformRetryMs)
-  paintWaitingStep()
+  if (platformWaitTimer || quitting) return;
+  if (!first) platformRetryMs = Math.min(platformRetryMs * 2, platformRetryMax);
+  platformWaiting = true;
+  platformWaitTimer = setTimeout(retryPlatform, platformRetryMs);
+  paintWaitingStep();
 }
 
 async function retryPlatform() {
-  clearTimeout(platformWaitTimer)
-  platformWaitTimer = null
-  if (quitting || !platformView || platformProbing) return
-  platformProbing = true
-  let reachable = false
+  clearTimeout(platformWaitTimer);
+  platformWaitTimer = null;
+  if (quitting || !platformView || platformProbing) return;
+  platformProbing = true;
+  let reachable = false;
   try {
-    reachable = await probeRoot(host)
+    reachable = await probeRoot(host);
   } finally {
-    platformProbing = false
+    platformProbing = false;
   }
-  if (quitting) return
+  if (quitting) return;
   if (!reachable) {
-    schedulePlatformRetry(false)
-    return
+    schedulePlatformRetry(false);
+    return;
   }
-  platformRetryMs = platformRetryMin
-  setStep('平台已连接，正在恢复 Host 会话…')
+  platformRetryMs = platformRetryMin;
+  setStep("平台已连接，正在恢复 Host 会话…");
   if (nativeApp) {
-    try { await nativeApp.activate() } catch (_) { /* 原生页展示具体原因 */ }
+    try {
+      await nativeApp.activate();
+    } catch (_) {
+      /* 原生页展示具体原因 */
+    }
   } else {
-    loadMain(platformUrl())
+    loadMain(platformUrl());
   }
 }
 
 // failedUrl 是否落在当前平台 origin（did-fail-load 只对自家平台回落 loading）
 function samePlatform(url) {
-  try { return new URL(url).origin === new URL(host).origin } catch (_) { return false }
+  try {
+    return new URL(url).origin === new URL(host).origin;
+  } catch (_) {
+    return false;
+  }
 }
 
 // ---- 本地指令通道（aic wake 子指令 → pet 组件事件）----
 // unix socket：$HOME/.aic/desktop.sock（0600，仅本机同用户进程可连；
 // 路径与 Go 端 cfg.StateDir() 同位置）。协议 = 换行分隔 JSON 请求/应答。
 // windows 下 Node 走命名管道、与 Go 端拨号不兼容，暂不开启。
-let cmdServer = null
+let cmdServer = null;
 
 function cmdSockPath() {
-  return path.join(configDir(), 'desktop.sock')
+  return path.join(configDir(), "desktop.sock");
 }
 
 function startCmdServer() {
-  if (process.platform === 'win32') return
-  const p = cmdSockPath()
-  try { fs.mkdirSync(path.dirname(p), { recursive: true }) } catch (_) { /* 忽略 */ }
-  try { fs.unlinkSync(p) } catch (_) { /* 忽略 */ }
+  if (process.platform === "win32") return;
+  const p = cmdSockPath();
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+  } catch (_) {
+    /* 忽略 */
+  }
+  try {
+    fs.unlinkSync(p);
+  } catch (_) {
+    /* 忽略 */
+  }
   cmdServer = net.createServer((conn) => {
-    let buf = ''
-    conn.on('data', (d) => {
-      buf += d
-      let i
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim()
-        buf = buf.slice(i + 1)
-        if (line) handleCmd(line, conn)
+    let buf = "";
+    conn.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line) handleCmd(line, conn);
       }
-    })
-    conn.on('error', () => { })
-  })
-  cmdServer.on('error', (e) => console.error('[cmd] server:', e.message))
-  cmdServer.listen(p, () => { try { fs.chmodSync(p, 0o600) } catch (_) { /* 忽略 */ } })
-  app.on('will-quit', () => {
-    try { cmdServer && cmdServer.close() } catch (_) { /* 忽略 */ }
-    try { fs.unlinkSync(p) } catch (_) { /* 忽略 */ }
-  })
+    });
+    conn.on("error", () => {});
+  });
+  cmdServer.on("error", (e) => console.error("[cmd] server:", e.message));
+  cmdServer.listen(p, () => {
+    try {
+      fs.chmodSync(p, 0o600);
+    } catch (_) {
+      /* 忽略 */
+    }
+  });
+  app.on("will-quit", () => {
+    try {
+      cmdServer && cmdServer.close();
+    } catch (_) {
+      /* 忽略 */
+    }
+    try {
+      fs.unlinkSync(p);
+    } catch (_) {
+      /* 忽略 */
+    }
+  });
 }
 
 // 指令分发：wake = 唤醒 pet 录音（与 pet 页左键单击同效）。转发桌宠窗与主窗口
 // （非 pet 页无监听器自动丢弃）；无任何窗口存活时返回错误供 CLI 退出码反馈
 function handleCmd(line, conn) {
-  const reply = (o) => { try { conn.end(JSON.stringify(o) + '\n') } catch (_) { /* 忽略 */ } }
-  let cmd = null
-  try { cmd = JSON.parse(line) } catch (_) { return reply({ ok: false, error: 'invalid json' }) }
-  if (!cmd || cmd.action !== 'wake') return reply({ ok: false, error: 'unknown action' })
-  let delivered = false
-  for (const w of [petWin, platformView]) {
-    if (w && !(w.isDestroyed ? w.isDestroyed() : w.webContents.isDestroyed())) { w.webContents.send('pet:cmd', { action: 'wake' }); delivered = true }
+  const reply = (o) => {
+    try {
+      conn.end(JSON.stringify(o) + "\n");
+    } catch (_) {
+      /* 忽略 */
+    }
+  };
+  let cmd = null;
+  try {
+    cmd = JSON.parse(line);
+  } catch (_) {
+    return reply({ ok: false, error: "invalid json" });
   }
-  reply(delivered ? { ok: true } : { ok: false, error: 'no window alive' })
+  if (!cmd || cmd.action !== "wake")
+    return reply({ ok: false, error: "unknown action" });
+  let delivered = false;
+  for (const w of [petWin, platformView]) {
+    if (w && !(w.isDestroyed ? w.isDestroyed() : w.webContents.isDestroyed())) {
+      w.webContents.send("pet:cmd", { action: "wake" });
+      delivered = true;
+    }
+  }
+  reply(delivered ? { ok: true } : { ok: false, error: "no window alive" });
 }
 
 // 本地配置 = 独立设置窗口（系统边框）。不依赖平台页/主窗状态——平台或主窗异常
 // 时仍可打开改基本配置；单例（已开则 show+focus），关闭即销毁、重开重载。
 function openSettings() {
   if (settingsWin && !settingsWin.isDestroyed()) {
-    settingsWin.show()
-    settingsWin.focus()
-    return
+    settingsWin.show();
+    settingsWin.focus();
+    return;
   }
   settingsWin = new BrowserWindow({
     width: 760,
     height: 640,
     frame: true,
     webPreferences: {
-      partition: 'settings',
-      preload: path.join(__dirname, 'settings-preload.js'),
+      partition: "settings",
+      preload: path.join(__dirname, "settings-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
-  })
-  settingsWin.loadURL(SETTINGS_ORIGIN + SETTINGS_PAGE)
-  settingsWin.on('closed', () => { settingsWin = null })
+  });
+  settingsWin.loadURL(SETTINGS_ORIGIN + SETTINGS_PAGE);
+  settingsWin.on("closed", () => {
+    settingsWin = null;
+  });
 }
 
 // ---- IPC ----
 function registerIpc() {
   // 白名单下发（remote-preload 顶层 sendSync）：平台 host 列表
-  ipcMain.on('allowed:hosts', (e) => {
-    e.returnValue = hostPolicy.all()
-  })
+  ipcMain.on("allowed:hosts", (e) => {
+    e.returnValue = hostPolicy.all();
+  });
 
   // Desktop 自有管理面。平台页使用 remote-preload 的固定方法；设置窗是本地受信任页。
-  ipcMain.handle('local:api', async (event, name, args) => {
-    if (!hostPolicy.isPlatformFrame(event) && !hostPolicy.isSettingsFrame(event)) throw new Error('forbidden')
-    const m = String(name || '')
-    if (!/^[a-z_]+$/.test(m)) throw new Error('invalid method')
-    const a = args || {}
+  ipcMain.handle("local:api", async (event, name, args) => {
+    if (
+      !hostPolicy.isPlatformFrame(event) &&
+      !hostPolicy.isSettingsFrame(event)
+    )
+      throw new Error("forbidden");
+    const m = String(name || "");
+    if (!/^[a-z_]+$/.test(m)) throw new Error("invalid method");
+    const a = args || {};
     switch (m) {
-      case 'ping':
-        return 'pong'
-      case 'get_config': {
-        const cfg = await readConfig()
-        if (nativeApp) cfg.key = '' // 原生模式不向网页暴露任何静态凭证
-        return cfg
+      case "ping":
+        return "pong";
+      case "get_config": {
+        const cfg = await readConfig();
+        if (nativeApp) cfg.key = ""; // 原生模式不向网页暴露任何静态凭证
+        return cfg;
       }
-      case 'set_config': {
-        const previousHost = host
-        await writeConfig(a)
-        const cfg = await readConfig()
-        const nextHost = cfg.host || previousHost
-        const serverChanged = nativeApp ? nativeApp.server !== normalizeServer(nextHost) : nextHost !== previousHost
+      case "set_config": {
+        const previousHost = host;
+        await writeConfig(a);
+        const cfg = await readConfig();
+        const nextHost = cfg.host || previousHost;
+        const serverChanged = nativeApp
+          ? nativeApp.server !== normalizeServer(nextHost)
+          : nextHost !== previousHost;
         if (serverChanged) {
-          await nativeApp?.signOut()
-          host = nextHost
-          hostPolicy.replace(host)
-          ensureOriginTrusted(host)
-          nativeApp = await buildNativeApp(host)
-          showNativeLogin()
-          return { ok: true, server_changed: true }
+          await nativeApp?.signOut();
+          host = nextHost;
+          hostPolicy.replace(host);
+          ensureOriginTrusted(host);
+          nativeApp = await buildNativeApp(host);
+          showNativeLogin();
+          return { ok: true, server_changed: true };
         }
-        await syncHostFromConfig()
-        if (nativeApp?.state().signedIn) await nativeApp.restart()
-        else await backendCtl.stop()
-        return { ok: true }
+        await syncHostFromConfig();
+        if (nativeApp?.state().signedIn) await nativeApp.restart();
+        else await backendCtl.stop();
+        return { ok: true };
       }
-      case 'get_status':
-        return await localStatus()
-      case 'get_auth_state':
-        return nativeApp?.state() || { signedIn: false, active: false }
-      case 'get_log':
-        return await readLogTail()
-      case 'check_host':
-        return await checkHost(a.host)
-      case 'start':
-        if (!nativeApp) throw new Error('native session is not ready')
-        return await nativeApp.activate({ openWorkspace: false })
-      case 'stop':
-        if (!nativeApp) throw new Error('native session is not ready')
-        return await nativeApp.stop()
-      case 'sign_out':
-        if (!nativeApp) throw new Error('native session is not ready')
-        return await nativeApp.signOut({ remote: true })
+      case "get_status":
+        return await localStatus();
+      case "get_auth_state":
+        return nativeApp?.state() || { signedIn: false, active: false };
+      case "get_log":
+        return await readLogTail();
+      case "check_host":
+        return await checkHost(a.host);
+      case "start":
+        if (!nativeApp) throw new Error("native session is not ready");
+        return await nativeApp.activate({ openWorkspace: false });
+      case "stop":
+        if (!nativeApp) throw new Error("native session is not ready");
+        return await nativeApp.stop();
+      case "sign_out":
+        if (!nativeApp) throw new Error("native session is not ready");
+        return await nativeApp.signOut({ remote: true });
       default:
-        throw new Error('invalid method')
+        throw new Error("invalid method");
     }
-  })
+  });
 
   // 原生登录页：只允许 app://aic/login.html 调用，不返回 token 或 protocol secret。
-  ipcMain.handle('native:auth', async (event, method, args) => {
-    if (!hostPolicy.isLoginFrame(event)) throw new Error('forbidden')
-    const a = args || {}
-    if (method === 'open_settings') {
-      openSettings()
-      return { ok: true }
+  ipcMain.handle("native:auth", async (event, method, args) => {
+    if (!hostPolicy.isLoginFrame(event)) throw new Error("forbidden");
+    const a = args || {};
+    if (method === "open_settings") {
+      openSettings();
+      return { ok: true };
     }
-    if (method === 'open_external') {
-      const url = String(a.url || '')
-      if (!/^https?:\/\//.test(url)) throw new Error('invalid external url')
-      await shell.openExternal(url)
-      return { ok: true }
+    if (method === "open_external") {
+      const url = String(a.url || "");
+      if (!/^https?:\/\//.test(url)) throw new Error("invalid external url");
+      await shell.openExternal(url);
+      return { ok: true };
     }
-    if (!nativeApp) throw new Error('native session is not ready')
+    if (!nativeApp) throw new Error("native session is not ready");
     switch (method) {
-      case 'bootstrap':
-        return { state: nativeApp.state(), config: await nativeApp.fetchAuthConfig(), ...nativeLoginTexts() }
-      case 'login_password':
-        return await nativeApp.loginPassword(a)
-      case 'login_code':
-        return await nativeApp.loginCode(a)
-      case 'register':
-        return await nativeApp.register(a)
-      case 'send_code':
-        return await nativeApp.sendCode(a)
-      case 'retry':
-        return await nativeApp.activate()
-      case 'switch_account':
-        return await nativeApp.switchAccount()
-      case 'third_party': {
-        const result = await nativeApp.thirdPartyLogin(String(a.provider || ''))
-        openAuthWindow(result.auth_url)
-        return { ok: true }
+      case "bootstrap":
+        return {
+          state: nativeApp.state(),
+          config: await nativeApp.fetchAuthConfig(),
+          ...nativeLoginTexts(),
+        };
+      case "login_password":
+        return await nativeApp.loginPassword(a);
+      case "login_code":
+        return await nativeApp.loginCode(a);
+      case "register":
+        return await nativeApp.register(a);
+      case "send_code":
+        return await nativeApp.sendCode(a);
+      case "retry":
+        return await nativeApp.activate();
+      case "switch_account":
+        return await nativeApp.switchAccount();
+      case "third_party": {
+        const result = await nativeApp.thirdPartyLogin(
+          String(a.provider || ""),
+        );
+        openAuthWindow(result.auth_url);
+        return { ok: true };
       }
       default:
-        throw new Error('invalid native auth method')
+        throw new Error("invalid native auth method");
     }
-  })
+  });
 
   // 三端统一 App 桥。当前仅启用认证与外链；其他能力由 preload 明确声明为 false。
-  ipcMain.handle('aic-host:call', async (event, method, args) => {
-    if (!hostPolicy.isPlatformFrame(event) || !samePlatform(event.senderFrame.url) || !nativeApp) throw new Error('forbidden')
-    const a = args || {}
+  ipcMain.handle("aic-host:call", async (event, method, args) => {
+    if (
+      !hostPolicy.isPlatformFrame(event) ||
+      !samePlatform(event.senderFrame.url) ||
+      !nativeApp
+    )
+      throw new Error("forbidden");
+    const a = args || {};
     switch (method) {
-      case 'app_info':
-        return { version: app.getVersion(), platform: 'desktop', build: app.getVersion() }
-      case 'auth_state':
-        return publicNativeAuthState()
-      case 'auth_refresh':
-        await nativeApp.refresh()
-        return publicNativeAuthState()
-      case 'auth_sign_out':
-        return await nativeApp.signOut()
-      case 'auth_open_login':
-        return await nativeApp.openLogin()
-      case 'external_open': {
-        const url = String(a.url || '')
-        if (!/^https?:\/\//.test(url)) throw new Error('invalid external url')
-        await shell.openExternal(url)
-        return { ok: true }
+      case "app_info":
+        return {
+          version: app.getVersion(),
+          platform: "desktop",
+          build: app.getVersion(),
+        };
+      case "auth_state":
+        return publicNativeAuthState();
+      case "auth_refresh":
+        await nativeApp.refresh();
+        return publicNativeAuthState();
+      case "auth_sign_out":
+        return await nativeApp.signOut();
+      case "auth_open_login":
+        return await nativeApp.openLogin();
+      case "external_open": {
+        const url = String(a.url || "");
+        if (!/^https?:\/\//.test(url)) throw new Error("invalid external url");
+        await shell.openExternal(url);
+        return { ok: true };
       }
       default:
-        throw new Error('unsupported aicHost method')
+        throw new Error("unsupported aicHost method");
     }
-  })
+  });
 
   // 窗口控制（平台页桌面版 header / 桌宠页）
-  ipcMain.handle('window:minimise', (e) => { if (hostPolicy.isPlatformFrame(e)) mainWin?.minimize(); return state() })
-  ipcMain.handle('window:maximise', (e) => {
-    if (hostPolicy.isPlatformFrame(e) && mainWin) mainWin.isMaximized() ? mainWin.unmaximize() : mainWin.maximize()
-    return state()
-  })
-  ipcMain.handle('window:close', (e) => { if (hostPolicy.isPlatformFrame(e)) mainWin?.hide(); return state() })
-  ipcMain.handle('window:fullscreen', (e) => {
-    if (hostPolicy.isPlatformFrame(e) && mainWin) mainWin.setFullScreen(!mainWin.isFullScreen())
-    return state()
-  })
-  ipcMain.handle('window:pet', (e, page) => (hostPolicy.isPlatformFrame(e) ? enterPet(page) : state()))
-  ipcMain.handle('window:restore', (e) => (hostPolicy.isPlatformFrame(e) ? leavePet() : state()))
+  ipcMain.handle("window:minimise", (e) => {
+    if (hostPolicy.isPlatformFrame(e)) mainWin?.minimize();
+    return state();
+  });
+  ipcMain.handle("window:maximise", (e) => {
+    if (hostPolicy.isPlatformFrame(e) && mainWin)
+      mainWin.isMaximized() ? mainWin.unmaximize() : mainWin.maximize();
+    return state();
+  });
+  ipcMain.handle("window:close", (e) => {
+    if (hostPolicy.isPlatformFrame(e)) mainWin?.hide();
+    return state();
+  });
+  ipcMain.handle("window:fullscreen", (e) => {
+    if (hostPolicy.isPlatformFrame(e) && mainWin)
+      mainWin.setFullScreen(!mainWin.isFullScreen());
+    return state();
+  });
+  ipcMain.handle("window:pet", (e, page) =>
+    hostPolicy.isPlatformFrame(e) ? enterPet(page) : state(),
+  );
+  ipcMain.handle("window:restore", (e) =>
+    hostPolicy.isPlatformFrame(e) ? leavePet() : state(),
+  );
 
   // AI page screenshot：只截平台 WebContents，不开放整个显示器或任意窗口。
-  ipcMain.handle('platform:screenshot', async (e) => {
-    if (!hostPolicy.isPlatformFrame(e) || e.sender !== platformView?.webContents) throw new Error('forbidden')
-    return capturePlatform(platformView)
-  })
+  ipcMain.handle("platform:screenshot", async (e) => {
+    if (
+      !hostPolicy.isPlatformFrame(e) ||
+      e.sender !== platformView?.webContents
+    )
+      throw new Error("forbidden");
+    return capturePlatform(platformView);
+  });
 
   // 外链 → 系统默认浏览器（平台页拦截普通外链）
-  ipcMain.handle('open:external', (e, url) => {
-    if (!hostPolicy.isPlatformFrame(e)) return false
-    const u = String(url || '')
-    if (!/^https?:\/\//.test(u)) return false
-    shell.openExternal(u)
-    return true
-  })
+  ipcMain.handle("open:external", (e, url) => {
+    if (!hostPolicy.isPlatformFrame(e)) return false;
+    const u = String(url || "");
+    if (!/^https?:\/\//.test(u)) return false;
+    shell.openExternal(u);
+    return true;
+  });
 
   // 桌宠右键菜单：打开/隐藏对话框（有 agent 时，由渲染进程携带状态）/ 缩小 / 放大 / 关闭
-  ipcMain.on('pet:menu', (e, opts) => {
-    if (!petWin || e.sender !== petWin.webContents) return
-    const o = opts || {}
-    const items = []
+  ipcMain.on("pet:menu", (e, opts) => {
+    if (!petWin || e.sender !== petWin.webContents) return;
+    const o = opts || {};
+    const items = [];
     if (o.hasAgent) {
-      items.push({ label: o.dialogVisible ? '隐藏对话框' : '打开对话框', click: () => petWin?.webContents.send('pet:toggle-dialog') })
-      items.push({ type: 'separator' })
+      items.push({
+        label: o.dialogVisible ? "隐藏对话框" : "打开对话框",
+        click: () => petWin?.webContents.send("pet:toggle-dialog"),
+      });
+      items.push({ type: "separator" });
     }
     items.push(
-      { label: '缩小', click: () => resizePet(-1) },
-      { label: '放大', click: () => resizePet(1) },
-      { type: 'separator' },
-      { label: '关闭', click: () => leavePet() },
-    )
-    Menu.buildFromTemplate(items).popup({ window: petWin })
-  })
+      { label: "缩小", click: () => resizePet(-1) },
+      { label: "放大", click: () => resizePet(1) },
+      { type: "separator" },
+      { label: "关闭", click: () => leavePet() },
+    );
+    Menu.buildFromTemplate(items).popup({ window: petWin });
+  });
 
   // 桌宠拖动（pet 页）
-  ipcMain.on('pet:drag-start', (e, { x, y }) => {
-    if (!hostPolicy.isPlatformFrame(e) || !petWin) return
-    const [wx, wy] = petWin.getPosition()
-    petDragOff = [x - wx, y - wy]
-  })
-  ipcMain.on('pet:drag-move', (e, { x, y }) => {
-    if (!hostPolicy.isPlatformFrame(e) || !petWin || !petDragOff) return
-    petWin.setPosition(Math.round(x - petDragOff[0]), Math.round(y - petDragOff[1]))
-    petPos = petWin.getPosition()
-    savePetPosDebounced()
-  })
+  ipcMain.on("pet:drag-start", (e, { x, y }) => {
+    if (!hostPolicy.isPlatformFrame(e) || !petWin) return;
+    const [wx, wy] = petWin.getPosition();
+    petDragOff = [x - wx, y - wy];
+  });
+  ipcMain.on("pet:drag-move", (e, { x, y }) => {
+    if (!hostPolicy.isPlatformFrame(e) || !petWin || !petDragOff) return;
+    petWin.setPosition(
+      Math.round(x - petDragOff[0]),
+      Math.round(y - petDragOff[1]),
+    );
+    petPos = petWin.getPosition();
+    savePetPosDebounced();
+  });
 
   // 设置窗口能力（仅设置窗 app://aic 页面）
-  ipcMain.handle('platform:check', async (e, url) => {
-    if (!hostPolicy.isSettingsFrame(e)) return { ok: false, error: 'forbidden' }
-    const ok = await probeRoot(url)
-    return { ok, url: String(url || '').replace(/\/+$/, '') + '/root.html' }
-  })
-  ipcMain.handle('platform:open', async (e, url) => {
-    if (!hostPolicy.isSettingsFrame(e)) return false
-    const u = String(url || '')
-    if (!/^https?:\/\//.test(u)) return false
-    hostPolicy.remember(u)
-    ensureOriginTrusted(u)
-    if (nativeApp) await nativeApp.openLogin()
-    else loadMain(u)
+  ipcMain.handle("platform:check", async (e, url) => {
+    if (!hostPolicy.isSettingsFrame(e))
+      return { ok: false, error: "forbidden" };
+    const ok = await probeRoot(url);
+    return { ok, url: String(url || "").replace(/\/+$/, "") + "/root.html" };
+  });
+  ipcMain.handle("platform:open", async (e, url) => {
+    if (!hostPolicy.isSettingsFrame(e)) return false;
+    const u = String(url || "");
+    if (!/^https?:\/\//.test(u)) return false;
+    hostPolicy.remember(u);
+    ensureOriginTrusted(u);
+    if (nativeApp) await nativeApp.openLogin();
+    else loadMain(u);
     // 原生模式必须先认证并成功接入 Host，不能由设置页绕过登录直接打开工作区。
-    return true
-  })
+    return true;
+  });
 
   // 本地配置窗口的关闭走窗口自带按钮（macOS 红绿灯 / win-linux 系统按钮）
 }
@@ -936,28 +1216,36 @@ function registerIpc() {
 // 处理：窗口聚焦期间 RegisterHotKey 抢占该组合（系统不再弹菜单），命中后把 Space 键回注
 // 平台页——页面按既有 keymap 决定动作（默认 launcher，改键位也跟随）。失焦即注销，不长期
 // 占用系统热键；注册失败（被 PowerToys Run 等占用）只告警，维持现状。
-const ALT_SPACE = 'Alt+Space'
-let altSpaceHeld = false
+const ALT_SPACE = "Alt+Space";
+let altSpaceHeld = false;
 
 function syncAltSpace() {
-  if (process.platform !== 'win32') return
-  const focused = !!mainWin && !mainWin.isDestroyed() && (mainWin.isFocused() || (!!petWin && !petWin.isDestroyed() && petWin.isFocused()))
+  if (process.platform !== "win32") return;
+  const focused =
+    !!mainWin &&
+    !mainWin.isDestroyed() &&
+    (mainWin.isFocused() ||
+      (!!petWin && !petWin.isDestroyed() && petWin.isFocused()));
   if (focused && !altSpaceHeld) {
-    altSpaceHeld = globalShortcut.register(ALT_SPACE, onAltSpace)
-    if (!altSpaceHeld) console.warn('[hotkey] Alt+Space 注册失败（已被其它应用占用？）')
+    altSpaceHeld = globalShortcut.register(ALT_SPACE, onAltSpace);
+    if (!altSpaceHeld)
+      console.warn("[hotkey] Alt+Space 注册失败（已被其它应用占用？）");
   } else if (!focused && altSpaceHeld) {
-    globalShortcut.unregister(ALT_SPACE)
-    altSpaceHeld = false
+    globalShortcut.unregister(ALT_SPACE);
+    altSpaceHeld = false;
   }
 }
 
 // 命中：主窗聚焦 → 回注 Space（alt 修饰）走页面 keymap；桌宠聚焦 → 仅吞掉不弹菜单
 function onAltSpace() {
-  if (!mainWin || mainWin.isDestroyed() || !mainWin.isFocused()) return
-  const wc = platformView && !platformView.webContents.isDestroyed() ? platformView.webContents : null
-  if (!wc) return
-  wc.sendInputEvent({ type: 'keyDown', keyCode: 'Space', modifiers: ['alt'] })
-  wc.sendInputEvent({ type: 'keyUp', keyCode: 'Space', modifiers: ['alt'] })
+  if (!mainWin || mainWin.isDestroyed() || !mainWin.isFocused()) return;
+  const wc =
+    platformView && !platformView.webContents.isDestroyed()
+      ? platformView.webContents
+      : null;
+  if (!wc) return;
+  wc.sendInputEvent({ type: "keyDown", keyCode: "Space", modifiers: ["alt"] });
+  wc.sendInputEvent({ type: "keyUp", keyCode: "Space", modifiers: ["alt"] });
 }
 
 // ---- 窗口 ----
@@ -975,8 +1263,8 @@ function createMainWindow(init) {
     // BaseWindow 的 setFullScreen(true) 永久失效（Electron 33.4.11 最小复现 2/2：
     // 创建时 fullscreen:false → 之后 setFullScreen 恒 no-op；不传该键则正常）
     ...(startFullscreen ? { fullscreen: true } : {}),
-    backgroundColor: '#1b2a3a',
-  })
+    backgroundColor: "#1b2a3a",
+  });
 
   // 平台页（恒占满 contentView 且恒最顶；session 级 preloads 自动注入 remote-preload.js）
   platformView = new WebContentsView({
@@ -985,63 +1273,70 @@ function createMainWindow(init) {
       nodeIntegration: false,
       sandbox: true,
     },
-  })
-  mainWin.contentView.addChildView(platformView)
+  });
+  mainWin.contentView.addChildView(platformView);
   // v2 反转模型：平台页背景透明——内容区"洞"由页面 mask 挖除，洞底即下层原生视图
   //（docs §1/§4；页面侧用 mask 而非 clip-path，clip-path 会让采样元素不可命中）
-  platformView.setBackgroundColor('#00000000')
+  platformView.setBackgroundColor("#00000000");
   // Keep the platform UI zoom independent of device browser coordinates.
   //（CSS px = DIP，zoom 恒等映射）由框架保证，不依赖“页面未启用 zoom”的约定
-  platformView.webContents.setZoomMode('disabled')
+  platformView.webContents.setZoomMode("disabled");
   // 平台页 target=_blank → 系统浏览器
   platformView.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) shell.openExternal(url)
-    return { action: 'deny' }
-  })
+    if (/^https?:\/\//.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
   // 主框架网络级加载失败（平台重启/网络中断；-3=ERR_ABORTED 属正常打断）→ 回落 loading 页
   // 并进入自动复查：否则停在 Chromium 错误页，平台恢复后刷新也看不到东西。
-  platformView.webContents.on('did-fail-load', (_e, code, _desc, failedUrl, isMainFrame) => {
-    if (!isMainFrame || code === -3 || quitting || !samePlatform(failedUrl)) return
-    // 回 loading 页后重画等待文案（loading 页尚无 __setStep 时，落页后补一次）
-    platformView.webContents.once('did-finish-load', () => { if (platformWaiting) paintWaitingStep() })
-    platformView.webContents.loadFile(path.join(__dirname, 'loading.html'))
-    // 连续加载失败（探测通过但页面仍起不来）走退避，避免 10s 级无限重载
-    schedulePlatformRetry(false)
-  })
+  platformView.webContents.on(
+    "did-fail-load",
+    (_e, code, _desc, failedUrl, isMainFrame) => {
+      if (!isMainFrame || code === -3 || quitting || !samePlatform(failedUrl))
+        return;
+      // 回 loading 页后重画等待文案（loading 页尚无 __setStep 时，落页后补一次）
+      platformView.webContents.once("did-finish-load", () => {
+        if (platformWaiting) paintWaitingStep();
+      });
+      platformView.webContents.loadFile(path.join(__dirname, "loading.html"));
+      // 连续加载失败（探测通过但页面仍起不来）走退避，避免 10s 级无限重载
+      schedulePlatformRetry(false);
+    },
+  );
 
-  layoutMain()
-  mainWin.on('resize', layoutMain)
-  mainWin.on('focus', syncAltSpace)
-  mainWin.on('blur', syncAltSpace)
+  layoutMain();
+  mainWin.on("resize", layoutMain);
+  mainWin.on("focus", syncAltSpace);
+  mainWin.on("blur", syncAltSpace);
 
-  // BaseWindow 无 ready-to-show（BrowserWindow 专属）：内容 view 创建即直接显示
-  if (startFullscreen) mainWin.setFullScreen(true)
-  mainWin.show()
-  syncAltSpace()
-  mainWin.on('close', (e) => {
+  // BaseWindow 无 ready-to-show（BrowserWindow 专属）：内容 view 创建即直接显示。
+  // 未登录时先不显示主窗口：登录页有自己的小窗，避免启动阶段出现「空主窗 + 登录窗」两个窗口。
+  if (startFullscreen) mainWin.setFullScreen(true);
+  if (nativeApp && nativeApp.state().signedIn) mainWin.show();
+  syncAltSpace();
+  mainWin.on("close", (e) => {
     if (!quitting) {
-      e.preventDefault()
-      mainWin.hide()
+      e.preventDefault();
+      mainWin.hide();
     }
-  })
-  if (init) init()
+  });
+  if (init) init();
 }
 
 // ---- 主窗口布局 ----
 // 这里只改变平台页的尺寸。各 browser 视口永远不跟随主窗口。
 function layoutMain() {
-  if (!mainWin || mainWin.isDestroyed()) return
-  const [w, h] = mainWin.getContentSize()
-  platformView?.setBounds({ x: 0, y: 0, width: w, height: h })
+  if (!mainWin || mainWin.isDestroyed()) return;
+  const [w, h] = mainWin.getContentSize();
+  platformView?.setBounds({ x: 0, y: 0, width: w, height: h });
 }
 
 function loadMain(url) {
-  if (!platformView) return
-  clearPlatformRetry()
-  platformView.webContents.loadURL(url)
-  keepWorkerAlive(url) // 保活窗口跟随平台地址：持 nc SharedWorker 端口，平台页刷新不再销毁 worker/WS
-  mainWin?.show()
-  mainWin?.focus()
+  if (!platformView) return;
+  clearPlatformRetry();
+  platformView.webContents.loadURL(url);
+  keepWorkerAlive(url); // 保活窗口跟随平台地址：持 nc SharedWorker 端口，平台页刷新不再销毁 worker/WS
+  mainWin?.show();
+  mainWin?.focus();
 }
 
 // ---- worker 保活窗口 ----
@@ -1053,11 +1348,11 @@ function loadMain(url) {
 function keepWorkerAlive(base) {
   // 保活页固定在平台根（go:embed 静态页位于根路径）——拼在 home_path 之后
   //（非 / 时）会 404 且 HTTP 错误不触发 did-fail-load，保活静默失效
-  const url = new URL('/worker-keep.html', base).href
-  keepExpectedUrl = url
+  const url = new URL("/worker-keep.html", base).href;
+  keepExpectedUrl = url;
   if (keepWin && !keepWin.isDestroyed()) {
-    if (keepWin.webContents.getURL() !== url) keepWin.loadURL(url)
-    return
+    if (keepWin.webContents.getURL() !== url) keepWin.loadURL(url);
+    return;
   }
   keepWin = new BrowserWindow({
     show: false,
@@ -1068,107 +1363,154 @@ function keepWorkerAlive(base) {
       sandbox: true,
       backgroundThrottling: false, // 隐藏常驻页不节流（端口活性本不依赖计时器，防御性开关）
     },
-  })
-  keepWin.on('closed', () => { keepWin = null })
+  });
+  keepWin.on("closed", () => {
+    keepWin = null;
+  });
   // 渲染进程崩溃 → 原地重载恢复（保活窗口消亡 = worker 回到“刷新即死”）
-  keepWin.webContents.on('render-process-gone', () => {
-    try { if (keepWin && !keepWin.isDestroyed()) keepWin.webContents.reload() } catch (_) { /* 忽略 */ }
-  })
+  keepWin.webContents.on("render-process-gone", () => {
+    try {
+      if (keepWin && !keepWin.isDestroyed()) keepWin.webContents.reload();
+    } catch (_) {
+      /* 忽略 */
+    }
+  });
   // 网络级加载失败（如平台暂不可达）→ 10s 后重试（-3=ERR_ABORTED 除外，属正常打断）；
   // 重试前比对当前期望地址——等待期间可能经设置窗切换平台地址，防旧定时器把保活窗拉回旧平台
-  keepWin.webContents.on('did-fail-load', (_e, code, _desc, failedUrl, isMainFrame) => {
-    if (isMainFrame && code !== -3) setTimeout(() => {
-      if (keepWin && !keepWin.isDestroyed() && keepExpectedUrl === failedUrl) keepWin.loadURL(failedUrl)
-    }, 10000)
-  })
-  keepWin.loadURL(url)
+  keepWin.webContents.on(
+    "did-fail-load",
+    (_e, code, _desc, failedUrl, isMainFrame) => {
+      if (isMainFrame && code !== -3)
+        setTimeout(() => {
+          if (
+            keepWin &&
+            !keepWin.isDestroyed() &&
+            keepExpectedUrl === failedUrl
+          )
+            keepWin.loadURL(failedUrl);
+        }, 10000);
+    },
+  );
+  keepWin.loadURL(url);
 }
 
 function setStep(text) {
-  platformView?.webContents.executeJavaScript(`window.__setStep && window.__setStep(${JSON.stringify(text)})`).catch(() => { })
+  platformView?.webContents
+    .executeJavaScript(
+      `window.__setStep && window.__setStep(${JSON.stringify(text)})`,
+    )
+    .catch(() => {});
 }
 
 // ---- 托盘：win 右下角 / mac 菜单栏 ----
 function createTray() {
-  tray = new Tray(trayIcon)
-  tray.setToolTip('ivec')
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '打开', click: () => focusMain() },
-    { label: '设置', click: () => openSettings() },
-    { label: '打开配置目录', click: () => openConfigDir() },
-    { type: 'separator' },
-    { label: '退出', click: () => { quitting = true; app.quit() } },
-  ]))
-  tray.on('click', () => focusMain())
+  tray = new Tray(trayIcon);
+  tray.setToolTip("ivec");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开", click: () => focusMain() },
+      { label: "设置", click: () => openSettings() },
+      { label: "打开配置目录", click: () => openConfigDir() },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  tray.on("click", () => focusMain());
 }
 
 // Go 后端配置根目录（$HOME/.aic：config.yaml / aic.log / state.json / browser
 // 状态同根，三平台统一；2026-10-01 目录两根治理弃 UserConfigDir 平台分叉根）。
 // Electron 侧取同一路径，供托盘「打开配置目录」用系统文件管理器打开。
 function configDir() {
-  return path.join(app.getPath('home'), '.aic')
+  return path.join(app.getPath("home"), ".aic");
 }
 
 function openConfigDir() {
-  const dir = configDir()
-  try { fs.mkdirSync(dir, { recursive: true }) } catch (e) { /* 建目录失败由 openPath 报错兜底 */ }
-  shell.openPath(dir).then((err) => { if (err) console.error('[tray] open config dir failed:', err) })
+  const dir = configDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    /* 建目录失败由 openPath 报错兜底 */
+  }
+  shell.openPath(dir).then((err) => {
+    if (err) console.error("[tray] open config dir failed:", err);
+  });
 }
 
 // ---- 桌宠位置/尺寸缓存：userData/pet-pos.json {x,y,size}（进入恢复上次，拖动/缩放防抖落盘） ----
 function petPosFile() {
-  return path.join(app.getPath('userData'), 'pet-pos.json')
+  return path.join(app.getPath("userData"), "pet-pos.json");
 }
 
 function loadPetState() {
   try {
-    const p = JSON.parse(fs.readFileSync(petPosFile(), 'utf-8'))
-    if (p && typeof p === 'object') return p
-  } catch (_) { /* 首次/损坏 → 无缓存 */ }
-  return {}
+    const p = JSON.parse(fs.readFileSync(petPosFile(), "utf-8"));
+    if (p && typeof p === "object") return p;
+  } catch (_) {
+    /* 首次/损坏 → 无缓存 */
+  }
+  return {};
 }
 
 function savePetPosNow() {
-  clearTimeout(petPosTimer)
-  petPosTimer = null
-  if (!petPos) return
-  try { fs.writeFileSync(petPosFile(), JSON.stringify({ ...petPos, size: petSize })) } catch (_) { /* 忽略 */ }
+  clearTimeout(petPosTimer);
+  petPosTimer = null;
+  if (!petPos) return;
+  try {
+    fs.writeFileSync(
+      petPosFile(),
+      JSON.stringify({ ...petPos, size: petSize }),
+    );
+  } catch (_) {
+    /* 忽略 */
+  }
 }
 
 function savePetPosDebounced() {
-  clearTimeout(petPosTimer)
-  petPosTimer = setTimeout(savePetPosNow, 300)
+  clearTimeout(petPosTimer);
+  petPosTimer = setTimeout(savePetPosNow, 300);
 }
 
 // 缓存位置是否落在任一显示器工作区内（跨会话显示器可能变化，失效则回退鼠标位置）
 function petPosOnScreen(x, y) {
   return screen.getAllDisplays().some((d) => {
-    const b = d.workArea
-    return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height
-  })
+    const b = d.workArea;
+    return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height;
+  });
 }
 
 // 缩放桌宠：×1.25 / ×0.8 步进，50–400，以窗口中心为锚点
 function resizePet(dir) {
-  if (!petWin) return
-  const next = Math.min(400, Math.max(50, Math.round(petSize * (dir > 0 ? 1.25 : 0.8))))
-  if (next === petSize) return
-  const [x, y] = petWin.getPosition()
-  const d = next - petSize
-  petSize = next
-  petWin.setSize(petSize, petSize)
-  petWin.setPosition(Math.round(x - d / 2), Math.round(y - d / 2))
-  petPos = petWin.getPosition()
-  savePetPosDebounced()
+  if (!petWin) return;
+  const next = Math.min(
+    400,
+    Math.max(50, Math.round(petSize * (dir > 0 ? 1.25 : 0.8))),
+  );
+  if (next === petSize) return;
+  const [x, y] = petWin.getPosition();
+  const d = next - petSize;
+  petSize = next;
+  petWin.setSize(petSize, petSize);
+  petWin.setPosition(Math.round(x - d / 2), Math.round(y - d / 2));
+  petPos = petWin.getPosition();
+  savePetPosDebounced();
 }
 
 // ---- 桌宠：独立透明小窗，与主窗口共存（主窗口不动），加载 /pet 或 /agents/{aid}/pet ----
 function enterPet(page) {
-  if (!mainWin) return state()
-  if (petWin) return state()
+  if (!mainWin) return state();
+  if (petWin) return state();
   // 恢复上次尺寸（默认 100）
-  const st = loadPetState()
-  petSize = Number.isFinite(st.size) ? Math.min(400, Math.max(50, Math.round(st.size))) : 100
+  const st = loadPetState();
+  petSize = Number.isFinite(st.size)
+    ? Math.min(400, Math.max(50, Math.round(st.size)))
+    : 100;
   petWin = new BrowserWindow({
     width: petSize,
     height: petSize,
@@ -1183,31 +1525,41 @@ function enterPet(page) {
       nodeIntegration: false,
       sandbox: true,
     },
-  })
-  petWin.on('focus', syncAltSpace)
-  petWin.on('blur', syncAltSpace)
+  });
+  petWin.on("focus", syncAltSpace);
+  petWin.on("blur", syncAltSpace);
   // 平台桌宠页（仅放行 /pet 与 /agents/{aid}/pet，query 透传）；remote-preload 注入（host 白名单）
-  const raw = String(page || '')
-  const p = /^\/pet($|\?)|^\/agents\/[^/]+\/pet($|\?)/.test(raw) ? raw : '/pet'
-  petWin.loadURL(host.replace(/\/+$/, '') + p)
+  const raw = String(page || "");
+  const p = /^\/pet($|\?)|^\/agents\/[^/]+\/pet($|\?)/.test(raw) ? raw : "/pet";
+  petWin.loadURL(host.replace(/\/+$/, "") + p);
   // 位置：优先恢复上次缓存（仍在显示器内），无缓存/失效居中于鼠标
-  if (Number.isFinite(st.x) && Number.isFinite(st.y) && petPosOnScreen(st.x, st.y)) {
-    petWin.setPosition(st.x, st.y)
+  if (
+    Number.isFinite(st.x) &&
+    Number.isFinite(st.y) &&
+    petPosOnScreen(st.x, st.y)
+  ) {
+    petWin.setPosition(st.x, st.y);
   } else {
-    const c = screen.getCursorScreenPoint()
-    petWin.setPosition(Math.round(c.x - petSize / 2), Math.round(c.y - petSize / 2))
+    const c = screen.getCursorScreenPoint();
+    petWin.setPosition(
+      Math.round(c.x - petSize / 2),
+      Math.round(c.y - petSize / 2),
+    );
   }
-  petPos = petWin.getPosition()
-  return state()
+  petPos = petWin.getPosition();
+  return state();
 }
 
 // 双击桌宠：仅销毁小窗，主窗口不动
 function leavePet() {
-  if (petWin) { petWin.destroy(); petWin = null }
-  syncAltSpace() // 桌宠销毁后主窗恢复焦点前的兜底对账
-  petDragOff = null
-  savePetPosNow() // 防抖未落盘时兜底写盘
-  return state()
+  if (petWin) {
+    petWin.destroy();
+    petWin = null;
+  }
+  syncAltSpace(); // 桌宠销毁后主窗恢复焦点前的兜底对账
+  petDragOff = null;
+  savePetPosNow(); // 防抖未落盘时兜底写盘
+  return state();
 }
 
 function state() {
@@ -1215,12 +1567,12 @@ function state() {
     desktop: true,
     maximised: mainWin ? mainWin.isMaximized() : false,
     fullscreen: mainWin ? mainWin.isFullScreen() : false,
-  }
+  };
 }
 
 function focusMain() {
-  if (!mainWin) return
-  if (mainWin.isMinimized()) mainWin.restore()
-  mainWin.show()
-  mainWin.focus()
+  if (!mainWin) return;
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
 }

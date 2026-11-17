@@ -46,6 +46,20 @@ test('Desktop 设置不再提供手工设备 key 绑定', () => {
   assert.ok(!source.includes('$pod.unbind'))
 })
 
+test('桌面主进程与 preload 脚本语法可解析', () => {
+  // 页面测试只解析 HTML 内联脚本；main.js 这类主进程入口必须在测试里也编译一遍，
+  // 否则一个多余括号就会一直到用户重启 Electron 才暴露（2026-11-17 实际踩过）。
+  const files = [
+    'main.js', 'native-app.cjs', 'native-auth.cjs', 'auth-cookies.cjs', 'auth-store.cjs',
+    'electron-cookies.cjs', 'device-identity.cjs', 'session-rpc.cjs', 'settings-protocol.cjs',
+    'platform-hosts.cjs', 'host-state.cjs', 'backend.cjs', 'backend-startup.cjs',
+    'login-preload.js', 'settings-preload.js', 'remote-preload.js', 'secure-origin.cjs', 'runtime-paths.cjs',
+  ]
+  for (const file of files) {
+    assert.doesNotThrow(() => new vm.Script(read(file), { filename: file }), file + ' 语法错误')
+  }
+})
+
 test('原生登录页：不显示平台服务器地址、用平台图标、带三方登录入口', () => {
   const source = read('settings-ui/login.html')
   assert.ok(!source.includes('id="server"'), 'login page still shows the server address')
