@@ -1,0 +1,11 @@
+# 构建产物与派生数据（不入库）
+.build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM
+
+# Xcode 用户态数据（工程由 scripts/gen-project.py 生成，不手工改）
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/

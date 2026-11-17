@@ -1,0 +1,229 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+		C6F5C0D6796EDF3E09F257AF /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppConfig.swift"; sourceTree = "<group>"; };
+		FA9BFFB0CA49BCA1038F5402 /* IvecAIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "IvecAIApp.swift"; sourceTree = "<group>"; };
+		FFAF77C7958073B37235B1D0 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RootView.swift"; sourceTree = "<group>"; };
+		D70FC64D0318258C67B3D639 /* App */ = {isa = PBXGroup; children = (C6F5C0D6796EDF3E09F257AF, FA9BFFB0CA49BCA1038F5402, FFAF77C7958073B37235B1D0); path = "App"; sourceTree = "<group>"; };
+		2B2E0FC2DD36915EAE8CE0B5 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LoginView.swift"; sourceTree = "<group>"; };
+		12C050036FD6AC184EE7528F /* Auth */ = {isa = PBXGroup; children = (2B2E0FC2DD36915EAE8CE0B5); path = "Auth"; sourceTree = "<group>"; };
+		53A98C646E88233F94C87112 /* ConsentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsentView.swift"; sourceTree = "<group>"; };
+		077E60BF00504F7A138BA65E /* ConsentViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsentViewModel.swift"; sourceTree = "<group>"; };
+		3CBB5835C2A87928B05D9ADD /* Consent */ = {isa = PBXGroup; children = (53A98C646E88233F94C87112, 077E60BF00504F7A138BA65E); path = "Consent"; sourceTree = "<group>"; };
+		0E9AB6242258AB4CC97AEDD0 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView.swift"; sourceTree = "<group>"; };
+		AE3622B0C2D0D33B5DBCD811 /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsViewModel.swift"; sourceTree = "<group>"; };
+		2A8FC22B7B5CC8926D3C2FC8 /* Settings */ = {isa = PBXGroup; children = (0E9AB6242258AB4CC97AEDD0, AE3622B0C2D0D33B5DBCD811); path = "Settings"; sourceTree = "<group>"; };
+		02AAE21523F4F24847C95377 /* WebViewContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WebViewContainer.swift"; sourceTree = "<group>"; };
+		8F791941D42484CEEC18014C /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WorkspaceView.swift"; sourceTree = "<group>"; };
+		2A9585CCD53F299A2F9A652F /* WorkspaceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WorkspaceViewModel.swift"; sourceTree = "<group>"; };
+		8F5CF58DA6BAE1B8F5F319AD /* Workspace */ = {isa = PBXGroup; children = (02AAE21523F4F24847C95377, 8F791941D42484CEEC18014C, 2A9585CCD53F299A2F9A652F); path = "Workspace"; sourceTree = "<group>"; };
+		35A581C1AF6FB3EE2AD14A15 /* Features */ = {isa = PBXGroup; children = (12C050036FD6AC184EE7528F, 3CBB5835C2A87928B05D9ADD, 2A8FC22B7B5CC8926D3C2FC8, 8F5CF58DA6BAE1B8F5F319AD); path = "Features"; sourceTree = "<group>"; };
+		24EFD06A904C7FD8B3B167B6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets.xcassets"; sourceTree = "<group>"; };
+		112FBCD07ADB2C10EA477853 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info.plist"; sourceTree = "<group>"; };
+		F60E6EEE5308948CBAAA4132 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.privacy; path = "PrivacyInfo.xcprivacy"; sourceTree = "<group>"; };
+		0E41B7BA11DD61F4FC9F68D2 /* Resources */ = {isa = PBXGroup; children = (24EFD06A904C7FD8B3B167B6, 112FBCD07ADB2C10EA477853, F60E6EEE5308948CBAAA4132); path = "Resources"; sourceTree = "<group>"; };
+		1521E4B4DC60E310A4519584 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient.swift"; sourceTree = "<group>"; };
+		9A913BE7E5DD49FF98C51F08 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "KeychainStore.swift"; sourceTree = "<group>"; };
+		4F7812B4AEB7E09E660197AD /* L10n.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "L10n.swift"; sourceTree = "<group>"; };
+		1BC32113E4BB9BB42CD06A93 /* LegalDocumentSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LegalDocumentSheet.swift"; sourceTree = "<group>"; };
+		F067E3658F0C60E0F7276C0C /* LegalDocuments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LegalDocuments.swift"; sourceTree = "<group>"; };
+		61428B234454AE8ACFD47C98 /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServerConfig.swift"; sourceTree = "<group>"; };
+		4208E477C18E3404206256A4 /* ShellBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ShellBridge.swift"; sourceTree = "<group>"; };
+		63507713FCE55D6D5944E352 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Theme.swift"; sourceTree = "<group>"; };
+		256446C20F794E189DC214C9 /* Shared */ = {isa = PBXGroup; children = (1521E4B4DC60E310A4519584, 9A913BE7E5DD49FF98C51F08, 4F7812B4AEB7E09E660197AD, 1BC32113E4BB9BB42CD06A93, F067E3658F0C60E0F7276C0C, 61428B234454AE8ACFD47C98, 4208E477C18E3404206256A4, 63507713FCE55D6D5944E352); path = "Shared"; sourceTree = "<group>"; };
+		449E49869BB17B4E46B52804 /* IvecAI */ = {isa = PBXGroup; children = (D70FC64D0318258C67B3D639, 35A581C1AF6FB3EE2AD14A15, 0E41B7BA11DD61F4FC9F68D2, 256446C20F794E189DC214C9); path = "IvecAI"; sourceTree = "<group>"; };
+		D452FEA2BBE00326C4B6DC8E /* IvecAI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IvecAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		361FF3508AF23F4E0CB329EA = {isa = PBXGroup; children = (449E49869BB17B4E46B52804, D452FEA2BBE00326C4B6DC8E); sourceTree = "<group>"; };
+		E210BA1B334645A48212E13D /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6F5C0D6796EDF3E09F257AF /* AppConfig.swift */; };
+		1F2D6AAB7F85215ED11169A4 /* IvecAIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA9BFFB0CA49BCA1038F5402 /* IvecAIApp.swift */; };
+		CAFA5493964854358F7DDE70 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFAF77C7958073B37235B1D0 /* RootView.swift */; };
+		75185689972360A90D2EF5AE /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2E0FC2DD36915EAE8CE0B5 /* LoginView.swift */; };
+		9288EB76FB517A003CC616B1 /* ConsentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53A98C646E88233F94C87112 /* ConsentView.swift */; };
+		D563067F7579DFB402D04DC1 /* ConsentViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 077E60BF00504F7A138BA65E /* ConsentViewModel.swift */; };
+		28040AAC919EA0C6432FD4EE /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E9AB6242258AB4CC97AEDD0 /* SettingsView.swift */; };
+		1E5BEADB191AD2B65ACAD7BE /* SettingsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE3622B0C2D0D33B5DBCD811 /* SettingsViewModel.swift */; };
+		324C1FBF6D82C02902564BB4 /* WebViewContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02AAE21523F4F24847C95377 /* WebViewContainer.swift */; };
+		30479C94077348F7919ECD14 /* WorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F791941D42484CEEC18014C /* WorkspaceView.swift */; };
+		6FF5680F84EB5DF7A4536C18 /* WorkspaceViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9585CCD53F299A2F9A652F /* WorkspaceViewModel.swift */; };
+		45AB1BC5E14A9F3EAC6614D1 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1521E4B4DC60E310A4519584 /* APIClient.swift */; };
+		DCD5F1D13407AFA92AC345B7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A913BE7E5DD49FF98C51F08 /* KeychainStore.swift */; };
+		74B3DFEF86EDB379CAD71203 /* L10n.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F7812B4AEB7E09E660197AD /* L10n.swift */; };
+		BC1043A9B8EA8DA5FEE8C1CB /* LegalDocumentSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BC32113E4BB9BB42CD06A93 /* LegalDocumentSheet.swift */; };
+		C5625D65E8E0F59E4AF219BC /* LegalDocuments.swift in Sources */ = {isa = PBXBuildFile; fileRef = F067E3658F0C60E0F7276C0C /* LegalDocuments.swift */; };
+		82B9E5C45EBB2610729FF9AB /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61428B234454AE8ACFD47C98 /* ServerConfig.swift */; };
+		4B29DC719FC2B880E5363187 /* ShellBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4208E477C18E3404206256A4 /* ShellBridge.swift */; };
+		6E720FDB5A052766A50B1941 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63507713FCE55D6D5944E352 /* Theme.swift */; };
+		E29ACDDEB349F203E64DEC73 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 24EFD06A904C7FD8B3B167B6 /* Assets.xcassets */; };
+		3110337CC18B5802C0B1EC26 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F60E6EEE5308948CBAAA4132 /* PrivacyInfo.xcprivacy */; };
+		C2511B36F0F0E810A9E46328 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E210BA1B334645A48212E13D, 1F2D6AAB7F85215ED11169A4, CAFA5493964854358F7DDE70, 75185689972360A90D2EF5AE, 9288EB76FB517A003CC616B1, D563067F7579DFB402D04DC1, 28040AAC919EA0C6432FD4EE, 1E5BEADB191AD2B65ACAD7BE, 324C1FBF6D82C02902564BB4, 30479C94077348F7919ECD14, 6FF5680F84EB5DF7A4536C18, 45AB1BC5E14A9F3EAC6614D1, DCD5F1D13407AFA92AC345B7, 74B3DFEF86EDB379CAD71203, BC1043A9B8EA8DA5FEE8C1CB, C5625D65E8E0F59E4AF219BC, 82B9E5C45EBB2610729FF9AB, 4B29DC719FC2B880E5363187, 6E720FDB5A052766A50B1941); runOnlyForDeploymentPostprocessing = 0; };
+		C2112B99FC6905E49DE55430 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (E29ACDDEB349F203E64DEC73, 3110337CC18B5802C0B1EC26); runOnlyForDeploymentPostprocessing = 0; };
+		019BAB185F97B56993A7087D /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		DC6EE823F900BDACC1F20867 /* IvecAI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0DE2CBF2CADFBD0D8D2A46ED /* Build configuration list for PBXNativeTarget "IvecAI" */;
+			buildPhases = (
+				C2511B36F0F0E810A9E46328 /* Sources */,
+				019BAB185F97B56993A7087D /* Frameworks */,
+				C2112B99FC6905E49DE55430 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IvecAI;
+			productName = IvecAI;
+			productReference = D452FEA2BBE00326C4B6DC8E /* IvecAI.app */;
+			productType = "com.apple.product-type.application";
+		};
+		8B07E21606514D2CB8FE8E8E /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					DC6EE823F900BDACC1F20867 = {
+							CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 7BD745CEE2AB93F6CDE99EED /* Build configuration list for PBXProject "IvecAI" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				zh_CN,
+			);
+			mainGroup = 361FF3508AF23F4E0CB329EA;
+			productRefGroup = 361FF3508AF23F4E0CB329EA /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				DC6EE823F900BDACC1F20867 /* IvecAI */,
+				);
+		};
+		70DCC1EB255A5F3C8D9ED349 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C3DCEEC1E0EB17A5583B8E94 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		DB189EBE9D4E38495C3C7EF5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = CC6VQMAF97;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = IvecAI/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ivec.ai;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+			};
+			name = Debug;
+		};
+		032222C0BAA33BC7119DFAF1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = CC6VQMAF97;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = IvecAI/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ivec.ai;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7BD745CEE2AB93F6CDE99EED /* Build configuration list for PBXProject "IvecAI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				70DCC1EB255A5F3C8D9ED349 /* Debug */,
+				C3DCEEC1E0EB17A5583B8E94 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0DE2CBF2CADFBD0D8D2A46ED /* Build configuration list for PBXNativeTarget "IvecAI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DB189EBE9D4E38495C3C7EF5 /* Debug */,
+				032222C0BAA33BC7119DFAF1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+	};
+	rootObject = 8B07E21606514D2CB8FE8E8E /* Project object */;
+}

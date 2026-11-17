@@ -1,19 +1,80 @@
-# iOS 端（ivec AI）
+# ivec AI · iOS 壳
 
-工程尚未创建（2026-11-05）。前置条件（不依赖业务代码）：
+ivec AI 的 iOS 客户端。工作区（Agent 会话、技能、文件）由平台服务承载，壳是薄薄一层原生外壳：
+把工作区稳稳托住、管好本地选择、把不可逆动作（同意协议 / 注销账户）说清楚。
 
-1. App Store Connect 建 App 记录 → 顺带把 `ivec AI` 这个**全局唯一**的名字占住
-2. Apple Developer 门户建标识符：Bundle ID = **`com.ivec.ai`**
-3. 申请 **Apple Distribution** 证书：上传 `signing/ios/apple-distribution.csr`，
-   下载后另存为 `signing/ios/AppleDistribution.cer`（真证书会覆盖 p12 里的临时自签证书）
-4. `signing/ios/apple-distribution.p12` 导入钥匙串（口令在 `signing/PASSWORDS.md`）
+| 项 | 值 |
+|---|---|
+| 应用名（商店名 = 备案名） | `ivec AI` |
+| Bundle ID | `com.ivec.ai` |
+| 最低系统 | iOS 17.0 |
+| 团队 | `CC6VQMAF97`（Beijing Qiongju Technology Co., Ltd.） |
+| 许可证 | MIT（随 aic-pod 主仓开源） |
+| 工作区地址 | `https://ivec-ai.com/u`（可在设置里改） |
 
-账号事实（2026-11-05）：Apple Developer Program 组织账号已激活，Team ID `CC6VQMAF97`，
-主体 Beijing Qiongju Technology Co., Ltd.，DUNS `576682284`。
-**待办**：Apple 后台的成员单位地址与统一社会信用代码须与营业执照一致（当前 D&B 为 91113350，
-执照为 91110114MAK7U7DK9L），App Store 上架前必须改，否则卡审核。
+## 目录结构
 
-工程创建时锁死的项：Bundle ID、Team ID、Provisioning Profile（正式发布用 App Store profile）。
+```
+mobile/ios/
+├── README.md
+├── IvecAI.xcodeproj/            # 工程文件（由 scripts/gen-project.py 生成）
+├── IvecAI/
+│   ├── App/                     # 入口、根视图、常量
+│   ├── Features/
+│   │   ├── Workspace/           # 工作区（WKWebView）
+│   │   ├── Settings/            # 设置（原生分组列表）
+│   │   ├── Consent/             # 首启协议同意
+│   │   └── Account/             # 注销账户
+│   ├── Shared/                  # 主题、Keychain、服务地址、协议清单、ShellBridge
+│   ├── Resources/               # Info.plist、PrivacyInfo.xcprivacy、Assets.xcassets
+│   └── Supporting/
+├── scripts/
+│   ├── gen-project.py           # 生成 .xcodeproj（可重复执行）
+│   └── build.sh                 # 构建 / 归档 / 跑模拟器
+└── docs/APPSTORE.md             # 上架清单
+```
 
-取值提醒：iOS 侧「公钥」= 证书的 RSA 公钥模数（hex），「证书MD5指纹」栏填 Apple 证书的 **SHA-1**（40 位，
-字段名叫 MD5 但 iOS 规范就是 SHA-1）。用 `bash mobile/scripts/sign-fingerprints.sh` 取现成值。
+## 构建
+
+前置：Xcode 27.2+。本机 `xcode-select` 若仍指向 CommandLineTools，脚本用 `DEVELOPER_DIR` 直连
+`/Applications/Xcode.app/Contents/Developer`，不改全局设置。
+
+```bash
+python3 scripts/gen-project.py        # 生成/刷新工程文件（源码增删后重跑）
+bash scripts/build.sh                  # 模拟器 Debug 构建
+bash scripts/build.sh run              # 装到 iPhone 18 Pro 模拟器并启动
+bash scripts/build.sh device           # 真机 Release 归档（需签名）
+```
+
+在受限沙箱里跑 `xcodebuild` 时，Swift 宏插件需要 `-Xfrontend -disable-sandbox`；
+`swiftc -typecheck` 可独立验证代码：
+
+```bash
+SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+xcrun swiftc -typecheck -Xfrontend -disable-sandbox -sdk "$SDK" \
+  -target arm64-apple-ios17.0-simulator $(find IvecAI -name '*.swift')
+```
+
+## 与服务端的约定
+
+| 用途 | 接口 | 说明 |
+|---|---|---|
+| 协议地址 | `GET /vb/api/config` | 读 `values.vb["auth.legal.terms_url"]`（用户协议）与 `values.vb["auth.legal.privacy_url"]`（隐私政策）；哪个配了就显示哪个 |
+| 注销账号 | `DELETE /vb/api/auth/account` | Bearer 令牌；成功后清本机 Keychain 凭据 |
+| 登出 | `POST /vb/api/auth/logout` | 仅吊销会话 |
+
+网页登录后的令牌由页面通过 `window.webkit.messageHandlers.ivec.postMessage({type:"auth.token", token})`
+交给壳，壳存进 Keychain（不进 UserDefaults、不写日志）。
+
+## 隐私与权限
+
+- 权限最小化：只申请麦克风（且仅在你使用语音输入 / 朗读时）。
+- 壳不采集设备标识符（IDFA/OAID/IMEI）、不读通讯录与位置。
+- 凭据存 Keychain；本地偏好（服务地址、主题、语言、同意记录）存 UserDefaults，
+  已在 `PrivacyInfo.xcprivacy` 里声明 required reason（`CA92.1`）。
+- 只用 HTTPS 标准加密：`ITSAppUsesNonExemptEncryption = false`，出口合规走豁免问卷。
+
+## 开源约定
+
+- 私钥、证书、Provisioning Profile 一律不入库（放在仓库根 `signing/`，已 gitignore）。
+- 工程文件由脚本生成，**不建议手工编辑** `project.pbxproj`；改完源码重跑生成器。
