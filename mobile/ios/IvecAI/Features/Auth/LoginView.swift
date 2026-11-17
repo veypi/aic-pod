@@ -302,7 +302,7 @@ struct LoginView: View {
                     countdown -= 1
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = config.errorText(error)
             }
         }
     }
@@ -334,7 +334,7 @@ struct LoginView: View {
                 password = ""
                 confirmPassword = ""
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = config.errorText(error)
             }
         }
     }

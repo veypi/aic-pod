@@ -77,6 +77,16 @@ final class ServerConfig: ObservableObject {
         L10nStore.text(key, language: resolvedLanguage, argument)
     }
 
+    /// 错误文案：先按平台业务码（error.<code>，与网页 $err 同一套语义）取本地化文案，
+    /// 取不到才用错误自带的描述。
+    func errorText(_ error: Error) -> String {
+        if let auth = error as? AuthError, let code = auth.businessCode,
+           let text = L10nStore.table[resolvedLanguage]?["error.\(code)"] {
+            return text
+        }
+        return error.localizedDescription
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {

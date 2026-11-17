@@ -18,8 +18,13 @@ enum Brand {
 
 extension Color {
     /// 语义色：跟随系统浅/深色。
+    /// 浅色模式取平台图标 squircle 底色 #f1f8ff（与登录窗背景一致），深色用系统分组背景。
     static var brandBackground: Color {
-        Color(uiColor: .systemGroupedBackground)
+        Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? .systemGroupedBackground
+                : UIColor(red: 241 / 255, green: 248 / 255, blue: 255 / 255, alpha: 1)
+        })
     }
 
     static var brandSurface: Color {

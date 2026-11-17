@@ -105,7 +105,7 @@ final class SettingsViewModel: ObservableObject {
             try await auth.deleteAccount()
             accountDeleted = true
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = config.errorText(error)
         }
     }
 }

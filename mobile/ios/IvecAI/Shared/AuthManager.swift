@@ -17,15 +17,21 @@ enum AuthError: LocalizedError {
     case invalidToken
     case accountMismatch
     case badResponse
-    case server(status: Int, message: String)
+    case server(code: Int, status: Int, message: String)
 
     /// 需要重新登录（刷新时收到 401 或身份漂移）。
     var requiresRelogin: Bool {
         switch self {
         case .notSignedIn, .accountMismatch: return true
-        case let .server(status, _): return status == 401
+        case let .server(_, status, _): return status == 401
         default: return false
         }
+    }
+
+    /// 平台业务码（vigo 的 code，如 40104 凭据错误），没有则为 nil。
+    var businessCode: Int? {
+        if case let .server(code, _, _) = self, code > 0 { return code }
+        return nil
     }
 
     var errorDescription: String? {
@@ -35,7 +41,7 @@ enum AuthError: LocalizedError {
         case .invalidToken: return "登录响应不是动态 Web access token。"
         case .accountMismatch: return "登录用户与访问凭证不一致。"
         case .badResponse: return "服务返回了无法识别的响应。"
-        case let .server(_, message):
+        case let .server(_, _, message):
             return message.isEmpty ? "服务返回错误。" : message
         }
     }
@@ -77,7 +83,10 @@ struct AuthTransport {
             let message = (payload?["message"] as? String)
                 ?? ((payload?["error"] as? [String: Any])?["message"] as? String)
                 ?? ""
-            throw AuthError.server(status: http.statusCode, message: message)
+            let code = (payload?["code"] as? Int)
+                ?? ((payload?["error"] as? [String: Any])?["code"] as? Int)
+                ?? 0
+            throw AuthError.server(code: code, status: http.statusCode, message: message)
         }
         return Response(data: data, response: http)
     }
