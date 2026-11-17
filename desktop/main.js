@@ -172,7 +172,8 @@ function registerSettingsProtocol() {
 let mainWin = null; // 主窗口（BaseWindow：平台页与 browser 画面展示）
 let platformView = null; // 平台页视图（恒占满 contentView）
 let loginWin = null; // 原生登录窗口（独立小窗）
-let authWin = null; // 三方授权窗口（应用内完成 OAuth）
+// 三方登录进行中：授权在主窗口平台页里走网页流程，回调后接管会话。
+let authPending = false;
 let petWin = null; // 桌宠窗口（透明小窗，与主窗口共存，加载 /pet 或 /agents/{aid}/pet）
 let settingsWin = null; // 本地配置独立窗口（BrowserWindow，系统边框，独立 partition + settings-preload）
 let keepWin = null; // worker 保活窗口（隐藏；与平台页同 session 同源，持 nc SharedWorker 端口）
@@ -414,6 +415,7 @@ async function buildNativeApp(server) {
 // 原生登录页：独立的小窗口（规范尺寸的原生页面），不再塞进主窗口的平台视图。
 function showNativeLogin() {
   clearPlatformRetry();
+  authPending = false;
   // 登录窗就是当前界面：主窗口先藏起来，不要出现「工作区还在 + 登录窗浮在上面」。
   if (mainWin && !mainWin.isDestroyed()) mainWin.hide();
   // 旧账户的 SharedWorker / 网页用户 NATS 不能越过登出或账户切换继续存活。
@@ -453,58 +455,30 @@ function showNativeLogin() {
 
 // 三方授权窗口：在应用内完成 OAuth。回调落在平台侧，会话 cookie 进入本应用的
 // Electron 会话，随后由 nativeApp.adoptSession() 接管。
-function openAuthWindow(url) {
-  if (authWin && !authWin.isDestroyed()) {
-    authWin.focus();
-    return;
+// 三方登录：在主窗口的平台页里走网页版授权流程。
+// 不再另开授权窗（那会出现「登录窗 + 授权窗」两个窗口，且窄窗口里的绑定页排版是错的）。
+function startThirdPartyLogin(url) {
+  if (loginWin && !loginWin.isDestroyed()) loginWin.close();
+  authPending = true;
+  mainWin?.show();
+  mainWin?.focus();
+  if (platformView && !platformView.webContents.isDestroyed()) {
+    platformView.webContents.loadURL(url);
   }
-  authWin = new BrowserWindow({
-    width: 520,
-    height: 720,
-    frame: true,
-    center: true,
-    title: "ivec.ai",
-    autoHideMenuBar: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-  authWin.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (/^https?:\/\//.test(target)) shell.openExternal(target);
-    return { action: "deny" };
-  });
-  const adopt = () => {
-    if (!nativeApp) return;
-    nativeApp
-      .adoptSession()
-      .then((result) => {
-        if (result && authWin && !authWin.isDestroyed()) authWin.close();
-      })
-      .catch(() => {});
-  };
-  authWin.webContents.on("did-navigate", (_e, target) => {
-    if (samePlatform(target)) adopt();
-  });
-  // 授权页加载失败（外网不通 / DNS / 代理）时不能留一个白窗：直接把原因写出来。
-  authWin.webContents.on(
-    "did-fail-load",
-    (_e, code, description, failedUrl, isMainFrame) => {
-      if (!isMainFrame || code === -3) return;
-      const body = `<!doctype html><meta charset="utf-8"><body style="margin:0;padding:28px;font:14px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;color:#c73535;word-break:break-all">` +
-        `<p style="font-size:15px;font-weight:600;margin:0 0 10px">授权页加载失败</p>` +
-        `<p style="margin:0 0 10px">${description || "网络错误"}（${code}）</p>` +
-        `<p style="margin:0;color:#6d7787;font-size:12px">${failedUrl}</p>` +
-        `<p style="margin:16px 0 0;color:#6d7787;font-size:12px">请检查网络 / 代理后重新点登录。</p></body>`;
-      authWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(body));
-    },
-  );
-  authWin.on("closed", () => {
-    authWin = null;
-    adopt();
-  });
-  authWin.loadURL(url);
+}
+
+// 授权回调落回平台后接管会话：页面自己先把 /api/auth/callback 调完、cookie 就位，
+// 然后通常还会跳到某个页面——每次平台域名内的导航都试一次，拿到会话就 activates。
+function tryAdoptPendingAuth() {
+  if (!authPending || !nativeApp) return;
+  const url = platformView?.webContents.getURL() || "";
+  if (!samePlatform(url)) return;
+  nativeApp
+    .adoptSession()
+    .then((result) => {
+      if (result) authPending = false;
+    })
+    .catch(() => {});
 }
 
 async function waitForNativeConnected(timeoutMs) {
@@ -1080,7 +1054,7 @@ function registerIpc() {
           const result = await nativeApp.thirdPartyLogin(
             String(a.provider || ""),
           );
-          openAuthWindow(result.auth_url);
+          startThirdPartyLogin(result.auth_url);
           return { ok: true };
         }
         default:
@@ -1334,6 +1308,10 @@ function createMainWindow(init) {
   mainWin.on("resize", layoutMain);
   mainWin.on("focus", syncAltSpace);
   mainWin.on("blur", syncAltSpace);
+
+  // 三方登录：授权回调落回平台后，页面每次导航都试一次会话接管。
+  platformView.webContents.on("did-navigate", () => tryAdoptPendingAuth());
+  platformView.webContents.on("did-navigate-in-page", () => tryAdoptPendingAuth());
 
   // BaseWindow 无 ready-to-show（BrowserWindow 专属）：内容 view 创建即直接显示。
   // 未登录时先不显示主窗口：登录页有自己的小窗，避免启动阶段出现「空主窗 + 登录窗」两个窗口。

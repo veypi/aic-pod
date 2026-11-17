@@ -72,7 +72,7 @@ test('原生登录页平铺（不再套第二层卡片）且顶部对齐', () =>
 test('登出后主窗口让位给登录窗', () => {
   const source = read('main.js')
   const start = source.indexOf('function showNativeLogin()')
-  const end = source.indexOf('function openAuthWindow(')
+  const end = source.indexOf('function startThirdPartyLogin(')
   assert.ok(start > 0 && end > start)
   assert.match(source.slice(start, end), /mainWin\.hide\(\)/)
 })
@@ -99,9 +99,19 @@ test('原生登录页：不显示平台服务器地址、用平台图标、带�
 test('原生登录页开在独立小窗口，不再塞进平台视图', () => {
   const source = read('main.js')
   const start = source.indexOf('function showNativeLogin()')
-  const end = source.indexOf('function openAuthWindow(')
+  const end = source.indexOf('function startThirdPartyLogin(')
   assert.ok(start > 0 && end > start)
   const body = source.slice(start, end)
   assert.ok(!body.includes('platformView.webContents.loadURL'))
   assert.match(body, /loginWin = new BrowserWindow\(/)
+})
+
+test('三方登录在主窗口走网页流程，不开专用授权窗', () => {
+  const source = read('main.js')
+  assert.ok(!source.includes('openAuthWindow'), '仍存在专用授权窗')
+  const start = source.indexOf('function startThirdPartyLogin(')
+  assert.ok(start > 0)
+  const body = source.slice(start, start + 900)
+  assert.match(body, /loginWin\.close\(\)/, '三方登录前要先关掉登录窗')
+  assert.match(body, /platformView\.webContents\.loadURL/, '授权地址应交给平台页加载')
 })
