@@ -78,9 +78,13 @@ private struct OAuthWebView: UIViewRepresentable {
                   let host = webView.url?.host,
                   let platformHost,
                   host == platformHost else { return }
-            finished = true
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-                guard let self else { return }
+                guard let self, !self.finished else { return }
+                // 回调页本身也会落在平台域名上，但那时页面还在调 /api/auth/callback；
+                // 没有 access cookie 就保持窗口，等页跳转后下一次 didFinish 再读。
+                let hasSession = cookies.contains { $0.name.lowercased().hasSuffix("access") }
+                guard hasSession else { return }
+                self.finished = true
                 DispatchQueue.main.async { self.onCookies(cookies) }
             }
         }
