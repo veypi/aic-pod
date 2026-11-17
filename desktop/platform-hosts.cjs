@@ -44,7 +44,15 @@ function createHostPolicy({ platform, defaultHost, legacyHosts = [] }) {
     isSettingsFrame(event) {
       try {
         const u = new URL(event.senderFrame.url)
-        return u.protocol === SETTINGS_SCHEME + ':' && u.hostname === 'aic'
+        return u.protocol === SETTINGS_SCHEME + ':' && u.hostname === 'aic' && u.pathname === '/settings.html'
+      } catch (e) {
+        return false
+      }
+    },
+    isLoginFrame(event) {
+      try {
+        const u = new URL(event.senderFrame.url)
+        return u.protocol === SETTINGS_SCHEME + ':' && u.hostname === 'aic' && u.pathname === '/login.html'
       } catch (e) {
         return false
       }

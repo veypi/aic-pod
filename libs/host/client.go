@@ -38,16 +38,17 @@ type Options struct {
 	Commands      map[string]cfg.CommandConfig
 	CommandConfig map[string]cfg.CommandDefConfig
 	Transfers     hostfs.TransferConfig
-	Host          string        // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
-	Key           string        // 设备凭证复合串 "<host_id>.<vbase 四段 credential>"（必填，平台设备页签发）
-	WorkDir       string        // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
-	IndexRoots    []string      // rg 常驻文件名/内容索引根；空 = WorkDir
-	DeviceName    string        // 展示名称，默认 hostname
-	DeviceType    string        // 客户端类型（cli/desktop/...），默认 cli
-	Version       string        // 客户端版本号（va.b.c，§6.3 版本门禁）
-	ExecTimeout   time.Duration // 程序后台自有超时，默认 30m（§5.9）
-	NoSandbox     bool          // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
-	RTC           bool          // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
+	Host          string         // 平台地址（如 https://ivec-ai.com，可带路径前缀），NATS 端点据此推断
+	Key           string         // 静态设备凭证复合串；CLI/Docker 使用，与 Session 互斥
+	Session       *SessionConfig // 原生客户端 Session Host 连接档案与动态 access token provider
+	WorkDir       string         // exec/fs 缺省工作区（§2.1.1 workdir 缺省值），默认 /tmp
+	IndexRoots    []string       // rg 常驻文件名/内容索引根；空 = WorkDir
+	DeviceName    string         // 展示名称，默认 hostname
+	DeviceType    string         // 客户端类型（cli/desktop/...），默认 cli
+	Version       string         // 客户端版本号（va.b.c，§6.3 版本门禁）
+	ExecTimeout   time.Duration  // 程序后台自有超时，默认 30m（§5.9）
+	NoSandbox     bool           // 全局免沙箱（§5.10）：cfg.Options.NoSandbox 透传
+	RTC           bool           // RTC 直连应答开关（cfg.Options.RTC）：关闭仍保留文件 proxy
 	OnLog         func(format string, args ...any)
 }
 
@@ -111,6 +112,10 @@ func defaultWorkDir() string {
 
 // New 创建客户端（不连接）。
 func New(opts Options) *Client {
+	if opts.Session != nil {
+		session := *opts.Session
+		opts.Session = &session
+	}
 	if opts.DeviceType == "" {
 		opts.DeviceType = "cli"
 	}
@@ -154,13 +159,8 @@ func New(opts Options) *Client {
 		c.index = idx
 	}
 
-	if dc, err := protocol.ParseDeviceCredential(opts.Key); err == nil {
-		c.hostID = dc.HostID
-		c.uid = dc.UID
-		c.credVer = dc.Ver
-		c.authToken = dc.AuthToken
-		c.secret = dc.Secret
-		c.kTool, _ = protocol.DeriveKTool(dc.Secret, dc.HostID)
+	if identity, err := identityFromOptions(opts); err == nil {
+		c.installIdentity(identity)
 	}
 	// 会话区根 = {StateDir}/sessions：与 permissionState 会话便利根
 	// 同路径（生产此前从不赋值 → sessionWorkDir 退 Temp 兜底，「会话区」分裂
@@ -196,9 +196,15 @@ func (c *Client) connect() error {
 	if c.initErr != nil {
 		return c.initErr
 	}
-	dc, err := protocol.ParseDeviceCredential(c.options().Key)
+	identity, err := identityFromOptions(c.options())
 	if err != nil {
-		return fmt.Errorf("invalid device credential: %w", err)
+		return err
+	}
+	c.installIdentity(identity)
+	// 初次连接前显式取一次 token，让 provider 配置错误直接返回给调用方；
+	// NATS TokenHandler 自身仍会在每次连接/重连时重新取最新 token。
+	if _, err := c.natsToken(context.Background()); err != nil {
+		return fmt.Errorf("host authentication token: %w", err)
 	}
 
 	c.logf("starting aic-host v%s [%s/%s] (host=%s)", c.options().Version, c.options().DeviceType, c.options().DeviceName, c.hostID)
@@ -206,12 +212,9 @@ func (c *Client) connect() error {
 	natsURL := ResolveNATSURL(c.options().Host)
 	opts := []nats.Option{
 		nats.Name("aic-host-" + c.hostID),
-		// 设备凭证 = vbase 静态秘钥（device-key-migration）：CONNECT token 只发
-		// 前 3 段 JWT（服务端 SplitCredential 忽略第 4 段——secret 不出设备）；
-		// 撤销/换代 = 平台删行或 reset，每连接查库即时生效。
-		nats.TokenHandler(func() string {
-			return dc.AuthToken
-		}),
+		// 静态模式发送前三段 JWT；Session 模式每次连接/重连动态组装 s1. envelope。
+		// 两种模式的 protocol secret 都留在本地，不进入 CONNECT。
+		nats.TokenHandler(c.natsTokenHandler),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
@@ -223,9 +226,13 @@ func (c *Client) connect() error {
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			c.logf("NATS disconnected: %v", err)
 			if isAuthError(err) {
-				c.logf("FATAL: authentication permanently failed — credential expired or revoked. Obtain a new credential and restart.")
+				message := "authentication failed — credential expired or revoked (obtain a new credential and restart)"
+				if c.options().Session != nil {
+					message = "session authentication failed — sign in again or ensure the host to refresh its connection profile"
+				}
+				c.logf("FATAL: %s", message)
 				writeState(State{Connected: false, HostID: c.hostID, NATSURL: natsURL, Version: c.options().Version,
-					LastError: "authentication failed — credential expired or revoked (obtain a new credential and restart)"})
+					LastError: message})
 				go func() {
 					c.lifecycleMu.Lock()
 					defer c.lifecycleMu.Unlock()

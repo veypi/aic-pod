@@ -2,7 +2,7 @@
 
 // Go 后端子进程生命周期：spawn / 优雅停止 / 串行重启 / 退出回收。
 // Electron 只提供 spawn、环境与致命错误回调；窗口/对话框不在本模块。
-function createBackend({ spawn, binary, env, waitForStartup, onFatal }) {
+function createBackend({ spawn, binary, env, waitForStartup, onFatal, session = null }) {
   let child = null
   let ready = false // 就绪后异常退出才算启动失败（主动 stop/restart 不算）
   let restarting = null
@@ -21,8 +21,17 @@ function createBackend({ spawn, binary, env, waitForStartup, onFatal }) {
   }
 
   async function startNow() {
-    child = spawn(binary, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-    child.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
+    const nativeSession = !!session?.enabled()
+    child = spawn(binary, nativeSession ? ['desktop-session'] : [], {
+      env,
+      stdio: [nativeSession ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    })
+    if (nativeSession) {
+      // stdout 专用于 JSON RPC；日志只在 stderr/文件，绝不混入控制帧。
+      session.attach(child)
+    } else {
+      child.stdout.on('data', (d) => console.log('[backend]', d.toString().trim()))
+    }
     child.stderr.on('data', (d) => console.log('[backend]', d.toString().trim()))
     child.on('exit', (code, signal) => {
       if (ready) onFatal(new Error(`后端进程异常退出（${signal || code}）`))

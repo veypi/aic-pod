@@ -1,7 +1,7 @@
 // settings-preload.js — 独立本地配置窗口专用（BrowserWindow，独立 partition，仅 app://aic 设置页）。
 // 只暴露配置流程需要的能力：设置桥（api）+ 探测平台可达 + 打开平台。
-// api(method, args)：与平台页 remote-preload 同一路由（IPC 'local:api'），主进程按方法名
-// spawn `aic-backend config|bind` 子命令 / 读日志 / 重启后端子进程——本地无 HTTP、无校验码。
+// api 仅服务本地受信任设置页；主进程执行配置、日志与原生 Session Host 管理。
+// 平台工作区不暴露这个通用入口，只使用 remote-preload 的固定管理方法。
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('aicDesktop', {

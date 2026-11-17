@@ -13,8 +13,16 @@ files:
   - host-state.cjs
   - platform-hosts.cjs
   - settings-protocol.cjs
+  - auth-cookies.cjs
+  - auth-store.cjs
+  - native-auth.cjs
+  - native-app.cjs
+  - electron-cookies.cjs
+  - device-identity.cjs
+  - session-rpc.cjs
   - loading.html
   - remote-preload.js
+  - login-preload.js
   - screenshot.cjs
   - settings-preload.js
   - settings-ui/**
@@ -43,6 +51,10 @@ extraResources:
   # 官方预装包设备程序（make skill-bin-desktop，预编译 browser/cua）→ resources/skill-bin/
   - from: vendor/skill-bin
     to: skill-bin
+  - from: ../client-bridge
+    to: client-bridge
+    filter:
+      - l10n.json
 artifactName: aic-desktop-${os}-${arch}.${ext}
 mac:
   target: dmg

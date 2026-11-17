@@ -5,11 +5,11 @@
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:">
-  <title>AIC 本地设置</title>
+  <title>设置</title>
   <!--
     ivec 本地设置页：单文件静态页（无框架、无构建、无本地 HTTP 服务）。
-    数据全部经 Electron 桥：window.aicDesktop.api(method, args) → 主进程 spawn
-    `aic-backend config|bind|unbind` 子命令 / 读日志 / 重启后端子进程。
+    数据全部经本地受限 Electron 桥：配置子命令、日志与原生 Session Host 管理。
+    Web token 与 Host 连接秘密由主进程另行加密管理，不进入此页面。
     页面由 main.js 的 app://aic 协议提供（真实 origin，localStorage 可用）。
     主题：跟随系统 prefers-color-scheme（html[data-theme] + color-scheme 同时生效，
     原生控件 placeholder/滚动条/下拉 不会在深色下变成黑字）。
@@ -400,13 +400,12 @@
       <span id="msg"></span>
     </div>
 
+    <div class="sec">账户</div>
+    <div class="row"><span id="account" class="hint" style="margin:0;flex:1">检查中…</span><button id="btnSignOut" class="mini ghost" hidden>退出登录</button></div>
+
     <div class="sec">连接</div>
     <label class="f"><span>平台地址 <em>host</em></span><input id="host" placeholder="https://ivec-ai.com"></label>
-    <label class="f"><span>凭证 <em>key</em></span></label>
-    <div class="row">
-      <input id="key" placeholder="host key" aria-label="凭证 key">
-      <button id="btnGet" class="mini ghost" title="打开平台设备页获取绑定 key">获取</button>
-    </div>
+    <p class="hint">Host 凭证由原生登录自动创建并安全保存，无需手工绑定设备 key。修改平台地址会退出当前连接并返回原生登录页。</p>
 
     <div class="sec">运行</div>
     <label class="f"><span>工作目录 <em>work_dir</em></span><input id="work_dir"
@@ -431,8 +430,8 @@
     const $pod = {
       get_config: () => call('get_config'),
       set_config: (cfg) => call('set_config', cfg),
-      bind: (credential) => call('bind', { credential }),
-      unbind: () => call('unbind', {}),
+      get_auth_state: () => call('get_auth_state'),
+      sign_out: () => call('sign_out'),
       get_status: () => call('get_status'),
       get_log: () => call('get_log'),
       check_host: (host) => call('check_host', { host }),
@@ -456,7 +455,7 @@
 
     // ---- 脏检查：只有改动过才显示「保存」 ----
     // 表单字段 + 三域授权（policy/deny/allow）全量快照；列表编辑器的「新增输入框」不计入。
-    const FIELDS = ['host', 'key', 'work_dir', 'exec_timeout', 'home_path']
+    const FIELDS = ['host', 'work_dir', 'exec_timeout', 'home_path']
     const domains = [
       { key: 'fs', name: '文件 (fs)', ph: '如 deny:~/**/*.pem、rw:~/.cache/**' },
       { key: 'net', name: '网络 (net)', ph: '如 allow:example.com:443、deny:169.254.169.254:*' },
@@ -655,20 +654,29 @@
       }
     }
 
-    // 连接失败提示：认证类错误 → 指路去目标平台重新获取 key（换平台未换 key 场景）。
     const connFailMsg = (s, fallback) => {
       const err = (s && s.last_error) || ''
-      if (/authoriz|authentic/i.test(err)) {
-        return '凭证不被该平台接受：请打开 ' + normalizeHost($('host').value.trim()) + '/hosts 重新获取 key'
-      }
+      if (/authoriz|authentic/i.test(err)) return '登录或 Host 凭证已失效，请回到原生登录页重新登录'
       return err ? '未连接: ' + err : fallback
+    }
+
+    const refreshAccount = async () => {
+      try {
+        const value = await $pod.get_auth_state()
+        $('account').textContent = value.signedIn
+          ? (value.user?.nickname || value.user?.username || value.user?.id || '已登录') + (value.host_id ? ' · ' + value.host_id : '')
+          : '未登录'
+        $('btnSignOut').hidden = !value.signedIn
+      } catch (e) {
+        $('account').textContent = '状态获取失败: ' + e.message
+        $('btnSignOut').hidden = true
+      }
     }
 
     const boot = async () => {
       try {
         const cfg = await $pod.get_config()
         $('host').value = cfg.host || ''
-        $('key').value = cfg.key || ''
         $('work_dir').value = cfg.work_dir || ''
         $('exec_timeout').value = cfg.exec_timeout || ''
         $('home_path').value = cfg.home_path || '/'
@@ -680,16 +688,16 @@
         markClean() // 载入完成 = 无改动（保存按钮此时隐藏）
       } catch (e) { setMsg('加载失败: ' + e.message, 'err') }
       refreshStatus()
+      refreshAccount()
     }
 
     // 窗口重新获得焦点 → 刷新连接状态（不重拉 get_config，避免覆盖正在编辑的输入框）
     window.addEventListener('focus', () => refreshStatus())
 
-    // ---- 保存：先落盘（set_config）→ 凭证非空才 bind（同值幂等）；主进程随后自动重启后端子进程 ----
+    // 保存后由主进程重建 Session Host；返回时已经等待真实连接结果。
     const save = async () => {
       saveBtn.disabled = true
       const host = $('host').value.trim()
-      const key = $('key').value.trim()
       const work_dir = $('work_dir').value.trim()
       const exec_timeout = $('exec_timeout').value.trim()
       const home_path = $('home_path').value.trim()
@@ -699,66 +707,30 @@
           body[d.key + '_policy'] = auth[d.key].policy
           body[d.key + '_rules'] = auth[d.key].rules
         }
-        await $pod.set_config(body)
+        const result = await $pod.set_config(body)
+        setMsg(result.server_changed ? '地址已保存，请重新登录' : '已保存 · 已重连', 'ok')
+        markClean()
       } catch (e) {
         setMsg(isNetErr(e) ? '设置桥暂不可用（后端可能正在重启），请重试' : '保存失败: ' + e.message, 'err')
         saveBtn.disabled = false
-        refreshStatus()
-        return
-      }
-      if (key) {
-        try {
-          await $pod.bind(key)
-        } catch (e) {
-          setMsg('地址已保存；凭证未生效: ' + e.message, 'warn')
-          markClean()
-          refreshStatus()
-          return
-        }
-      }
-      setMsg('已保存', 'ok')
-      markClean() // 基线刷新 → 保存按钮消失
-      // 保存后等真实连接结果（换平台未换 key 等场景不再假「已连接」）。
-      if (key) {
-        const s = await waitConnected(15000)
-        if (s && s.connected) setMsg('已保存 · 已连接', 'ok')
-        else setMsg(connFailMsg(s, '已保存，但后端未连上平台'), 'warn')
       }
       refreshStatus()
+      refreshAccount()
     }
 
-    // 归一平台地址（补 scheme + 去尾斜杠）
-    const normalizeHost = (raw) => {
-      let h = (raw || 'https://ivec-ai.com').trim()
-      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(h)) h = 'https://' + h
-      return h.replace(/\/+$/, '')
-    }
-
-    // 探测 {host}/root.html 可达后打开平台（Electron：主窗口跳转、配置页保留）
-    const probeAndJump = async (rawHost, failMsg) => {
-      const h = normalizeHost(rawHost)
-      let ok = false
-      if (window.aicDesktop && window.aicDesktop.checkPlatform) {
-        const r = await window.aicDesktop.checkPlatform(h)
-        ok = !!(r && r.ok)
-      } else {
-        try {
-          const r = await $pod.check_host({ host: h })
-          ok = !!(r && r.ok)
-        } catch (e) { ok = false }
+    $('btnSignOut').onclick = async () => {
+      $('btnSignOut').disabled = true
+      try {
+        await $pod.sign_out()
+        setMsg('已退出登录', 'ok')
+      } catch (e) {
+        setMsg('退出失败: ' + e.message, 'err')
+      } finally {
+        $('btnSignOut').disabled = false
+        refreshAccount()
+        refreshStatus()
       }
-      if (ok) {
-        const url = h + '/hosts'
-        if (window.aicDesktop && window.aicDesktop.openPlatform) window.aicDesktop.openPlatform(url)
-        else window.open(url, '_blank')
-        return true
-      }
-      setMsg(failMsg || '平台不可达，请检查地址', 'err')
-      return false
     }
-
-    // 获取：打开 {host}/hosts 设备页拿绑定 key（桌面主窗口打开、配置页保留）
-    $('btnGet').onclick = () => { probeAndJump($('host').value.trim()) }
 
     const reconnect = async () => {
       const btn = $('btnReconnect')

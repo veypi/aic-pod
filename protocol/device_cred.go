@@ -42,8 +42,8 @@ type DeviceCredential struct {
 //	fail fast，连接期不再重复解析。
 func ParseDeviceCredential(composite string) (*DeviceCredential, error) {
 	hostID, credential, ok := strings.Cut(strings.TrimSpace(composite), ".")
-	if !ok || !validSeg(hostID) {
-		return nil, fmt.Errorf("proto: invalid device credential (want <host_id>.<credential>)")
+	if !ok || !ValidHostID(hostID) {
+		return nil, fmt.Errorf("proto: invalid device credential (want <36位host_id>.<credential>)")
 	}
 	parts := strings.Split(credential, ".")
 	if len(parts) != 4 || parts[3] == "" {
@@ -66,8 +66,11 @@ func ParseDeviceCredential(composite string) (*DeviceCredential, error) {
 	if uid == "" {
 		uid = claims.Subject
 	}
-	if !validSeg(uid) || claims.Version == 0 {
+	if !ValidHostOwnerID(uid) || claims.Version == 0 {
 		return nil, fmt.Errorf("proto: device credential payload missing uid/ver")
+	}
+	if hostID[:HostOwnerIDLength] != uid {
+		return nil, fmt.Errorf("proto: device credential owner does not match host id")
 	}
 	if claims.Type != "" && claims.Type != "static" {
 		return nil, fmt.Errorf("proto: device credential is not a static key (type=%q)", claims.Type)

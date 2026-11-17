@@ -85,3 +85,25 @@ test('并发 start+stop 串行化：start 等 stop 完成后再拉起', async ()
   assert.equal(ctl.alive(), true)
   assert.equal(ctl.child, children[1])
 })
+
+test('原生 Session 使用 desktop-session 子命令与私有 stdin/stdout', async () => {
+  const child = fakeChild()
+  let spawnArgs = null
+  let attached = null
+  const ctl = createBackend({
+    spawn: (_binary, args, options) => {
+      spawnArgs = { args, options }
+      return child
+    },
+    binary: 'aic-backend',
+    env: {},
+    waitForStartup: async () => {},
+    onFatal: () => {},
+    session: { enabled: () => true, attach: value => { attached = value } },
+  })
+  await ctl.start()
+  assert.deepEqual(spawnArgs.args, ['desktop-session'])
+  assert.deepEqual(spawnArgs.options.stdio, ['pipe', 'pipe', 'pipe'])
+  assert.equal(attached, child)
+  await ctl.stop()
+})

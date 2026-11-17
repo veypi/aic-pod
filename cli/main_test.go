@@ -142,9 +142,9 @@ func TestConfigSetRejectsBadValues(t *testing.T) {
 }
 
 // testDeviceCred 是合法形态的设备凭证复合串（JWT 段不签名——bind 只做形态校验）。
-const testDeviceCred = "ab62a0c624f2496b8e7cf8f63c735d1d." +
+const testDeviceCred = "ab62a0c624f2496b8e7cf8f63c735d1d0001." +
 	"eyJhbGciOiJIUzI1NiJ9." +
-	"eyJ1aWQiOiJ1MSIsInN1YiI6InUxIiwidmVyIjoxLCJ0eXBlIjoic3RhdGljIiwibW9kIjoibGltaXRlZCJ9." +
+	"eyJ1aWQiOiJhYjYyYTBjNjI0ZjI0OTZiOGU3Y2Y4ZjYzYzczNWQxZCIsInN1YiI6ImFiNjJhMGM2MjRmMjQ5NmI4ZTdjZjhmNjNjNzM1ZDFkIiwidmVyIjoxLCJ0eXBlIjoic3RhdGljIiwibW9kIjoibGltaXRlZCJ9." +
 	"c2ln.c2VjcmV0"
 
 // TestBindUnbindRoundTrip：bind 写入凭证（含 host_id 解析），unbind 清空凭证。
@@ -160,7 +160,7 @@ func TestBindUnbindRoundTrip(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &resp); err != nil || !resp.OK {
 		t.Fatalf("bind output: %q (%v)", out, err)
 	}
-	if resp.HostID != "ab62a0c624f2496b8e7cf8f63c735d1d" {
+	if resp.HostID != "ab62a0c624f2496b8e7cf8f63c735d1d0001" {
 		t.Fatalf("host_id = %q", resp.HostID)
 	}
 	got, err := cfg.LoadFile()

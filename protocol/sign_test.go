@@ -40,18 +40,18 @@ func TestDeriveKToolVector(t *testing.T) {
 }
 
 func TestParseDeviceCredential(t *testing.T) {
-	composite := ComposeDeviceCredential("host32hex", unsignedJWT(map[string]any{
-		"uid": "u_vec", "sub": "u_vec", "ver": 3, "type": "static", "mod": "limited",
+	composite := ComposeDeviceCredential(testSessionHostID, unsignedJWT(map[string]any{
+		"uid": testSessionUID, "sub": testSessionUID, "ver": 3, "type": "static", "mod": "limited",
 	})+".secret42")
 	dc, err := ParseDeviceCredential(composite)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dc.HostID != "host32hex" || dc.UID != "u_vec" || dc.Ver != 3 || dc.Secret != "secret42" {
+	if dc.HostID != testSessionHostID || dc.UID != testSessionUID || dc.Ver != 3 || dc.Secret != "secret42" {
 		t.Errorf("parsed = %+v", dc)
 	}
 	// 认证用 credential = 原样四段（不含 host_id 前缀）
-	want := strings.TrimPrefix(composite, "host32hex.")
+	want := strings.TrimPrefix(composite, testSessionHostID+".")
 	if dc.Credential != want {
 		t.Errorf("credential = %q, want %q", dc.Credential, want)
 	}
@@ -64,10 +64,11 @@ func TestParseDeviceCredential(t *testing.T) {
 	for _, bad := range []string{
 		"no-separator",
 		"host.only.two",
-		"host." + unsignedJWT(map[string]any{"uid": "u", "ver": 1, "type": "access"}) + ".s", // 非 static
-		"host." + unsignedJWT(map[string]any{"ver": 1, "type": "static"}) + ".s",             // 缺 uid
-		"host." + unsignedJWT(map[string]any{"uid": "u", "type": "static"}) + ".s",           // 缺 ver
-		"host." + unsignedJWT(map[string]any{"uid": "u", "ver": 1, "type": "static"}),        // 缺 secret 段
+		testSessionHostID + "." + unsignedJWT(map[string]any{"uid": testSessionUID, "ver": 1, "type": "access"}) + ".s",                     // 非 static
+		testSessionHostID + "." + unsignedJWT(map[string]any{"ver": 1, "type": "static"}) + ".s",                                            // 缺 uid
+		testSessionHostID + "." + unsignedJWT(map[string]any{"uid": testSessionUID, "type": "static"}) + ".s",                               // 缺 ver
+		testSessionHostID + "." + unsignedJWT(map[string]any{"uid": testSessionUID, "ver": 1, "type": "static"}),                            // 缺 secret 段
+		testSessionHostID + "." + unsignedJWT(map[string]any{"uid": "fedcba9876543210fedcba9876543210", "ver": 1, "type": "static"}) + ".s", // owner 不匹配
 	} {
 		if _, err := ParseDeviceCredential(bad); err == nil {
 			t.Errorf("bad credential %q want error", bad)

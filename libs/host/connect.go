@@ -6,6 +6,7 @@ package host
 func Connect(opts Options) (*Client, error) {
 	c := New(opts)
 	if err := c.Connect(); err != nil {
+		_ = c.Close()
 		return nil, err
 	}
 	return c, nil

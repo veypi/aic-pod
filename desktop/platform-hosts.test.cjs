@@ -28,4 +28,8 @@ test('平台 frame 只认白名单 host，设置 frame 只认 app://aic', () => 
   assert.equal(policy.isPlatformFrame({}), false)
   assert.equal(policy.isSettingsFrame(frame('app://aic/settings.html')), true)
   assert.equal(policy.isSettingsFrame(frame('https://ivec-ai.com/settings.html')), false)
+  assert.equal(policy.isSettingsFrame(frame('app://aic/login.html')), false)
+  assert.equal(policy.isLoginFrame(frame('app://aic/login.html')), true)
+  assert.equal(policy.isLoginFrame(frame('app://aic/settings.html')), false)
+  assert.equal(policy.isLoginFrame(frame('https://ivec-ai.com/login.html')), false)
 })

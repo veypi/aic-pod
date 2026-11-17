@@ -125,7 +125,7 @@ func (c *Client) installCommandPackage(ctx context.Context, skillID string) erro
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return err
 	}
-	cloud, err := newCloudFS(c.options().Host, c.authToken)
+	cloud, err := newCloudFSWithProvider(c.options().Host, c.bearerToken)
 	if err != nil {
 		return err
 	}

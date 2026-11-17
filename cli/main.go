@@ -44,12 +44,20 @@ func main() {
 	if dt := os.Getenv("AIC_DEVICE_TYPE"); dt != "" {
 		cfg.DeviceType = dt
 	}
-	// 日志：console（终端）+ 文件（cfg.LogPath，get_log 数据源）
+	// 日志：console（终端）+ 文件（cfg.LogPath，get_log 数据源）。
+	// desktop-session 的 stdout 是私有 JSON RPC，日志必须只走 stderr/文件。
+	desktopSession := len(os.Args) > 1 && os.Args[1] == "desktop-session"
+	console := logv.ConsoleWriter()
+	if desktopSession {
+		console = os.Stderr
+		// LogWriter 初始化自身也可能告警；在那一刻 stdout 仍只能是 RPC。
+		logv.SetLogger(logv.NewLogger(os.Stderr))
+	}
 	if lw, err := cfg.LogWriter(); err != nil {
 		logv.Warn().Msgf("log file writer: %v", err)
-		logv.SetLogger(logv.NewLogger(logv.ConsoleWriter()))
+		logv.SetLogger(logv.NewLogger(console))
 	} else {
-		logv.SetLogger(logv.NewLogger(logv.ConsoleWriter(), lw))
+		logv.SetLogger(logv.NewLogger(console, lw))
 	}
 
 	cmd := flags.New("aic", "AIC host agent (local client)")
@@ -65,6 +73,7 @@ func main() {
 	cfgCmd.SubCommand("set", "apply settings JSON from stdin to config.yaml").Command = func() error { return runConfigSet() }
 	cmd.SubCommand("bind", "save the platform credential from stdin to config.yaml").Command = func() error { return runBind() }
 	cmd.SubCommand("unbind", "clear the platform credential").Command = func() error { return runUnbind() }
+	cmd.SubCommand("desktop-session", "run a Desktop session host over private stdio control").Command = func() error { return runDesktopSession() }
 
 	// 主命令：连接运行（host 会话）
 	cmd.Command = func() error { return runCmd() }

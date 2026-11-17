@@ -16,15 +16,10 @@ var (
 	rtClient *Client
 )
 
-// Start 启动 host 会话（凭证为空返回错误；已运行返回 host already running）。
-// 客户端身份取 cfg.DeviceType/cfg.Version（二进制启动时固定）。
+type connectClientFunc func(Options) (*Client, error)
+
+// Start 启动静态设备会话；原生 Session 客户端使用 StartOptions。
 func Start(o cfg.Options) error {
-	rtMu.Lock()
-	if rtClient != nil {
-		rtMu.Unlock()
-		return fmt.Errorf("host already running")
-	}
-	rtMu.Unlock()
 	if strings.TrimSpace(o.Key) == "" {
 		return fmt.Errorf("key is empty — bind a device first")
 	}
@@ -34,13 +29,60 @@ func Start(o cfg.Options) error {
 	if err != nil {
 		return err
 	}
-	c, err := Connect(opts)
+	return StartOptions(opts)
+}
+
+// StartSession 以 Desktop 原生会话配置启动 Host，并沿用本机工作区、权限与传输设置。
+// config.yaml 中的静态 key 不会与 Session 混用；CLI/Docker 仍走 Start。
+func StartSession(o cfg.Options, session *SessionConfig) error {
+	opts, err := optionsOf(o, cfg.DeviceType, cfg.Version, func(format string, args ...any) {
+		logv.WithNoCaller.Info().Msgf(format, args...)
+	})
 	if err != nil {
 		return err
 	}
+	opts.Key = ""
+	opts.Session = session
+	return StartOptions(opts)
+}
+
+// StartOptions 以明确的静态或 Session 配置启动进程内唯一 Client。
+func StartOptions(opts Options) error {
+	return startOptions(opts, Connect)
+}
+
+func startOptions(opts Options, connect connectClientFunc) error {
 	rtMu.Lock()
+	defer rtMu.Unlock()
+	if rtClient != nil {
+		return fmt.Errorf("host already running")
+	}
+	c, err := connect(opts)
+	if err != nil {
+		noteOptionsFailure(opts, err)
+		return err
+	}
 	rtClient = c
-	rtMu.Unlock()
+	return nil
+}
+
+// SwitchAccount 完整销毁旧账户 Client 后再创建新 Client。
+// 旧 NATS inbox、RTC、会话 grant、后台进程、命令服务实例和 token provider 都不会跨账户复用。
+// 新连接失败时旧连接也不会复活；调用方应展示错误并允许重试或重新登录。
+func SwitchAccount(opts Options) error {
+	return switchAccount(opts, Connect)
+}
+
+func switchAccount(opts Options, connect connectClientFunc) error {
+	rtMu.Lock()
+	defer rtMu.Unlock()
+	stopRuntimeClientLocked()
+	c, err := connect(opts)
+	if err != nil {
+		noteOptionsFailure(opts, err)
+		return err
+	}
+	rtClient = c
 	return nil
 }
 
@@ -48,10 +90,26 @@ func Start(o cfg.Options) error {
 func Stop() {
 	rtMu.Lock()
 	defer rtMu.Unlock()
-	if rtClient != nil {
-		id, version := rtClient.hostID, rtClient.options().Version
-		rtClient.Close()
-		rtClient = nil
-		writeState(State{Connected: false, HostID: id, Version: version, LastError: "host session stopped"})
+	stopRuntimeClientLocked()
+}
+
+func stopRuntimeClientLocked() {
+	if rtClient == nil {
+		return
 	}
+	id, version := rtClient.hostID, rtClient.options().Version
+	_ = rtClient.Close()
+	rtClient = nil
+	writeState(State{Connected: false, HostID: id, Version: version, LastError: "host session stopped"})
+}
+
+func noteOptionsFailure(opts Options, err error) {
+	if err == nil {
+		return
+	}
+	hostID := ""
+	if identity, identityErr := identityFromOptions(opts); identityErr == nil {
+		hostID = identity.hostID
+	}
+	writeState(State{HostID: hostID, Version: opts.Version, LastError: err.Error()})
 }

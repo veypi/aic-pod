@@ -3,8 +3,9 @@ package host
 // pullpush.go — pull/push vsh 命令（host-only 接线）：设备 ↔ 平台云盘文件传输，
 // 走 /fs/cloud HTTP 面（device-key-migration：替代已删除的 NATS fetch 分块通道）。
 //
-// 凭证纪律：Bearer（凭证前 3 段 JWT，第 4 段 secret 不出设备）由 pod 进程内
-// HTTP client 注入——不写沙箱子进程 env、不随命令参数回显。pull/push 只访问
+// 凭证纪律：静态模式 Bearer = 凭证前 3 段 JWT；Session 模式每次请求动态取
+// 原始 Web access token。两种 protocol secret 都不出设备，s1. 只用于 NATS。
+// Bearer 由 pod 进程内 HTTP client 注入——不写沙箱子进程 env、不随命令参数回显。pull/push 只访问
 // pod 配置并协商的平台地址，AI 不能指定其他凭证目标；允许内网明文 HTTP 部署。
 //
 // 落盘/读取一律经 inv.FS（vsh 策略与 jail 自动生效）；pull 目录 = 一次
@@ -39,13 +40,18 @@ const (
 
 // cloudFS 是 pod → 平台 /fs/cloud 面的最小 HTTP 客户端。
 type cloudFS struct {
-	base string // 平台地址（可带路径前缀）
-	cred string // vbase 四段凭证
-	http *http.Client
+	base          string // 平台地址（可带路径前缀）
+	tokenProvider AccessTokenProvider
+	http          *http.Client
 }
 
-// newCloudFS 装配客户端；目标只能来自 pod 配置的平台地址。
+// newCloudFS 保留静态凭证装配，供 CLI 与协议测试使用。
 func newCloudFS(platformHost, credential string) (*cloudFS, error) {
+	return newCloudFSWithProvider(platformHost, staticTokenProvider(credential))
+}
+
+// newCloudFSWithProvider 装配客户端；Session 每次请求动态取原始 Web access token。
+func newCloudFSWithProvider(platformHost string, provider AccessTokenProvider) (*cloudFS, error) {
 	base := strings.TrimRight(strings.TrimSpace(platformHost), "/")
 	if base == "" {
 		return nil, fmt.Errorf("platform host not configured")
@@ -54,7 +60,10 @@ func newCloudFS(platformHost, credential string) (*cloudFS, error) {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("invalid platform host %q", platformHost)
 	}
-	return &cloudFS{base: base, cred: credential, http: &http.Client{Timeout: 5 * time.Minute}}, nil
+	if provider == nil {
+		return nil, fmt.Errorf("platform access token provider is required")
+	}
+	return &cloudFS{base: base, tokenProvider: provider, http: &http.Client{Timeout: 5 * time.Minute}}, nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -63,7 +72,11 @@ func isLoopbackHost(host string) bool {
 
 // do 发请求并校验状态码；错误响应读前 4KB 摘要。
 func (c *cloudFS) do(req *http.Request) (*http.Response, error) {
-	req.Header.Set("Authorization", "Bearer "+c.cred)
+	token, err := c.tokenProvider(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	// 禁带 Accept: text/html——目录须拿到 raw JSON 列表而非 SPA 壳（IsRawRequest）。
 	req.Header.Set("Accept", "application/json, application/octet-stream")
 	resp, err := c.http.Do(req)
@@ -211,7 +224,7 @@ func (c *Client) cmdPull(ctx context.Context, inv *commands.Invocation) error {
 	if err != nil {
 		return commands.Exitf(inv, 2, "pull: %v", err)
 	}
-	cfs, err := newCloudFS(c.options().Host, c.authToken)
+	cfs, err := newCloudFSWithProvider(c.options().Host, c.bearerToken)
 	if err != nil {
 		return commands.Exitf(inv, 2, "pull: %v", err)
 	}
@@ -267,7 +280,7 @@ func (c *Client) cmdPush(ctx context.Context, inv *commands.Invocation) error {
 	if err != nil {
 		return commands.Exitf(inv, 2, "push: %v", err)
 	}
-	cfs, err := newCloudFS(c.options().Host, c.authToken)
+	cfs, err := newCloudFSWithProvider(c.options().Host, c.bearerToken)
 	if err != nil {
 		return commands.Exitf(inv, 2, "push: %v", err)
 	}

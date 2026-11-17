@@ -89,8 +89,8 @@ func setupPullPush(t *testing.T, execRules []string) (*Client, *fakeCloud, *http
 	server := httptest.NewServer(http.HandlerFunc(fake.handler))
 	t.Cleanup(server.Close)
 
-	payload, _ := json.Marshal(map[string]any{"uid": "u1", "sub": "u1", "ver": 1, "type": "static", "mod": "limited"})
-	composite := "testhost32." + base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256"}`)) +
+	payload, _ := json.Marshal(map[string]any{"uid": sessionTestUIDA, "sub": sessionTestUIDA, "ver": 1, "type": "static", "mod": "limited"})
+	composite := sessionTestHostIDA + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256"}`)) +
 		"." + base64.RawURLEncoding.EncodeToString(payload) + ".sig.test-secret"
 	c := New(Options{Key: composite, Host: server.URL, WorkDir: t.TempDir(), RTC: false})
 	t.Cleanup(func() { c.Close() })

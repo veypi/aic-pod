@@ -21,8 +21,11 @@
 //     工具名常量。
 //   - sign.go：工具请求签名根（DeriveKTool/HMACSHA256——HKDF 公式锁定，
 //     sign_vectors_test.go）。
-//   - device_cred.go：设备凭证复合串（ComposeDeviceCredential/
+//   - host_id.go：36 位完整 Host 身份与 32 位 owner uid 校验。
+//   - device_cred.go：静态设备凭证复合串（ComposeDeviceCredential/
 //     ParseDeviceCredential——vbase 四段 credential + host_id 前缀）。
+//   - session_cred.go：Session Host 的 s1. CONNECT envelope、Web access token
+//     形态解析与账户漂移检查（Compose/ParseSessionConnectToken）。
 //   - caps.go：设备能力声明（Caps/DeviceInfo/FSCaps/MgmtCaps/TransportCaps
 //     与版本协商）。
 //   - path.go：路径可解析层（ResolvePath/NormalizeHostPath/SplitDriveRoot/

@@ -8,15 +8,15 @@
 //   │    默认 1280×720、DPR=1；与主窗口尺寸、可见性和焦点无关
 //   ├─ 原生 exec 经 RTC/NATS 调用官方 MCP；RTC 转发上游 Browser 帧流
 //   │    rect 只用于显示与输入换算；键盘/IME 焦点保留在平台页，输入经 CDP 转发
-//	 ├─ 本地配置 = 独立设置窗口（系统边框，settings-preload + app://aic 单文件静态页）：托盘
-//	 │    「本地配置」直开；平台不可达首配时自动打开（主窗停留 loading 提示）
-//	 └─ 托盘：打开 / 本地配置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
+//	 ├─ 原生登录 + 独立设置窗口（app://aic 静态页，受限 preload）
+//	 │    主进程统一认证/ensure/刷新；Go desktop-session 经私有 stdio 动态取 token
+//	 └─ 托盘：打开 / 设置 / 打开配置目录 / 退出；桌宠 = 透明小窗加载 {host}/pet
 //
 // 安全：所有 IPC handler 校验 event.senderFrame.url——
-// 平台能力（local:api/window:*/pet:*）仅白名单 host（配置 host + 默认与旧平台域名）可调；
-// 设置能力（platform:check/open）仅设置窗（app://aic 协议）可调；
-// local:api 的设置面分支两类 frame 都可用，但只落盘 config.yaml（无 HTTP、无端口、无 code）。
-const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol } = require('electron')
+// 平台能力仅白名单 host；aicHost 进一步限定当前平台 origin。native:auth 仅限原生登录页，
+// local:api 的平台面只有固定 Pod 管理方法，设置面仅限 app://aic/settings.html。
+// desktop-session 使用私有 stdio，不开放 HTTP、端口或通用本地管理 API。
+const { app, BaseWindow, BrowserWindow, WebContentsView, Tray, Menu, ipcMain, shell, dialog, session, screen, globalShortcut, protocol, safeStorage } = require('electron')
 const { spawn, execFileSync } = require('child_process')
 const { waitForStartup } = require('./backend-startup.cjs')
 const { createBackend } = require('./backend.cjs')
@@ -24,6 +24,9 @@ const { capturePlatform } = require('./screenshot.cjs')
 const { composeLocalStatus } = require('./host-state.cjs')
 const { browserExecutable, agentBrowserBinaryName } = require('./runtime-paths.cjs')
 const { insecureOriginFor, hostFromConfigOutput } = require('./secure-origin.cjs')
+const { createNativeApp } = require('./native-app.cjs')
+const { attachSessionRPC } = require('./session-rpc.cjs')
+const { normalizeServer } = require('./auth-cookies.cjs')
 const fs = require('fs')
 const net = require('net')
 const os = require('os')
@@ -137,13 +140,32 @@ let platformWaiting = false // 主视图停在 loading、平台不可达复查�
 let platformWaitTimer = null // 复查定时器
 let platformProbing = false // 复查探测进行中（防并发探测）
 let platformRetryMs = platformRetryMin // 当前复查间隔（10s 起步，×2 退避到 30s）
+let nativeApp = null // 原生认证状态与 Session Host 生命周期的唯一所有者
+let sessionRPC = null // 当前 Go 子进程的私有 stdio 控制通道
 
 const backendCtl = createBackend({
   spawn,
   binary: backendBin,
   env: { ...process.env, AIC_DEVICE_TYPE: 'desktop', ...browserEnv(), ...cuaBundleEnv(), ...agentBrowserEnv(), ...skillBinEnv() },
   waitForStartup,
-  onFatal: (error) => failStartup(error),
+  onFatal: (error) => {
+    if (nativeApp) nativeApp.handleBackendFatal(error)
+    else failStartup(error)
+  },
+  session: {
+    enabled: () => !!nativeApp,
+    attach: (child) => {
+      sessionRPC?.close()
+      sessionRPC = attachSessionRPC(child, {
+        bootstrap: () => nativeApp.sessionRPC.bootstrap(),
+        accessToken: () => nativeApp.sessionRPC.accessToken(),
+        onError: (error) => {
+          nativeApp?.handleBackendFatal(error)
+          backendCtl.stop().catch(() => {})
+        },
+      })
+    },
+  },
 })
 
 // ---- 单实例（唯一 ID，第二实例聚焦现有窗口；本地服务端口唯一） ----
@@ -225,53 +247,109 @@ if (process.platform === 'darwin' && app.dock) {
 }
 
 async function start() {
-  // 1. 主窗口先加载本地 loading（静态文件，无需后端）
   createMainWindow(() => {
     platformView?.webContents.loadFile(path.join(__dirname, 'loading.html'))
   })
-  // 平台页注入：session 级 preload（所有 frame 生效，host 白名单过滤；Electron 35+
-  // registerPreloadScript 取代已废弃的 setPreloads）
   session.defaultSession.registerPreloadScript({
     type: 'frame',
     id: 'aic-remote-preload',
     filePath: path.join(__dirname, 'remote-preload.js'),
+  })
+  session.defaultSession.registerPreloadScript({
+    type: 'frame',
+    id: 'aic-login-preload',
+    filePath: path.join(__dirname, 'login-preload.js'),
   })
 
   registerSettingsProtocol()
   registerIpc()
   startCmdServer()
 
-  // 2. 异步链：spawn 后端 → 读配置（config get 子命令）→ 探测平台 → 跳转
-  setStep('正在启动本地服务…')
-  await spawnBackend()
-
   setStep('正在读取配置…')
   const cfg = await readConfig().catch(() => null)
   if (!cfg) throw new Error('无法读取本地服务配置，请检查本地服务日志')
-  if (cfg && cfg.host) host = cfg.host
+  if (cfg.host) host = cfg.host
   hostPolicy.replace(host)
-  ensureOriginTrusted(host) // 运行期地址不在启动期提升名单内 → 提示重启
-  // 默认打开地址：host + home_path（默认 /；非法值回退 /）
-  homePath = (cfg && cfg.home_path) || '/'
+  ensureOriginTrusted(host)
+  homePath = cfg.home_path || '/'
   if (typeof homePath !== 'string' || !homePath.startsWith('/') || homePath.startsWith('//')) homePath = '/'
 
-  setStep('正在检测平台 ' + host + ' …')
-  const reachable = await probeRoot(host)
-
-  // 3. 跳转：平台可达 → host + homePath；否则停留 loading + 独立本地配置窗口（首配）
-  //    并进入自动复查（平台恢复后自动进入，无需重启应用）
-  if (reachable) {
-    loadMain(platformUrl())
-  } else {
-    openSettings()
-    schedulePlatformRetry(true)
-  }
-
+  nativeApp = await buildNativeApp(host)
   try {
     createTray()
   } catch (err) {
     console.error('[tray] create failed:', err.message)
   }
+
+  // 只有恢复登录、ensure、Session Host 真实连接全部成功后才进入工作区。
+  // 未登录或任一步骤失败都停留在原生页，不再先打开 Web /login。
+  await nativeApp.boot()
+}
+
+async function buildNativeApp(server) {
+  const value = createNativeApp({
+    server,
+    safeStorage,
+    electronSession: session,
+    userDataPath: app.getPath('userData'),
+    backend: backendCtl,
+    hostname: os.hostname(),
+    waitConnected: waitForNativeConnected,
+    showLogin: showNativeLogin,
+    loadWorkspace: async () => {
+      if (!await probeRoot(host)) throw new Error('平台不可达，请检查服务器地址或网络')
+      loadMain(platformUrl())
+    },
+    onChanged: (authState) => {
+      if (platformView && !platformView.webContents.isDestroyed()) {
+        platformView.webContents.send('aic-host:event', { event: 'auth.changed', payload: authState })
+      }
+    },
+  })
+  await value.init()
+  return value
+}
+
+function showNativeLogin() {
+  clearPlatformRetry()
+  // 旧账户的 SharedWorker / 网页用户 NATS 不能越过登出或账户切换继续存活。
+  if (keepWin && !keepWin.isDestroyed()) keepWin.destroy()
+  keepWin = null
+  if (petWin && !petWin.isDestroyed()) petWin.destroy()
+  petWin = null
+  if (!platformView || platformView.webContents.isDestroyed()) return
+  const url = SETTINGS_ORIGIN + '/login.html'
+  if (platformView.webContents.getURL() === url) platformView.webContents.send('native:auth:sync')
+  else platformView.webContents.loadURL(url)
+  mainWin?.show()
+  mainWin?.focus()
+}
+
+async function waitForNativeConnected(timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  let status = null
+  for (;;) {
+    status = await localStatus()
+    if (status.connected || !backendAlive() || Date.now() >= deadline) return status
+    await new Promise(resolve => setTimeout(resolve, 400))
+  }
+}
+
+let clientBridgeL10n = null
+function nativeLoginTexts() {
+  if (!clientBridgeL10n) {
+    const file = isDev
+      ? path.join(__dirname, '..', 'client-bridge', 'l10n.json')
+      : path.join(process.resourcesPath, 'client-bridge', 'l10n.json')
+    clientBridgeL10n = JSON.parse(fs.readFileSync(file, 'utf8'))
+  }
+  const locale = String(app.getLocale() || '').toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US'
+  return { locale, texts: clientBridgeL10n[locale] || clientBridgeL10n['en-US'] }
+}
+
+function publicNativeAuthState() {
+  const value = nativeApp?.state() || { signedIn: false, user: null, expiresAt: 0 }
+  return { signedIn: value.signedIn, user: value.user, expiresAt: value.expiresAt }
 }
 
 // ---- 内置 cua-driver 目录提示（scripts/sync-cua.mjs 同步 vendor/cua → resources/cua） ----
@@ -315,11 +393,8 @@ function skillBinEnv() {
   return fs.existsSync(dir) ? { AIC_SKILL_BIN_DIR: dir } : {}
 }
 
-// ---- 后端子进程：启动 / 停止 / 重启（实现见 backend.cjs） ----
-const spawnBackend = () => backendCtl.start()
+// ---- 后端子进程状态（原生生命周期由 nativeApp 统一管理） ----
 const backendAlive = () => backendCtl.alive()
-const stopBackend = () => backendCtl.stop()
-const restartBackend = () => backendCtl.restart()
 
 function failStartup(error) {
   if (quitting) return
@@ -376,14 +451,6 @@ async function writeConfig(patch) {
   await runBackendCmd(['config', 'set'], JSON.stringify(patch || {}))
 }
 
-async function bindCredential(credential) {
-  await runBackendCmd(['bind'], String(credential))
-}
-
-async function unbindCredential() {
-  await runBackendCmd(['unbind'])
-}
-
 // 后端连接状态：读 $HOME/.aic/state.json（Go 侧在连接成功 / 断开 / 认证
 // 失败 / 重试失败时原子写；pid 核对防陈旧文件误读）。
 async function readState() {
@@ -402,7 +469,8 @@ async function localStatus() {
   const cfg = await readConfig().catch(() => null)
   const out = composeLocalStatus({
     alive: backendAlive(),
-    key: (cfg && cfg.key) || '',
+    key: nativeApp ? '' : (cfg && cfg.key) || '',
+    session: nativeApp?.currentProfile() || null,
     childPid: backendCtl.child ? backendCtl.child.pid : null,
     state: await readState(),
     hostname: os.hostname(),
@@ -480,7 +548,7 @@ function clearPlatformRetry() {
 }
 
 function paintWaitingStep() {
-  setStep('平台不可达——每 ' + platformRetryMs / 1000 + 's 自动重试（也可在「本地配置」窗口检查地址）')
+  setStep('平台不可达——每 ' + platformRetryMs / 1000 + 's 自动重试（也可在「设置」窗口检查地址）')
 }
 
 function schedulePlatformRetry(first) {
@@ -508,8 +576,12 @@ async function retryPlatform() {
     return
   }
   platformRetryMs = platformRetryMin
-  setStep('平台已连接，正在打开…')
-  loadMain(platformUrl())
+  setStep('平台已连接，正在恢复 Host 会话…')
+  if (nativeApp) {
+    try { await nativeApp.activate() } catch (_) { /* 原生页展示具体原因 */ }
+  } else {
+    loadMain(platformUrl())
+  }
 }
 
 // failedUrl 是否落在当前平台 origin（did-fail-load 只对自家平台回落 loading）
@@ -591,14 +663,6 @@ function openSettings() {
   settingsWin.on('closed', () => { settingsWin = null })
 }
 
-// 绑定/解绑完成后：若本地配置窗口开着，原地重载（等价「重新打开这个界面」，
-// 展示 pod 侧最新凭证/连接状态）——配置页只在打开时取数，需要主进程这一推。
-function reloadSettingsIfOpen() {
-  try {
-    if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.reload()
-  } catch (_) { /* 窗口销毁竞态 */ }
-}
-
 // ---- IPC ----
 function registerIpc() {
   // 白名单下发（remote-preload 顶层 sendSync）：平台 host 列表
@@ -606,9 +670,7 @@ function registerIpc() {
     e.returnValue = hostPolicy.all()
   })
 
-  // 设置面 + 本地状态：方法名与平台页 window.aicDesktop.api、设置页 $mod.$pod 一致。
-  // 平台 frame（hosts 页绑定/解绑/查状态）与设置窗 frame 都可用；实现 = 主进程本地执行
-  // （spawn `aic-backend config|bind` 子命令 / 读日志 / 重启后端子进程），不经过任何端口。
+  // Desktop 自有管理面。平台页使用 remote-preload 的固定方法；设置窗是本地受信任页。
   ipcMain.handle('local:api', async (event, name, args) => {
     if (!hostPolicy.isPlatformFrame(event) && !hostPolicy.isSettingsFrame(event)) throw new Error('forbidden')
     const m = String(name || '')
@@ -617,41 +679,112 @@ function registerIpc() {
     switch (m) {
       case 'ping':
         return 'pong'
-      case 'get_config':
-        return await readConfig()
-      case 'set_config':
-        await writeConfig(a)
-        await restartBackend()
-        await syncHostFromConfig()
-        return { ok: true }
-      case 'bind': {
-        const cred = String(a.credential || '').trim()
-        if (!cred) throw new Error('credential is empty')
-        await bindCredential(cred)
-        await restartBackend()
-        await syncHostFromConfig()
-        reloadSettingsIfOpen() // 平台页完成绑定 → 开着的设置窗重载取最新凭证/状态
-        return { ok: true, host: host }
+      case 'get_config': {
+        const cfg = await readConfig()
+        if (nativeApp) cfg.key = '' // 原生模式不向网页暴露任何静态凭证
+        return cfg
       }
-      case 'unbind':
-        await unbindCredential()
-        await restartBackend()
-        reloadSettingsIfOpen()
+      case 'set_config': {
+        const previousHost = host
+        await writeConfig(a)
+        const cfg = await readConfig()
+        const nextHost = cfg.host || previousHost
+        const serverChanged = nativeApp ? nativeApp.server !== normalizeServer(nextHost) : nextHost !== previousHost
+        if (serverChanged) {
+          await nativeApp?.signOut()
+          host = nextHost
+          hostPolicy.replace(host)
+          ensureOriginTrusted(host)
+          nativeApp = await buildNativeApp(host)
+          showNativeLogin()
+          return { ok: true, server_changed: true }
+        }
+        await syncHostFromConfig()
+        if (nativeApp?.state().signedIn) await nativeApp.restart()
+        else await backendCtl.stop()
         return { ok: true }
+      }
       case 'get_status':
         return await localStatus()
+      case 'get_auth_state':
+        return nativeApp?.state() || { signedIn: false, active: false }
       case 'get_log':
         return await readLogTail()
       case 'check_host':
         return await checkHost(a.host)
       case 'start':
-        if (!backendAlive()) await spawnBackend()
-        return { ok: true }
+        if (!nativeApp) throw new Error('native session is not ready')
+        return await nativeApp.activate({ openWorkspace: false })
       case 'stop':
-        await stopBackend()
-        return { ok: true }
+        if (!nativeApp) throw new Error('native session is not ready')
+        return await nativeApp.stop()
+      case 'sign_out':
+        if (!nativeApp) throw new Error('native session is not ready')
+        return await nativeApp.signOut({ remote: true })
       default:
         throw new Error('invalid method')
+    }
+  })
+
+  // 原生登录页：只允许 app://aic/login.html 调用，不返回 token 或 protocol secret。
+  ipcMain.handle('native:auth', async (event, method, args) => {
+    if (!hostPolicy.isLoginFrame(event)) throw new Error('forbidden')
+    const a = args || {}
+    if (method === 'open_settings') {
+      openSettings()
+      return { ok: true }
+    }
+    if (method === 'open_external') {
+      const url = String(a.url || '')
+      if (!/^https?:\/\//.test(url)) throw new Error('invalid external url')
+      await shell.openExternal(url)
+      return { ok: true }
+    }
+    if (!nativeApp) throw new Error('native session is not ready')
+    switch (method) {
+      case 'bootstrap':
+        return { state: nativeApp.state(), config: await nativeApp.fetchAuthConfig(), ...nativeLoginTexts() }
+      case 'login_password':
+        return await nativeApp.loginPassword(a)
+      case 'login_code':
+        return await nativeApp.loginCode(a)
+      case 'register':
+        return await nativeApp.register(a)
+      case 'send_code':
+        return await nativeApp.sendCode(a)
+      case 'retry':
+        return await nativeApp.activate()
+      case 'switch_account':
+        return await nativeApp.switchAccount()
+      default:
+        throw new Error('invalid native auth method')
+    }
+  })
+
+  // 三端统一 App 桥。当前仅启用认证与外链；其他能力由 preload 明确声明为 false。
+  ipcMain.handle('aic-host:call', async (event, method, args) => {
+    if (!hostPolicy.isPlatformFrame(event) || !samePlatform(event.senderFrame.url) || !nativeApp) throw new Error('forbidden')
+    const a = args || {}
+    switch (method) {
+      case 'app_info':
+        return { version: app.getVersion(), platform: 'desktop', build: app.getVersion() }
+      case 'auth_state':
+        return publicNativeAuthState()
+      case 'auth_refresh':
+        await nativeApp.refresh()
+        return publicNativeAuthState()
+      case 'auth_sign_out':
+        return await nativeApp.signOut()
+      case 'auth_open_login':
+        return await nativeApp.openLogin()
+      case 'external_open': {
+        const url = String(a.url || '')
+        if (!/^https?:\/\//.test(url)) throw new Error('invalid external url')
+        await shell.openExternal(url)
+        return { ok: true }
+      }
+      default:
+        throw new Error('unsupported aicHost method')
     }
   })
 
@@ -721,14 +854,15 @@ function registerIpc() {
     const ok = await probeRoot(url)
     return { ok, url: String(url || '').replace(/\/+$/, '') + '/root.html' }
   })
-  ipcMain.handle('platform:open', (e, url) => {
+  ipcMain.handle('platform:open', async (e, url) => {
     if (!hostPolicy.isSettingsFrame(e)) return false
     const u = String(url || '')
     if (!/^https?:\/\//.test(u)) return false
     hostPolicy.remember(u)
     ensureOriginTrusted(u)
-    loadMain(u)
-    // 不关闭配置窗口：配置页内任何操作（保存/获取）都不得让配置页消失
+    if (nativeApp) await nativeApp.openLogin()
+    else loadMain(u)
+    // 原生模式必须先认证并成功接入 Host，不能由设置页绕过登录直接打开工作区。
     return true
   })
 
@@ -899,7 +1033,7 @@ function createTray() {
   tray.setToolTip('ivec')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开', click: () => focusMain() },
-    { label: '本地配置', click: () => openSettings() },
+    { label: '设置', click: () => openSettings() },
     { label: '打开配置目录', click: () => openConfigDir() },
     { type: 'separator' },
     { label: '退出', click: () => { quitting = true; app.quit() } },

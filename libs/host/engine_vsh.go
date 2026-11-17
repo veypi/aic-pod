@@ -103,14 +103,15 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 			Platform: &execution.PlatformHTTPConfig{
 				BaseURL:      c.options().Host,
 				AuthPrefixes: execution.DefaultPlatformAuthPrefixes,
-				Inject: func(_ context.Context, req *http.Request) error {
-					if c.authToken == "" {
-						return fmt.Errorf("device credential is not configured")
+				Inject: func(ctx context.Context, req *http.Request) error {
+					token, err := c.bearerToken(ctx)
+					if err != nil {
+						return err
 					}
 					if req.URL.Scheme == "http" && !isLoopbackHost(req.URL.Hostname()) {
 						return fmt.Errorf("refusing to send device credentials over plaintext http")
 					}
-					req.Header.Set("Authorization", "Bearer "+c.authToken)
+					req.Header.Set("Authorization", "Bearer "+token)
 					return nil
 				},
 			},

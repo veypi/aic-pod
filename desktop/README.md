@@ -8,30 +8,33 @@ Electron 只提供窗口/托盘/桌宠/窗口控制。
 
 ```
 Electron Main (Node, main.js)
- ├─ spawn bin/aic-backend（Go 二进制 = cli 编译产物：NATS host 会话）
- │    └─ 设置/凭证：spawn `aic-backend config get|set / bind / unbind` 子命令读写
- │       config.yaml（stdin JSON/凭证）——无端口握手、无校验码；保存后重启子进程生效
+ ├─ 原生登录与设置（app://aic/login.html / settings.html）
+ │    主进程统一持有 Web token，safeStorage 加密保存；Cookie 仅作 WebView 镜像，
+ │    singleflight 刷新，按“服务器 + 账户”保存并复用完整 Host 连接档案
+ ├─ spawn bin/aic-backend desktop-session（Go 二进制 = cli 编译产物）
+ │    首次登录自动 POST /api/nc/ensure；Go 每次 NATS 连接/重连与 HTTP 请求
+ │    经 stdin/stdout 私有 JSON RPC 向主进程取最新 access token；stdout 仅协议帧，
+ │    日志只走 stderr/文件。无本地监听端口，token/secret 不进 argv/env/config.yaml
  ├─ browser/cua/blender：普通技能包（browser/cua 预装并随包附带预编译程序，其余 `commands install <id>`；pod 按包内 manifest 拉起）
  │    包自带服务或启动器；MCP 工具与 schema 原样暴露
  ├─ resources/agent-browser：官方原生二进制（AIC_AGENT_BROWSER_PATH = 可执行文件）
  ├─ resources/browser：Chrome for Testing（AIC_BROWSER_PATH = 可执行文件）
  ├─ resources/cua：官方 CuaDriver（AIC_CUA_BUNDLE_DIR）
  ├─ BaseWindow 主窗口：平台页 WebContentsView
- │    Browser UI 经 RTC command 调用上游工具，同一 RTC 连接转发上游画面和人工输入
+ │    只有登录、ensure 与 Session Host 真实连接全部成功后才加载；Browser UI 经 RTC
+ │    command 调用上游工具，同一 RTC 连接转发上游画面和人工输入
  ├─ worker 保活窗口（隐藏常驻，skipTaskbar）：加载 {平台根}/worker-keep.html——与平台页
- │    同源共享同一 nc SharedWorker 实例并持端口，平台页刷新（Cmd+R）不再销毁 worker/WS；
- │    崩溃原地重载、网络级失败 10s 重试（依赖平台先部署该静态页）
- ├─ 本地配置：独立设置窗口（系统边框 BrowserWindow，`app://aic` 协议加载单文件静态页
- │    settings-ui/settings.html；settings-preload 暴露设置桥 → IPC 'local:api' → 主进程 spawn
- │    子命令；托盘「本地配置」直开，平台不可达首配时自动打开）——不依赖平台页/主窗状态；
- │    保存/绑定后自动重启后端子进程并原地重载设置页
- ├─ 平台不可达 / 主框架加载失败：主窗停留 loading 页并按 10s→20s→30s 复查 {host}/root.html，
- │    恢复即自动载入平台（等待态按「重新加载」= 立即复查）——平台恢复后不需要重启应用
+ │    同源共享同一 nc SharedWorker 实例并持端口；登出/切换账户时与桌宠一并销毁
+ ├─ 设置：独立 BrowserWindow（app://aic/settings.html + settings-preload）
+ │    管理服务器、工作区、授权与 Pod；不再展示或手工绑定设备 key
+ ├─ 平台不可达 / 主框架加载失败：按 10s→20s→30s 复查并恢复原生 Session
  └─ 托盘 / 单实例 / 关闭=隐藏 / 桌宠（独立透明小窗）
 ```
 
-窗口控制：平台页经 preload（`window.aicDesktop`）调 IPC（minimise/maximise/close/
-fullscreen/pet/restore）；外链经 `openExternal` 交系统浏览器；普通浏览器无此能力。
+窗口控制与 Desktop 自有 Pod 管理走 `window.aicDesktop` 的固定方法；统一 App 能力走
+`window.aicHost.call/on`，当前启用 auth 与 external，未实现能力显式为 false。普通网页
+不再获得任意 `local:api` 转发，也看不到 Web token、refresh token 或 Host protocol secret。
+外链经系统浏览器打开；普通浏览器无这些原生能力。
 
 Windows 热键：Alt+Space 由主进程在窗口聚焦期间 RegisterHotKey 抢占（否则走系统
 DefWindowProc 弹窗口菜单、页面收不到 keydown），命中后 `sendInputEvent` 回注 Space
@@ -51,8 +54,8 @@ cd desktop && npm install && npm run runtime-sync
 npm start
 ```
 
-平台页改动即时生效（远端 HTTP）；设置页（desktop/settings-ui/settings.html 单文件静态页，
-无框架/无构建、数据全走 IPC 桥）与 main.js/preload.js 改动需重启 electron。
+平台页改动即时生效（远端 HTTP）；原生登录/设置页（desktop/settings-ui 静态页，
+无框架/无构建、数据全走受限 IPC 桥）与 main.js/preload 改动需重启 electron。
 browser/CUA 使用上游独立程序，没有自研 server 或工具适配层。
 owner 可用 `commands add <alias> --protocol mcp ... --persist` 添加第三方服务。协议见 [设备 MCP](../docs/reference/hosts-tools.md)。
 开发依赖分别由 `npm run agent-browser-sync`、`npm run browser-sync`、`npm run cua-sync` 同步。

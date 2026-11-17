@@ -51,3 +51,14 @@ test('进程不存活 → running/connected 恒 false（state 再新也不算）
   assert.equal(s.connected, false)
   assert.equal(s.retrying, false)
 })
+
+test('Session Host 没有静态 key 也按真实进程状态展示', () => {
+  const s = composeLocalStatus({
+    alive: true, key: '', session: { host_id: 'a'.repeat(32) + '0001' }, childPid: 7,
+    state: { pid: 7, connected: true, host_id: 'a'.repeat(32) + '0001' }, hostname: 'h',
+  })
+  assert.equal(s.running, true)
+  assert.equal(s.connected, true)
+  assert.equal(s.auth_mode, 'session')
+  assert.equal(s.host_id, 'a'.repeat(32) + '0001')
+})

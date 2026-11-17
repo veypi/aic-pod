@@ -93,11 +93,13 @@ while (queue.length) {
 
 if ([...entries].some(x=>x.startsWith("/vendor/browser/"))) missing.push("Chrome belongs in resources/browser, outside asar");
 
-// ---- 设置页（app://aic → desktop/settings-ui，单文件静态页）随包 ----
+// ---- 原生登录与设置页（app://aic → desktop/settings-ui）随包 ----
+if (!entries.has("/settings-ui/login.html")) missing.push("原生登录页缺失: /settings-ui/login.html");
 if (!entries.has("/settings-ui/settings.html")) missing.push("设置页缺失: /settings-ui/settings.html");
 
 // ---- resources/backend 后端二进制（原生 exec/fs 与 MCP manager） ----
 const resDir = path.dirname(asarPath); // mac: Contents/Resources；win/linux: resources
+if (!fs.existsSync(path.join(resDir, "client-bridge", "l10n.json"))) missing.push("resources/client-bridge/l10n.json");
 const backendCandidates = [
   path.join(resDir, "backend", "aic-backend"),
   path.join(resDir, "backend", "aic-backend.exe"),
