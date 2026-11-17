@@ -207,6 +207,26 @@
 (() => {
   const $ = id => document.getElementById(id)
   const call = (method, params) => window.aicNative.call(method, params)
+  // 主进程把业务错误包成 {ok:false, error:{message, serverCode}}（不丢业务码）；
+  // 这里还原成异常对象，渲染层不用再认识 IPC 封装。
+  const invoke = async (method, params) => {
+    const result = await call(method, params)
+    if (result && result.ok === false && result.error) {
+      const failure = new Error(result.error.message || '')
+      failure.serverCode = Number(result.error.serverCode) || 0
+      throw failure
+    }
+    return result
+  }
+  // 错误文案：优先用平台业务码（error.<code>，与网页 $err 同一套语义），否则文原文。
+  function describe(failure) {
+    const code = failure && failure.serverCode
+    if (code && texts['error.' + code]) return texts['error.' + code]
+    const raw = String((failure && failure.message) || failure || '')
+    return raw
+      .replace(/^Error invoking remote method '[^']*':\s*/, '')
+      .replace(/^[A-Za-z]*Error:\s*/, '')
+  }
   let config = null
   let texts = {}
   let state = null
@@ -225,6 +245,8 @@
       const element = $(id)
       if (element) element.disabled = value || cooling.has(id)
     }
+    // 三方按钮不在上面的固定清单里（数量随配置变），单独同步一次。
+    for (const button of $('social').querySelectorAll('button')) button.disabled = value
   }
 
   function legalLink(label, url) {
@@ -275,9 +297,9 @@
         setBusy(true)
         error('')
         try {
-          await call('third_party', { provider: provider.code })
+          await invoke('third_party', { provider: provider.code })
         } catch (e) {
-          error(e.message)
+          error(describe(e))
           await bootstrap()
         } finally {
           setBusy(false)
@@ -362,14 +384,14 @@
 
   async function bootstrap() {
     try {
-      const result = await call('bootstrap')
+      const result = await invoke('bootstrap')
       config = result.config
       state = result.state
       texts = result.texts || {}
       document.documentElement.lang = result.locale || 'zh-CN'
-      if (state.error) error(state.error)
+      if (state.error) error(describe(state.error))
       render()
-    } catch (e) { error(e.message) }
+    } catch (e) { error(describe(e)) }
   }
 
   $('settings').onclick = () => call('open_settings')
@@ -377,15 +399,15 @@
   $('codeTab').onclick = () => { useCode = true; registering = false; error(''); render() }
   $('switchMode').onclick = () => { registering = !registering; useCode = false; error(''); render() }
   $('forgot').onclick = () => call('open_external', { url: state.server + '/vb/forgot-password' })
-  $('retry').onclick = async () => { setBusy(true); error(''); try { await call('retry') } catch (e) { error(e.message) } finally { setBusy(false); await bootstrap() } }
-  $('switchAccount').onclick = async () => { setBusy(true); try { await call('switch_account'); state = null; await bootstrap() } catch (e) { error(e.message) } finally { setBusy(false) } }
+  $('retry').onclick = async () => { setBusy(true); error(''); try { await invoke('retry') } catch (e) { error(describe(e)) } finally { setBusy(false); await bootstrap() } }
+  $('switchAccount').onclick = async () => { setBusy(true); try { await invoke('switch_account'); state = null; await bootstrap() } catch (e) { error(describe(e)) } finally { setBusy(false) } }
 
   async function sendCode(type, target, purpose, button) {
     if (!target) return error(t('login.required'))
     setBusy(true)
     button.disabled = true
     try {
-      await call('send_code', { type, target, purpose })
+      await invoke('send_code', { type, target, purpose })
       let remaining = 60
       cooling.add(button.id)
       const previous = button.textContent
@@ -399,7 +421,7 @@
           clearInterval(timer)
         }
       }, 1000)
-    } catch (e) { error(e.message); button.disabled = false } finally { setBusy(false) }
+    } catch (e) { error(describe(e)); button.disabled = false } finally { setBusy(false) }
   }
 
   $('sendCode').onclick = () => {
@@ -417,7 +439,7 @@
     try {
       if (registering) {
         if ($('password').value !== $('confirm').value) throw new Error(t('login.password_mismatch'))
-        await call('register', {
+        await invoke('register', {
           username: $('account').value.trim(), password: $('password').value,
           email: config.requireEmail ? $('email').value.trim() : '',
           phone: config.requirePhone ? $('phone').value.trim() : '',
@@ -426,14 +448,14 @@
         })
       } else if (useCode) {
         const target = $('target').value.trim()
-        await call('login_code', { type: target.includes('@') ? 'email' : 'sms', target, code: $('code').value.trim() })
+        await invoke('login_code', { type: target.includes('@') ? 'email' : 'sms', target, code: $('code').value.trim() })
       } else {
-        await call('login_password', { username: $('account').value.trim(), password: $('password').value })
+        await invoke('login_password', { username: $('account').value.trim(), password: $('password').value })
       }
       $('password').value = ''
       $('confirm').value = ''
     } catch (e) {
-      error(e.message)
+      error(describe(e))
       await bootstrap()
     } finally { setBusy(false) }
   }

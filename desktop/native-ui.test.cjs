@@ -77,6 +77,16 @@ test('登出后主窗口让位给登录窗', () => {
   assert.match(source.slice(start, end), /mainWin\.hide\(\)/)
 })
 
+test('业务错误码透传到登录页，不再冒 IPC 包装字符串', () => {
+  const page = read('settings-ui/login.html')
+  assert.ok(!/error\(\s*e\.message\s*\)/.test(page), '登录页仍直接展示 e.message')
+  assert.match(page, /Error invoking remote method/, '登录页缺少剥离 IPC 前缀的兵底')
+  assert.match(page, /serverCode/, '登录页未按业务码取文案')
+  const main = read('main.js')
+  assert.match(main, /ok: false/, 'native:auth 未把业务错误包成结果')
+  assert.match(main, /serverCode/, 'native:auth 未透传业务码')
+})
+
 test('原生登录页：不显示平台服务器地址、用平台图标、带三方登录入口', () => {
   const source = read('settings-ui/login.html')
   assert.ok(!source.includes('id="server"'), 'login page still shows the server address')

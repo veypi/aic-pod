@@ -193,6 +193,24 @@ test('refresh 失效清除 token 与 Cookie，但保留原账户 Host 档案', a
   assert.equal(cleared.length, 1)
 })
 
+test('登录失败携带平台业务码（凭据错误 40104）', async () => {
+  const { auth } = await setup(async url => {
+    if (url.endsWith('/vb/api/auth/login')) {
+      return response({ status: 401, body: { code: 40104, message: 'invalid credentials' }, cookies: false })
+    }
+    throw new Error('unexpected ' + url)
+  })
+  await assert.rejects(
+    () => auth.loginPassword({ username: 'admin', password: 'wrong' }),
+    (error) => {
+      assert.equal(error.serverCode, 40104)
+      assert.equal(error.message, 'invalid credentials')
+      assert.equal(error.status, 401)
+      return true
+    },
+  )
+})
+
 test('刷新后 uid 变化必须 fail closed，不允许旧 Host 漂移账户', async () => {
   const { auth, store } = await setup(async url => {
     if (url.endsWith('/vb/api/auth/login')) return loginResponse(UID_A)

@@ -92,7 +92,21 @@
     "delete.message": "注销后本机令牌与凭据将被清除，账号数据按隐私政策处理，该操作不可恢复。",
 
     "common.ok": "好",
-    "common.retry": "重试"
+    "common.retry": "重试",
+
+    "error.40001": "登录信息有误，请检查后重试",
+    "error.40002": "请完整填写登录信息",
+    "error.40010": "该登录方式未开放",
+    "error.40100": "请先登录",
+    "error.40101": "登录状态已失效，请重新登录",
+    "error.40102": "登录状态已过期，请重新登录",
+    "error.40104": "用户名或密码错误",
+    "error.40105": "该账号已被禁用",
+    "error.40110": "验证码无效或已过期",
+    "error.40300": "没有权限执行该操作",
+    "error.40901": "该账号已存在",
+    "error.42900": "请求过于频繁，请稍后再试",
+    "error.50000": "服务暂时不可用，请稍后再试"
   },
   "en-US": {
     "app.name": "ivec.ai",
@@ -187,6 +201,20 @@
     "delete.message": "The token and credentials on this device will be removed, account data is handled per the Privacy Policy. This cannot be undone.",
 
     "common.ok": "OK",
-    "common.retry": "Retry"
+    "common.retry": "Retry",
+
+    "error.40001": "Check your sign-in details and try again",
+    "error.40002": "Complete all required fields",
+    "error.40010": "This sign-in method is disabled",
+    "error.40100": "Please sign in first",
+    "error.40101": "Session expired, please sign in again",
+    "error.40102": "Session expired, please sign in again",
+    "error.40104": "Incorrect username or password",
+    "error.40105": "This account has been disabled",
+    "error.40110": "The code is invalid or expired",
+    "error.40300": "You do not have permission to do that",
+    "error.40901": "This account already exists",
+    "error.42900": "Too many requests, please try again later",
+    "error.50000": "Service temporarily unavailable, please try again later"
   }
 }

@@ -11,11 +11,13 @@ const {
 } = require('./auth-cookies.cjs')
 
 class NativeAuthError extends Error {
-  constructor(message, { status = 0, code = 'auth_error' } = {}) {
+  constructor(message, { status = 0, code = 'auth_error', serverCode = 0 } = {}) {
     super(message)
     this.name = 'NativeAuthError'
     this.status = status
     this.code = code
+    // 平台业务错误码（vigo 的 code，如 40104 凭据错误），登录页据此选本地化文案。
+    this.serverCode = serverCode
   }
 }
 
@@ -77,7 +79,12 @@ function createNativeAuth({
     }
     if (!response.ok) {
       const message = payload?.message || payload?.error?.message || (typeof payload?.error === 'string' ? payload.error : '') || `服务返回 ${response.status}`
-      throw new NativeAuthError(message, { status: response.status, code: response.status === 401 ? 'authentication_required' : 'http_error' })
+      const serverCode = Number(payload?.code || payload?.error?.code || 0)
+      throw new NativeAuthError(message, {
+        status: response.status,
+        code: response.status === 401 ? 'authentication_required' : 'http_error',
+        serverCode: Number.isFinite(serverCode) ? serverCode : 0,
+      })
     }
     return { response, payload }
   }

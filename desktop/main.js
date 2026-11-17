@@ -1041,34 +1041,46 @@ function registerIpc() {
       return { ok: true };
     }
     if (!nativeApp) throw new Error("native session is not ready");
-    switch (method) {
-      case "bootstrap":
-        return {
-          state: nativeApp.state(),
-          config: await nativeApp.fetchAuthConfig(),
-          ...nativeLoginTexts(),
-        };
-      case "login_password":
-        return await nativeApp.loginPassword(a);
-      case "login_code":
-        return await nativeApp.loginCode(a);
-      case "register":
-        return await nativeApp.register(a);
-      case "send_code":
-        return await nativeApp.sendCode(a);
-      case "retry":
-        return await nativeApp.activate();
-      case "switch_account":
-        return await nativeApp.switchAccount();
-      case "third_party": {
-        const result = await nativeApp.thirdPartyLogin(
-          String(a.provider || ""),
-        );
-        openAuthWindow(result.auth_url);
-        return { ok: true };
+    // 业务错误不透传 IPC 封装：直接返回 {ok:false, error:{message, serverCode}}，
+    // 否则渲染进程只能拿到 "Error invoking remote method 'native:auth': ..." 这种字符串。
+    try {
+      switch (method) {
+        case "bootstrap":
+          return {
+            state: nativeApp.state(),
+            config: await nativeApp.fetchAuthConfig(),
+            ...nativeLoginTexts(),
+          };
+        case "login_password":
+          return await nativeApp.loginPassword(a);
+        case "login_code":
+          return await nativeApp.loginCode(a);
+        case "register":
+          return await nativeApp.register(a);
+        case "send_code":
+          return await nativeApp.sendCode(a);
+        case "retry":
+          return await nativeApp.activate();
+        case "switch_account":
+          return await nativeApp.switchAccount();
+        case "third_party": {
+          const result = await nativeApp.thirdPartyLogin(
+            String(a.provider || ""),
+          );
+          openAuthWindow(result.auth_url);
+          return { ok: true };
+        }
+        default:
+          throw new Error("invalid native auth method");
       }
-      default:
-        throw new Error("invalid native auth method");
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          message: (error && error.message) || String(error),
+          serverCode: Number(error && error.serverCode) || 0,
+        },
+      };
     }
   });
 
