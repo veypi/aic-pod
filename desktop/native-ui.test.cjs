@@ -60,6 +60,23 @@ test('桌面主进程与 preload 脚本语法可解析', () => {
   }
 })
 
+test('原生登录页平铺（不再套第二层卡片）且顶部对齐', () => {
+  const source = read('settings-ui/login.html')
+  const cardRule = source.match(/\.card \{[^}]*\}/)
+  assert.ok(cardRule, '.card 规则缺失')
+  assert.ok(!/background:\s*var\(--card\)/.test(cardRule[0]), '登录页仍给卡片加了背景')
+  assert.ok(!/box-shadow/.test(cardRule[0]), '登录页仍给卡片加了阴影')
+  assert.match(source, /justify-content:flex-start/, '登录页未做顶部对齐（切换登录方式会整页跳动）')
+})
+
+test('登出后主窗口让位给登录窗', () => {
+  const source = read('main.js')
+  const start = source.indexOf('function showNativeLogin()')
+  const end = source.indexOf('function openAuthWindow(')
+  assert.ok(start > 0 && end > start)
+  assert.match(source.slice(start, end), /mainWin\.hide\(\)/)
+})
+
 test('原生登录页：不显示平台服务器地址、用平台图标、带三方登录入口', () => {
   const source = read('settings-ui/login.html')
   assert.ok(!source.includes('id="server"'), 'login page still shows the server address')

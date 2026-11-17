@@ -414,6 +414,8 @@ async function buildNativeApp(server) {
 // 原生登录页：独立的小窗口（规范尺寸的原生页面），不再塞进主窗口的平台视图。
 function showNativeLogin() {
   clearPlatformRetry();
+  // 登录窗就是当前界面：主窗口先藏起来，不要出现「工作区还在 + 登录窗浮在上面」。
+  if (mainWin && !mainWin.isDestroyed()) mainWin.hide();
   // 旧账户的 SharedWorker / 网页用户 NATS 不能越过登出或账户切换继续存活。
   if (keepWin && !keepWin.isDestroyed()) keepWin.destroy();
   keepWin = null;
@@ -427,7 +429,7 @@ function showNativeLogin() {
   }
   loginWin = new BrowserWindow({
     width: 400,
-    height: 760,
+    height: 690,
     minWidth: 380,
     maxWidth: 520,
     resizable: true,
