@@ -58,21 +58,20 @@
     }
     /* 表单比窗口高时仍可滚动，但不显示滚动条（原生窗口里没有滚动条才像 App）。 */
     body::-webkit-scrollbar { width:0; height:0 }
-    .shell { width:100%; max-width:340px; display:flex; flex-direction:column; align-items:center; gap:20px; position:relative }
+    .shell { width:100%; max-width:340px; display:flex; flex-direction:column; align-items:center; gap:26px; position:relative }
     .settings {
       position:absolute; top:-4px; right:-4px; border:0; background:transparent; color:var(--muted);
       font-size:17px; cursor:pointer; padding:6px; line-height:1;
     }
     .settings:hover { color:var(--fg) }
-    .brand { display:flex; flex-direction:column; align-items:center; gap:8px }
-    .brand img { width:48px; height:48px; border-radius:13px; display:block }
+    .brand { display:flex; flex-direction:column; align-items:center; gap:10px }
+    .brand img { width:52px; height:52px; border-radius:14px; display:block }
     .brand h1 { margin:0; font-size:18px; font-weight:650; letter-spacing:-0.01em }
-    .brand p { margin:0; font-size:13px; color:var(--muted) }
     .card {
       width:100%;
     }
     .card h2 { margin:0 0 12px; font-size:17px; font-weight:650; text-align:center; letter-spacing:-0.01em }
-    .social { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-bottom:14px }
+    .social { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-bottom:16px }
     .social-btn {
       border:1px solid var(--line); background:transparent; color:var(--fg); font:inherit; font-size:13px;
       padding:8px 12px; border-radius:999px; cursor:pointer; max-width:100%;
@@ -86,7 +85,7 @@
     .social-btn.icon img { width:20px; height:20px; object-fit:contain; display:block }
     .social-btn:hover { border-color:var(--brand); color:var(--brand) }
     .social-btn:disabled { opacity:.5; cursor:default }
-    .tip { text-align:center; font-size:12px; color:var(--muted); margin:0 0 14px }
+    .tip { display:none }
     .tabs { display:flex; gap:4px; padding:3px; background:var(--fill); border-radius:10px; margin-bottom:12px }
     .tabs button {
       flex:1; border:0; padding:7px 0; background:transparent; color:var(--muted);
@@ -131,13 +130,10 @@
   <div class="brand">
     <img src="/assets/icon.png" alt="ivec.ai">
     <h1 id="appName">ivec.ai</h1>
-    <p id="subtitle"></p>
   </div>
 
   <section class="card" id="formCard">
-    <h2 id="formTitle"></h2>
     <div class="social" id="social"></div>
-    <div class="tip" id="formTip"></div>
     <div class="tabs" id="tabs">
       <button type="button" id="passwordTab"></button>
       <button type="button" id="codeTab"></button>
@@ -316,9 +312,6 @@
   function render() {
     if (!config || !state) return
     $('appName').textContent = t('app.name')
-    $('subtitle').textContent = t('login.subtitle')
-    $('formTitle').textContent = registering ? t('login.title_sign_up') : t('login.title_sign_in')
-    $('formTip').textContent = registering ? t('login.use_info_register') : t('login.use_account')
     $('passwordTab').textContent = t('login.password')
     $('codeTab').textContent = t('login.code')
     $('accountLabel').textContent = t('login.account')
