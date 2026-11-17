@@ -51,7 +51,7 @@ struct ConsentView: View {
 
                 HStack(spacing: 14) {
                     ForEach(model.documents) { document in
-                        Button(document.title) {
+                        Button(config.t(document.titleKey)) {
                             if let url = document.absoluteURL(server: config.server) {
                                 legalLink = LegalLink(url: url)
                             }

@@ -2,7 +2,7 @@
 //  WorkspaceView.swift
 //  aic-pod · mobile/ios
 //
-//  工作区：平台会话页面由 WKWebView 承载，原生只保留一条轻量顶栏与底部工具条。
+//  工作区：平台会话页面由 WKWebView 承载，原生只保留一条轻量底栏。
 //
 
 import SwiftUI
@@ -10,36 +10,38 @@ import SwiftUI
 struct WorkspaceView: View {
     @ObservedObject var model: WorkspaceViewModel
     @ObservedObject var config: ServerConfig
-    /// 登录会话 cookie（写入 webview）。
-    var cookies: [HTTPCookie] = []
+    @ObservedObject var coordinator: AppCoordinator
     @State private var showSettings = false
 
     var body: some View {
-        content
-            .background(Color.brandBackground)
-            .sheet(isPresented: $showSettings) {
-                SettingsView(model: SettingsViewModel(config: model.config)) {
-                    model.reload()
-                }
-                .presentationDetents([.large])
+        VStack(spacing: 0) {
+            content
+            bottomBar
+        }
+        .background(Color.brandBackground)
+        .sheet(isPresented: $showSettings) {
+            SettingsView(model: SettingsViewModel(config: model.config, auth: model.auth)) {
+                model.reload()
             }
+            .presentationDetents([.large])
+        }
     }
 
     private var content: some View {
         ZStack {
             WebViewContainer(
                 url: model.workspaceURL,
-                onMessage: { message in
-                    Task { @MainActor in model.handle(message) }
-                },
+                auth: model.auth,
+                bridge: model.bridge,
                 onLoad: {
                     Task { @MainActor in model.loadFinished() }
                 },
                 onFail: { message in
                     Task { @MainActor in model.loadFailed(message) }
                 },
-                postToPage: model.pendingPost,
-                cookies: cookies
+                onPageError: { message in
+                    Task { @MainActor in model.pageError(message) }
+                }
             )
             if model.isLoading {
                 ProgressView()
@@ -59,7 +61,7 @@ struct WorkspaceView: View {
                     Button {
                         model.reload()
                     } label: {
-                        Text("重试")
+                        Text(config.t("common.retry"))
                             .font(.system(size: 14, weight: .medium))
                     }
                 }
@@ -102,28 +104,5 @@ struct WorkspaceView: View {
         }
         .foregroundStyle(active ? Color.brandPrimary : Color.brandSecondary)
         .frame(maxWidth: .infinity)
-    }
-}
-
-/// 品牌标记：纯黑环 + A，浅底。矢量绘制，随系统深浅色反相由外层处理。
-struct BrandMark: View {
-    var size: CGFloat = 24
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                .fill(Brand.field)
-            HStack(spacing: size * 0.04) {
-                Circle()
-                    .trim(from: 0.08, to: 0.86)
-                    .stroke(Color.black, style: StrokeStyle(lineWidth: size * 0.09, lineCap: .round))
-                    .frame(width: size * 0.46, height: size * 0.46)
-                Text("A")
-                    .font(.system(size: size * 0.34, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.black)
-                    .offset(x: -size * 0.02)
-            }
-        }
-        .frame(width: size, height: size)
     }
 }

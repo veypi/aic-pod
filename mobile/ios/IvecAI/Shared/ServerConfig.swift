@@ -69,12 +69,12 @@ final class ServerConfig: ObservableObject {
 
     /// 取本地化文案（视图里读它，语言变化会触发重绘）。
     func t(_ key: String) -> String {
-        L10n.text(key, language: resolvedLanguage)
+        L10nStore.text(key, language: resolvedLanguage)
     }
 
     /// 取带一个占位符的本地化文案。
     func t(_ key: String, _ argument: String) -> String {
-        L10n.text(key, language: resolvedLanguage, argument)
+        L10nStore.text(key, language: resolvedLanguage, argument)
     }
 
     private let defaults: UserDefaults
@@ -121,8 +121,9 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
 enum AppLanguage: String, CaseIterable, Identifiable {
     case system
-    case zh
-    case en
+    /// 语言码与 client-bridge/l10n.json 的键一致。
+    case zh = "zh-CN"
+    case en = "en-US"
 
     var id: String { rawValue }
 

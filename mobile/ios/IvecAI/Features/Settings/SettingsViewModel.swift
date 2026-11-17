@@ -2,7 +2,7 @@
 //  SettingsViewModel.swift
 //  aic-pod · mobile/ios
 //
-//  设置页状态：服务地址、主题、语言、账户注销。
+//  设置页状态：服务地址、主题、语言、账户。
 //
 
 import Foundation
@@ -21,24 +21,28 @@ final class SettingsViewModel: ObservableObject {
     @Published var privacyURL: String?
 
     let config: ServerConfig
+    let auth: AuthManager
 
-    init(config: ServerConfig) {
+    init(config: ServerConfig, auth: AuthManager) {
         self.config = config
+        self.auth = auth
         serverText = config.server.absoluteString
         theme = config.theme
         language = config.language
     }
 
-    /// 已登录账号（来自 Keychain 里是否存在令牌）。
-    var isSignedIn: Bool {
-        guard let token = KeychainStore.get(KeychainStore.Account.authToken) else { return false }
-        return !token.isEmpty
+    /// 已登录账号（由原生认证管理器持有）。
+    var isSignedIn: Bool { auth.isSignedIn }
+
+    /// 当前账户展示名。
+    var currentUserName: String {
+        auth.currentUser?.displayName ?? ""
     }
 
     /// 服务地址是否可用。
     var serverIsValid: Bool {
-        guard let url = URL(string: normalizedServerText), serverIsValid(url) else { return false }
-        return true
+        guard let url = URL(string: normalizedServerText) else { return false }
+        return serverIsValid(url)
     }
 
     /// 去掉输入里可能混入的空格（iOS 键盘常在冒号后补空格）。
@@ -51,7 +55,7 @@ final class SettingsViewModel: ObservableObject {
         return true
     }
 
-    /// 保存服务地址。
+    /// 保存服务地址（换地址即换登录档案）。
     func saveServer() {
         let trimmed = normalizedServerText
         guard let url = URL(string: trimmed), serverIsValid(url) else {
@@ -85,6 +89,11 @@ final class SettingsViewModel: ObservableObject {
         }
     }
 
+    /// 退出登录：吊销服务端会话并清本机凭据。
+    func signOut() async {
+        await auth.signOut()
+    }
+
     /// 注销账号：先调服务端，成功后清本机凭据。
     func deleteAccount() async {
         guard !isDeleting else { return }
@@ -92,10 +101,8 @@ final class SettingsViewModel: ObservableObject {
         errorMessage = nil
         defer { isDeleting = false }
 
-        let client = APIClient(server: config.server)
         do {
-            try await client.deleteAccount()
-            KeychainStore.remove(KeychainStore.Account.authToken)
+            try await auth.deleteAccount()
             accountDeleted = true
         } catch {
             errorMessage = error.localizedDescription

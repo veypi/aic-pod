@@ -33,6 +33,9 @@ FILE_TYPES = {
 SOURCE_EXTS = {".swift"}
 RESOURCE_NAMES = {"Assets.xcassets", "PrivacyInfo.xcprivacy"}
 
+# 仓外共享资源：文案单一真源在 client-bridge/l10n.json（相对工程目录）。
+EXTERNAL_RESOURCES = [("l10n.json", "../../client-bridge/l10n.json")]
+
 
 def uid(*parts: str) -> str:
     """稳定 UUID：同样的输入永远得到同样的标识（工程文件可重复生成）。"""
@@ -128,6 +131,25 @@ class Project:
         app_group = group_for(base.relative_to(self.root))
         return app_group, app_group
 
+    # ---------- 仓外共享资源 ----------
+    def external_resources(self) -> list[str]:
+        """把仓外共享文件（如 client-bridge/l10n.json）挂进 Resources 阶段。"""
+        builds = []
+        for name, relative in EXTERNAL_RESOURCES:
+            ref = uid("fileref", "external", name)
+            self.objects.append(
+                f'\t\t{ref} /* {name} */ = {{isa = PBXFileReference; '
+                f'lastKnownFileType = text.json; name = "{name}"; path = "{relative}"; '
+                f'sourceTree = SOURCE_ROOT; }};'
+            )
+            build = uid("buildfile", "Resources", "external", name)
+            self.objects.append(
+                f'\t\t{build} /* {name} in Resources */ = {{isa = PBXBuildFile; '
+                f'fileRef = {ref} /* {name} */; }};'
+            )
+            builds.append(build)
+        return builds
+
     # ---------- 主生成 ----------
     def generate(self) -> str:
         sources, resources = self.collect()
@@ -148,6 +170,7 @@ class Project:
 
         source_builds = [self.build_file(p, "Sources") for p in sources]
         resource_builds = [self.build_file(p, "Resources") for p in resources]
+        resource_builds += self.external_resources()
 
         sources_phase = uid("phase", "sources")
         self.objects.append(

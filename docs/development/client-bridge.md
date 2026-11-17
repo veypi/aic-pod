@@ -1,6 +1,6 @@
 # 客户端桥与设备自动接入统一设计
 
-> 2026-11-17 整篇重写。阶段 1（服务端）、阶段 2（Go Pod）、阶段 3（aic 客户端适配）与阶段 4（Desktop）已实施；阶段 5 起仍为待实施设计。
+> 2026-11-17 整篇重写。阶段 1（服务端）、阶段 2（Go Pod）、阶段 3（aic 客户端适配）、阶段 4（Desktop）与阶段 5 第一版（iOS / Android）已实施；阶段 6（其余原生能力）仍为待实施设计。
 > 覆盖 Desktop / iOS / Android 的统一宿主桥、原生登录、Web 会话接入 `/api/nc`，以及 CLI / Docker 继续使用的静态设备凭证。
 
 ## 一、目标与最终原则
@@ -754,6 +754,9 @@ aic-pod/client-bridge/l10n.json
 - 统一登录、设置、注销和错误展示。
 - Android 按同一协议实现。
 - 移动端后台任务以服务端调度为准。
+
+实施落点（2026-11-17 第一版）：iOS 删除旧 `ShellBridge` 与壳内第二份文案表（`L10n.swift` 删除，文案改读 `client-bridge/l10n.json`，构建时打进 App 包）；新增 `IvecAI/Shared/AuthManager.swift`（access/refresh token 存 Keychain、刷新 singleflight、刷新后向 WebView 重新下发 cookie）、`AuthModels.swift`（凭据模型 + JWT / Set-Cookie 解析）、`AuthStore.swift`（按服务器隔离的登录档案）、`AicHostBridge.swift`（`window.aicHost`：能力探测、`call` Promise 回执、`on/off` 事件）、`AppCoordinator.swift`（桥方法接线）；工作区只留平台 origin，站外链接交给系统（原生桥只注入受信任 origin）。Android 新建 `mobile/android/`：同一套 `window.aicHost` 协议（`@JavascriptInterface` + `WebViewCompat.addDocumentStartJavaScript`）、Keystore(AES/GCM) 加密的登录档案、原生登录页与工作区 WebView 容器。能力面：当前只有 `auth` 与 `accountDelete` 为真，文件 / 分享 / 剪贴板 / 通知 / 外部链接 / 深链 / 主题 / 语言仍属阶段 6。
+未做：iOS 与 Android 的协议同意页与完整设置页（iOS 已有同意页，设置页只有账户分组）；Android 未构建验证（本机无 SDK）；移动端后台任务按服务端调度为兜底，App 被杀不承诺常驻连接。
 
 ### 阶段 6：其余原生能力
 

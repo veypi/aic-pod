@@ -6,15 +6,14 @@
 //  密码登录 / 验证码登录切换、忘记密码、注册（按后台要求要邮箱或手机号 + 验证码）、
 //  协议同意、服务器地址切换。
 //
-//  登录成功后把会话 cookie 注入 webview，网页即认这个登录态。
+//  登录成功后凭据由原生认证管理器持有（Keychain），网页不再拿令牌。
 //
 
 import SwiftUI
 
 struct LoginView: View {
     @ObservedObject var config: ServerConfig
-    /// 登录成功：回调会话 cookie。
-    var onLogin: ([HTTPCookie]) -> Void
+    @ObservedObject var auth: AuthManager
     /// 打开设置页。
     var onOpenSettings: () -> Void
 
@@ -113,8 +112,8 @@ struct LoginView: View {
 
     private var loginTypeSwitch: some View {
         HStack(spacing: 0) {
-            segment(config.t("login.password_login"), active: !useCode) { useCode = false }
-            segment(config.t("login.code_login"), active: useCode) { useCode = true }
+            segment(config.t("login.password"), active: !useCode) { useCode = false }
+            segment(config.t("login.code"), active: useCode) { useCode = true }
         }
         .padding(3)
         .background(Color.black.opacity(0.05))
@@ -142,8 +141,8 @@ struct LoginView: View {
     private var fields: some View {
         VStack(spacing: 10) {
             if isRegister {
-                field(config.t("login.username"), text: $username)
-                field(config.t("login.password"), text: $password, secure: true)
+                field(config.t("login.username_label"), text: $username)
+                field(config.t("login.password_value"), text: $password, secure: true)
                 field(config.t("login.confirm_password"), text: $confirmPassword, secure: true)
                 if authConfig.requireEmail {
                     codeRow(type: "email", target: $email, code: $emailCode, purpose: "register")
@@ -154,8 +153,8 @@ struct LoginView: View {
             } else if useCode {
                 codeRow(type: nil, target: $codeTarget, code: $code, purpose: "login")
             } else {
-                field(config.t("login.account_placeholder"), text: $username)
-                field(config.t("login.password"), text: $password, secure: true)
+                field(config.t("login.placeholder_account"), text: $username)
+                field(config.t("login.password_value"), text: $password, secure: true)
             }
         }
     }
@@ -163,8 +162,8 @@ struct LoginView: View {
     /// 目标 + 验证码一行（发送按钮在右）。
     private func codeRow(type: String?, target: Binding<String>, code: Binding<String>, purpose: String) -> some View {
         VStack(spacing: 10) {
-            let placeholder = type == "email" ? config.t("login.email_placeholder")
-                : (type == "sms" ? config.t("login.phone_placeholder") : config.t("login.account_placeholder"))
+            let placeholder = type == "email" ? config.t("login.placeholder_email")
+                : (type == "sms" ? config.t("login.placeholder_phone") : config.t("login.placeholder_account"))
             HStack(spacing: 8) {
                 field(placeholder, text: target, keyboard: type == "email" ? .emailAddress : .default)
                 Button {
@@ -181,7 +180,7 @@ struct LoginView: View {
                 .buttonStyle(.plain)
                 .disabled(countdown > 0)
             }
-            field(config.t("login.code_placeholder"), text: code, keyboard: .numberPad)
+            field(config.t("login.placeholder_code"), text: code, keyboard: .numberPad)
         }
     }
 
@@ -212,7 +211,7 @@ struct LoginView: View {
             Button {
                 UIApplication.shared.open(config.server.sitePath("/vb/forgot-password"))
             } label: {
-                Text(config.t("login.forgot_password"))
+                Text(config.t("login.forgot"))
                     .font(.system(size: 13))
                     .foregroundStyle(Color.brandSecondary)
             }
@@ -236,7 +235,7 @@ struct LoginView: View {
     private var consentText: Text {
         var text = Text(config.t("consent.agree_prefix"))
         for document in legalDocs {
-            text = text + Text(document.title)
+            text = text + Text(config.t(document.titleKey))
                 .foregroundStyle(Color.brandPrimary)
                 .underline(true)
             text = text + Text(document.kind == .terms ? config.t("consent.and") : "")
@@ -314,41 +313,29 @@ struct LoginView: View {
         errorMessage = nil
         Task { @MainActor in
             defer { isBusy = false }
-            let client = APIClient(server: config.server)
             do {
-                let cookies: [HTTPCookie]
                 if isRegister {
-                    cookies = try await client.register(
-                        username: username,
-                        password: password,
-                        email: authConfig.requireEmail ? email : nil,
-                        phone: authConfig.requirePhone ? phone : nil,
-                        emailCode: authConfig.requireEmail ? emailCode : nil,
-                        phoneCode: authConfig.requirePhone ? phoneCode : nil
-                    )
+                    var body: [String: String] = ["username": username, "password": password]
+                    if authConfig.requireEmail {
+                        body["email"] = email
+                        body["email_code"] = emailCode
+                    }
+                    if authConfig.requirePhone {
+                        body["phone"] = phone
+                        body["phone_code"] = phoneCode
+                    }
+                    try await auth.register(body)
                 } else if useCode {
                     let type = codeTarget.contains("@") ? "email" : "sms"
-                    cookies = try await client.loginWithCode(type: type, target: codeTarget, code: code)
+                    try await auth.loginCode(type: type, target: codeTarget, code: code)
                 } else {
-                    cookies = try await client.login(username: username, password: password)
+                    try await auth.login(username: username, password: password)
                 }
-                if let token = APIClient.token(in: cookies) {
-                    KeychainStore.set(token, for: KeychainStore.Account.authToken)
-                }
-                KeychainStore.set(Self.serialize(cookies), for: KeychainStore.Account.sessionCookies)
                 password = ""
                 confirmPassword = ""
-                onLogin(cookies)
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
-    }
-
-    /// 把 cookie 序列化成可存进 Keychain 的字符串。
-    static func serialize(_ cookies: [HTTPCookie]) -> String {
-        cookies
-            .map { "\($0.name)=\($0.value); Domain=\($0.domain); Path=\($0.path)" }
-            .joined(separator: "\n")
     }
 }

@@ -20,11 +20,11 @@ enum LegalKind: String, Codable, Hashable {
     case terms
     case privacy
 
-    /// 展示名（壳侧文案暂为中文；界面语言开关只存偏好，未做多语言）。
-    var title: String {
+    /// 展示名（本地化 key；文案唯一来源是 client-bridge/l10n.json）。
+    var titleKey: String {
         switch self {
-        case .terms: return "用户协议"
-        case .privacy: return "隐私政策"
+        case .terms: return "login.terms"
+        case .privacy: return "login.privacy"
         }
     }
 }
@@ -35,7 +35,9 @@ struct LegalDocument: Identifiable, Hashable, Codable {
     var url: String
 
     var id: String { kind.rawValue }
-    var title: String { kind.title }
+
+    /// 展示名（本地化 key；文案唯一来源是 client-bridge/l10n.json）。
+    var titleKey: String { kind.titleKey }
 
     /// 站内相对路径补成绝对地址，便于在原生层打开。
     func absoluteURL(server: URL) -> URL? {

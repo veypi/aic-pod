@@ -1,0 +1,7 @@
+# 构建产物
+.gradle/
+build/
+local.properties
+
+# 文案由构建时从 client-bridge/l10n.json 复制进来，不入库
+app/src/main/assets/l10n.json

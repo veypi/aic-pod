@@ -3,7 +3,7 @@
 //  aic-pod · mobile/ios
 //
 //  设置：壳里唯一有分量的原生页面。标题就叫「设置」。
-//  注销账户放在「账户」分组里。
+//  账户分组：当前账户、退出登录、注销账户。
 //
 
 import SwiftUI
@@ -47,14 +47,13 @@ struct SettingsView: View {
                 get: { model.errorMessage != nil },
                 set: { if !$0 { model.errorMessage = nil } }
             )) {
-                Button("好", role: .cancel) { model.errorMessage = nil }
+                Button(config.t("common.ok"), role: .cancel) { model.errorMessage = nil }
             } message: {
                 Text(model.errorMessage ?? "")
             }
             .sheet(item: $legalLink) { link in
                 LegalDocumentSheet(url: link.url)
             }
-            .onChange(of: model.serverText) { _, _ in }
             .task {
                 await model.loadLegalLinks()
             }
@@ -111,8 +110,13 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section {
             LabeledContent(config.t("settings.signed_in")) {
-                Text(model.isSignedIn ? config.t("settings.signed_in") : config.t("settings.not_signed_in"))
+                Text(model.isSignedIn ? model.currentUserName : config.t("settings.not_signed_in"))
                     .foregroundStyle(.secondary)
+            }
+            if model.isSignedIn {
+                Button(config.t("settings.sign_out")) {
+                    Task { await model.signOut() }
+                }
             }
             Button(role: .destructive) {
                 showDeleteConfirm = true
@@ -155,13 +159,16 @@ struct SettingsView: View {
             Link(config.t("settings.open_source"), destination: URL(string: "https://github.com/veypi/aic-pod")!)
         }
     }
-
 }
 
 extension Bundle {
     var shortVersion: String {
         let version = infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
-        let build = infoDictionary?["CFBundleVersion"] as? String ?? "1"
-        return "\(version) (\(build))"
+        return "\(version) (\(buildNumber))"
+    }
+
+    /// 构建号（aicHost 的 app_info 用）。
+    var buildNumber: String {
+        infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 }

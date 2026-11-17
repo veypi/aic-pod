@@ -1,12 +1,51 @@
-# Android 端（ivec AI）
+# ivec AI · Android 壳
 
-工程尚未创建（2026-11-05）。创建时必须锁死的项：
+ivec AI 的 Android 客户端。工作区（Agent 会话、技能、文件）由平台服务承载，壳是薄薄一层原生外壳：
+把工作区稳稳托住、管好本地选择、把不可逆动作（同意协议 / 注销账户）说清楚。
 
-- `applicationId` = **`com.ivec.ai`**（与 iOS / 鸿蒙一致；APP 备案已按此值填，提交后不可改）
-- 签名：`signingConfigs.release` 从 `mobile/signing.env` 读 `AIC_ANDROID_KEYSTORE` / `AIC_ANDROID_KEY_ALIAS` / `AIC_ANDROID_KEYSTORE_PASSWORD`，
-  keystore 为 PKCS#12（`signing/android/ivec-release.p12`，alias `ivec-release`）
-- 不得把 keystore 或口令写进代码/仓库（`.gitignore` 已排除 `signing/`、`*.jks`、`*.p12`、`*.keystore`）
-- 出包必须用 **release 签名**构建（调试签名与备案指纹不一致，上架/备案校验会失败）
+> 状态（2026-11-17）：阶段 5 第一版。已落地——统一 `window.aicHost` 桥、原生认证管理器（Keystore 加密存储 +
+> 单一刷新执行者）、原生登录页与工作区 WebView 容器、文案单一真源（`client-bridge/l10n.json`）。
+> 未落地——协议同意页与设置页、验证码登录、文件/分享/剪贴板/通知等原生能力（阶段 6）。
+> **本机没有 Android SDK，以上代码未经过 Gradle 构建验证**，落地前先跑一次 `./gradlew assembleDebug`。
 
-取值提醒：Android 侧「公钥」= 签名证书的 RSA 公钥模数（hex 512 字符），「证书MD5指纹」= 证书 MD5（32 位）。
-用 `bash mobile/scripts/sign-fingerprints.sh` 取现成值。
+## 目录结构
+
+```
+mobile/android/
+├── build.gradle.kts          # 插件与仓库
+├── settings.gradle.kts
+└── app/
+    ├── build.gradle.kts       # 应用模块 + l10n 复制任务
+    └── src/main/
+        ├── AndroidManifest.xml
+        ├── assets/l10n.json   # 构建时从 client-bridge/l10n.json 复制（不入库）
+        ├── java/com/ivec/ai/
+        │   ├── MainActivity.kt        # 登录页 ↔ 工作区 WebView
+        │   ├── auth/AuthManager.kt    # 原生认证管理器（登录/刷新/登出/注销）
+        │   ├── auth/AuthModels.kt     # 凭据模型 + JWT / Set-Cookie 解析
+        │   ├── auth/CredentialStore.kt # Keystore(AES/GCM) 加密的登录档案
+        │   ├── bridge/AicHostBridge.kt # window.aicHost 协议实现
+        │   └── util/L10n.kt           # 文案读取（assets/l10n.json）
+        └── res/layout/activity_main.xml
+```
+
+## 协议
+
+桥协议与 iOS 壳、Desktop 同一份契约，见
+[`docs/development/client-bridge.md`](../../docs/development/client-bridge.md) §七。
+
+- 页面侧对象：`window.aicHost`（`version` / `platform` / `capabilities` / `call` / `on` / `off`）
+- 页面 → 原生：`app_info`、`auth_state`、`auth_refresh`、`auth_sign_out`、`auth_open_login`、
+  `account_delete`、`page_error`
+- 原生 → 页面事件：`auth.changed`、`server.changed`、`navigate`
+- 当前能力：`auth` 与 `accountDelete` 为真；文件 / 分享 / 剪贴板 / 通知 / 外部链接 / 深链 / 主题 / 语言为假（阶段 6）
+
+## 构建
+
+```bash
+cd mobile/android
+./gradlew assembleDebug
+```
+
+依赖 Google Maven 与 Maven Central；本机若无 SDK，先装 Android Studio 或命令行工具，
+并在 `local.properties` 写 `sdk.dir=/path/to/Android/sdk`。

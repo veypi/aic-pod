@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.IvecAI" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#f1f8ff</item>
+        <item name="android:windowBackground">#f1f8ff</item>
+    </style>
+</resources>
