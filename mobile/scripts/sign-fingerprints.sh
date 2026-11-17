@@ -67,7 +67,7 @@ leaf_match() { # $1=证书文件(可含链) $2=公钥 hex
   return 1
 }
 
-echo "应用名: ivec AI"
+echo "应用名: ivec ai"
 echo "包名:   $APP_ID"
 echo "签名目录: $SIGN"
 echo

@@ -1,4 +1,4 @@
-# APP STORE 上架清单（ivec AI · iOS）
+# APP STORE 上架清单（ivec ai · iOS）
 
 > 状态同步：2026-11-17。勾选项按「谁能做」分组。
 
@@ -18,7 +18,7 @@
 
 - [ ] **Bundle ID** `com.ivec.ai` 在 Apple Developer 门户创建
 - [ ] **正式 Provisioning Profile**（App Store distribution）
-- [ ] **App Store Connect 建 App 记录**，占名 `ivec AI`
+- [ ] **App Store Connect 建 App 记录**，占名 `ivec ai`
 - [ ] **主体信息更正**：地址 `No.1 Yunshan Road / 101100`、统一社会信用代码 `91110114MAK7U7DK9L`
       （当前 D&B 仍是旧值 91113350，会卡卖家信息核对）
 - [ ] **App 隐私问卷**（对应 `PrivacyInfo.xcprivacy` 与实际行为）

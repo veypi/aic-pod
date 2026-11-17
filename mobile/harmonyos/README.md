@@ -1,8 +1,8 @@
-# HarmonyOS 端（ivec AI）
+# HarmonyOS 端（ivec ai）
 
 工程尚未创建（2026-11-05）。前置条件（**都不依赖业务代码**，可先做）：
 
-1. AGC 建 APP ID：`bundleName` = **`com.ivec.ai`**（创建后不可改），应用名 `ivec AI`
+1. AGC 建 APP ID：`bundleName` = **`com.ivec.ai`**（创建后不可改），应用名 `ivec ai`
 2. DevEco Studio `Build > Generate Key and CSR` → `app-release.p12` + `app-release.csr`（CSR 内不要中文）
 3. AGC「证书管理」上传 csr → 下载发布证书 `.cer` → 放 `signing/harmonyos/app-release.cer`
 4. AGC 创建**发布 Profile** → `app-release.p7b` → 放 `signing/harmonyos/app-release.p7b`

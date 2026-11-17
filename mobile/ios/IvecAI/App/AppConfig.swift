@@ -11,7 +11,7 @@ import Foundation
 enum AppConfig {
     /// 应用名（商店名 = 备案名 = 软著名的锚），提交后不可改。
     /// 这只用于系统层面（主屏名称、Info.plist），App 内部展示用 displayName。
-    static let appName = "ivec AI"
+    static let appName = "ivec ai"
 
     /// App 内部展示用的品牌标记（与官网/网页一致：ivec.ai）。
     static let displayName = "ivec.ai"

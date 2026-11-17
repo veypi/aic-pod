@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build.sh — 构建 ivec AI iOS 壳
+# build.sh — 构建 ivec ai iOS 壳
 #
 # 用法：
 #   bash scripts/build.sh                # 模拟器 Debug 构建

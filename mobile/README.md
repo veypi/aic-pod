@@ -1,4 +1,4 @@
-# 移动端三端壳（ivec AI）
+# 移动端三端壳（ivec ai）
 
 三端共用一套产品壳，承载 aic 平台能力（会话 / 技能 / 设备执行）。
 
@@ -10,7 +10,7 @@
 
 ## 命名约定（2026-11-05 定，提交后不可改）
 
-- **应用名**（商店名 = 备案名 = 软著名的锚）：`ivec AI`
+- **应用名**（商店名 = 备案名 = 软著名的锚）：`ivec ai`；品牌与域名使用 `ivec.ai`
 - **包名**（三端统一）：`com.ivec.ai`
 - **代码层标识**：`aic`（仓库 / 模块 / CLI / API 路径）。`aic` = 开源引擎代号，`ivec` = 官方品牌
 - **服务域名**：`ivec-ai.com`（已 ICP 备案，APP 备案与后端访问用）
@@ -29,7 +29,7 @@ bash mobile/scripts/sign-fingerprints.sh
 
 ## 当前状态（2026-11-05）
 
-- [x] 命名与包名定稿（ivec AI / com.ivec.ai）
+- [x] 命名与包名定稿（ivec ai / com.ivec.ai）
 - [x] Android 上传密钥（PKCS#12，alias `ivec-release`）已生成
 - [x] iOS Apple Distribution 私钥 + CSR 已生成（待上传 Apple 门户换正式证书）
 - [ ] HarmonyOS：需先在 AGC 建 APP ID（`bundleName=com.ivec.ai`），再出发布证书 `.cer`
