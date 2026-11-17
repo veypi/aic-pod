@@ -26,12 +26,15 @@ FILE_TYPES = {
     ".json": "text.json",
     ".html": "text.html",
     ".png": "image.png",
+    ".ttf": "font.ttf",
     ".sh": "text.script.sh",
     ".py": "text.script.python",
 }
 
 SOURCE_EXTS = {".swift"}
 RESOURCE_NAMES = {"Assets.xcassets", "PrivacyInfo.xcprivacy"}
+# 字体随包发（三方登录品牌图标用 FA Brands，需在 Info.plist 的 UIAppFonts 声明）。
+RESOURCE_EXTS = {".ttf", ".otf"}
 
 # 仓外共享资源：文案单一真源在 client-bridge/l10n.json（相对工程目录）。
 EXTERNAL_RESOURCES = [("l10n.json", "../../client-bridge/l10n.json")]
@@ -70,7 +73,7 @@ class Project:
                 continue
             if path.suffix in SOURCE_EXTS:
                 sources.append(path)
-            elif path.name in RESOURCE_NAMES:
+            elif path.name in RESOURCE_NAMES or path.suffix in RESOURCE_EXTS:
                 resources.append(path)
         return sources, resources
 

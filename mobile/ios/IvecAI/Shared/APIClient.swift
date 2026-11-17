@@ -28,6 +28,27 @@ struct APIClient {
         try await post(path: "/vb/api/verification/send", body: ["type": type, "target": target, "purpose": purpose])
     }
 
+    /// 已启用的三方登录提供商（只返回后台开启的）。
+    func fetchProviders() async throws -> [AuthProvider] {
+        let url = server.sitePath("/vb/api/oauth/providers/public")
+        let (data, response) = try await session.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            return []
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = root["items"] as? [[String: Any]] else {
+            return []
+        }
+        return items.compactMap { item in
+            guard let code = item["code"] as? String, !code.isEmpty else { return nil }
+            return AuthProvider(
+                code: code,
+                name: (item["name"] as? String) ?? code,
+                icon: (item["icon"] as? String) ?? ""
+            )
+        }
+    }
+
     /// 认证相关配置（登录方式、注册要求、邮件/短信通道是否可用）。
     func fetchAuthConfig() async throws -> AuthConfig {
         let url = server.sitePath(AppConfig.configPath)
@@ -73,6 +94,15 @@ struct APIClient {
     private struct ErrorPayload: Decodable {
         let message: String?
     }
+}
+
+/// 一个已启用的三方登录提供商（来自 /vb/api/oauth/providers/public）。
+struct AuthProvider: Identifiable, Hashable {
+    var code: String
+    var name: String
+    var icon: String
+
+    var id: String { code }
 }
 
 /// 认证配置快照（来自 /vb/api/config 的 vb 段）。

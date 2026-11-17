@@ -36,6 +36,10 @@ struct LoginView: View {
     @State private var legalDocs: [LegalDocument] = []
     @State private var authConfig = AuthConfig()
     @State private var countdown = 0
+    /// 已启用的三方登录提供商。
+    @State private var providers: [AuthProvider] = []
+    /// 待打开的三方授权页。
+    @State private var oauthTarget: OAuthTarget?
 
     var body: some View {
         ZStack {
@@ -45,6 +49,9 @@ struct LoginView: View {
                 VStack(spacing: 22) {
                     topBar
                     brand
+                    if !providers.isEmpty {
+                        social
+                    }
                     if authConfig.codeLoginEnabled && !isRegister {
                         loginTypeSwitch
                     }
@@ -72,9 +79,98 @@ struct LoginView: View {
             serverText = config.server.absoluteString
             legalDocs = (try? await LegalDocuments.fetch(server: config.server)) ?? []
             authConfig = (try? await APIClient(server: config.server).fetchAuthConfig()) ?? AuthConfig()
+            providers = (try? await APIClient(server: config.server).fetchProviders()) ?? []
             if useCode && codeTarget.isEmpty { codeTarget = username }
         }
+        .sheet(item: $oauthTarget) { target in
+            OAuthWebSheet(
+                target: target,
+                platformHost: config.server.host,
+                cancelTitle: config.t("settings.cancel")
+            ) { cookies in
+                do {
+                    try auth.adopt(cookies: cookies)
+                } catch {
+                    errorMessage = config.errorText(error)
+                }
+            }
+        }
     }
+
+    // MARK: - 三方登录
+
+    private var social: some View {
+        HStack(spacing: 10) {
+            ForEach(providers) { provider in
+                Button {
+                    startOAuth(provider)
+                } label: {
+                    providerBadge(provider)
+                }
+                .buttonStyle(.plain)
+                .disabled(isBusy)
+                .accessibilityLabel(provider.name)
+            }
+        }
+        .padding(.bottom, 2)
+    }
+
+    /// 三方按钮：本地图标优先（微信 / 钉钉 / 飞书），其次 Font Awesome 品牌字形，
+    /// 都没有才用首字母。
+    private func providerBadge(_ provider: AuthProvider) -> some View {
+        let keys = [provider.icon.lowercased(), provider.code.lowercased()]
+        let asset = keys.compactMap { Self.localProviderAssets[$0] }.first
+        let glyph = keys.compactMap { Self.brandGlyphs[$0] }.first
+        return ZStack {
+            Circle()
+                .stroke(Color.black.opacity(0.12), lineWidth: 1)
+            if let asset {
+                Image(asset)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+            } else if let glyph {
+                Text(glyph)
+                    .font(.custom("Font Awesome 6 Brands", size: 18))
+                    .foregroundStyle(Color.brandPrimary)
+            } else {
+                Text(String(provider.name.prefix(1)).uppercased())
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.brandPrimary)
+            }
+        }
+        .frame(width: 44, height: 44)
+        .contentShape(Circle())
+    }
+
+    private func startOAuth(_ provider: AuthProvider) {
+        guard !isBusy else { return }
+        errorMessage = nil
+        Task { @MainActor in
+            do {
+                let url = try await auth.authorizeThirdParty(provider: provider.code)
+                oauthTarget = OAuthTarget(url: url)
+            } catch {
+                errorMessage = config.errorText(error)
+            }
+        }
+    }
+
+    /// FA 没有的品牌用本地矢量图标（与 vbase 网页登录页同一份来源）。
+    private static let localProviderAssets: [String: String] = [
+        "wechat": "ProviderWechat", "weixin": "ProviderWechat",
+        "dingtalk": "ProviderDingtalk", "feishu": "ProviderFeishu",
+    ]
+
+    /// Font Awesome 6 Brands 字形（码点在 PUA 区）。
+    private static let brandGlyphs: [String: String] = [
+        "google": "\u{f1a0}", "github": "\u{f09b}", "weixin": "\u{f1d7}", "wechat": "\u{f1d7}",
+        "apple": "\u{f179}", "microsoft": "\u{f3ca}", "twitter": "\u{f099}", "x-twitter": "\u{e61b}",
+        "discord": "\u{f392}", "qq": "\u{f1d6}", "weibo": "\u{f18a}", "alipay": "\u{f642}",
+        "gitlab": "\u{f296}", "facebook": "\u{f39e}", "linkedin": "\u{f0e1}", "amazon": "\u{f270}",
+        "bitbucket": "\u{f171}", "steam": "\u{f1b6}", "twitch": "\u{f1e8}", "reddit": "\u{f1a1}",
+        "git": "\u{f1d3}", "android": "\u{f17b}", "linux": "\u{f17c}", "windows": "\u{f17a}",
+    ]
 
     // MARK: - 顶部
 

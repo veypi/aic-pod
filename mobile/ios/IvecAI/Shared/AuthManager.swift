@@ -17,6 +17,8 @@ enum AuthError: LocalizedError {
     case invalidToken
     case accountMismatch
     case badResponse
+    case invalidProvider
+    case invalidAuthURL
     case server(code: Int, status: Int, message: String)
 
     /// 需要重新登录（刷新时收到 401 或身份漂移）。
@@ -41,6 +43,8 @@ enum AuthError: LocalizedError {
         case .invalidToken: return "登录响应不是动态 Web access token。"
         case .accountMismatch: return "登录用户与访问凭证不一致。"
         case .badResponse: return "服务返回了无法识别的响应。"
+        case .invalidProvider: return "未指定第三方登录提供商。"
+        case .invalidAuthURL: return "服务端未返回可用的授权地址。"
         case let .server(_, _, message):
             return message.isEmpty ? "服务返回错误。" : message
         }
@@ -154,6 +158,59 @@ final class AuthManager: ObservableObject {
 
     func register(_ body: [String: String]) async throws {
         try await authenticate(path: "/vb/api/auth/register", body: body)
+    }
+
+    /// 三方授权地址：由服务端签发，回调落回平台侧。
+    func authorizeThirdParty(provider: String) async throws -> URL {
+        let code = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { throw AuthError.invalidProvider }
+        let redirect = server.sitePath(AppConfig.workspacePath).absoluteString
+        let escapedRedirect = redirect.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? redirect
+        let path = "/vb/api/auth/authorize/thirdparty?provider=\(code)&redirect=\(escapedRedirect)"
+        let response = try await transport.request(
+            server: server, path: path, method: "GET", body: nil, headers: [:]
+        )
+        guard let payload = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+              let raw = payload["auth_url"] as? String,
+              let url = URL(string: raw), url.scheme == "https" || url.scheme == "http" else {
+            throw AuthError.invalidAuthURL
+        }
+        return url
+    }
+
+    /// 接管会话：三方授权在应用内 WKWebView 里完成后，用会话 cookie 重建登录态。
+    func adopt(cookies: [HTTPCookie], now: Date = Date()) throws {
+        let access = cookies.first { $0.name.lowercased().hasSuffix("access") }
+            ?? cookies.first { JWT.type($0.value) == "access" }
+        let refresh = cookies.first { $0.name.lowercased().hasSuffix("refresh") }
+            ?? cookies.first { JWT.type($0.value) == "refresh" }
+        guard let access, let refresh, !access.value.isEmpty, !refresh.value.isEmpty else {
+            throw AuthError.missingCredentials
+        }
+        let payload = JWT.payload(access.value)
+        guard payload?["type"] as? String == "access",
+              payload?["mod"] as? String == "inherit",
+              let uid = JWT.uid(access.value) else {
+            throw AuthError.invalidToken
+        }
+        guard JWT.type(refresh.value) == "refresh", JWT.uid(refresh.value) == uid else {
+            throw AuthError.accountMismatch
+        }
+        let next = AuthCredentials(
+            accessToken: access.value,
+            refreshToken: refresh.value,
+            accessCookieName: access.name,
+            refreshCookieName: refresh.name,
+            user: AuthUser(id: uid),
+            expiresAt: JWT.expiresAt(access.value, fallback: now.addingTimeInterval(900))
+        )
+        var archive = AuthStore.load(server: server) ?? AuthArchive()
+        archive.accounts[uid] = AuthArchive.Account(credentials: next)
+        archive.currentUID = uid
+        AuthStore.save(archive, server: server)
+        credentials = next
+        publish(state: AuthState(signedIn: true, user: next.user, expiresAt: next.expiresAt))
+        publishCookies(self.cookies(for: next))
     }
 
     // MARK: - 刷新
