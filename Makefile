@@ -81,10 +81,10 @@ skill-bin-%:
 			(cd "$$skills_dir" && GOOS=$$os GOARCH=$$arch go build -ldflags "-s -w" -o "$$out/cua/cua_cast$$ext" ./cua/src/cua_cast) || exit 1; \
 		fi; \
 	done; \
-	stage="$(abspath $(BIN_DIR))/.skill-bin-pack-$$os-$$arch"; \
-	rm -rf "$$stage"; mkdir -p "$$stage"; cp -R "$$out" "$$stage/skill-bin"; \
-	tar -czf "$(abspath $(BIN_DIR))/aic-skill-bin-$$os-$$arch.tar.gz" -C "$$stage" skill-bin; \
-	rm -rf "$$stage"
+	stage=".skill-bin-pack-$$os-$$arch"; \
+	rm -rf "$(BIN_DIR)/$$stage"; mkdir -p "$(BIN_DIR)/$$stage"; cp -R "$$out" "$(BIN_DIR)/$$stage/skill-bin"; \
+	(cd $(BIN_DIR) && tar -czf "aic-skill-bin-$$os-$$arch.tar.gz" -C "$$stage" skill-bin); \
+	rm -rf "$(BIN_DIR)/$$stage"
 	@echo "→ $(BIN_DIR)/skill-bin/$* + aic-skill-bin-$*.tar.gz"
 
 skill-bin-all: skill-bin-linux-amd64 skill-bin-linux-arm64 skill-bin-darwin-amd64 skill-bin-darwin-arm64 skill-bin-windows-amd64

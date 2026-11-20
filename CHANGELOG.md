@@ -7,6 +7,10 @@
 
 ## 未发布
 
+## v0.11.1（2026-11-20）
+
+- **Windows 桌面包打包修复（CI）**：v0.11.0 的 CI 在 Windows runner 上失败（`desktop-windows-amd64` → 连带 `GitHub Release` job 跳过，v0.11.0 **未产出任何发行产物**）。根因是 runner 环境漂移，不是代码逻辑：`desktop/scripts/sync-cua.mjs` 用 `powershell Expand-Archive` 解压上游 cua-driver 的 zip，而当前 runner 的 Microsoft.PowerShell.Archive 模块里 `ExtractToDirectory` 没有 3 参数重载（5.1 与 7 不兼容），解压半途失败 → 找不到 `cua-driver.exe` → 打包中止。现改为用系统自带 bsdtar（`%SystemRoot%\System32\tar.exe`，Win10+ 内置、支持 zip）解压，复制改用 Node 的 `fs.cpSync`，Windows 分支不再依赖 PowerShell。另修 `Makefile` 的 `skill-bin-%` 打包：GNU tar 把 Windows 盘符路径（`D:\…`）当远程主机（`Cannot connect to D: resolve failed`），改为在 `dist/` 内用相对路径打包。
+
 ## v0.11.0（2026-11-20）
 
 - **原生登录窗重做（Desktop，2026-11-17）**：登录页改为独立小窗（400×690、居中、顶部对齐），不再塞进主窗口的平台视图；未登录与登出时主窗口隐藏，登录窗独占前台（不再出现「工作区还在 + 登录窗浮在上面」）。界面改为平铺：去掉外层卡片（无背景/边框/阴影），品牌与表单直接铺在窗口底色上（底色对齐平台图标 #f1f8ff）、输入框改白底；标题与提示文案去重；切换密码/验证码/注册时品牌区不动（`justify-content:flex-start`），不再整页上下跳，表单高时仍可滚动但不显示滚动条。删除底部平台服务器地址；品牌区改用平台图标（`app://aic/assets/*` 新增资源目录）。三方登录按 `/api/oauth/providers/public` 渲染已启用提供商（本地图标微信/钉钉/飞书，其余用 Font Awesome 品牌字形，未知回退文字按钮），点击经 `/api/auth/authorize/thirdparty` 换授权地址，**在主窗口内以平台网页流程完成 OAuth（11-18 二次修订：不再单开授权窗）**，回调后 `credentialsFromCookies` + `auth.adopt` 接管会话并激活 Host。授权页加载失败不再白屏；登录失败按业务码显示本地化文案，不再冒 IPC 包装字符串。另修主进程 `openAuthWindow` 里的语法错误（多余括号导致 Electron 启动即崩、设备掉线），并新增「桌面主进程与 preload 脚本语法可解析」用例外兜。测试：desktop 60 项全绿；渲染用 headless Chrome 实拍核对。**桌面端需重新打包生效。**
@@ -22,6 +26,8 @@
 - **品牌名统一为 ivec ai（2026-11-18）**：应用名（商店名 = 备案名 = 软著名锚）从 `ivec AI` 改为 `ivec ai`，与官网/网页显示的 `ivec.ai` 区分开（品牌与域名走 `ivec.ai`，应用名走小写 ai）；包名 `com.ivec.ai` 不变。涉及 iOS `AppConfig`、HarmonyOS 前置说明、`APPSTORE` 上架清单（App Store Connect 占名）、签名脚本输出与 `signing.env` 示例。**不进本仓发行产物**（同上一条）。
 
 - **平台版本门禁下限对齐 v0.11.0（2026-11-20）**：aic v0.18.3 把 `cfg.MinPodVersion` 提到 v0.11.0——低于此版的 pod 会被平台版本门禁拒绝连接（`client version … is below the minimum supported …`）。本版（v0.11.0）是接入 Session Host（36 位 `host.id` + `s1.` CONNECT envelope）与客户端宿主桥的最低要求。**设备端 pod 需升级到本版并重启。**
+
+> 注：v0.11.0 的 CI 在 Windows runner 上打包失败（环境漂移，详见 v0.11.1），未产出任何发行产物；实际发行以 v0.11.1 为准。
 
 ## v0.10.7 — 2026-11-13
 
