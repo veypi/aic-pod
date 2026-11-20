@@ -17,9 +17,9 @@
 4. aic 网页只认一个 App 能力桥 `window.aicHost`，不直接操作 Electron IPC、`WKWebView` message handler 或 Android JavascriptInterface。
 5. 测试版不保留旧桥协议、旧登录路径或旧凭证格式的兼容层。
 
-### 1.2 Host ID 与 AI 短引用
+### 1.2 Host ID 与 AI `_host` 短引用
 
-**Host 永远以完整 `host.id` 为唯一身份；AI 只使用该 ID 在当前用户空间中的 4 位短引用。**
+**Host 永远以完整 `host.id` 为唯一身份；AI 除 fs/exec 的 `_host` 参数外，全部使用完整 ID。**
 
 完整 ID 固定为 36 位：
 
@@ -37,9 +37,10 @@ AI ref  = 0007
 - `user_id` 是 vbase / vigo 已生成的 32 位无连字符 UUID；创建 Host 时校验其长度和格式，非 32 位 ID 不进入拼接。
 - 后 4 位是该用户空间内单调递增、补零到 4 位的 `host_seq`：`0001`…`9999`。
 - 完整 36 位 ID 用于数据库、客户端连接档案、NATS、K_tool、RTC、权限和真实文件路由。
-- 4 位短引用只用于 AI 上下文和 AI 工具输入输出；系统根据当前会话可信 `uid` 还原完整 ID。
+- `host_list` 同时输出完整 `id` 与 4 位 `ref`；只有 fs/exec 新调用的 `_host` 使用 `ref`，系统根据当前会话可信 `uid` 还原完整 ID。
 - 不同账户可以都出现 `0001`，因为真实 ID 的用户前缀不同；还原时使用会话 owner uid，不能使用 viewer uid 或模型传入的 uid。
-- 短引用不是第二套 Host 身份，只是完整 `host.id` 在 AI 边界的投影。
+- `/fs`、`host_id`、消息正文、工具结果与压缩摘要始终使用完整 `host.id`，不做文本投影；`tool_result` 不携带 `from`。
+- 短引用不是第二套 Host 身份，只是 `_host` 参数的紧凑寻址形式。
 
 序号规则：
 
@@ -237,7 +238,7 @@ s1.<host_id>.<credential_ver>.<web_access_token>
 
 其中：
 
-- `host_id` 是来自 ensure 或本地连接档案的 36 位完整 ID，不是 AI 使用的 4 位短引用；
+- `host_id` 是来自 ensure 或本地连接档案的 36 位完整 ID，不是 fs/exec `_host` 使用的 4 位短引用；
 - `credential_ver` 是 Host protocol secret 的代次，不是 Web token 的过期时间；
 - `web_access_token` 每次连接或重连时从原生认证管理器动态取得；
 - protocol secret 不放进 CONNECT token，继续只用于本地 K_tool / RTC 派生；
@@ -356,7 +357,7 @@ NATS JWT 的 allow subject、caps、presence、RTC 出向 subject 全部继续�
 u.{uid}.h.{host.id}.{credential_ver}....
 ```
 
-这里永远只有 36 位完整 `host.id`，没有 `device_uuid`，也没有 AI 的 4 位短引用。
+这里永远只有 36 位完整 `host.id`，没有 `device_uuid`，也没有 `_host` 的 4 位短引用。
 
 ### 5.4 Pod 配置拆分
 
@@ -378,7 +379,7 @@ u.{uid}.h.{host.id}.{credential_ver}....
 
 账户切换时必须重建 `uid`、`hostID`、NATS inbox、RTC、会话级 grant、后台任务和 HTTP Bearer provider，不能在旧连接上只换 token。
 
-### 5.5 AI 短 ID 与真实执行边界
+### 5.5 AI `_host` 与真实执行边界
 
 统一约定：
 
@@ -388,63 +389,39 @@ u.{uid}.h.{host.id}.{credential_ver}....
 | 原生客户端连接档案、`s1.` CONNECT、静态复合凭证 | 36 位完整 ID |
 | NATS subject、K_tool salt、RTC 票据 | 36 位完整 ID |
 | 前端真实 `/fs` 路由、持久化消息和文件引用 | 36 位完整 ID |
-| AI 的 host_list、工具说明、工具输入输出、历史上下文 | 4 位短引用 |
+| AI 的 `host_list` | 完整 `id` + 4 位 `ref` 两列 |
+| fs/exec 新调用的 `_host` | 仅 4 位 `ref`（cloud/page 保留字除外） |
+| AI 的 `/fs`、`host_id`、历史上下文与压缩摘要 | 36 位完整 ID |
 
-#### AI 输入 → 完整 ID
+#### AI 新调用 → 完整 ID
 
-1. `BuildHostListMD` 和启动提醒中的物理 Host `id` 只输出后 4 位，例如 `0007`。
-2. `cloud` / `page` 保留字不变；物理 Host 的 `_host` 使用 4 位短引用。
-3. `ResolveToolTarget` 从当前 `types.Session.UserID()` 取得可信 uid：
-   - 对 4 位数字目标组成 `uid + target`；
-   - 在当前用户的 Host 列表中验证存在、启用和归属；
-   - 将工具输入 `_host` 重写为 36 位完整 ID；
-   - 后续 `SendToolRequest`、NATS 和 Pod 完全不接触短引用。
-4. 设备名称解析可以继续作为便利入口，但歧义候选和错误消息只展示 4 位 ID。
-5. AI 不提交 uid，也不能通过传入另一个 user_id 选择别的用户空间。
-6. 旧 32 位 ID 直接拒绝；36 位完整 ID 是内部协议值，不作为 AI 推荐输入。
+1. `BuildHostListMD` 输出物理 Host 的完整 `id` 和 `_host` 使用的 `ref`。
+2. `ResolveToolTarget` 从当前 `types.Session.UserID()` 取得可信 uid，对 4 位目标组成 `uid + ref`。
+3. 在当前用户的 Host 列表中验证存在、启用和归属，将工具输入 `_host` 重写为完整 ID。
+4. 完整 ID、旧 32 位 ID 和设备名称都不作为物理 `_host` 的新调用输入；AI 不提交 uid。
+5. 后续 `SendToolRequest`、NATS 和 Pod 完全不接触短引用。
 
-#### 内部结果 → AI 上下文
+#### 内部结果与 AI 上下文
 
-内部执行结果可以继续保存：
+内部执行结果、历史消息和压缩摘要始终保留：
 
 ```text
-attrs.from = host/<36位完整ID>
 /fs/<36位完整ID>/native/path
 ```
 
-构造 LLM 上下文时统一投影为：
+`BuildRuntimeMessages` 原样投递，不做 Host ID 投影。`tool_result` 不携带 `from`；裸结果路径由原始工具调用的 `_host` 解释，构造文件链接时通过 `host_list` 把该短 `ref` 映射为完整 `id`。
 
-```text
-attrs.from = host/0007
-/fs/0007/native/path
-```
+#### AI 输出、持久化与恢复
 
-投影范围包括：
+AI 最终回复直接输出完整 `/fs` 链接；`sessionctx.finishAssistant` 不再扫描或改写 Host 引用，流式与终态内容使用同一格式。
 
-- host_list 与其他系统提醒；
-- fs / exec 工具描述和 schema 示例；
-- tool call 输入回放；
-- tool result 的 `attrs.from`、文件链接和错误文本中的结构化 Host 引用；
-- 历史 assistant / tool 消息及压缩摘要中的 `/fs` Host 段。
+工具首次预检会把短 `_host` 规范化为完整 ID 后持久化。审批或崩溃恢复使用 `RevalidateStoredToolTarget` 复核这个完整身份，不再按名称或短引用重新寻址，防止审批后 retarget。
 
-不能做全局四位数字字符串替换；只转换明确的 `_host`、`host/{id}`、`/fs/{id}/...` 等结构化位置，普通文本中的数字保持不变。
+这样保证：
 
-#### AI 输出 → 持久化与前端
-
-AI 最终回复中允许使用短链接：
-
-```text
-[report](/fs/0007/Users/veypi/report.md)
-```
-
-在消息持久化前，系统按**该消息所属 session 的 owner uid**解析为完整 36 位 Host ID并验证 Host 归属，再保存完整 `/fs` 链接。前端始终使用完整 ID 路由，不根据当前 viewer 猜短 ID 属于谁。
-
-这样同时保证：
-
-- AI 全程只看到 4 位；
-- 数据库存储和前端链接没有用户空间歧义；
-- 分享或跨账户查看消息时，仍指向原 session owner 的 Host，不会错误解析成 viewer 自己的 `0007`；
-- 无法解析的短 Host 引用明确报错，不留下不可路由的模糊链接。
+- AI 文件引用、数据库存储和前端链接格式一致；
+- 分享或跨账户查看消息时不存在短 ID 用户空间歧义；
+- 工具寻址仍保持简短，且执行前始终复核归属。
 
 #### 短 ID 不是权限边界
 
@@ -566,7 +543,7 @@ window.aicHost = {
 
 删除原草案中的 `auth_set_token`：网页不向宿主上传长期 token，宿主也不通过桥把 token 暴露给网页。
 
-文件接口不规定所有文件都转成 base64。小文件可直接返回内容；大文件使用原生文件引用、流式句柄或 `/fs/{host_id}` 引用，避免阻塞桥通道。真实路由使用 36 位完整 ID，AI 上下文统一投影为 `/fs/0001/...` 形式的 4 位短引用。
+文件接口不规定所有文件都转成 base64。小文件可直接返回内容；大文件使用原生文件引用、流式句柄或 `/fs/{host_id}` 引用，避免阻塞桥通道。真实路由与 AI 文件引用都使用 36 位完整 ID，不做短引用投影。
 
 ### 7.3 宿主 → 页面事件
 
@@ -680,7 +657,7 @@ aic-pod/client-bridge/l10n.json
 
 ## 十、安全边界
 
-1. 36 位完整 `host.id` 是 Host 的唯一身份；AI 的 4 位短引用必须按 session owner uid 还原；`device_uuid` 只用于创建前解析，不是秘密、不签发权限。
+1. 36 位完整 `host.id` 是 Host 的唯一身份；只有 fs/exec `_host` 的 4 位短引用按 session owner uid 还原，其他 AI 引用保持完整 ID；`device_uuid` 只用于创建前解析，不是秘密、不签发权限。
 2. Web access token 决定 ensure 和 session 连接的用户；Host 归属必须等于 token 用户。
 3. refresh token 永不进入 Web JS、Pod 配置明文、NATS、URL 或日志。
 4. ensure 只有显式 Bearer 才返回 protocol secret；Cookie-only 请求可以识别登录态，但不能取签名根。
@@ -723,14 +700,14 @@ aic-pod/client-bridge/l10n.json
 
 主要落点：
 
-- `aic/libs/host/resolve.go` / `target.go` / `hostlist.go`：4 位 AI 引用解析、Host 列表和错误候选。
+- `aic/libs/host/target.go` / `hostlist.go`：完整 ID + 短 `ref` Host 列表、`_host` 新调用解析与持久化目标复核。
 - `aic/libs/runtime` 与消息上下文装配：tool call、tool result、历史消息和 `/fs` 链接的双向 ID 投影。
 - `aic/ui/shared/client-host.js`：能力探测、`call` 封装、事件订阅和资源清理。
 - aic 认证适配：原生模式调用 `auth_refresh` / `auth_sign_out`，纯 Web 保持原路径。
 - vbase 只增加通用刷新与登出钩子，不 import 或硬编码 aic 产品桥。
 - 文件、分享、通知等能力按 `capabilities` 逐项接入。
 
-实施落点：`libs/host/projection.go` 统一结构化双向投影；`BuildHostListMD`、`ResolveToolTarget`、`BuildRuntimeMessages` 和 `sessionctx.finishAssistant` 只按 session owner 解析短引用，未知引用标错并阻止 tool dispatch。`ui/shared/client-host.js` 提供能力/方法白名单与事件清理；vbase 的通用 refresh/logout/login-redirect 钩子由 aic 适配，纯 Web 不变。会话附件接 `files_pick`，cloud/host 下载接 `files_save`（page OPFS 保留 Blob），消息成果接 `share`，复制按能力走原生或 Web。前端所有真实 `/fs` 入口只接受完整 36 位 Host ID。任务完成通知等待可靠终态事件与去重键，主题、语言、深链等仍属后续阶段。
+实施落点：`BuildHostListMD` 输出完整 `id` 与短 `ref`；`ResolveToolTarget` 只解析 fs/exec 新调用的 `_host`，`RevalidateStoredToolTarget` 复核审批恢复所用的完整目标；`BuildRuntimeMessages` 与 `sessionctx.finishAssistant` 不改写 Host 引用。`ui/shared/client-host.js` 提供能力/方法白名单与事件清理；vbase 的通用 refresh/logout/login-redirect 钩子由 aic 适配，纯 Web 不变。会话附件接 `files_pick`，cloud/host 下载接 `files_save`（page OPFS 保留 Blob），消息成果接 `share`，复制按能力走原生或 Web。前端所有真实 `/fs` 入口只接受完整 36 位 Host ID。任务完成通知等待可靠终态事件与去重键，主题、语言、深链等仍属后续阶段。
 
 ### 阶段 4：Desktop
 
@@ -812,11 +789,11 @@ aic-pod/client-bridge/l10n.json
 
 1. 同一用户创建 Host 得到 `<uid>0001`、`<uid>0002`，序号补零且不复用。
 2. 不同用户可以都有短 ID `0001`，完整 Host.ID 不同，互不影响。
-3. AI 的 host_list、工具输入、工具结果和压缩后历史只看到 4 位短 ID。
+3. AI 的 host_list 同时看到完整 `id` 与 4 位 `ref`；除 `_host` 外，工具结果、文件链接和压缩后历史都保留完整 ID。
 4. `_host=0001` 在当前 session owner 下还原为 36 位 ID；其他用户空间不能混用。
 5. Pod、NATS、K_tool、RTC 和静态凭证只收到 36 位完整 ID。
-6. AI 输出 `/fs/0001/...` 在持久化前扩展为完整链接；前端真实路由不依赖 viewer uid。
-7. 名称歧义、离线、未知 Host 等错误候选只向 AI 暴露 4 位 ID。
+6. AI 输出完整 `/fs/{host_id}/...`，持久化与流式内容不做文本展开；前端真实路由不依赖 viewer uid。
+7. 物理 `_host` 的名称、完整 ID、旧 32 位 ID 与未知短引用都被新调用校验拒绝；离线或禁用 Host 不可解析。
 8. 普通文本中的四位数字不被替换，旧 32 位 ID 不被接受。
 9. 并发创建序号不冲突，软删除后新建不复用旧序号。
 
