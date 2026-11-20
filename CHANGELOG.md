@@ -7,13 +7,21 @@
 
 ## 未发布
 
-- **原生登录窗重做（Desktop，2026-11-17）**：登录页改为独立小窗（400×690、居中、顶部对齐），不再塞进主窗口的平台视图；未登录与登出时主窗口隐藏，登录窗独占前台（不再出现「工作区还在 + 登录窗浮在上面」）。界面改为平铺：去掉外层卡片（无背景/边框/阴影），品牌与表单直接铺在窗口底色上、输入框改白底；切换密码/验证码/注册时品牌区不动（`justify-content:flex-start`），不再整页上下跳，表单高时仍可滚动但不显示滚动条。删除底部平台服务器地址；品牌区改用平台图标（`app://aic/assets/*` 新增资源目录）。三方登录按 `/api/oauth/providers/public` 渲染已启用提供商（本地图标微信/钉钉/飞书，其余用 Font Awesome 品牌字形，未知回退文字按钮），点击经 `/api/auth/authorize/thirdparty` 换授权地址，在主进程授权窗内完成 OAuth，回调后 `credentialsFromCookies` + `auth.adopt` 接管会话并激活 Host。另修主进程 `openAuthWindow` 里的语法错误（多余括号导致 Electron 启动即崩、设备掉线），并新增「桌面主进程与 preload 脚本语法可解析」用例外兜。测试：desktop 57 项全绿；渲染用 headless Chrome 实拍核对。
+## v0.11.0（2026-11-20）
+
+- **原生登录窗重做（Desktop，2026-11-17）**：登录页改为独立小窗（400×690、居中、顶部对齐），不再塞进主窗口的平台视图；未登录与登出时主窗口隐藏，登录窗独占前台（不再出现「工作区还在 + 登录窗浮在上面」）。界面改为平铺：去掉外层卡片（无背景/边框/阴影），品牌与表单直接铺在窗口底色上（底色对齐平台图标 #f1f8ff）、输入框改白底；标题与提示文案去重；切换密码/验证码/注册时品牌区不动（`justify-content:flex-start`），不再整页上下跳，表单高时仍可滚动但不显示滚动条。删除底部平台服务器地址；品牌区改用平台图标（`app://aic/assets/*` 新增资源目录）。三方登录按 `/api/oauth/providers/public` 渲染已启用提供商（本地图标微信/钉钉/飞书，其余用 Font Awesome 品牌字形，未知回退文字按钮），点击经 `/api/auth/authorize/thirdparty` 换授权地址，**在主窗口内以平台网页流程完成 OAuth（11-18 二次修订：不再单开授权窗）**，回调后 `credentialsFromCookies` + `auth.adopt` 接管会话并激活 Host。授权页加载失败不再白屏；登录失败按业务码显示本地化文案，不再冒 IPC 包装字符串。另修主进程 `openAuthWindow` 里的语法错误（多余括号导致 Electron 启动即崩、设备掉线），并新增「桌面主进程与 preload 脚本语法可解析」用例外兜。测试：desktop 60 项全绿；渲染用 headless Chrome 实拍核对。**桌面端需重新打包生效。**
 
 - **移动端壳收敛到 `aicHost`（阶段 5 第一版，2026-11-17）**：iOS 侧删除旧 `ShellBridge` 消息（`auth.token` / `auth.signedOut` / `page.error`）与壳内第二份文案表，`L10n.swift` 删除、文案改读 `client-bridge/l10n.json`（构建时打进 App 包）；新增 `IvecAI/Shared/AuthManager.swift`（原生认证管理器：access/refresh token 存 Keychain，刷新 singleflight，刷新后向 WebView 重新下发 cookie）、`AuthModels.swift`（凭据模型 + JWT / Set-Cookie 解析）、`AuthStore.swift`（按服务器隔离的登录档案）、`AicHostBridge.swift`（`window.aicHost` 实现：能力探测、`call` Promise 回执、`on/off` 事件）与 `AppCoordinator.swift`（桥方法接线）；工作区只留平台 origin，站外链接交给系统（原生桥只注入受信任 origin）。Android 侧新建 `mobile/android/`：同一套 `window.aicHost` 协议（`@JavascriptInterface` + `WebViewCompat.addDocumentStartJavaScript`）、Keystore(AES/GCM) 加密的登录档案、原生登录页与工作区 WebView 容器。能力面：当前只有 `auth` 与 `accountDelete` 为真，文件 / 分享 / 剪贴板 / 通知 / 外部链接 / 深链 / 主题 / 语言仍属阶段 6。验证：iOS 全量 `swiftc -typecheck` 通过、Xcode 模拟器构建通过（`l10n.json` 已打进 App 包）；**Android 未构建验证（本机无 SDK）**，协议同意页/设置页与验证码登录待补。
 
 - **Session Host 客户端与原生登录桥（Desktop，2026-11-17）**：新增 `protocol/host_id.go`（36 位 `host.id` = 32 位 owner uid + 4 位序号）与 `protocol/session_cred.go`（`s1.` session 凭证）；`cli/desktop-session` 以 stdout 专用换行 JSON RPC 与 Electron 主进程通信（token 只在主进程，秘密不进 argv/env/config）；`libs/host/session_config.go` 管本地 Host 档案与账户切换；`desktop/native-auth.cjs` + `native-app.cjs` 统一认证、ensure 与生命周期，`auth-store.cjs` 用 Electron `safeStorage` 按「服务器 + 账户」加密保存 token 与 Host 档案，刷新 singleflight；`desktop/remote-preload.js` 暴露统一 `window.aicHost`（普通网页不再获得任意 `local:api` 转发与 bind/unbind），原生 Session 下 Hosts 页隐藏手工绑定面板；`client-bridge/l10n.json` 成为文案单一真源；新增 `docs/development/client-bridge.md`（阶段 1-4 的统一设计）。测试：desktop node 49 项与 Go CLI 用例通过；**未做实机 Desktop 验收**，实际应用需重新构建 backend 并重启 Electron。
 
 - **MCP 命令调用面：标量映射 + stdin 取值 + 自助参数表**：设备侧 MCP 服务命令（`<alias> <tool>`）按工具 `inputSchema` 把标量属性（string/number/integer/boolean）映射为同名 flag，复杂对象/数组仍走 `--input`；新增 `--<flag> -` 从 stdin 读该参数的值（等号形式 `--flag=-` 为字面量），长文本（代码、配置、prompt）不再需要手拼 JSON 或嵌套 shell 转义；文本工具目录直接列出每个工具的 flag 名/类型/必填/枚举，非标量属性标注 `via --input`；参数面错误（类型错、enum 越界、缺必填）退 2 且自带可映射 flag 清单与候选值。**行为变更**：空格形式 `--flag -` 的字面量 "-" 语义改为读 stdin（取字面量用 `--flag=-`）；客户端在已取到 schema 时前置校验 required/enum（此前一律交给服务端）。落点：`libs/vtools/command.go`、`docs/reference/host-vtools.md`。测试：vtools 包全绿。**需升级设备 pod 生效。**
+
+- **iOS 三方登录与错误本地化（2026-11-17）**：iOS 壳补齐三方登录（品牌图标 + 应用内授权，`IvecAI` 内新增对应资源与 Provider 图标）；登录错误按业务码本地化，不再直接抛原始报文，底色对齐平台图标 `#f1f8ff`；回调页落在平台域名时不再过早接管会话（避免回调未落地就切走）；授权页加载失败不再白屏（Desktop 同源问题一并修）。验证：iOS 全量 `swiftc -typecheck` 与 Xcode 模拟器构建通过。**移动端不进本仓发行产物**（CI 矩阵只有 3 个 desktop + 3 个 cli），走 App Store/TestFlight 单独流程。
+
+- **品牌名统一为 ivec ai（2026-11-18）**：应用名（商店名 = 备案名 = 软著名锚）从 `ivec AI` 改为 `ivec ai`，与官网/网页显示的 `ivec.ai` 区分开（品牌与域名走 `ivec.ai`，应用名走小写 ai）；包名 `com.ivec.ai` 不变。涉及 iOS `AppConfig`、HarmonyOS 前置说明、`APPSTORE` 上架清单（App Store Connect 占名）、签名脚本输出与 `signing.env` 示例。**不进本仓发行产物**（同上一条）。
+
+- **平台版本门禁下限对齐 v0.11.0（2026-11-20）**：aic v0.18.3 把 `cfg.MinPodVersion` 提到 v0.11.0——低于此版的 pod 会被平台版本门禁拒绝连接（`client version … is below the minimum supported …`）。本版（v0.11.0）是接入 Session Host（36 位 `host.id` + `s1.` CONNECT envelope）与客户端宿主桥的最低要求。**设备端 pod 需升级到本版并重启。**
 
 ## v0.10.7 — 2026-11-13
 
