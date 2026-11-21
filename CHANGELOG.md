@@ -7,6 +7,10 @@
 
 ## 未发布
 
+## v0.11.2（2026-11-21）
+
+- **Windows 桌面包打包再修（CI）**：v0.11.1 的 `desktop-windows-amd64` 仍失败（Release job 再次跳过，v0.11.1 同样零产物）。v0.11.1 修好了 `sync-cua.mjs`（日志已出现 `→ vendor\cua\win32 (cua-driver.exe)`），但**同款问题还在 `sync-browser.mjs`**：它同样用 `powershell Expand-Archive` 解压 Chrome for Testing 的 zip → 解压中断 → 上层报的是 `ENOENT ... extracted\chrome-win64`（看着像目录不存在，实为解压半途失败）→ before-pack 钩子抛错、整包中止。现抽出共享模块 `desktop/scripts/extract-archive.mjs`（Windows 走系统 bsdtar `%SystemRoot%\System32\tar.exe`，其余平台 unzip / tar），`sync-cua.mjs` 与 `sync-browser.mjs` 共用；全仓已无 Expand-Archive / powershell 调用。
+
 ## v0.11.1（2026-11-20）
 
 - **Windows 桌面包打包修复（CI）**：v0.11.0 的 CI 在 Windows runner 上失败（`desktop-windows-amd64` → 连带 `GitHub Release` job 跳过，v0.11.0 **未产出任何发行产物**）。根因是 runner 环境漂移，不是代码逻辑：`desktop/scripts/sync-cua.mjs` 用 `powershell Expand-Archive` 解压上游 cua-driver 的 zip，而当前 runner 的 Microsoft.PowerShell.Archive 模块里 `ExtractToDirectory` 没有 3 参数重载（5.1 与 7 不兼容），解压半途失败 → 找不到 `cua-driver.exe` → 打包中止。现改为用系统自带 bsdtar（`%SystemRoot%\System32\tar.exe`，Win10+ 内置、支持 zip）解压，复制改用 Node 的 `fs.cpSync`，Windows 分支不再依赖 PowerShell。另修 `Makefile` 的 `skill-bin-%` 打包：GNU tar 把 Windows 盘符路径（`D:\…`）当远程主机（`Cannot connect to D: resolve failed`），改为在 `dist/` 内用相对路径打包。
@@ -27,7 +31,7 @@
 
 - **平台版本门禁下限对齐 v0.11.0（2026-11-20）**：aic v0.18.3 把 `cfg.MinPodVersion` 提到 v0.11.0——低于此版的 pod 会被平台版本门禁拒绝连接（`client version … is below the minimum supported …`）。本版（v0.11.0）是接入 Session Host（36 位 `host.id` + `s1.` CONNECT envelope）与客户端宿主桥的最低要求。**设备端 pod 需升级到本版并重启。**
 
-> 注：v0.11.0 的 CI 在 Windows runner 上打包失败（环境漂移，详见 v0.11.1），未产出任何发行产物；实际发行以 v0.11.1 为准。
+> 注：v0.11.0 与 v0.11.1 的 CI 均在 Windows runner 上打包失败（同一环境漂移下的两处 PowerShell 解压，详见 v0.11.1 与 v0.11.2），两版都未产出任何发行产物；实际发行以 v0.11.2 为准。
 
 ## v0.10.7 — 2026-11-13
 

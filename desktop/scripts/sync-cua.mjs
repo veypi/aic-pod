@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { extractTarGz, extractZip } from "./extract-archive.mjs";
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cfg = JSON.parse(fs.readFileSync(path.join(desktopDir, "cua.json"), "utf8"));
@@ -68,24 +69,9 @@ try {
   const extractDir = path.join(tmp, "x");
   fs.mkdirSync(extractDir);
   if (asset.file.endsWith(".zip")) {
-    if (process.platform === "win32") {
-      // Windows runner 的 PowerShell Expand-Archive 依赖 Microsoft.PowerShell.Archive
-      // 模块版本（ExtractToDirectory 的 2/3 参数重载在 5.1 与 7 之间不兼容，会抛
-      // "Cannot find an overload for ExtractToDirectory"），换用系统自带 bsdtar
-      // （Win10+ 内置，支持 zip）——彻底不依赖 PowerShell。
-      const sysTar = process.env.SystemRoot
-        ? path.join(process.env.SystemRoot, "System32", "tar.exe")
-        : "";
-      if (!sysTar || !fs.existsSync(sysTar)) {
-        console.error("[sync-cua] 找不到系统 bsdtar（%SystemRoot%\\System32\\tar.exe）");
-        process.exit(1);
-      }
-      execFileSync(sysTar, ["-xf", archive, "-C", extractDir], { stdio: "inherit" });
-    } else {
-      execFileSync("unzip", ["-q", archive, "-d", extractDir], { stdio: "inherit" });
-    }
+    extractZip(archive, extractDir);
   } else {
-    execFileSync("tar", ["-xzf", archive, "-C", extractDir], { stdio: "inherit" });
+    extractTarGz(archive, extractDir);
   }
 
   const payloadRoot = findPayloadRoot(extractDir, asset.payload);

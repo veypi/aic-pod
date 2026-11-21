@@ -12,6 +12,7 @@ import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import runtimePaths from '../runtime-paths.cjs'
+import { extractZip } from './extract-archive.mjs'
 
 const desktopDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -73,14 +74,9 @@ export async function syncBrowser({ platform = process.platform, arch = process.
     if (await sha256(archive) !== asset.sha256) throw new Error(`Chrome SHA-256 mismatch for ${key}`)
     const extracted = path.join(temporary, 'extracted')
     fs.mkdirSync(extracted)
-    if (process.platform === 'win32') {
-      // Paths travel through env, never interpolated into PowerShell code.
-      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-        'Expand-Archive -LiteralPath $env:AIC_CHROME_ARCHIVE -DestinationPath $env:AIC_CHROME_EXTRACT -Force'],
-        { stdio: 'inherit', env: { ...process.env, AIC_CHROME_ARCHIVE: path.resolve(archive), AIC_CHROME_EXTRACT: extracted } })
-    } else {
-      execFileSync('unzip', ['-q', path.resolve(archive), '-d', extracted], { stdio: 'inherit' })
-    }
+    // Windows runner 的 PowerShell Expand-Archive 依赖模块版本（见 extract-archive.mjs），
+    // 统一改用系统 bsdtar 解压。
+    extractZip(path.resolve(archive), extracted)
     const payload = path.join(extracted, `chrome-${asset.platform}`)
     fs.cpSync(payload, path.join(prepared, key), { recursive: true, verbatimSymlinks: true })
     fs.writeFileSync(path.join(prepared, key, '.aic-browser.json'), JSON.stringify({
