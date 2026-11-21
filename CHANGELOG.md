@@ -7,14 +7,6 @@
 
 ## 未发布
 
-## v0.11.2（2026-11-21）
-
-- **Windows 桌面包打包再修（CI）**：v0.11.1 的 `desktop-windows-amd64` 仍失败（Release job 再次跳过，v0.11.1 同样零产物）。v0.11.1 修好了 `sync-cua.mjs`（日志已出现 `→ vendor\cua\win32 (cua-driver.exe)`），但**同款问题还在 `sync-browser.mjs`**：它同样用 `powershell Expand-Archive` 解压 Chrome for Testing 的 zip → 解压中断 → 上层报的是 `ENOENT ... extracted\chrome-win64`（看着像目录不存在，实为解压半途失败）→ before-pack 钩子抛错、整包中止。现抽出共享模块 `desktop/scripts/extract-archive.mjs`（Windows 走系统 bsdtar `%SystemRoot%\System32\tar.exe`，其余平台 unzip / tar），`sync-cua.mjs` 与 `sync-browser.mjs` 共用；全仓已无 Expand-Archive / powershell 调用。
-
-## v0.11.1（2026-11-20）
-
-- **Windows 桌面包打包修复（CI）**：v0.11.0 的 CI 在 Windows runner 上失败（`desktop-windows-amd64` → 连带 `GitHub Release` job 跳过，v0.11.0 **未产出任何发行产物**）。根因是 runner 环境漂移，不是代码逻辑：`desktop/scripts/sync-cua.mjs` 用 `powershell Expand-Archive` 解压上游 cua-driver 的 zip，而当前 runner 的 Microsoft.PowerShell.Archive 模块里 `ExtractToDirectory` 没有 3 参数重载（5.1 与 7 不兼容），解压半途失败 → 找不到 `cua-driver.exe` → 打包中止。现改为用系统自带 bsdtar（`%SystemRoot%\System32\tar.exe`，Win10+ 内置、支持 zip）解压，复制改用 Node 的 `fs.cpSync`，Windows 分支不再依赖 PowerShell。另修 `Makefile` 的 `skill-bin-%` 打包：GNU tar 把 Windows 盘符路径（`D:\…`）当远程主机（`Cannot connect to D: resolve failed`），改为在 `dist/` 内用相对路径打包。
-
 ## v0.11.0（2026-11-20）
 
 - **原生登录窗重做（Desktop，2026-11-17）**：登录页改为独立小窗（400×690、居中、顶部对齐），不再塞进主窗口的平台视图；未登录与登出时主窗口隐藏，登录窗独占前台（不再出现「工作区还在 + 登录窗浮在上面」）。界面改为平铺：去掉外层卡片（无背景/边框/阴影），品牌与表单直接铺在窗口底色上（底色对齐平台图标 #f1f8ff）、输入框改白底；标题与提示文案去重；切换密码/验证码/注册时品牌区不动（`justify-content:flex-start`），不再整页上下跳，表单高时仍可滚动但不显示滚动条。删除底部平台服务器地址；品牌区改用平台图标（`app://aic/assets/*` 新增资源目录）。三方登录按 `/api/oauth/providers/public` 渲染已启用提供商（本地图标微信/钉钉/飞书，其余用 Font Awesome 品牌字形，未知回退文字按钮），点击经 `/api/auth/authorize/thirdparty` 换授权地址，**在主窗口内以平台网页流程完成 OAuth（11-18 二次修订：不再单开授权窗）**，回调后 `credentialsFromCookies` + `auth.adopt` 接管会话并激活 Host。授权页加载失败不再白屏；登录失败按业务码显示本地化文案，不再冒 IPC 包装字符串。另修主进程 `openAuthWindow` 里的语法错误（多余括号导致 Electron 启动即崩、设备掉线），并新增「桌面主进程与 preload 脚本语法可解析」用例外兜。测试：desktop 60 项全绿；渲染用 headless Chrome 实拍核对。**桌面端需重新打包生效。**
@@ -31,7 +23,9 @@
 
 - **平台版本门禁下限对齐 v0.11.0（2026-11-20）**：aic v0.18.3 把 `cfg.MinPodVersion` 提到 v0.11.0——低于此版的 pod 会被平台版本门禁拒绝连接（`client version … is below the minimum supported …`）。本版（v0.11.0）是接入 Session Host（36 位 `host.id` + `s1.` CONNECT envelope）与客户端宿主桥的最低要求。**设备端 pod 需升级到本版并重启。**
 
-> 注：v0.11.0 与 v0.11.1 的 CI 均在 Windows runner 上打包失败（同一环境漂移下的两处 PowerShell 解压，详见 v0.11.1 与 v0.11.2），两版都未产出任何发行产物；实际发行以 v0.11.2 为准。
+- **Windows 桌面包打包修复（CI）**：v0.11.0 的 CI 在 Windows runner 上失败（`desktop-windows-amd64` → 连带 `GitHub Release` job 跳过，**零产物**）。根因是 runner 环境漂移，不是代码逻辑：仓库里有**两处**用 `powershell Expand-Archive` 解压上游归档——`desktop/scripts/sync-cua.mjs`（上游 cua-driver zip）与 `desktop/scripts/sync-browser.mjs`（Chrome for Testing zip）；当前 runner 的 Microsoft.PowerShell.Archive 模块没有 `ExtractToDirectory` 的 3 参数重载（5.1 与 7 不兼容），解压中断后上层报的是 `ENOENT ... extracted\chrome-win64`（看着像目录不存在，实为解压半途失败）→ before-pack 钩子抛错、整包中止。现抽出共享模块 `desktop/scripts/extract-archive.mjs`（Windows 走系统 bsdtar `%SystemRoot%\System32\tar.exe`，其余平台 unzip / tar），两个脚本共用；复制改用 Node 的 `fs.cpSync`；全仓已无 Expand-Archive / powershell 调用。另修 `Makefile` 的 `skill-bin-%` 打包：GNU tar 把 Windows 盘符路径（`D:\…`）当远程主机（`Cannot connect to D: resolve failed`），改为在 `dist/` 内用相对路径打包。
+
+- **发布流程：build.yml 支持手动指定版本（workflow_dispatch）**：以前只有推 tag 才会构建并发布 Release，tag 一推上去就“用掉”——CI 环境出问题时只能再吃一个补丁版本号。现 `workflow_dispatch` 增加 `version`（必填）与 `notarize`（可选）两个输入：手动触发时用输入的版本号作为构建版本与 Release tag（tag 不存在则以本次构建提交创建），Release job 不再绑死在 tag 触发；macOS 公证在手动触发时由 `notarize` 开关决定（tag 触发仍始终公证）。这样可以先手动跑一次验证各平台打包，绿了再定版号。
 
 ## v0.10.7 — 2026-11-13
 
