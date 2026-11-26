@@ -14,6 +14,8 @@ import Foundation
 enum AuthError: LocalizedError {
     case notSignedIn
     case missingCredentials
+    case insecureCredentials
+    case emptyCredentials
     case invalidToken
     case accountMismatch
     case badResponse
@@ -40,6 +42,8 @@ enum AuthError: LocalizedError {
         switch self {
         case .notSignedIn: return "未登录，无法执行该操作。"
         case .missingCredentials: return "登录响应缺少 HttpOnly 会话凭证。"
+        case .insecureCredentials: return "登录响应的会话 Cookie 不是 HttpOnly。"
+        case .emptyCredentials: return "登录响应的会话 Cookie 为空。"
         case .invalidToken: return "登录响应不是动态 Web access token。"
         case .accountMismatch: return "登录用户与访问凭证不一致。"
         case .badResponse: return "服务返回了无法识别的响应。"
@@ -144,11 +148,11 @@ final class AuthManager: ObservableObject {
     func restore() {
         guard let archive = AuthStore.load(server: server),
               let account = archive.accounts[archive.currentUID] else {
-            NSLog("[aic] restore: no stored credentials for %@", server.absoluteString)
+            AicLog.debug("restore: no stored credentials for \(server.absoluteString)")
             return
         }
         credentials = account.credentials
-        NSLog("[aic] restore: signed in as %@", account.credentials.user.id)
+        AicLog.debug("restore: signed in as \(account.credentials.user.id)")
         publish(state: AuthState(signedIn: true, user: account.credentials.user, expiresAt: account.credentials.expiresAt))
         publishCookies(cookies(for: account.credentials))
     }
@@ -244,7 +248,9 @@ final class AuthManager: ObservableObject {
                 var archive = AuthStore.load(server: self.server) ?? AuthArchive()
                 archive.accounts[next.user.id] = AuthArchive.Account(credentials: next)
                 archive.currentUID = next.user.id
-                try? AuthStore.save(archive, server: self.server)
+                // 存不进去就直接失败：静默丢掉的话，刷新出来的凭据只活在内存里，
+                // 冷启动又变回未登录——正是这次要修的症状。
+                try AuthStore.save(archive, server: self.server)
                 self.credentials = next
                 self.publish(state: AuthState(signedIn: true, user: next.user, expiresAt: next.expiresAt))
                 self.publishCookies(self.cookies(for: next))
@@ -302,9 +308,9 @@ final class AuthManager: ObservableObject {
     // MARK: - 内部
 
     private func authenticate(path: String, body: [String: String]) async throws {
-        NSLog("[aic] login: POST %@ server=%@", path, server.absoluteString)
+        AicLog.debug("login: POST \(path) server=\(server.absoluteString)")
         let response = try await transport.request(server: server, path: path, method: "POST", body: body, headers: [:])
-        NSLog("[aic] login: response status=%ld", response.response.statusCode)
+        AicLog.debug("login: response status=\(response.response.statusCode)")
         let next = try AuthManager.credentials(from: response, now: Date())
         var archive = AuthStore.load(server: server) ?? AuthArchive()
         let uid = next.user.id
@@ -315,7 +321,7 @@ final class AuthManager: ObservableObject {
         archive.currentUID = uid
         // 存不进去就直接失败：静默丢掉的话，界面会停在登录页而没有任何提示。
         try AuthStore.save(archive, server: server)
-        NSLog("[aic] login: credentials persisted, uid=%@", uid)
+        AicLog.debug("login: credentials persisted, uid=\(uid)")
         credentials = next
         publish(state: AuthState(signedIn: true, user: next.user, expiresAt: next.expiresAt))
         publishCookies(cookies(for: next))
@@ -334,7 +340,7 @@ final class AuthManager: ObservableObject {
     }
 
     private func publish(state: AuthState) {
-        NSLog("[aic] auth state -> signedIn=%@", state.signedIn ? "true" : "false")
+        AicLog.debug("auth state -> signedIn=\(state.signedIn)")
         self.state = state
         onStateChange?(state)
     }
@@ -362,47 +368,42 @@ final class AuthManager: ObservableObject {
     /// 从登录 / 刷新响应里取凭据：只认 HttpOnly 的 access + refresh cookie。
     static func credentials(from response: AuthTransport.Response, now: Date) throws -> AuthCredentials {
         let cookies = SetCookie.cookies(from: response.response)
-        NSLog("[aic] credentials: cookies = %@",
-              cookies.map { "\($0.name)(httpOnly=\($0.httpOnly),path=\($0.path))" }.joined(separator: " | "))
+        AicLog.debug("credentials: cookies = \(cookies.map { "\($0.name)(httpOnly=\($0.httpOnly),path=\($0.path))" }.joined(separator: " | "))")
         let access = cookies.first { $0.name.lowercased().hasSuffix("access") }
             ?? cookies.first { JWT.type($0.value) == "access" }
         let refresh = cookies.first { $0.name.lowercased().hasSuffix("refresh") }
             ?? cookies.first { JWT.type($0.value) == "refresh" }
         guard let access, let refresh else {
-            NSLog("[aic] credentials: access/refresh cookie missing")
+            AicLog.debug("credentials: access/refresh cookie missing")
             throw AuthError.missingCredentials
         }
         guard access.httpOnly, refresh.httpOnly else {
-            NSLog("[aic] credentials: cookie not httpOnly (access=%@, refresh=%@)",
-                  access.httpOnly ? "true" : "false", refresh.httpOnly ? "true" : "false")
-            throw AuthError.missingCredentials
+            AicLog.debug("credentials: cookie not httpOnly (access=\(access.httpOnly), refresh=\(refresh.httpOnly))")
+            throw AuthError.insecureCredentials
         }
         guard !access.value.isEmpty, !refresh.value.isEmpty else {
-            NSLog("[aic] credentials: empty cookie value")
-            throw AuthError.missingCredentials
+            AicLog.debug("credentials: empty cookie value")
+            throw AuthError.emptyCredentials
         }
         let payload = JWT.payload(access.value)
-        NSLog("[aic] credentials: access claims type=%@ mod=%@ uid=%@",
-              payload?["type"] as? String ?? "nil",
-              payload?["mod"] as? String ?? "nil",
-              (payload?["uid"] as? String) ?? (payload?["sub"] as? String) ?? "nil")
+        AicLog.debug("credentials: access claims type=\(payload?["type"] as? String ?? "nil") mod=\(payload?["mod"] as? String ?? "nil") uid=\((payload?["uid"] as? String) ?? (payload?["sub"] as? String) ?? "nil")")
         guard payload?["type"] as? String == "access", payload?["mod"] as? String == "inherit" else {
-            NSLog("[aic] credentials: access token claim mismatch")
+            AicLog.debug("credentials: access token claim mismatch")
             throw AuthError.invalidToken
         }
         guard let uid = JWT.uid(access.value) else {
-            NSLog("[aic] credentials: uid missing or not 32-hex")
+            AicLog.debug("credentials: uid missing or not 32-hex")
             throw AuthError.invalidToken
         }
         let refreshPayload = JWT.payload(refresh.value)
         guard refreshPayload?["type"] as? String == "refresh", JWT.uid(refresh.value) == uid else {
-            NSLog("[aic] credentials: refresh token claim mismatch")
+            AicLog.debug("credentials: refresh token claim mismatch")
             throw AuthError.accountMismatch
         }
         let body = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any]
         let info = body?["user"] as? [String: Any] ?? [:]
         if let bodyID = info["id"] as? String, bodyID != uid {
-            NSLog("[aic] credentials: user id mismatch (body=%@, token=%@)", bodyID, uid)
+            AicLog.debug("credentials: user id mismatch (body=\(bodyID), token=\(uid))")
             throw AuthError.accountMismatch
         }
         let user = AuthUser(

@@ -134,7 +134,7 @@ final class AicHostBridge: NSObject, WKScriptMessageHandler {
     private func evaluate(_ script: String) {
         webView?.evaluateJavaScript(script) { _, error in
             if let error {
-                NSLog("aicHost evaluate failed: %@", String(describing: error))
+                AicLog.debug("aicHost evaluate failed: \(String(describing: error))")
             }
         }
     }

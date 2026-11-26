@@ -59,15 +59,13 @@ struct RootView: View {
             consented = config.consent != nil
         }
         .onChange(of: auth.isSignedIn) { _, signedIn in
-            NSLog("[aic] rootview isSignedIn -> %@ (requiresNativeLogin=%@)",
-                  signedIn ? "true" : "false",
-                  coordinator.requiresNativeLogin ? "true" : "false")
+            AicLog.debug("rootview isSignedIn -> \(signedIn) (requiresNativeLogin=\(coordinator.requiresNativeLogin))")
             if signedIn {
                 coordinator.didSignIn()
             }
         }
         .onChange(of: coordinator.requiresNativeLogin) { _, required in
-            NSLog("[aic] rootview requiresNativeLogin -> %@", required ? "true" : "false")
+            AicLog.debug("rootview requiresNativeLogin -> \(required)")
         }
     }
 }

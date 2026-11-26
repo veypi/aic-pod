@@ -33,7 +33,7 @@ enum AuthStore {
         do {
             raw = try KeychainStore.get(key(for: server))
         } catch {
-            NSLog("[aic] auth archive load failed: %@", String(describing: error))
+            AicLog.debug("auth archive load failed: \(String(describing: error))")
             return nil
         }
         guard let raw, let data = raw.data(using: .utf8),

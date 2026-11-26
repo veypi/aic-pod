@@ -7,6 +7,14 @@
 
 ## 未发布
 
+- **iOS 登录态：Keychain 失败不再静默，调试日志不进生产包（2026-11-27）**：三处收口。
+
+  1. **刷新出的凭据存不进 Keychain 时不再静默**：`AuthManager.refresh` 用 `try?` 保存刷新结果——写失败时新凭据只活在内存里，界面照常显示已登录，冷启动又变回未登录，正是本次要修的症状。改为 `try`：写不进去直接失败（与登录路径一致），不再假装成功。
+  2. **登录链路的调试日志收进 `AicLog.debug`**：此前直接 `NSLog` 打 server 地址、uid、cookie 名与 HttpOnly 标志——凭据值不进日志，但 iOS 设备日志可被任意进程经 sysdiagnose 读取，这些标识不该进生产包。新增 `Shared/AicLog.swift`（`#if DEBUG` 才输出，Release 下消息不求值），登录/刷新/凭据解析/Keychain/桥接/根视图共 25 处调用改走它；`mobile/ios/IvecAI.xcodeproj/project.pbxproj` 由 `scripts/gen-project.py` 重新生成（脚本按目录递归收集源文件，新文件自动纳入）。
+  3. **凭据缺失的三种原因拆成三种错误**：cookie 缺失 / cookie 不是 HttpOnly / cookie 值为空原来都报 `missingCredentials`（同一句文案），排查时分不出是哪一种——新增 `insecureCredentials` 与 `emptyCredentials` 两种错误与对应文案。
+
+  另外：`keychain-access-groups` 声明（`IvecAI/IvecAI.entitlements`）从「只在 Debug 配」挪到 Debug 与 Release 共用的 target 配置——模拟器走 ad-hoc 签名（`CODE_SIGN_IDENTITY="-"`）、真机走正式签名，两种签名方式都得声明访问组，否则 `SecItem*` 一律 -34018（errSecMissingEntitlement），登录态存不住。验证：`xcrun swiftc -typecheck`（iOS 模拟器 SDK，全量源文件）无错误无告警。
+
 - **会话语义订正为 conversation（2026-11-25）**：平台侧会话模型已统一为 Conversation/Item——**会话 id 的值不变**，只是语义名从 session 换成 conversation。本仓同步口径：①`protocol/rtc_ticket.go` 注明票据里的 `session_id` **JSON 键名保持不变**（它是签名载荷的一部分，改键名会让在途票据与历史签名向量失效），只更新语义注释；②票据校验失败的文案由 `Invalid session identity` 改为 `Invalid conversation identity`；③`docs/reference/hosts-tools.md` 补 page 通道的载荷字段 `conversation_id` / `owner_conversation_id`，`docs/reference/host-sandbox.md` 与 `libs/execution/tasks.go` 的会话归属表述同步。**工具请求协议零变化**（`protocol/tool.go` 不含任何会话字段），平台版本闸 `MinPodVersion` 维持 v0.11.0 不变，设备端无需为本次改动升级。
 
 ## v0.11.0（2026-11-20）

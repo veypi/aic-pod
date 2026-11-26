@@ -289,11 +289,15 @@ class Project:
             ("PRODUCT_NAME", '"$(TARGET_NAME)"'),
             ("SWIFT_EMIT_LOC_STRINGS", "YES"),
             ("TARGETED_DEVICE_FAMILY", '"1,2"'),
+            # keychain-access-groups：没有它，SecItem* 一律 -34018
+            # （errSecMissingEntitlement），登录态存不住。Debug 与 Release 都要带：
+            # 模拟器走 ad-hoc 签名（CODE_SIGN_IDENTITY="-"），真机走正式签名，
+            # 两种签名方式都得声明访问组。
+            ("CODE_SIGN_ENTITLEMENTS", "IvecAI/IvecAI.entitlements"),
         ]
         target_debug = target_common + [
             # 模拟器构建必须签名：不签名就没有 keychain-access-groups，
             # SecItem* 一律 -34018（errSecMissingEntitlement），登录态存不住。
-            ("CODE_SIGN_ENTITLEMENTS", "IvecAI/IvecAI.entitlements"),
             ("CODE_SIGNING_ALLOWED", "YES"),
             ("CODE_SIGNING_REQUIRED", "NO"),
             ("CODE_SIGN_IDENTITY", '"-"'),

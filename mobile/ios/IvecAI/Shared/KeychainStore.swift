@@ -43,7 +43,7 @@ enum KeychainStore {
         ]
         let deleted = SecItemDelete(query as CFDictionary)
         guard deleted == errSecSuccess || deleted == errSecItemNotFound else {
-            NSLog("[aic] keychain delete(%@) failed: %d", account, deleted)
+            AicLog.debug("keychain delete(\(account)) failed: \(deleted)")
             throw KeychainError.status(deleted, operation: "delete")
         }
 
@@ -52,7 +52,7 @@ enum KeychainStore {
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         let added = SecItemAdd(attributes as CFDictionary, nil)
         guard added == errSecSuccess else {
-            NSLog("[aic] keychain add(%@) failed: %d", account, added)
+            AicLog.debug("keychain add(\(account)) failed: \(added)")
             throw KeychainError.status(added, operation: "add")
         }
     }
@@ -70,7 +70,7 @@ enum KeychainStore {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else {
-            NSLog("[aic] keychain read(%@) failed: %d", account, status)
+            AicLog.debug("keychain read(\(account)) failed: \(status)")
             throw KeychainError.status(status, operation: "read")
         }
         guard let data = item as? Data else { return nil }
@@ -86,7 +86,7 @@ enum KeychainStore {
         ]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            NSLog("[aic] keychain remove(%@) failed: %d", account, status)
+            AicLog.debug("keychain remove(\(account)) failed: \(status)")
             throw KeychainError.status(status, operation: "remove")
         }
     }
