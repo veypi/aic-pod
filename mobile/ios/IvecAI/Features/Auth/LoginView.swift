@@ -347,13 +347,21 @@ struct LoginView: View {
         Button {
             submit()
         } label: {
-            Text(isRegister ? config.t("login.register") : config.t("login.submit"))
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(canSubmit ? Brand.ink : Color.black.opacity(0.25))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            HStack(spacing: 8) {
+                if isBusy {
+                    // 有明确的进度反馈：否则网络慢时按钮只是变灰，看着像"点了没反应"。
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                }
+                Text(isRegister ? config.t("login.register") : config.t("login.submit"))
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .foregroundStyle(Color.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background(canSubmit ? Brand.ink : Color.black.opacity(0.25))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!canSubmit || isBusy)

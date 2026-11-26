@@ -7,6 +7,8 @@
 
 ## 未发布
 
+- **会话语义订正为 conversation（2026-11-25）**：平台侧会话模型已统一为 Conversation/Item——**会话 id 的值不变**，只是语义名从 session 换成 conversation。本仓同步口径：①`protocol/rtc_ticket.go` 注明票据里的 `session_id` **JSON 键名保持不变**（它是签名载荷的一部分，改键名会让在途票据与历史签名向量失效），只更新语义注释；②票据校验失败的文案由 `Invalid session identity` 改为 `Invalid conversation identity`；③`docs/reference/hosts-tools.md` 补 page 通道的载荷字段 `conversation_id` / `owner_conversation_id`，`docs/reference/host-sandbox.md` 与 `libs/execution/tasks.go` 的会话归属表述同步。**工具请求协议零变化**（`protocol/tool.go` 不含任何会话字段），平台版本闸 `MinPodVersion` 维持 v0.11.0 不变，设备端无需为本次改动升级。
+
 ## v0.11.0（2026-11-20）
 
 - **原生登录窗重做（Desktop，2026-11-17）**：登录页改为独立小窗（400×690、居中、顶部对齐），不再塞进主窗口的平台视图；未登录与登出时主窗口隐藏，登录窗独占前台（不再出现「工作区还在 + 登录窗浮在上面」）。界面改为平铺：去掉外层卡片（无背景/边框/阴影），品牌与表单直接铺在窗口底色上（底色对齐平台图标 #f1f8ff）、输入框改白底；标题与提示文案去重；切换密码/验证码/注册时品牌区不动（`justify-content:flex-start`），不再整页上下跳，表单高时仍可滚动但不显示滚动条。删除底部平台服务器地址；品牌区改用平台图标（`app://aic/assets/*` 新增资源目录）。三方登录按 `/api/oauth/providers/public` 渲染已启用提供商（本地图标微信/钉钉/飞书，其余用 Font Awesome 品牌字形，未知回退文字按钮），点击经 `/api/auth/authorize/thirdparty` 换授权地址，**在主窗口内以平台网页流程完成 OAuth（11-18 二次修订：不再单开授权窗）**，回调后 `credentialsFromCookies` + `auth.adopt` 接管会话并激活 Host。授权页加载失败不再白屏；登录失败按业务码显示本地化文案，不再冒 IPC 包装字符串。另修主进程 `openAuthWindow` 里的语法错误（多余括号导致 Electron 启动即崩、设备掉线），并新增「桌面主进程与 preload 脚本语法可解析」用例外兜。测试：desktop 60 项全绿；渲染用 headless Chrome 实拍核对。**桌面端需重新打包生效。**

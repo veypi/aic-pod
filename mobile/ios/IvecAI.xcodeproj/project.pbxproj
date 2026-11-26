@@ -24,6 +24,7 @@
 		2A9585CCD53F299A2F9A652F /* WorkspaceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WorkspaceViewModel.swift"; sourceTree = "<group>"; };
 		8F5CF58DA6BAE1B8F5F319AD /* Workspace */ = {isa = PBXGroup; children = (02AAE21523F4F24847C95377, 8F791941D42484CEEC18014C, 2A9585CCD53F299A2F9A652F); path = "Workspace"; sourceTree = "<group>"; };
 		35A581C1AF6FB3EE2AD14A15 /* Features */ = {isa = PBXGroup; children = (12C050036FD6AC184EE7528F, 3CBB5835C2A87928B05D9ADD, 2A8FC22B7B5CC8926D3C2FC8, 8F5CF58DA6BAE1B8F5F319AD); path = "Features"; sourceTree = "<group>"; };
+		58634AE28544A1F1C2CF8607 /* IvecAI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "IvecAI.entitlements"; sourceTree = "<group>"; };
 		24EFD06A904C7FD8B3B167B6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets.xcassets"; sourceTree = "<group>"; };
 		112FBCD07ADB2C10EA477853 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info.plist"; sourceTree = "<group>"; };
 		F60E6EEE5308948CBAAA4132 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.privacy; path = "PrivacyInfo.xcprivacy"; sourceTree = "<group>"; };
@@ -41,7 +42,7 @@
 		61428B234454AE8ACFD47C98 /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServerConfig.swift"; sourceTree = "<group>"; };
 		63507713FCE55D6D5944E352 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Theme.swift"; sourceTree = "<group>"; };
 		256446C20F794E189DC214C9 /* Shared */ = {isa = PBXGroup; children = (1521E4B4DC60E310A4519584, 5FABD9F9B2700971B096D9F8, E1D08E93221D0A5CD3DBC0E3, D667D0B7B88D676DF883191C, F4E45DA15860BD05CBC4A5EC, 9A913BE7E5DD49FF98C51F08, 24C3707E4A779886B66484C5, 1BC32113E4BB9BB42CD06A93, F067E3658F0C60E0F7276C0C, 61428B234454AE8ACFD47C98, 63507713FCE55D6D5944E352); path = "Shared"; sourceTree = "<group>"; };
-		449E49869BB17B4E46B52804 /* IvecAI */ = {isa = PBXGroup; children = (D70FC64D0318258C67B3D639, 35A581C1AF6FB3EE2AD14A15, 0E41B7BA11DD61F4FC9F68D2, 256446C20F794E189DC214C9); path = "IvecAI"; sourceTree = "<group>"; };
+		449E49869BB17B4E46B52804 /* IvecAI */ = {isa = PBXGroup; children = (D70FC64D0318258C67B3D639, 35A581C1AF6FB3EE2AD14A15, 58634AE28544A1F1C2CF8607, 0E41B7BA11DD61F4FC9F68D2, 256446C20F794E189DC214C9); path = "IvecAI"; sourceTree = "<group>"; };
 		D452FEA2BBE00326C4B6DC8E /* IvecAI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IvecAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		361FF3508AF23F4E0CB329EA = {isa = PBXGroup; children = (449E49869BB17B4E46B52804, D452FEA2BBE00326C4B6DC8E); sourceTree = "<group>"; };
 		E210BA1B334645A48212E13D /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6F5C0D6796EDF3E09F257AF /* AppConfig.swift */; };
@@ -192,9 +193,10 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_ENTITLEMENTS = IvecAI/IvecAI.entitlements;
+				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGNING_REQUIRED = NO;
-				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_IDENTITY = "-";
 			};
 			name = Debug;
 		};

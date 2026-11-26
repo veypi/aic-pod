@@ -9,6 +9,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +109,7 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 					if err != nil {
 						return err
 					}
-					if req.URL.Scheme == "http" && !isLoopbackHost(req.URL.Hostname()) {
+					if req.URL.Scheme == "http" && !isLoopbackHost(req.URL.Hostname()) && !isConfiguredPlaintextPlatform(req.URL, c.options().Host) {
 						return fmt.Errorf("refusing to send device credentials over plaintext http")
 					}
 					req.Header.Set("Authorization", "Bearer "+token)
@@ -140,6 +141,34 @@ func (c *Client) buildVSHEngine(reg *commands.Registry) (*execution.Engine, erro
 		return nil, err
 	}
 	return engine, nil
+}
+
+// isConfiguredPlaintextPlatform 报告目标是否正是设备配置的平台地址本身。
+// 用户把平台配置成 http://self.domain 即已明确信任该端点，凭证本就只发给它；
+// 仅这种情形放行明文 http，其余非 loopback 的明文地址仍拒绝注入。
+func isConfiguredPlaintextPlatform(target *url.URL, platformHost string) bool {
+	if target == nil || target.Scheme != "http" {
+		return false
+	}
+	base, err := url.Parse(strings.TrimSpace(platformHost))
+	if err != nil || base.Scheme != "http" || base.Host == "" {
+		return false
+	}
+	return endpointKey(base) == endpointKey(target)
+}
+
+// endpointKey 归一化 host:port（省略端口按 scheme 补默认），用于端点身份比较。
+func endpointKey(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	return strings.ToLower(u.Hostname()) + ":" + port
 }
 
 func (c *Client) hostDiscoverable(name string) bool {

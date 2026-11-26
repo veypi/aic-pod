@@ -94,7 +94,7 @@ nosandbox 是请求级显式选项，由发送端批准后进入可信执行上�
 
 ## 5. 生命周期与日志
 
-普通 exec 不建 bg 任务，前台等待结束仍在运行时才登记原执行。bg 只负责 list/wait/kill；管理命令仍是可组合的普通脚本指令。任务和日志按 user_id + session_id 隔离，同会话 NATS/RTC 不另分权限域。
+普通 exec 不建 bg 任务，前台等待结束仍在运行时才登记原执行。bg 只负责 list/wait/kill；管理命令仍是可组合的普通脚本指令。任务和日志按 user_id + 会话 id 隔离（平台侧会话模型已统一为 conversation，id 值不变），同会话 NATS/RTC 不另分权限域。
 
 exec 外层将 stdout/stderr 分别写文件，始终返回已创建文件的路径，只截断响应预览。cancel 与 bg kill 取消实际脚本及受管进程；等待结束、网络断线不等于取消。具体预算、bg wait 和输出契约以主设计第 2 节为准。
 

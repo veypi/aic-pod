@@ -31,6 +31,11 @@ type RtcTicket struct {
 	ConnectionID      string `json:"connection_id,omitempty"`
 	// SessionID 绑定 RTC 请求归属会话（契约见 docs/reference/hosts-tools.md；RTC 的
 	// session_id 必须由票据绑定，不能由脚本或未经核验的请求字段冒认）。
+	//
+	// 平台侧会话模型已统一为 Conversation/Item：签发方把「会话」理解为
+	// conversation，值不变（仍是平台侧的会话 id），只是语义名换成 conversation。
+	// **JSON 键名保持 session_id 不变**——它是签名载荷的一部分，改键名会让
+	// 在途票据与历史向量失效；本字段只是「会话 id」的载体。
 	SessionID  string `json:"session_id,omitempty"`
 	ID         string `json:"jti"`
 	IssuedAt   int64  `json:"issued_at"`
@@ -132,7 +137,7 @@ func (t RtcTicket) validate(now time.Time) error {
 		return Fail("invalid_argument", "Invalid connection identity")
 	}
 	if t.SessionID != "" && !ValidID(t.SessionID) {
-		return Fail("invalid_argument", "Invalid session identity")
+		return Fail("invalid_argument", "Invalid conversation identity")
 	}
 	fp, err := NormalizeFingerprint(t.Fingerprint)
 	if err != nil || !bytes.Equal([]byte(fp), []byte(t.Fingerprint)) {

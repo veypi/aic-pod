@@ -78,13 +78,18 @@ final class ServerConfig: ObservableObject {
     }
 
     /// 错误文案：先按平台业务码（error.<code>，与网页 $err 同一套语义）取本地化文案，
-    /// 取不到才用错误自带的描述。
+    /// 取不到才用错误自带的描述；两者都空时给通用文案（空文案渲染出来是空白，
+    /// 用户只会看到"点了没反应"）。
     func errorText(_ error: Error) -> String {
         if let auth = error as? AuthError, let code = auth.businessCode,
-           let text = L10nStore.table[resolvedLanguage]?["error.\(code)"] {
+           let text = L10nStore.table[resolvedLanguage]?["error.\(code)"], !text.isEmpty {
             return text
         }
-        return error.localizedDescription
+        let text = error.localizedDescription
+        if text.isEmpty {
+            return L10nStore.text("error.unknown", language: resolvedLanguage)
+        }
+        return text
     }
 
     private let defaults: UserDefaults

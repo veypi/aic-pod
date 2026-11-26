@@ -106,6 +106,7 @@
     "error.40300": "没有权限执行该操作",
     "error.40901": "该账号已存在",
     "error.42900": "请求过于频繁，请稍后再试",
+    "error.unknown": "操作失败，请重试。",
     "error.50000": "服务暂时不可用，请稍后再试"
   },
   "en-US": {
@@ -215,6 +216,7 @@
     "error.40300": "You do not have permission to do that",
     "error.40901": "This account already exists",
     "error.42900": "Too many requests, please try again later",
+    "error.unknown": "Something went wrong. Please try again.",
     "error.50000": "Service temporarily unavailable, please try again later"
   }
 }

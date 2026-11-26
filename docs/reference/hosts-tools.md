@@ -69,7 +69,7 @@ exec 只接受完整 vsh 脚本；命令面 = vsh 默认 registry（`sed`/`grep`
 
 - 外层 `exec._host` 唯一选择执行端；MCP 服务命令不选择目标。
 - cloud/设备执行完整 vsh 脚本。内建、CLI、脚本、管道、重定向和 bg 使用现有执行器，原生程序经 vbox 启动。
-- page 接受一个字面 command，按 session 和现有窗口 ID 调用 handler；通过 commands 和 --help 发现用法。复用 vsh 语法解析器，不建立另一套 shell，也不实现 MCP。页面文件继续直接调用 PageFS。
+- page 接受一个字面 command，按会话（平台侧现称 conversation，载荷字段 `conversation_id` / `owner_conversation_id`）和现有窗口 ID 调用 handler；通过 commands 和 --help 发现用法。复用 vsh 语法解析器，不建立另一套 shell，也不实现 MCP。页面文件继续直接调用 PageFS。
 - exec/fs、技能搜索/读取、云端 HTTP API 都没有 MCP 副本。Cloud 当前没有 MCP 服务配置。
 - 统一命令门均为别名本身；共享服务的 cwd/env/沙箱来自设备配置，不随某次 shell 改变。配置更新或 Pod 退出时回收服务，单次取消不关闭整个服务。
 - UI 与 AI 都按原生 request_id 取消执行，Pod 内 SDK 将上下文取消传给 MCP 服务。取消不回滚副作用；响应丢失不自动重放。

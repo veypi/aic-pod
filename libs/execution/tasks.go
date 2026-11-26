@@ -110,7 +110,7 @@ type Task struct {
 	StartedAt  time.Time
 	FinishedAt time.Time
 	Err        string
-	// Owner/Session 归属（user_id, session_id）；RequestID 请求关联（cancel）。
+	// Owner/Session 归属（user_id, 会话 id——平台侧称 conversation，id 值不变）；RequestID 请求关联（cancel）。
 	Owner, Session string
 	RequestID      string
 	// LogOut/LogErr 是 stdout/stderr 日志地址（bg list/wait 报告用；

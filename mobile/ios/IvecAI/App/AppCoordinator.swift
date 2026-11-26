@@ -35,6 +35,7 @@ final class AppCoordinator: ObservableObject {
         self.auth = auth
         bridge.handler = { [weak self] method, params in
             guard let self else { return [:] }
+            NSLog("[aic] bridge call %@", method)
             return try await self.handle(method, params)
         }
         auth.onStateChange = { [weak self] state in
@@ -79,6 +80,7 @@ final class AppCoordinator: ObservableObject {
             requiresNativeLogin = true
             return ["ok": true]
         case "auth_open_login":
+            NSLog("[aic] bridge auth_open_login -> requiresNativeLogin = true")
             requiresNativeLogin = true
             return ["ok": true]
         case "account_delete":
@@ -89,6 +91,7 @@ final class AppCoordinator: ObservableObject {
             pageError = params["message"] as? String
             return ["ok": true]
         default:
+            NSLog("[aic] bridge unsupported method %@", method)
             throw BridgeError.unsupported(method)
         }
     }

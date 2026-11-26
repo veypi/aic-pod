@@ -27,10 +27,16 @@ enum AuthStore {
         "auth.archive.\(server.host ?? server.absoluteString)"
     }
 
-    /// 读档案；不存在或格式不对返回 nil。
+    /// 读档案；不存在、格式不对或 Keychain 不可用时返回 nil。
     static func load(server: URL) -> AuthArchive? {
-        guard let raw = KeychainStore.get(key(for: server)),
-              let data = raw.data(using: .utf8),
+        let raw: String?
+        do {
+            raw = try KeychainStore.get(key(for: server))
+        } catch {
+            NSLog("[aic] auth archive load failed: %@", String(describing: error))
+            return nil
+        }
+        guard let raw, let data = raw.data(using: .utf8),
               let archive = try? JSONDecoder().decode(AuthArchive.self, from: data) else {
             return nil
         }
@@ -41,15 +47,17 @@ enum AuthStore {
         return archive
     }
 
-    /// 写档案（原子替换）。
-    static func save(_ archive: AuthArchive, server: URL) {
+    /// 写档案（原子替换）；Keychain 写不进去时抛错，不静默吞。
+    static func save(_ archive: AuthArchive, server: URL) throws {
         guard let data = try? JSONEncoder().encode(archive),
-              let raw = String(data: data, encoding: .utf8) else { return }
-        KeychainStore.set(raw, for: key(for: server))
+              let raw = String(data: data, encoding: .utf8) else {
+            throw KeychainError.encoding
+        }
+        try KeychainStore.set(raw, for: key(for: server))
     }
 
     /// 清掉某台服务器的档案。
     static func clear(server: URL) {
-        KeychainStore.remove(key(for: server))
+        try? KeychainStore.remove(key(for: server))
     }
 }
