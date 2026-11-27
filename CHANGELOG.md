@@ -5,7 +5,7 @@
 `desktop/package.json` 由 `make desktop-version` 从 `git describe` 自动同步。
 更早版本见 GitHub Releases。
 
-## 未发布
+## v0.11.1（2026-11-27）
 
 - **iOS 登录态：Keychain 失败不再静默，调试日志不进生产包（2026-11-27）**：三处收口。
 
